@@ -1,0 +1,37 @@
+# GSD planning artifacts stay local. This repository is public, and the planning
+# notes carry entity names, addresses, and other details of one specific house.
+.planning/
+
+# Real configuration. Only config.example.yaml belongs in git.
+config/config.yaml
+config/*.local.yaml
+.env
+.env.*
+!.env.example
+
+# Recorded voice sessions: audio, transcripts, and timelines of real speech.
+data/
+sessions/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Models are large binaries, downloaded at build or first run.
+models/
+
+# OS
+.DS_Store

@@ -1,0 +1,188 @@
+# spire-voice configuration.
+#
+# Nothing house-specific belongs in this repo. This file is the shape of the
+# config, with placeholder values. The real one is mounted into the pod from a
+# ConfigMap, and every credential in it comes from a Secret through an env var
+# written as ${NAME} below.
+#
+# Env expansion happens once, at load, over the raw text. A ${NAME} with no
+# value in the environment is a startup error rather than an empty string,
+# because an empty RTSP password fails much later and much less clearly.
+
+camera:
+  # The audio source. Read straight from the camera over RTSP rather than from
+  # go2rtc: go2rtc republishes video fine, but consuming the microphone from its
+  # tapo:// producer hangs with no error on this setup, and a second direct RTSP
+  # connection alongside Frigate is measured-good.
+  rtsp_url: "rtsp://${TAPO_USER}:${TAPO_PASSWORD}@camera.invalid:554/stream1"
+
+  # The Tapo C121 emits G.711 A-law, 8 kHz, mono. xAI's STT accepts exactly
+  # that, so audio is never transcoded anywhere in this pipeline. If you point
+  # this at a camera that emits something else, set it here and the pipeline
+  # will transcode -- and get slower.
+  encoding: alaw
+  sample_rate: 8000
+  channels: 1
+
+  # How much audio to keep before the wake word fires. The wake detector reports
+  # a hit slightly after the phrase completes, and a speaker usually runs
+  # straight from "hey spire" into the command with no pause, so the first
+  # syllables of the command are already in the past by the time we know to
+  # listen. Replaying this buffer into the transcriber recovers them.
+  preroll_ms: 1500
+
+speaker:
+  # go2rtc, running inside the Frigate pod. It already holds a tapo:// producer
+  # for the camera's speaker -- the same path the gesture beeps use.
+  go2rtc_url: "http://frigate:1984"
+  stream: "cam"
+
+  # Idempotent PUT that (re)creates the backchannel producer. Holds the camera
+  # password, so it arrives as a whole URL from a Secret rather than being
+  # assembled here.
+  ensure_url: "${SPEAKER_ENSURE_URL}"
+
+  # A fresh ffmpeg process per utterance costs 300-800ms before the first sample
+  # reaches the speaker, which is the single largest avoidable delay in the
+  # round trip. Instead one long-lived ffmpeg reads this FIFO and stays
+  # connected to go2rtc; speaking is then just a write() into the pipe.
+  fifo_path: "/run/spire/speaker.alaw"
+  respawn_backoff_s: 2.0
+
+wake:
+  # openwakeword | vosk
+  #
+  # Pick this from a real recording, not from the docs. openwakeword's models
+  # were trained on 16 kHz synthetic speech and this camera gives 8 kHz
+  # narrowband, which costs it recall. Vosk descends from Kaldi telephony work
+  # and handles the band better, and a one-phrase grammar makes it very hard to
+  # false-fire -- at the cost of needing the phrase to be in its lexicon.
+  engine: openwakeword
+  phrase: "hey spire"
+
+  openwakeword:
+    model_path: "/models/hey_spire.onnx"
+    threshold: 0.55
+    # Frames are 80ms at 16 kHz. The camera is 8 kHz, so audio is upsampled for
+    # the detector only; the copy sent to the transcriber stays untouched 8 kHz.
+    trigger_frames: 2
+
+  vosk:
+    model_path: "/models/vosk-model-small-en-us-0.15"
+    # Restricting the decoder to the phrase plus [unk] means anything that is
+    # not the phrase decodes as [unk] and is discarded.
+    grammar: ["hey spire", "[unk]"]
+
+  # After a hit, ignore further hits for this long. Without it a drawn-out
+  # "heyyy spire" fires two sessions and the second one transcribes silence.
+  refractory_s: 2.0
+
+gate:
+  # Voice is an ambient trigger: the camera microphone hears the television, and
+  # a television can say any sentence in the language. These gates decide when
+  # the wake word is even allowed to count.
+
+  # Reuse Frigate's face recognition the same way the gesture pod does: only
+  # listen if a known face was seen on this camera recently. Costs nothing
+  # extra -- Frigate is already publishing it.
+  require_face: true
+  face_names: ["placeholder"]
+  face_window_s: 10
+
+  # Do not listen while these entities are playing. The most common false
+  # trigger source is your own television.
+  mute_when_playing: []
+
+stt:
+  url: "wss://api.x.ai/v1/stt"
+  api_key: "${XAI_API_KEY}"
+
+  # Silence before the utterance is declared finished. The xAI default is 400ms;
+  # it is the largest tunable term in the response time and 200ms is comfortable
+  # for command-shaped speech. Raise it if the tail of your sentences is getting
+  # cut off.
+  endpointing_ms: 200
+
+  # Lets the model predict end-of-turn rather than waiting out a fixed silence.
+  # smart_turn_timeout is the safety net for when it never becomes confident.
+  smart_turn: 0.7
+  smart_turn_timeout_ms: 1200
+
+  # Default is 0.08. Raising it rejects more room noise at the cost of rejecting
+  # quiet speech; this microphone is across a room, so be careful going up.
+  vad_threshold: 0.08
+
+  interim_results: true
+  language: "en"
+
+  # Give up on a session that produces nothing, so a stuck socket cannot hold
+  # the pipeline open forever.
+  max_utterance_s: 15
+
+brain:
+  base_url: "https://api.x.ai/v1"
+  api_key: "${XAI_API_KEY}"
+
+  # Resolved against GET /v1/models at startup rather than pinned blindly, and
+  # logged. Set an exact id here to pin it.
+  model: "grok-4.6"
+
+  # The entity list is injected into the system prompt at startup so the model
+  # never needs a discovery round trip to learn what exists. It is large and
+  # unchanging, which is exactly what prompt caching is for.
+  cache_system_prompt: true
+
+  temperature: 0.0
+  max_tokens: 400
+
+  # A command that needs more than this many tool calls is a misunderstanding,
+  # not a complex request. Stop and say so.
+  max_tool_rounds: 3
+
+tts:
+  url: "https://api.x.ai/v1/tts"
+  api_key: "${XAI_API_KEY}"
+  voice_id: "eve"
+  language: "en"
+
+  # Matching the camera speaker exactly means the bytes go from the HTTP
+  # response into the FIFO with no resampling step.
+  codec: alaw
+  sample_rate: 8000
+
+  # 0 | 1 | 2, higher trades a little quality for first-audio latency.
+  optimize_streaming_latency: 2
+
+  # Short confirmations are the same handful of sentences forever. Rendering
+  # them once to disk removes the whole TTS round trip from the common path.
+  cache_dir: "/data/tts-cache"
+  precache:
+    - "ok"
+    - "done"
+    - "sorry, i didn't catch that"
+    - "i can't do that one"
+
+mcp:
+  # Spoken over stdio to a child process. The tool server is never exposed to
+  # the network and xAI never connects to it -- the model asks for a call, this
+  # pod makes it. That matters: the alternative (xAI's remote MCP) would mean
+  # opening a path from the public internet into the house.
+  servers:
+    ha:
+      command: ["python3", "-m", "spire_mcp.ha"]
+      env:
+        HA_URL: "${HA_URL}"
+        HA_TOKEN: "${HA_TOKEN}"
+
+debug:
+  # One directory per interaction, holding the audio, every event with an
+  # arrival timestamp, and a merged timeline. This is the raw material for
+  # tuning thresholds later, so it is on by default and verbose on purpose.
+  dir: "/data/sessions"
+  record_audio: true
+
+  # Sessions are small (a few hundred KB each). Keep plenty.
+  retain_days: 30
+
+  # Also emit a one-line summary per interaction to stdout for kubectl logs.
+  stdout_summary: true
