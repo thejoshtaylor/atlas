@@ -161,3 +161,43 @@ def test_repository_holds_no_credential_literal():
             break
 
     assert not violations, f"credential-shaped literal found in the repository: {violations}"
+
+
+# Directory names a real session's audio, events, and timeline live under
+# (CONTEXT.md D-16). `.gitignore` already carries both, and
+# `_EXCLUDED_DIR_NAMES` above already prunes both from `_iter_repo_files` --
+# which is exactly why this check reads `git ls-files` directly instead:
+# a directory `_iter_repo_files` never walks into can never surface a
+# violation through it.
+_SESSION_DIR_NAMES = {"data", "sessions"}
+
+# Session audio and the TTS cache both write raw codec bytes under these
+# extensions -- `.raw` is `tts_cache.py`'s own choice; `.alaw` is what
+# CONTEXT.md names for the camera's raw capture. Neither belongs in git.
+_AUDIO_EXTENSIONS = {".raw", ".alaw"}
+
+
+def test_no_session_path_or_audio_extension_is_tracked_by_git():
+    """D-16: the data root is gitignored before the first write, in that
+    order -- checked here against what git actually tracks, before this
+    phase's session recorder ever writes a real session.
+    """
+    proc = subprocess.run(
+        ["git", "ls-files"], capture_output=True, text=True, cwd=_REPO_ROOT, timeout=30
+    )
+    assert proc.returncode == 0, f"git ls-files failed: {proc.stderr}"
+
+    violations = [
+        tracked
+        for tracked in proc.stdout.splitlines()
+        if tracked.strip()
+        and (
+            Path(tracked).suffix in _AUDIO_EXTENSIONS
+            or _SESSION_DIR_NAMES & set(Path(tracked).parts[:-1])
+        )
+    ]
+
+    assert not violations, (
+        "found a tracked session path or a tracked captured-audio file "
+        f"(D-16 -- the data root must be gitignored before the first write): {violations}"
+    )
