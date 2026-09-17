@@ -40,9 +40,11 @@ something a fake can stand in for.
 from __future__ import annotations
 
 import asyncio
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 from mcp.types import Tool
@@ -376,3 +378,162 @@ def test_camera_runner_is_wired_with_the_configured_gate_and_barge_in_policy(tmp
         )
         # alaw is 1 byte/sample at 8000 Hz: 8 bytes/ms * 640ms.
         assert runner._preroll._max_bytes == 8 * 640
+
+
+# --- Plan 02-12 Task 3: correlation wiring and the startup refusal ----------
+
+
+def _write_calibration(calib_dir: Path, *, taken_at) -> None:
+    """A plainly fictional, valid `EchoCalibration`, written under
+    `calib_dir` with the same filename shape `calibration/runner.py`'s own
+    `_timestamped_filename` produces -- `find_latest_calibration` globs by
+    that shape, not by any name."""
+    from spire_voice.calibration.record import EchoCalibration
+
+    calibration = EchoCalibration(
+        schema_version=1,
+        probe_format_version=1,
+        probe_seed=1,
+        source="camera",
+        delay_s=0.05,
+        confidence=0.95,
+        echo_level=0.1,
+        gain=1.2,
+        agc_verdict="absent",
+        segment_levels=(0.1, 0.1, 0.1),
+        encoding="alaw",
+        sample_rate=8000,
+        channels=1,
+        placement_note="smoke test fixture, no real room",
+        taken_at=taken_at,
+    )
+    stamp = taken_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    calibration.save(calib_dir / f"echo_path-{stamp}Z.json")
+
+
+def test_correlation_enabled_with_no_calibration_refuses_to_start(tmp_path, monkeypatch):
+    """`ConfigError` is read off `app_module` itself, not re-imported from
+    `spire_voice.config` fresh -- `tests/test_config.py`'s own
+    `test_config_and_turn_macros_import_in_either_order` reloads
+    `spire_voice.config` (proving no import cycle), which mints a *new*
+    `ConfigError` class distinct from the one `app.py` captured at its own
+    import time. A fresh import here would build a `pytest.raises` that
+    can never match what `app.py` actually raises once that reload has run
+    earlier in the same test session -- `app_module.ConfigError` is
+    guaranteed to be the exact class `app.py`'s code raises, regardless.
+    """
+    ConfigError = app_module.ConfigError
+
+    extra = {
+        "barge_in": {"correlation_enabled": True},
+        "calibration": {"dir": str(tmp_path / "calibration")},
+    }
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with pytest.raises(ConfigError, match="correlation_enabled.*scripts/dev-calibrate-echo.sh"):
+        with TestClient(app_module.app):
+            pass
+
+
+def test_correlation_enabled_with_a_stale_calibration_refuses_to_start(tmp_path, monkeypatch):
+    """See the sibling test above for why `ConfigError` comes off
+    `app_module` rather than a fresh import."""
+    from datetime import datetime, timedelta, timezone as _timezone
+
+    ConfigError = app_module.ConfigError
+
+    calib_dir = tmp_path / "calibration"
+    calib_dir.mkdir()
+    stale_taken_at = datetime.now(_timezone.utc) - timedelta(days=31)  # past the default max_age_days=30
+    _write_calibration(calib_dir, taken_at=stale_taken_at)
+
+    extra = {
+        "barge_in": {"correlation_enabled": True},
+        "calibration": {"dir": str(calib_dir)},
+    }
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with pytest.raises(ConfigError, match="days old.*max_age_days"):
+        with TestClient(app_module.app):
+            pass
+
+
+def test_correlation_enabled_with_a_valid_calibration_wires_the_runner(tmp_path, monkeypatch):
+    from datetime import datetime, timezone as _timezone
+
+    calib_dir = tmp_path / "calibration"
+    calib_dir.mkdir()
+    fresh_taken_at = datetime.now(_timezone.utc)
+    _write_calibration(calib_dir, taken_at=fresh_taken_at)
+
+    extra = {
+        "barge_in": {"correlation_enabled": True},
+        "calibration": {"dir": str(calib_dir)},
+    }
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        runner = app_module.app.state.source_runners[0]
+        assert runner._calibration is not None, (
+            "correlation_enabled with a valid calibration on file must attach it to the runner"
+        )
+        assert runner._calibration.gain == 1.2
+        assert runner._barge_in_config.correlation_enabled is True
+
+
+def test_correlation_disabled_boots_unchanged_and_attaches_no_calibration(tmp_path, monkeypatch):
+    """The shipped default: no calibration directory even exists, and
+    nothing about startup looks at it."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        runner = app_module.app.state.source_runners[0]
+        assert runner._calibration is None
+        assert runner._barge_in_config.correlation_enabled is False
+
+
+def test_an_unreadable_calibration_with_correlation_off_boots_normally(tmp_path, monkeypatch):
+    """A corrupt record must never stop the house from listening (T-02-58)
+    -- with correlation off, startup never even reads the directory."""
+    calib_dir = tmp_path / "calibration"
+    calib_dir.mkdir()
+    (calib_dir / "echo_path-20260101T000000000000Z.json").write_text("not valid json{{{", encoding="utf-8")
+
+    extra = {"calibration": {"dir": str(calib_dir)}}
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app) as client:
+        response = client.get("/transport")
+        assert response.status_code == 200
+        runner = app_module.app.state.source_runners[0]
+        assert runner._calibration is None

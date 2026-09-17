@@ -26,7 +26,7 @@ from pydantic import BaseModel
 from spire_voice.audio.ring import PrerollBuffer
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
-from spire_voice.config import Config, WakeConfig, load_config
+from spire_voice.config import Config, ConfigError, WakeConfig, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
@@ -333,6 +333,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # future work, not something this fix pass invents untested.
     preroll = PrerollBuffer(camera_source.source_format(), config.camera.preroll_ms)
 
+    # Plan 02-12 Task 3: the startup refusal CR-02 left as a gap. Turning
+    # `correlation_enabled` on for a source with no valid, non-stale
+    # calibration on file must stop the process by name, never fall back to
+    # the guard-window-plus-floor gate the code review already found
+    # cannot tell the assistant's own voice from the operator's -- that
+    # fallback is exactly the silent failure this refusal exists to
+    # replace with a loud one. `find_latest_calibration` never raises for
+    # "no calibration directory yet" or "directory exists but empty" (its
+    # own docstring): both read as `None` here, the same "missing" case.
+    camera_barge_in = config.barge_in.resolve("camera")
+    camera_calibration: EchoCalibration | None = None
+    if camera_barge_in.correlation_enabled:
+        camera_calibration = find_latest_calibration(config.calibration.dir)
+        if camera_calibration is None:
+            raise ConfigError(
+                "barge_in.sources.camera.correlation_enabled is true, but no echo-path "
+                f"calibration exists at {config.calibration.dir!r} -- run "
+                "scripts/dev-calibrate-echo.sh against the real camera before enabling "
+                "correlation, or the gate would run uncalibrated against real playback"
+            )
+        now = datetime.now(timezone.utc)
+        if camera_calibration.is_stale(now, config.calibration.max_age_days):
+            age_days = (now - camera_calibration.taken_at).total_seconds() / 86400.0
+            raise ConfigError(
+                f"barge_in.sources.camera.correlation_enabled is true, but the stored "
+                f"calibration is {age_days:.1f} days old, past calibration.max_age_days="
+                f"{config.calibration.max_age_days} -- run scripts/dev-calibrate-echo.sh "
+                "again before enabling correlation on a stale measurement"
+            )
+
     camera_runner = SourceRunner(
         "camera",
         camera_source,
@@ -343,6 +373,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         gate_config=config.gate,
         barge_in_config=config.barge_in,
         preroll=preroll,
+        calibration=camera_calibration,
     )
     app.state.source_runners = [camera_runner]
     app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]

@@ -399,6 +399,13 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # apart from a real interruption on that path. The global default
     # (asserted above) stays on for every other source.
     assert config.barge_in.resolve("camera").enabled is False
+    # Plan 02-12's gap closure: the correlation ships inert -- off by
+    # default globally, so the camera's own resolved policy inherits it
+    # rather than needing a second override written for it.
+    assert config.barge_in.correlation_enabled is False
+    assert config.barge_in.resolve("camera").correlation_enabled is False
+    assert config.barge_in.correlation_tolerance == 0.03
+    assert config.barge_in.tracking_adaptation_rate == 0.1
     assert config.session.retain_days == 7
 
     # Plan 02-11's gap closure: the calibration block loads, and its route

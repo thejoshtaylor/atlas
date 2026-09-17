@@ -145,13 +145,14 @@ gate:
       mute_when_playing: []
 
 barge_in:
-  # An energy-floor-plus-guard-window gate, NOT known-output correlation:
-  # this process never compares incoming microphone energy against what it
-  # actually wrote to the speaker FIFO (found in code review -- see
-  # BargeInConfig's own docstring in config.py for the full explanation).
-  # An interrupt fires on sustained energy above a floor, past a guard
-  # window after playback starts -- not a single frame, and explicitly not
-  # requiring the wake word again (D-10).
+  # A floor-plus-guard-window gate, with an optional known-output
+  # correlation layered on top (plan 02-12, Tier 2). The base gate fires on
+  # sustained energy above a floor, past a guard window after playback
+  # starts -- not a single frame, and explicitly not requiring the wake
+  # word again (D-10). The correlation, below, is what compares that
+  # energy against what this process actually wrote to the speaker FIFO --
+  # the code review (CR-02) found this absent entirely; it now exists,
+  # unit-tested, and inert until a real calibration turns it on.
   enabled: true
 
   # Same unit as stt.vad_threshold below (0.08), the only noise-floor
@@ -171,14 +172,39 @@ barge_in:
   # interruption of itself.
   post_playback_guard_ms: 150
 
+  # Off by default everywhere. Two steps turn it on for a source: run
+  # calibration.dir's echo-path measurement against the real camera
+  # (scripts/dev-calibrate-echo.sh), then set this AND the source's own
+  # barge_in.sources.<name>.enabled to true. app.py's startup refuses to
+  # boot if this is true with no valid, non-stale calibration on file --
+  # it will not silently fall back to the floor-and-guard-window gate
+  # above. Even once on, this cannot separate a voice speaking at the
+  # exact moment the assistant is from the assistant's own echo -- that
+  # case stays open, and full acoustic echo cancellation is the only thing
+  # that would close it (CONTEXT.md's Deferred section).
+  correlation_enabled: false
+
+  # Headroom, in the same unit as energy_floor, that observed energy may
+  # exceed the predicted echo by and still count as explained --
+  # measurement noise, not a second floor. PROVISIONAL, same posture as
+  # energy_floor above.
+  correlation_tolerance: 0.03
+
+  # Only used once correlation is on for a camera whose calibration found
+  # automatic gain control present or indeterminate: the exponential-
+  # moving-average weight given to each explained reading when updating the
+  # running gain estimate. Fast enough to follow the AGC creep the
+  # calibration probe is built to detect; slow enough that a real
+  # interruption's own few readings cannot swing it first.
+  tracking_adaptation_rate: 0.1
+
   # Per-source override (D-12), same shape as gate.sources above. The
   # camera overrides the global default to off: its microphone and speaker
-  # are the same device with no AEC, so this gate's guard-window-plus-floor
-  # mechanism (not known-output correlation -- see above) cannot reliably
-  # tell the assistant's own voice apart from a real interruption. Flip
-  # this to true only once a real camera corpus
-  # (scripts/capture_wake_corpus.py) shows the guard window holds during
-  # actual playback.
+  # are the same device with no AEC, so this gate's floor-and-guard-window
+  # mechanism alone cannot reliably tell the assistant's own voice apart
+  # from a real interruption. Flip this to true only after a real
+  # calibration exists and correlation_enabled above is also true -- see
+  # the comment on correlation_enabled for the two steps.
   sources:
     camera:
       enabled: false
