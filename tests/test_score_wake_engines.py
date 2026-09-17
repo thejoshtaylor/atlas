@@ -693,3 +693,98 @@ def test_runbook_names_the_two_closing_edits_and_the_coupling_test():
     assert "wake-default-evidence" in text
     assert "DBG-04" in text
     assert "fails" in text.lower()
+
+
+# --- binding DBG-04's mark to the evidence line (plan 02-13, Task 3) --------
+
+
+def _requirements_mark(requirements_text: str, requirement_id: str) -> bool:
+    """`True` when `requirement_id` is marked `[x]` in REQUIREMENTS.md-shaped
+    text, `False` when present but unmarked. Raises `ValueError` if the
+    requirement is not found at all -- a coupling rule that silently
+    no-ops on a typo'd or renamed id would defeat its own purpose."""
+    pattern = re.compile(rf"^- \[(x| )\] \*\*{re.escape(requirement_id)}\*\*", re.MULTILINE)
+    match = pattern.search(requirements_text)
+    if match is None:
+        raise ValueError(f"{requirement_id} not found in requirements text")
+    return match.group(1) == "x"
+
+
+def check_dbg04_coupling(
+    evidence: "score_wake_engines.WakeDefaultEvidence", dbg04_marked: bool
+) -> tuple[bool, str]:
+    """The rule this coupling test enforces: DBG-04 may be marked complete
+    only when the wake-default-evidence line says measured, and a measured
+    line with DBG-04 still unmarked is equally a violation -- the two
+    edits move together, in either direction, or the suite fails.
+
+    Returns `(agrees, message)`; `message` is empty when they agree.
+    """
+    if evidence.classification == "provisional" and dbg04_marked:
+        return False, (
+            "DBG-04 is marked complete but config/config.example.yaml's "
+            "wake-default-evidence line is still provisional -- no score exists yet"
+        )
+    if evidence.classification == "measured" and not dbg04_marked:
+        return False, (
+            "a score exists (config/config.example.yaml's wake-default-evidence "
+            "line is measured) but DBG-04 has not been marked complete from it"
+        )
+    return True, ""
+
+
+def _write_wake_config_text(tmp_path: Path, evidence_line: str) -> Path:
+    config_path = tmp_path / "config.example.yaml"
+    config_path.write_text(f"wake:\n  {evidence_line}\n  engine: vosk\n")
+    return config_path
+
+
+def _write_requirements_text(tmp_path: Path, *, dbg04_marked: bool) -> Path:
+    mark = "x" if dbg04_marked else " "
+    req_path = tmp_path / "REQUIREMENTS.md"
+    req_path.write_text(f"- [{mark}] **DBG-04**: Both wake engines run against the same recorded audio\n")
+    return req_path
+
+
+_MEASURED_LINE = "# wake-default-evidence: measured date=2026-09-20 positives=24 negative_duration_s=180.0"
+
+
+@pytest.mark.parametrize(
+    "evidence_line, dbg04_marked, expected_agrees",
+    [
+        ("# wake-default-evidence: provisional", False, True),
+        ("# wake-default-evidence: provisional", True, False),
+        (_MEASURED_LINE, False, False),
+        (_MEASURED_LINE, True, True),
+    ],
+)
+def test_dbg04_coupling_all_four_combinations(tmp_path, evidence_line, dbg04_marked, expected_agrees):
+    config_path = _write_wake_config_text(tmp_path, evidence_line)
+    req_path = _write_requirements_text(tmp_path, dbg04_marked=dbg04_marked)
+
+    evidence = score_wake_engines.parse_wake_default_evidence(config_path.read_text())
+    marked = _requirements_mark(req_path.read_text(), "DBG-04")
+    agrees, message = check_dbg04_coupling(evidence, marked)
+
+    assert agrees is expected_agrees
+    if not expected_agrees:
+        assert "wake-default-evidence" in message
+        assert "DBG-04" in message
+
+
+_REQUIREMENTS_PATH = _REPO_ROOT / ".planning" / "REQUIREMENTS.md"
+
+
+def test_dbg04_coupling_against_the_real_repository():
+    if not _REQUIREMENTS_PATH.exists():
+        pytest.skip(
+            ".planning/REQUIREMENTS.md is absent -- .gitignore's `.planning/` rule "
+            "deliberately excludes it from this public repository, so a fresh clone "
+            "has nothing here to check the coupling against"
+        )
+
+    evidence = score_wake_engines.parse_wake_default_evidence(_CONFIG_PATH.read_text())
+    marked = _requirements_mark(_REQUIREMENTS_PATH.read_text(), "DBG-04")
+    agrees, message = check_dbg04_coupling(evidence, marked)
+
+    assert agrees, message
