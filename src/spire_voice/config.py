@@ -281,6 +281,134 @@ class TtsConfig:
 
 
 @dataclass(frozen=True)
+class CameraConfig:
+    """The `camera:` block: the RTSP audio source and the native format it
+    carries straight through to the transcriber, with no transcode step
+    (PROV-07). Read by the camera `AudioSource` (plan 02-03), which declares
+    `transports/base.py`'s `SourceFormat(encoding, sample_rate)` from these
+    same two fields -- there is one place the camera's format is written,
+    not two that could disagree.
+
+    `encoding` is validated against the two encodings this codebase actually
+    carries end to end (`transports/base.py`'s `SourceFormat` docstring:
+    `"pcm"` and `"alaw"`), rather than accepted as an arbitrary string. Any
+    other value would mean a transcode step no code in this phase
+    implements, which would produce silence at turn time with no test to
+    catch it first.
+    """
+
+    rtsp_url: str = ""
+    encoding: str = "alaw"
+    sample_rate: int = 8000
+    channels: int = 1
+    preroll_ms: int = 1500
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "CameraConfig":
+        raw = raw or {}
+        encoding = raw.get("encoding", cls.encoding)
+        supported = ("alaw", "pcm")
+        if encoding not in supported:
+            raise ConfigError(
+                f"camera.encoding {encoding!r} is not one this pipeline carries "
+                f"through to the transcriber untranscoded -- supported values are "
+                f"{supported!r}. Any other value means a transcode step this phase "
+                "does not implement, which would produce silence at turn time."
+            )
+        return cls(
+            rtsp_url=raw.get("rtsp_url", cls.rtsp_url),
+            encoding=encoding,
+            sample_rate=raw.get("sample_rate", cls.sample_rate),
+            channels=raw.get("channels", cls.channels),
+            preroll_ms=raw.get("preroll_ms", cls.preroll_ms),
+        )
+
+
+@dataclass(frozen=True)
+class SpeakerConfig:
+    """The `speaker:` block: the go2rtc backchannel and the FIFO the
+    long-lived ffmpeg supervisor (plan 02-03) reads from.
+
+    `respawn_backoff_s` must be positive: a zero or negative backoff turns
+    the supervisor into a busy loop restarting a dead subprocess with no
+    delay between attempts, which is a worse failure than refusing to start
+    (RESEARCH.md Pitfalls 4 and 5).
+    """
+
+    go2rtc_url: str = "http://frigate:1984"
+    stream: str = "cam"
+    ensure_url: str = ""
+    fifo_path: str = "/run/spire/speaker.alaw"
+    respawn_backoff_s: float = 2.0
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "SpeakerConfig":
+        raw = raw or {}
+        respawn_backoff_s = float(raw.get("respawn_backoff_s", cls.respawn_backoff_s))
+        if respawn_backoff_s <= 0:
+            raise ConfigError(
+                f"speaker.respawn_backoff_s must be positive, got {respawn_backoff_s!r} "
+                "-- a zero or negative backoff turns the ffmpeg supervisor into a busy "
+                "loop against a dead subprocess"
+            )
+        return cls(
+            go2rtc_url=raw.get("go2rtc_url", cls.go2rtc_url),
+            stream=raw.get("stream", cls.stream),
+            ensure_url=raw.get("ensure_url", cls.ensure_url),
+            fifo_path=raw.get("fifo_path", cls.fifo_path),
+            respawn_backoff_s=respawn_backoff_s,
+        )
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    """The `debug:` block: one directory per turn, its retention window, and
+    the sweep interval that enforces it. Read by the session recorder and
+    the retention sweep (plans 02-07 and 02-08).
+
+    Reads the **existing** `debug:` block rather than introducing a second
+    `session:` section -- a parallel block would give `retain_days` two
+    homes that could disagree, the same shadowing failure
+    `_check_macros_do_not_collide` exists to prevent below.
+    `expiry_interval_s` is the one field this block does not have yet: how
+    often the retention sweep runs, defaulted well under a day so a
+    long-running process sweeps more than once between restarts.
+    """
+
+    dir: str = "/data/sessions"
+    record_audio: bool = True
+    # Seven days: a conservative floor on audio of a real home. The operator
+    # raises this deliberately; it is never lowered for convenience (D-14,
+    # T-02-05).
+    retain_days: int = 7
+    stdout_summary: bool = True
+    expiry_interval_s: int = 3600
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "SessionConfig":
+        raw = raw or {}
+        retain_days = raw.get("retain_days", cls.retain_days)
+        if not isinstance(retain_days, int) or isinstance(retain_days, bool) or retain_days <= 0:
+            raise ConfigError(
+                f"debug.retain_days must be a positive integer, got {retain_days!r} -- "
+                "a zero or negative retention would mean deleting a turn's recording "
+                "while the turn is still being written"
+            )
+        expiry_interval_s = raw.get("expiry_interval_s", cls.expiry_interval_s)
+        if expiry_interval_s <= 0:
+            raise ConfigError(
+                f"debug.expiry_interval_s must be positive, got {expiry_interval_s!r}"
+            )
+        return cls(
+            dir=raw.get("dir", cls.dir),
+            record_audio=raw.get("record_audio", cls.record_audio),
+            retain_days=retain_days,
+            stdout_summary=raw.get("stdout_summary", cls.stdout_summary),
+            expiry_interval_s=expiry_interval_s,
+        )
+
+
+@dataclass(frozen=True)
 class McpServerConfig:
     """One `mcp.servers.<name>` block: the stdio child's args and env.
 
@@ -398,12 +526,20 @@ class Config:
     `Config.from_config` is the only place `Policy` is constructed from
     configuration (D-12, D-13) -- `Policy` is imported from
     `spire_mcp.safety`, never copied or re-implemented here.
+
+    Phase 2 adds three sections here: `camera` and `speaker` are read by the
+    camera `AudioSource` and its FIFO-backed speaker supervisor (plan
+    02-03); `session` is read by the session recorder and the retention
+    sweep (plan 02-07/02-08).
     """
 
     server: ServerConfig
     stt: SttConfig
     brain: BrainConfig
     tts: TtsConfig
+    camera: CameraConfig
+    speaker: SpeakerConfig
+    session: SessionConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
     # A tuple, not a dict: `macros:` is a list in the config file and there is
@@ -428,6 +564,9 @@ class Config:
             stt=SttConfig.from_config(raw.get("stt")),
             brain=BrainConfig.from_config(raw.get("brain")),
             tts=TtsConfig.from_config(raw.get("tts")),
+            camera=CameraConfig.from_config(raw.get("camera")),
+            speaker=SpeakerConfig.from_config(raw.get("speaker")),
+            session=SessionConfig.from_config(raw.get("debug")),
             mcp_servers={
                 name: McpServerConfig.from_config(server_raw)
                 for name, server_raw in mcp_servers_raw.items()
