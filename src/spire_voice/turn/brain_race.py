@@ -161,26 +161,41 @@ async def race_tiers(tasks_by_index: dict[int, "asyncio.Task[TierReply]"]) -> Ti
     When a winner is found, every still-pending task is cancelled and its
     unwind is awaited (`return_exceptions=True`) before this function
     returns, rather than firing the cancellation and moving on.
+
+    CR-02: that cancel-and-await cleanup runs on every exit path, including
+    the one where the top tier's own task raises. Without the `try`/`except`
+    below, a raise from inside the `while` loop's `for` loop propagated
+    straight out of this function, skipping the cleanup block entirely: a
+    triage tier still pending at that moment was neither cancelled nor
+    awaited, its underlying request left running detached from the turn
+    that started it.
     """
     top_index = max(tasks_by_index)
     task_index = {task: index for index, task in tasks_by_index.items()}
     pending = set(tasks_by_index.values())
     winner: TierReply | None = None
 
-    while pending and winner is None:
-        done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        for task in sorted(done, key=lambda t: task_index[t]):
-            index = task_index[task]
-            try:
-                reply = task.result()
-            except Exception:
-                if index == top_index:
-                    raise
-                logger.exception("triage tier %d raised; dropped from the race", index)
-                continue
-            if reply.confident or index == top_index:
-                winner = reply
-                break
+    try:
+        while pending and winner is None:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in sorted(done, key=lambda t: task_index[t]):
+                index = task_index[task]
+                try:
+                    reply = task.result()
+                except Exception:
+                    if index == top_index:
+                        raise
+                    logger.exception("triage tier %d raised; dropped from the race", index)
+                    continue
+                if reply.confident or index == top_index:
+                    winner = reply
+                    break
+    except Exception:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        raise
 
     for task in pending:
         task.cancel()

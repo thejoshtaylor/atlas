@@ -5,6 +5,8 @@ by plan 01.1-04's Task 2; every plan in this phase scopes its own suite run
 to explicit files for exactly this reason.
 """
 
+import pytest
+
 from spire_voice.providers.base import BrainReply
 
 
@@ -390,3 +392,38 @@ async def test_racing_many_times_does_not_leak_tasks():
 
     await asyncio.sleep(0)
     assert len(asyncio.all_tasks()) == baseline
+
+
+async def test_race_tiers_cancels_pending_siblings_when_the_top_tier_itself_raises():
+    """CR-02: when the top tier's own task raises, `race_tiers` re-raises
+    immediately from inside the `while` loop -- before the cancellation
+    block below it ever runs. A triage tier still pending at that moment
+    must still be cancelled and awaited, not abandoned mid-flight with its
+    underlying request left running detached from the turn that started it.
+    """
+    import asyncio
+
+    from spire_voice.providers.base import BrainError
+    from spire_voice.turn import brain_race
+
+    triage_finally_ran = False
+
+    async def _slow_triage() -> None:
+        nonlocal triage_finally_ran
+        try:
+            await asyncio.sleep(10)
+            raise AssertionError("the triage tier should have been cancelled before this line")
+        finally:
+            triage_finally_ran = True
+
+    async def _raising_top() -> None:
+        raise BrainError("top tier exploded")
+
+    triage_task = asyncio.create_task(_slow_triage())
+    tasks = {0: triage_task, 1: asyncio.create_task(_raising_top())}
+
+    with pytest.raises(BrainError, match="top tier exploded"):
+        await brain_race.race_tiers(tasks)
+
+    assert triage_task.cancelled()
+    assert triage_finally_ran
