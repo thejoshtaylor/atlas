@@ -29,6 +29,7 @@ from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
+from spire_voice.session.recorder import SessionRecorder
 from spire_voice.sources.runner import SourceRunner
 from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
 from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
@@ -184,6 +185,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
 
     async def _run(source: Any) -> None:
         timings = TurnTimings()
+        session_recorder = SessionRecorder(config.session, timings)
         await run_turn(
             source,
             app.state.stt,
@@ -200,6 +202,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             filler_cache=app.state.filler_cache,
             macros=config.macros,
             state_fetch=_make_state_fetch(app.state.tool_host),
+            session_recorder=session_recorder,
         )
 
     return _run
@@ -380,6 +383,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             filler_cache=app.state.filler_cache,
             macros=config.macros,
             state_fetch=_make_state_fetch(app.state.tool_host),
+            session_recorder=SessionRecorder(config.session, timings),
         )
     )
     app.state.background_turns.add(task)
@@ -431,6 +435,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         filler_cache=websocket.app.state.filler_cache,
         macros=config.macros,
         state_fetch=_make_state_fetch(websocket.app.state.tool_host),
+        session_recorder=SessionRecorder(config.session, timings),
     )
 
 

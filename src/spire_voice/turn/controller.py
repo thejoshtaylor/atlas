@@ -65,6 +65,7 @@ from spire_voice.providers.base import BrainError
 from spire_voice.transports.base import SourceFormat
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
+from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
 from spire_voice.turn.macros import fire_macro, match as match_macro
@@ -111,6 +112,45 @@ class _TtsProvider(Protocol):
 
 class _ToolHost(Protocol):
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any: ...
+
+
+class _RecordingAudioSource:
+    """Wraps one `AudioSource`, taping the two things Task 3 taps and only
+    those two: the frame iterator `run_turn` already drains, and the
+    events it already emits through `_emit_event`.
+
+    `send_audio()`/`source_format()` delegate straight through -- this
+    wrapper adds no behavior to either, and reply audio going out never
+    reaches a session recording (D-13 only names the audio a turn heard).
+    Constructing this wrapper is the only tap this plan opens: `frames()`
+    yields exactly what `self._wrapped.frames()` yields, one chunk handed
+    to `self._recorder` before it is handed onward, so the recorder can
+    hold no more than the turn actually sent to the transcriber (D-15).
+    `send_event()` records every event before forwarding it, so the
+    session's JSONL is the same stream the browser sees, not a second one
+    invented for disk.
+    """
+
+    def __init__(self, wrapped: Any, recorder: SessionRecorder) -> None:
+        self._wrapped = wrapped
+        self._recorder = recorder
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        async for chunk in self._wrapped.frames():
+            self._recorder.record_audio_chunk(chunk)
+            yield chunk
+
+    async def send_audio(self, chunk: bytes) -> None:
+        await self._wrapped.send_audio(chunk)
+
+    async def send_event(self, event: dict[str, Any]) -> None:
+        self._recorder.record_event(event)
+        wrapped_send_event = getattr(self._wrapped, "send_event", None)
+        if wrapped_send_event is not None:
+            await wrapped_send_event(event)
+
+    def source_format(self) -> SourceFormat:
+        return self._wrapped.source_format()
 
 
 @dataclass
@@ -161,17 +201,27 @@ async def run_turn(
     filler_cache: Mapping[str, bytes] | None = None,
     macros: tuple[MacroConfig, ...] = (),
     state_fetch: Callable[[], Any] | None = None,
+    session_recorder: SessionRecorder | None = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
     `max_utterance_s`, `clock`, `poll_interval_s`, `tiers`, `filler_after_ms`,
-    `filler_cache`, `macros`, and `state_fetch` all default to their Phase 01
-    (or Phase 01 shape-only) behavior, so every caller that predates this
-    plan (the WebSocket/WebRTC routes in `app.py`, the safety-integration
-    test) keeps working unmodified. `clock` exists so a test can drive the
-    silence-timeout guard and the filler deadline without waiting out the
-    real configured duration -- see
-    `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+    `filler_cache`, `macros`, `state_fetch`, and `session_recorder` all
+    default to their Phase 01 (or Phase 01 shape-only) behavior, so every
+    caller that predates this plan (the WebSocket/WebRTC routes in
+    `app.py`, the safety-integration test) keeps working unmodified.
+    `clock` exists so a test can drive the silence-timeout guard and the
+    filler deadline without waiting out the real configured duration --
+    see `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+
+    `session_recorder=None` (the default, plan 02-05) means no on-disk
+    session is written and `source` is used exactly as handed in --
+    every test that predates this plan exercises precisely the code path
+    it always has. When given, `source` is wrapped in
+    `_RecordingAudioSource` before the drain below ever runs, so the
+    recorder can only ever see what this turn actually sent to the
+    transcriber, and it is closed from a `finally` block that covers every
+    exit path this function has, including the two early returns below.
 
     `tiers=None` wraps `brain` in a one-element tier list and races that --
     there is one code path, always the list; a one-entry list is the
@@ -204,160 +254,177 @@ async def run_turn(
     # that predates this plan.
     state_task: asyncio.Task[Any] | None = asyncio.create_task(state_fetch()) if state_fetch is not None else None
 
-    final = await _drain_to_final_transcript(
-        source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
-    )
-    timings.mark_stt_final()
+    if session_recorder is not None:
+        # Resolved from the source's own declaration, never assumed (D-13),
+        # and wrapped before `_drain_to_final_transcript` is ever awaited
+        # below -- there is no earlier point at which `source.frames()`
+        # could be read, so this is the only tap this function opens.
+        fmt = source.source_format()
+        session_recorder.set_audio_format(fmt.encoding, fmt.sample_rate)
+        source = _RecordingAudioSource(source, session_recorder)
 
-    final_text = getattr(final, "text", "") if final is not None else ""
-    if not final_text:
-        # VOICE-08's two cases end the turn the same way, with no language
-        # model call and no text-to-speech call: `final is None` is
-        # RESEARCH.md Pitfall 3's second case (the provider never sent
-        # anything at all, closed here by the client-side timeout); a
-        # `FinalTranscript` whose text is empty is the first case (something
-        # arrived and decoded to nothing). `turn_outcome` keeps the two
-        # distinguishable in the log even though the reply path is shared.
-        timings.turn_outcome = "timeout" if final is None else "empty_transcript"
-        await _cancel_state_task(state_task)
-        await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
-        await _emit_event(source, timings.to_event())
-        timings.log()
-        return
-
-    # The macro check runs here, before a single tier task is created:
-    # placed after the dispatch below, the model round trip would already
-    # have been paid and MACRO-02 would be false while every other
-    # behavioral test still passed. `match_macro` on an empty `macros` tuple
-    # (the default) always returns `None`, so a caller that predates this
-    # plan reaches the tier race exactly as before, at no observable cost.
-    matched_macro = match_macro(macros, final_text)
-    if matched_macro is not None:
-        # A macro turn never builds the message list and never consumes the
-        # state fetch's result -- but the fetch was already started above
-        # (state_fetch does not know yet whether this turn will match a
-        # macro), so it must be cancelled and its cancellation awaited here,
-        # never left dangling. Same cancel-then-await shape `race_tiers`
-        # already uses for a losing tier -- not a second mechanism.
-        await _cancel_state_task(state_task)
-        outcome = await fire_macro(matched_macro, tool_host)
-        timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
-        # A macro reply is an answer, not a holding phrase -- it is the one
-        # utterance in this system that is both the answer and instant. On
-        # failure `outcome.cacheable` is always False (MacroOutcome's own
-        # doctrine): the failure text is composed at turn time from whichever
-        # action actually failed, so it was never precached, and this turn
-        # deliberately pays the live synthesis cost and loses the sub-1.5
-        # second claim. Losing it here is correct: CMD-07 forbids a cached
-        # confirmation of something that did not happen, and the latency
-        # cost is the honest price of not lying.
-        speaking_tts = CachedTts(filler_cache or {}) if outcome.cacheable else tts
-        # `outcome.text` is the boundary's own words verbatim (CMD-08) --
-        # nothing prepended, appended, or reworded here, and no length check
-        # or truncation either: a refusal never passes through a model, so
-        # `brain.max_tokens` does not apply to it and there is nothing to
-        # truncate against. `_DENIED_FALLBACK_REPLY` covers only the one
-        # case where there are no words at all.
-        await _speak(source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer")
-        await _emit_event(source, timings.to_event())
-        timings.log()
-        return
-
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    if state_task is not None:
-        # `state_task` was started before the drain above, so by now it has
-        # usually already finished -- this await rarely actually waits. A
-        # fetch that raised is logged and treated as "nothing known" rather
-        # than ending the turn: an assistant that cannot read current state
-        # can still take a command, and failing the whole turn over a
-        # stale-state fetch would be a worse outcome than answering without
-        # it (T-01.1-17).
-        try:
-            states_payload = await state_task
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("state fetch raised; continuing turn with no known state")
-            states_payload = []
-        states = (
-            {entity["entity_id"]: entity["state"] for entity in states_payload}
-            if isinstance(states_payload, list)
-            else {}
+    try:
+        final = await _drain_to_final_transcript(
+            source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
         )
-        # Deferred, not module-level: `app.py` imports `run_turn` from this
-        # module at load time, so a module-level import here of anything
-        # from `app.py` would deadlock the two modules' load order. By the
-        # time this line actually runs, this module has always finished
-        # loading -- there is no way to call `run_turn` without importing
-        # `spire_voice.turn.controller` first -- so importing `app.py` here,
-        # even the first time, only ever fetches or finishes a module that
-        # cannot be mid-load on this side. Same deferred-import shape
-        # `brain_race.py` already uses for `_run_tool_rounds`.
-        from spire_voice.app import _state_message
+        timings.mark_stt_final()
 
-        messages.append({"role": "system", "content": _state_message(states)})
-    messages.append({"role": "user", "content": final_text})
+        final_text = getattr(final, "text", "") if final is not None else ""
+        if not final_text:
+            # VOICE-08's two cases end the turn the same way, with no language
+            # model call and no text-to-speech call: `final is None` is
+            # RESEARCH.md Pitfall 3's second case (the provider never sent
+            # anything at all, closed here by the client-side timeout); a
+            # `FinalTranscript` whose text is empty is the first case (something
+            # arrived and decoded to nothing). `turn_outcome` keeps the two
+            # distinguishable in the log even though the reply path is shared.
+            timings.turn_outcome = "timeout" if final is None else "empty_transcript"
+            await _cancel_state_task(state_task)
+            await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
 
-    if tiers is None:
-        # The degenerate one-tier case: no instructor client exists, so
-        # `run_top_tier` wraps its settled text locally as a confident
-        # `TierReply` instead of calling out. This is the seam that keeps
-        # every Phase 01 test -- which drives `run_turn` with a `FakeBrain`
-        # and no instructor client -- working unchanged.
-        tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]
+        # The macro check runs here, before a single tier task is created:
+        # placed after the dispatch below, the model round trip would already
+        # have been paid and MACRO-02 would be false while every other
+        # behavioral test still passed. `match_macro` on an empty `macros` tuple
+        # (the default) always returns `None`, so a caller that predates this
+        # plan reaches the tier race exactly as before, at no observable cost.
+        matched_macro = match_macro(macros, final_text)
+        if matched_macro is not None:
+            # A macro turn never builds the message list and never consumes the
+            # state fetch's result -- but the fetch was already started above
+            # (state_fetch does not know yet whether this turn will match a
+            # macro), so it must be cancelled and its cancellation awaited here,
+            # never left dangling. Same cancel-then-await shape `race_tiers`
+            # already uses for a losing tier -- not a second mechanism.
+            await _cancel_state_task(state_task)
+            outcome = await fire_macro(matched_macro, tool_host)
+            timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
+            # A macro reply is an answer, not a holding phrase -- it is the one
+            # utterance in this system that is both the answer and instant. On
+            # failure `outcome.cacheable` is always False (MacroOutcome's own
+            # doctrine): the failure text is composed at turn time from whichever
+            # action actually failed, so it was never precached, and this turn
+            # deliberately pays the live synthesis cost and loses the sub-1.5
+            # second claim. Losing it here is correct: CMD-07 forbids a cached
+            # confirmation of something that did not happen, and the latency
+            # cost is the honest price of not lying.
+            speaking_tts = CachedTts(filler_cache or {}) if outcome.cacheable else tts
+            # `outcome.text` is the boundary's own words verbatim (CMD-08) --
+            # nothing prepended, appended, or reworded here, and no length check
+            # or truncation either: a refusal never passes through a model, so
+            # `brain.max_tokens` does not apply to it and there is nothing to
+            # truncate against. `_DENIED_FALLBACK_REPLY` covers only the one
+            # case where there are no words at all.
+            await _speak(source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer")
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
 
-    # CR-01: one instance per turn, shared between the top tier's tool
-    # round and the race -- set True the instant a real tool call is made,
-    # so a triage tier's confident reply can no longer end the race in the
-    # top tier's place once its action is no longer cancellable.
-    _validate_tiers(tiers)
-
-    commitment = brain_race.ToolCommitment()
-
-    tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
-    for tier in tiers:
-        tier_messages = list(messages)
-        if tier.calls_tools:
-            coro = brain_race.run_top_tier(
-                tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings, commitment
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        if state_task is not None:
+            # `state_task` was started before the drain above, so by now it has
+            # usually already finished -- this await rarely actually waits. A
+            # fetch that raised is logged and treated as "nothing known" rather
+            # than ending the turn: an assistant that cannot read current state
+            # can still take a command, and failing the whole turn over a
+            # stale-state fetch would be a worse outcome than answering without
+            # it (T-01.1-17).
+            try:
+                states_payload = await state_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("state fetch raised; continuing turn with no known state")
+                states_payload = []
+            states = (
+                {entity["entity_id"]: entity["state"] for entity in states_payload}
+                if isinstance(states_payload, list)
+                else {}
             )
-        else:
-            coro = brain_race.run_triage_tier(tier, tier_messages)
-        tier_tasks[tier.index] = asyncio.create_task(coro)
+            # Deferred, not module-level: `app.py` imports `run_turn` from this
+            # module at load time, so a module-level import here of anything
+            # from `app.py` would deadlock the two modules' load order. By the
+            # time this line actually runs, this module has always finished
+            # loading -- there is no way to call `run_turn` without importing
+            # `spire_voice.turn.controller` first -- so importing `app.py` here,
+            # even the first time, only ever fetches or finishes a module that
+            # cannot be mid-load on this side. Same deferred-import shape
+            # `brain_race.py` already uses for `_run_tool_rounds`.
+            from spire_voice.app import _state_message
 
-    race_task = asyncio.create_task(brain_race.race_tiers(tier_tasks, commitment))
+            messages.append({"role": "system", "content": _state_message(states)})
+        messages.append({"role": "user", "content": final_text})
 
-    filler_deadline = clock() + filler_after_ms / 1000
-    first_filler: FillerPhrase | None = None
-    inspected: set[asyncio.Task[TierReply]] = set()
-    while not race_task.done() and clock() < filler_deadline:
-        await asyncio.sleep(poll_interval_s)
-        for task in tier_tasks.values():
-            if task.done() and task not in inspected:
-                inspected.add(task)
-                if task.cancelled() or task.exception() is not None:
-                    continue
-                reply = task.result()
-                if not reply.confident and first_filler is None:
-                    first_filler = reply.filler
+        if tiers is None:
+            # The degenerate one-tier case: no instructor client exists, so
+            # `run_top_tier` wraps its settled text locally as a confident
+            # `TierReply` instead of calling out. This is the seam that keeps
+            # every Phase 01 test -- which drives `run_turn` with a `FakeBrain`
+            # and no instructor client -- working unchanged.
+            tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]
 
-    if not race_task.done() and filler_cache:
-        # D-08/D-09: the holding phrase plays on a deadline, from the
-        # startup cache only, and is awaited to completion before the
-        # answer -- that sequential await is what makes D-09 true (the
-        # filler finishes before the answer can start) with no second
-        # mechanism. When `filler_cache` is empty or `None`, this branch is
-        # skipped entirely: the turn waits in silence rather than
-        # synthesizing at turn time.
-        phrase = first_filler or DEFAULT_FILLER
-        await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler")
+        # CR-01: one instance per turn, shared between the top tier's tool
+        # round and the race -- set True the instant a real tool call is made,
+        # so a triage tier's confident reply can no longer end the race in the
+        # top tier's place once its action is no longer cancellable.
+        _validate_tiers(tiers)
 
-    winner = await race_task
-    timings.mark_tool_rounds_done()
+        commitment = brain_race.ToolCommitment()
 
-    await _speak(source, tts, timings, winner.answer, kind="answer")
-    await _emit_event(source, timings.to_event())
-    timings.log()
+        tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
+        for tier in tiers:
+            tier_messages = list(messages)
+            if tier.calls_tools:
+                coro = brain_race.run_top_tier(
+                    tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings, commitment
+                )
+            else:
+                coro = brain_race.run_triage_tier(tier, tier_messages)
+            tier_tasks[tier.index] = asyncio.create_task(coro)
+
+        race_task = asyncio.create_task(brain_race.race_tiers(tier_tasks, commitment))
+
+        filler_deadline = clock() + filler_after_ms / 1000
+        first_filler: FillerPhrase | None = None
+        inspected: set[asyncio.Task[TierReply]] = set()
+        while not race_task.done() and clock() < filler_deadline:
+            await asyncio.sleep(poll_interval_s)
+            for task in tier_tasks.values():
+                if task.done() and task not in inspected:
+                    inspected.add(task)
+                    if task.cancelled() or task.exception() is not None:
+                        continue
+                    reply = task.result()
+                    if not reply.confident and first_filler is None:
+                        first_filler = reply.filler
+
+        if not race_task.done() and filler_cache:
+            # D-08/D-09: the holding phrase plays on a deadline, from the
+            # startup cache only, and is awaited to completion before the
+            # answer -- that sequential await is what makes D-09 true (the
+            # filler finishes before the answer can start) with no second
+            # mechanism. When `filler_cache` is empty or `None`, this branch is
+            # skipped entirely: the turn waits in silence rather than
+            # synthesizing at turn time.
+            phrase = first_filler or DEFAULT_FILLER
+            await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler")
+
+        winner = await race_task
+        timings.mark_tool_rounds_done()
+
+        await _speak(source, tts, timings, winner.answer, kind="answer")
+        await _emit_event(source, timings.to_event())
+        timings.log()
+    finally:
+        # Covers every exit path above, including the two early returns --
+        # exactly the turns whose folders an operator will want, and the
+        # easiest ones to leak (D-13, T-02-22). A no-op when
+        # `session_recorder` is `None`.
+        if session_recorder is not None:
+            session_recorder.close(timings)
 
 
 def _validate_tiers(tiers: "list[brain_race.TierBrain]") -> None:

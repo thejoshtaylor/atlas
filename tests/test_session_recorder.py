@@ -18,6 +18,7 @@ from spire_voice.config import SessionConfig
 from spire_voice.session import timeline as timeline_module
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
+from spire_voice.turn.controller import run_turn
 
 
 def _session_config(tmp_path: Path, *, record_audio: bool = True) -> SessionConfig:
@@ -223,6 +224,148 @@ def test_timeline_preserves_written_order_for_events_whose_timestamps_tie():
     rendered = timeline_module.render_timeline(events, {})
 
     assert [entry["text"] for entry in rendered] == ["first", "second"]
+
+
+async def test_a_full_turn_through_run_turn_produces_all_four_artifacts(
+    fake_audio_source, recording_fake_stt, fake_brain, fake_tts, tmp_path
+):
+    """The integration case: a real `run_turn`, wired to a `SessionRecorder`,
+    leaves a directory holding all four artifacts -- not the recorder
+    exercised in isolation.
+
+    `recording_fake_stt`, not `fake_stt`, because `FakeStt` accepts and
+    ignores whatever `frames` it is handed -- it never actually drains the
+    iterator, so it can never prove this plan's tap did either.
+    """
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    source = fake_audio_source(frames=[b"\x00\x01", b"\x02\x03"])
+    stt = recording_fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    assert (recorder.directory / "events.jsonl").exists()
+    assert (recorder.directory / "timing.json").exists()
+    assert (recorder.directory / "timeline.jsonl").exists()
+    audio_path = recorder.directory / "audio.pcm"
+    assert audio_path.exists()
+    assert audio_path.read_bytes() == b"\x00\x01\x02\x03"
+
+
+async def test_the_recorded_audio_byte_count_equals_what_the_turn_drained(
+    fake_audio_source, recording_fake_stt, fake_brain, fake_tts, tmp_path
+):
+    """A second tap on the source would double this count -- this test
+    would fail it.
+    """
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    frames = [b"\x00\x01", b"\x02\x03", b"\x04\x05"]
+    source = fake_audio_source(frames=frames)
+    stt = recording_fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    audio_path = recorder.directory / "audio.pcm"
+    assert len(audio_path.read_bytes()) == sum(len(chunk) for chunk in frames)
+
+
+async def test_a_turn_ending_on_an_empty_transcript_still_writes_its_directory(fake_audio_source, fake_stt, fake_brain, fake_tts, tmp_path):
+    from spire_voice.providers.base import FinalTranscript
+
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    assert timings.turn_outcome == "empty_transcript"
+    assert recorder.directory.exists()
+    assert (recorder.directory / "events.jsonl").exists()
+    assert (recorder.directory / "timing.json").exists()
+
+
+async def test_record_audio_off_keeps_the_directory_events_and_timing_but_not_audio(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, tmp_path
+):
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+
+    config = _session_config(tmp_path, record_audio=False)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    assert recorder.directory.exists()
+    assert (recorder.directory / "events.jsonl").exists()
+    assert (recorder.directory / "timing.json").exists()
+    assert list(recorder.directory.glob("audio.*")) == []
 
 
 def test_timeline_module_holds_no_state_between_calls():
