@@ -50,3 +50,21 @@ def test_mcp_tools_to_openai_tools_defaults_missing_description_to_empty_string(
     (openai_tool,) = mcp_tools_to_openai_tools([tool])
 
     assert openai_tool["function"]["description"] == ""
+
+
+def test_mcp_tools_to_openai_tools_keeps_a_falsy_but_present_schema():
+    """WR-01 (phase 01 code review, iteration 2): CR-01's own fallback read
+    `getattr(tool, "input_schema", None) or getattr(tool, "inputSchema",
+    None)`. `or` is a truthiness test, not a presence test, so a schema
+    that is genuinely present but falsy -- an empty dict -- was discarded
+    and replaced with `None` from the second `getattr`, which resolves to
+    `None` on the installed SDK because `inputSchema` is not a real
+    attribute on `Tool`. That would send `{"parameters": None}` into a live
+    `tools=[...]` array instead of the empty-but-valid schema the tool
+    actually declared. A sentinel-based presence check keeps `{}` intact.
+    """
+    tool = Tool(name="ha_list_entities", description="List entities.", inputSchema={})
+
+    (openai_tool,) = mcp_tools_to_openai_tools([tool])
+
+    assert openai_tool["function"]["parameters"] == {}

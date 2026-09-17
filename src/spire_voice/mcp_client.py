@@ -62,6 +62,9 @@ class McpToolHost:
         await self._stack.aclose()
 
 
+_MISSING = object()
+
+
 def mcp_tools_to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     """Rename and nest each MCP tool's schema into the `tools=[...]` shape
     a chat-completions call expects. A rename and a nest, not a rewrite --
@@ -74,16 +77,28 @@ def mcp_tools_to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     `getattr` with a fallback, matching `app.py::_tool_result_json` and
     `turn/controller.py::_is_error`'s own camelCase/snake_case handling,
     keeps this working against either shape.
+
+    The fallback checks presence with a sentinel, not truthiness with `or`
+    -- a schema that legitimately serializes to `{}` must still win over
+    the second attribute name, and a `Tool` exposing neither name must
+    still fail loudly here rather than silently sending `None` as a tool's
+    `parameters` inside a live chat-completions call.
     """
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description or "",
-                "parameters": getattr(tool, "input_schema", None)
-                or getattr(tool, "inputSchema", None),
-            },
-        }
-        for tool in tools
-    ]
+    results = []
+    for tool in tools:
+        schema = getattr(tool, "input_schema", _MISSING)
+        if schema is _MISSING:
+            schema = getattr(tool, "inputSchema", _MISSING)
+        if schema is _MISSING:
+            raise AttributeError(f"MCP Tool {tool.name!r} exposes neither input_schema nor inputSchema")
+        results.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": schema,
+                },
+            }
+        )
+    return results
