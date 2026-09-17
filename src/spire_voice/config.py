@@ -643,12 +643,30 @@ class GateConfig:
 
 @dataclass(frozen=True)
 class BargeInConfig:
-    """The `barge_in:` block: known-output suppression, not acoustic echo
-    cancellation (D-09) -- the interrupt triggers on sustained energy above
-    a floor for a minimum duration, never a single frame and never the wake
-    word (D-10). Global with a per-source override (D-12), same shape as
-    `GateConfig`. Read by `_speak`'s interrupt point in
-    `turn/controller.py` (plan 02-06).
+    """The `barge_in:` block: an energy-floor-plus-guard-window gate, never
+    a single frame and never the wake word (D-10). Global with a per-source
+    override (D-12), same shape as `GateConfig`. Read by `_speak`'s
+    interrupt point in `turn/controller.py` (plan 02-06).
+
+    **This is not the known-output correlation CONTEXT.md's Barge-in
+    section describes** (D-09). `BargeInMonitor` (`sources/runner.py`)
+    never reads what `_speak` actually wrote to the speaker FIFO -- it only
+    checks whether microphone energy has stayed above `energy_floor` for
+    `min_duration_ms`, outside the `post_playback_guard_ms` window after
+    playback starts. On a source whose microphone and speaker are the same
+    device with no acoustic echo cancellation (the camera -- PROJECT.md's
+    own stated constraint), the assistant's own voice returning through
+    that open microphone can hold energy above the floor for longer than
+    the guard window, and this gate cannot tell that apart from a real
+    interruption (found in code review). A real known-output correlation
+    signal -- comparing incoming energy against a trailing window of what
+    was actually written to the FIFO -- is deferred until a real camera
+    corpus proves the guard window insufficient (CONTEXT.md's own Deferred
+    section names full acoustic echo cancellation as that fallback).
+    `config/config.example.yaml`'s `barge_in.sources.camera.enabled: false`
+    is this module's honest answer in the meantime: this mechanism ships
+    on by default everywhere except the one source it cannot be trusted on
+    yet.
 
     `energy_floor` is derived from `SttConfig.vad_threshold`, already tuned
     for this camera's across-a-room noise floor -- the only noise-floor

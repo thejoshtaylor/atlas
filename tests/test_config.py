@@ -392,6 +392,13 @@ def test_example_config_loads_end_to_end(monkeypatch):
     assert config.wake.engine == "vosk"
     assert config.gate.sources  # the browser override is written explicitly
     assert config.barge_in.enabled is True
+    # CR-02 fix: the shipped example turns barge-in off for the camera
+    # specifically -- its microphone and speaker are the same device with
+    # no AEC, and BargeInMonitor's own gate (energy floor + guard window,
+    # not known-output correlation) cannot tell the assistant's own voice
+    # apart from a real interruption on that path. The global default
+    # (asserted above) stays on for every other source.
+    assert config.barge_in.resolve("camera").enabled is False
     assert config.session.retain_days == 7
 
 

@@ -136,12 +136,13 @@ gate:
       mute_when_playing: []
 
 barge_in:
-  # Self-speech is suppressed by known output, not acoustic echo cancellation
-  # (D-09): this process wrote every byte it sent to the speaker FIFO, so it
-  # knows exactly what is playing and when. The camera has no AEC and the
-  # microphone and speaker are the same device, so an interrupt fires on
-  # sustained energy that does not correlate with the known output -- not a
-  # single frame, and explicitly not requiring the wake word again (D-10).
+  # An energy-floor-plus-guard-window gate, NOT known-output correlation:
+  # this process never compares incoming microphone energy against what it
+  # actually wrote to the speaker FIFO (found in code review -- see
+  # BargeInConfig's own docstring in config.py for the full explanation).
+  # An interrupt fires on sustained energy above a floor, past a guard
+  # window after playback starts -- not a single frame, and explicitly not
+  # requiring the wake word again (D-10).
   enabled: true
 
   # Same unit as stt.vad_threshold below (0.08), the only noise-floor
@@ -161,10 +162,17 @@ barge_in:
   # interruption of itself.
   post_playback_guard_ms: 150
 
-  # Per-source override (D-12), same shape as gate.sources above: on by
-  # default everywhere, overridable per source. No source needs to override
-  # it yet -- declared empty for shape parity, not omitted.
-  sources: {}
+  # Per-source override (D-12), same shape as gate.sources above. The
+  # camera overrides the global default to off: its microphone and speaker
+  # are the same device with no AEC, so this gate's guard-window-plus-floor
+  # mechanism (not known-output correlation -- see above) cannot reliably
+  # tell the assistant's own voice apart from a real interruption. Flip
+  # this to true only once a real camera corpus
+  # (scripts/capture_wake_corpus.py) shows the guard window holds during
+  # actual playback.
+  sources:
+    camera:
+      enabled: false
 
 stt:
   url: "wss://api.x.ai/v1/stt"

@@ -144,6 +144,18 @@ class BargeInMonitor:
     fires on the room's own noise floor costs the assistant's ability to
     finish a sentence. The two thresholds are not the same decision and
     must not be harmonized to look alike.
+
+    **What this class does not do, stated plainly (found in code review):**
+    it never reads or compares against the bytes `_speak` actually wrote to
+    the speaker FIFO. Every input here is the energy floor, the sustained
+    duration, and the guard window above -- nothing about *known output*.
+    On a device whose microphone and speaker are the same unit with no
+    acoustic echo cancellation, that means the assistant's own voice
+    returning through the open mic can satisfy floor-and-duration past the
+    guard window and read as a real interruption. `BargeInConfig`'s own
+    docstring (`config.py`) and `config.example.yaml`'s
+    `barge_in.sources.camera.enabled: false` are this project's answer
+    until a real camera corpus proves the guard window sufficient.
     """
 
     def __init__(self, *, floor: float, min_duration_s: float, guard_window_s: float, enabled: bool) -> None:
