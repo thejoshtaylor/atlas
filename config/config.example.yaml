@@ -9,6 +9,18 @@
 # value in the environment is a startup error rather than an empty string,
 # because an empty RTSP password fails much later and much less clearly.
 
+server:
+  # Phase 1 has no accounts and no login (WEB-04 adds those in Phase 3), so
+  # anything that can reach this port can switch real power. Binding to
+  # loopback means only this host can reach it; binding wider is a knowing
+  # operator decision, not a default.
+  bind_host: "127.0.0.1"
+  port: 8080
+
+  # websocket | webrtc -- the D-01 selector. The operator picks one; Phase 3's
+  # admin surface exposes this same key once the webapp exists to hold it.
+  transport: websocket
+
 camera:
   # The audio source. Read straight from the camera over RTSP rather than from
   # go2rtc: go2rtc republishes video fine, but consuming the microphone from its
@@ -149,6 +161,15 @@ tts:
   # response into the FIFO with no resampling step.
   codec: alaw
   sample_rate: 8000
+
+  # The camera-facing codec above is A-law at 8 kHz, and a browser cannot
+  # decode that through the Web Audio API at all -- it plays as noise, not
+  # silence-then-error, which looks like a working-but-garbled pipeline in
+  # manual testing. The browser dev harness (Phase 1) requests raw PCM at
+  # this rate instead; the camera path (Phase 2) keeps using codec/sample_rate
+  # above, unchanged.
+  browser_codec: pcm
+  browser_sample_rate: 24000
 
   # 0 | 1 | 2, higher trades a little quality for first-audio latency.
   optimize_streaming_latency: 2
