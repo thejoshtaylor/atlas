@@ -76,6 +76,17 @@ class VoskWakeDetector:
         # for both engines to share the same protocol member.
         return WakeHit(score=1.0)
 
+    def reset(self) -> None:
+        """Clear whatever utterance state `AcceptWaveform` has accumulated
+        (WR-02, code review): without this, `scripts/score_wake_engines.py`
+        reusing one `VoskWakeDetector` across every corpus recording could
+        carry a still-open decode from one recording's trailing audio into
+        the next one's very first bytes -- misattributing a hit (or a miss)
+        to the wrong file. `KaldiRecognizer.Reset()` is vosk's own call for
+        this, cheaper than discarding and reloading the whole model between
+        recordings."""
+        self._recognizer.Reset()
+
     def close(self) -> None:
         # Both `vosk.Model` and `vosk.KaldiRecognizer` free their native
         # handles in their own `__del__`; dropping the references is enough

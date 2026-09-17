@@ -108,6 +108,17 @@ class OpenWakeWordDetector:
                 hit = WakeHit(score=score)
         return hit
 
+    def reset(self) -> None:
+        """Clear the frame-accumulation buffer and consecutive-hit counter
+        (WR-02, code review; see `VoskWakeDetector.reset`'s own docstring
+        for why this matters to the offline scoring harness): otherwise a
+        partial frame or an in-progress hit streak carried over from the
+        previous recording's tail would count against the next
+        recording's first bytes, the same misattribution risk Vosk's own
+        recognizer state has."""
+        self._buffer = bytearray()
+        self._consecutive_hits = 0
+
     def close(self) -> None:
         # openwakeword's `Model` holds an onnxruntime `InferenceSession`
         # with no explicit close method of its own -- dropping the

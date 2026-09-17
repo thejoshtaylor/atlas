@@ -325,6 +325,14 @@ def score_engine_over_corpus(
     negative_scores: list[float | None] = []
     negative_duration = 0.0
     for recording, pcm16 in recordings_pcm16:
+        # WR-02 fix (code review): every recording is an independent
+        # utterance. Without this, a detector that accumulates state across
+        # `process()` calls (Vosk's `KaldiRecognizer`, openWakeWord's own
+        # frame buffer) could carry a still-open decode from one
+        # recording's trailing audio into the next recording's very first
+        # bytes -- attributing a hit, or a miss, to the wrong file, which
+        # corrupts the threshold-sweep evidence DBG-04 exists to produce.
+        engine.reset()
         score = score_detector_over_recording(engine, pcm16)
         if recording.label == "positive":
             positive_scores.append(score)

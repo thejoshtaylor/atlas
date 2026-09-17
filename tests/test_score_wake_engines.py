@@ -81,6 +81,10 @@ class _FakeDetector:
             return WakeHit(score=self.score)
         return None
 
+    def reset(self) -> None:
+        # Stateless by design (module docstring) -- nothing to clear.
+        pass
+
     def close(self) -> None:
         self.closed = True
 
@@ -203,6 +207,58 @@ def test_score_engine_over_corpus_separates_positive_and_negative_scores():
     assert report.available is True
     assert report.positive_scores == (None,)
     assert report.negative_scores == (0.8,)
+
+
+class _StatefulPendingHitDetector:
+    """A detector whose one call to `process()` fires a *delayed* hit --
+    the call after the one that saw the trigger byte, not the same call --
+    unless `reset()` clears that pending state first.
+
+    This is the shape `KaldiRecognizer.AcceptWaveform` actually has: an
+    endpoint can land one call after the audio that produced it. A detector
+    reused across recordings with no `reset()` between them can fire a hit
+    attributed to the *next* recording's first bytes, from state the
+    *previous* recording's trailing audio produced (WR-02's own report)."""
+
+    def __init__(self) -> None:
+        self._pending = False
+
+    def process(self, chunk: bytes) -> WakeHit | None:
+        if self._pending:
+            self._pending = False
+            return WakeHit(score=1.0)
+        if b"TRIGGER" in chunk:
+            self._pending = True
+        return None
+
+    def reset(self) -> None:
+        self._pending = False
+
+    def close(self) -> None:
+        pass
+
+
+def test_score_engine_over_corpus_resets_the_detector_between_recordings():
+    """WR-02 fix: without `reset()` between recordings, the first
+    recording's trailing `_pending` state (its own phrase-final endpoint
+    landing just past the file boundary -- a missed positive) would carry
+    into the second recording and fire on its very first chunk, registering
+    a false accept against audio where the phrase was never spoken."""
+    trigger_recording = _recording("positive", file="a.alaw")
+    innocent_recording = _recording("negative", file="b.alaw", duration_s=10.0)
+    pairs = [
+        (trigger_recording, b"TRIGGER-with-no-endpoint-before-the-file-ends"),
+        (innocent_recording, b"nothing-of-interest-in-this-recording"),
+    ]
+
+    report = score_wake_engines.score_engine_over_corpus(_StatefulPendingHitDetector(), "vosk", pairs)
+
+    # The positive's own trailing state must not carry into the negative
+    # that follows it: the positive itself is not detected within its own
+    # bytes (this fake deliberately mimics an endpoint landing one call
+    # later), and the negative must not inherit a hit from it.
+    assert report.positive_scores == (None,)
+    assert report.negative_scores == (None,)
 
 
 # --- the unavailable-engine outcome (D-08) ----------------------------------
