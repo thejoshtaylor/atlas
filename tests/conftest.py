@@ -8,6 +8,7 @@ ever talk to; every entity id in it is invented, following the rule
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Sequence
@@ -52,20 +53,32 @@ class BrainReply:
 
 
 class FakeStt:
-    """Replays a scripted sequence of transcript events, then stops.
+    """Replays a scripted sequence of transcript events, then stops -- or hangs.
 
-    An empty event list yields nothing at all -- the silence-timeout case,
-    where no `transcript.partial`/`transcript.done` event ever arrives.
+    Three constructible modes, all through the same `events`/`hang` pair:
+    scripted events ending in a real `FinalTranscript` (the happy path),
+    scripted events ending in an empty `FinalTranscript` (VOICE-08's first
+    case -- something arrived, but it decoded to nothing), and `hang=True`
+    (VOICE-08's second case -- the provider never sends a
+    `transcript.partial`/`transcript.done` event at all). `events=()` alone
+    still exhausts immediately rather than hanging; only `hang=True` actually
+    suspends forever, which is what makes it a faithful stand-in for a real
+    socket that a client-side timeout -- not a server event -- must close.
     """
 
-    def __init__(self, events: Sequence[object] = ()) -> None:
+    def __init__(self, events: Sequence[object] = (), hang: bool = False) -> None:
         self._events = list(events)
+        self._hang = hang
 
     async def stream(self, frames) -> AsyncIterator[object]:
         # `frames` is accepted and ignored: this fake replays its scripted
         # events regardless of what audio it was handed.
         for event in self._events:
             yield event
+        if self._hang:
+            # Never resolves on its own -- only cancellation (the
+            # controller's timeout guard) or garbage collection ends this.
+            await asyncio.Event().wait()
 
 
 @pytest.fixture
