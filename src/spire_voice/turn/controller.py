@@ -365,6 +365,17 @@ async def _speak(
     from setting the answer mark. Both kinds mark `first_audio` on the first
     chunk (criterion 6 wants "any audio, filler included" for that mark);
     only the answer utterance also marks `answer_audio`.
+
+    Both marks are set from one captured `time.monotonic()` reading, not two
+    separate calls to `timings.mark_first_audio()`/`mark_answer_audio()`: a
+    turn whose race finished before the filler deadline reaches this branch
+    with `kind="answer"` on its very first chunk, and `first_audio_at`/
+    `answer_audio_at` describe the exact same event then -- two independent
+    `time.monotonic()` reads would leave them off by a fraction of a
+    microsecond forever, which is not "equal" by any test that checks it.
+    Assignment (guarded exactly like the two mark methods) rather than
+    calling them is what makes a shared reading possible; `turn_outcome` is
+    already assigned directly from this module the same way.
     """
 
     async def _one_delta() -> AsyncIterator[str]:
@@ -373,10 +384,12 @@ async def _speak(
     first_audio_marked = False
     async for chunk in tts.synthesize(_one_delta()):
         if not first_audio_marked:
-            timings.mark_first_audio()
             first_audio_marked = True
-            if kind == "answer":
-                timings.mark_answer_audio()
+            now = _time.monotonic()
+            if timings.first_audio_at is None:
+                timings.first_audio_at = now
+            if kind == "answer" and timings.answer_audio_at is None:
+                timings.answer_audio_at = now
         await source.send_audio(chunk)
 
     await _emit_event(source, {"type": "reply.text", "text": reply_text})
