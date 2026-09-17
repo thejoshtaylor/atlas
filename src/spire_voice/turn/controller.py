@@ -20,10 +20,13 @@ not do, per `spire_mcp.safety.Denied`'s own doctrine.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
+import time as _time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Protocol
+from typing import Any, AsyncIterator, Callable, Protocol
 
 from spire_voice.timing import TurnTimings
 
@@ -31,6 +34,13 @@ logger = logging.getLogger("spire_voice.turn.controller")
 
 _NO_SPEECH_REPLY = "sorry, i didn't catch that"
 _TOO_MANY_ROUNDS_REPLY = "that needs more steps than i can take at once"
+
+# How often the silence-timeout guard rechecks its deadline while waiting on
+# an STT event that may never arrive. Real events short-circuit this --
+# `asyncio.wait` returns the instant the event lands, so this interval only
+# bounds how quickly a *stuck* session notices the deadline passed, not the
+# latency of an ordinary turn.
+_DEFAULT_POLL_INTERVAL_S = 0.05
 
 
 class _AudioSource(Protocol):
@@ -66,6 +76,7 @@ class TurnController:
     tools_schema: list[dict[str, Any]] = field(default_factory=list)
     system_prompt: str = ""
     max_tool_rounds: int = 3
+    max_utterance_s: float = 15.0
 
     async def run(self, timings: TurnTimings) -> None:
         await run_turn(
@@ -78,6 +89,7 @@ class TurnController:
             self.system_prompt,
             self.max_tool_rounds,
             timings,
+            self.max_utterance_s,
         )
 
 
@@ -91,18 +103,41 @@ async def run_turn(
     system_prompt: str,
     max_tool_rounds: int,
     timings: TurnTimings,
+    max_utterance_s: float = 15.0,
+    *,
+    clock: Callable[[], float] = _time.monotonic,
+    poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
 ) -> None:
-    """Drive one turn end to end: frames -> transcript -> tool calls -> speech."""
-    final = await _drain_to_final_transcript(source, stt)
+    """Drive one turn end to end: frames -> transcript -> tool calls -> speech.
+
+    `max_utterance_s`, `clock`, and `poll_interval_s` all default to their
+    production values, so every caller that predates this plan (the
+    WebSocket/WebRTC routes in `app.py`, the safety-integration test) keeps
+    working unmodified. `clock` exists so a test can drive the silence-timeout
+    guard without waiting out the real configured duration -- see
+    `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+    """
+    timings.mark_turn_started()
+    timings.turn_outcome = "completed"
+
+    final = await _drain_to_final_transcript(
+        source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
+    )
     timings.mark_stt_final()
 
     final_text = getattr(final, "text", "") if final is not None else ""
     if not final_text:
-        # No speech, or nothing intelligible -- VOICE-08 closes the turn with
-        # no language model call. The client-side no-speech timeout and the
-        # "next turn still runs" guarantee are plan 01-05's; this tracer only
-        # needs the happy path not to hang on an empty utterance.
+        # VOICE-08's two cases end the turn the same way, with no language
+        # model call and no text-to-speech call: `final is None` is
+        # RESEARCH.md Pitfall 3's second case (the provider never sent
+        # anything at all, closed here by the client-side timeout); a
+        # `FinalTranscript` whose text is empty is the first case (something
+        # arrived and decoded to nothing). `turn_outcome` keeps the two
+        # distinguishable in the log even though the reply path is shared.
+        timings.turn_outcome = "timeout" if final is None else "empty_transcript"
         await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
+        await _emit_event(source, timings.to_event())
+        timings.log()
         return
 
     messages: list[dict[str, Any]] = [
@@ -110,24 +145,70 @@ async def run_turn(
         {"role": "user", "content": final_text},
     ]
 
-    reply_text = await _run_tool_rounds(brain, tool_host, tools_schema, messages, max_tool_rounds)
+    reply_text = await _run_tool_rounds(brain, tool_host, tools_schema, messages, max_tool_rounds, timings)
+    timings.mark_tool_rounds_done()
 
     await _speak(source, tts, timings, reply_text)
-    await _emit_event(
-        source,
-        {"type": "turn.timing", "end_of_speech_to_first_audio_ms": timings.end_of_speech_to_first_audio_ms},
-    )
+    await _emit_event(source, timings.to_event())
     timings.log()
 
 
-async def _drain_to_final_transcript(source: _AudioSource, stt: _SttProvider) -> Any | None:
-    """Forward every event but the last as a partial; return the last, if any."""
+async def _drain_to_final_transcript(
+    source: _AudioSource,
+    stt: _SttProvider,
+    max_utterance_s: float,
+    timings: TurnTimings,
+    *,
+    clock: Callable[[], float],
+    poll_interval_s: float,
+) -> Any | None:
+    """Forward every event but the last as a partial; return the last, if any.
+
+    RESEARCH.md Pitfall 3: xAI's STT sends no dedicated no-speech event -- a
+    turn where nothing is ever said can otherwise leave this function
+    suspended forever on a socket that will never send anything. Bounding
+    the wait from this side, rather than trusting a provider event that may
+    not exist, is the mechanism behind VOICE-08's "closes itself": once
+    `max_utterance_s` elapses with no final transcript ever received, the
+    stream is closed through its own `aclose()` (releasing the socket, not
+    abandoning it) and the turn ends exactly like an empty transcript would.
+
+    A real event short-circuits the wait immediately -- `asyncio.wait`
+    returns the instant the pending `__anext__()` task completes, so
+    `poll_interval_s` only bounds how quickly a *stuck* session notices its
+    deadline passed, never the latency of an ordinary turn.
+    """
+    timings.mark_stt_socket_open()
+    stream = stt.stream(source.frames())
+    deadline = clock() + max_utterance_s
     pending: Any | None = None
-    async for event in stt.stream(source.frames()):
+    next_event_task = asyncio.ensure_future(stream.__anext__())
+    while True:
+        if clock() >= deadline:
+            logger.info(
+                "stt session exceeded max_utterance_s=%s with no final transcript; closing it",
+                max_utterance_s,
+            )
+            next_event_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await next_event_task
+            await stream.aclose()
+            return None
+
+        done, _pending_tasks = await asyncio.wait({next_event_task}, timeout=poll_interval_s)
+        if next_event_task not in done:
+            continue
+
+        try:
+            event = next_event_task.result()
+        except StopAsyncIteration:
+            return pending
+
         if pending is not None:
+            timings.mark_first_partial()
             await _emit_event(source, {"type": "transcript.partial", "text": getattr(pending, "text", "")})
         pending = event
-    return pending
+        next_event_task = asyncio.ensure_future(stream.__anext__())
 
 
 async def _run_tool_rounds(
@@ -136,15 +217,18 @@ async def _run_tool_rounds(
     tools_schema: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     max_tool_rounds: int,
+    timings: TurnTimings,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
     A command needing more rounds than the configured cap is a
     misunderstanding, not a complex request (per `BrainConfig.max_tool_rounds`'s
-    own doctrine) -- the turn ends by saying so rather than continuing.
+    own doctrine) -- the turn ends by saying so, never with a success
+    confirmation, per CMD-01's transparency prohibition.
     """
     for _round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
+        timings.mark_brain_first_token()
         if not reply.tool_calls:
             return reply.text
 
@@ -184,6 +268,7 @@ async def _run_tool_rounds(
             messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content_text})
 
     logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
+    timings.turn_outcome = "round_cap"
     return _TOO_MANY_ROUNDS_REPLY
 
 
