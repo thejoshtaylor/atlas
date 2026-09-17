@@ -568,3 +568,92 @@ async def test_a_committed_top_tier_survives_a_confident_triage_reply_end_to_end
         ("ha_call_service", {"domain": "light", "service": "turn_off", "entity_id": "light.example_lamp"})
     ]
     assert tts.received_text == [top_answer]
+
+
+async def test_run_turn_rejects_two_tiers_both_flagged_calls_tools(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """WR-01: `run_turn`'s dispatch loop is the actual public seam a future
+    in-process caller (a hot-reload path, a test helper reused incorrectly)
+    goes through -- `build_tiers` deriving `calls_tools` from position
+    correctly protects the one production construction path, but says
+    nothing about a `tiers` list built some other way and handed to
+    `run_turn` directly. Two tiers both flagged `calls_tools=True` must
+    raise rather than silently letting two racing models both reach
+    Home Assistant (D-05).
+    """
+    from spire_voice.providers.base import BrainError, FinalTranscript
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    reply = TierReply(answer="fine", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+    tier_a = brain_race.TierBrain(
+        index=0, model="a", brain=None, envelope_client=fake_envelope_client(reply=reply), calls_tools=True
+    )
+    tier_b = brain_race.TierBrain(
+        index=1, model="b", brain=None, envelope_client=fake_envelope_client(reply=reply), calls_tools=True
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    tts = fake_tts(chunks=[])
+    timings = TurnTimings()
+
+    with pytest.raises(BrainError, match="at most one tier may have calls_tools=True"):
+        await run_turn(
+            source,
+            stt,
+            None,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+            tiers=[tier_a, tier_b],
+        )
+
+
+async def test_run_turn_rejects_calls_tools_on_a_tier_that_is_not_the_highest_index(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """WR-01's other half: `race_tiers` independently derives "top" as
+    `max(tasks_by_index)`. If a caller flagged a *lower*-index tier as the
+    only `calls_tools=True` entry, that derivation and `calls_tools` would
+    disagree about which tier is "the top tier" -- `run_turn` must reject
+    that construction rather than let the two derivations silently diverge.
+    """
+    from spire_voice.providers.base import BrainError, FinalTranscript
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    reply = TierReply(answer="fine", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+    tier_a = brain_race.TierBrain(
+        index=0, model="a", brain=None, envelope_client=fake_envelope_client(reply=reply), calls_tools=True
+    )
+    tier_b = brain_race.TierBrain(
+        index=1, model="b", brain=None, envelope_client=fake_envelope_client(reply=reply), calls_tools=False
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    tts = fake_tts(chunks=[])
+    timings = TurnTimings()
+
+    with pytest.raises(BrainError, match="highest-index tier"):
+        await run_turn(
+            source,
+            stt,
+            None,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+            tiers=[tier_a, tier_b],
+        )

@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
 from spire_voice.config import MacroConfig
+from spire_voice.providers.base import BrainError
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
 from spire_voice.timing import TurnTimings
@@ -307,6 +308,8 @@ async def run_turn(
     # round and the race -- set True the instant a real tool call is made,
     # so a triage tier's confident reply can no longer end the race in the
     # top tier's place once its action is no longer cancellable.
+    _validate_tiers(tiers)
+
     commitment = brain_race.ToolCommitment()
 
     tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
@@ -353,6 +356,42 @@ async def run_turn(
     await _speak(source, tts, timings, winner.answer, kind="answer")
     await _emit_event(source, timings.to_event())
     timings.log()
+
+
+def _validate_tiers(tiers: "list[brain_race.TierBrain]") -> None:
+    """D-05, enforced here rather than only by convention (WR-01).
+
+    `build_tiers` is the only production construction path and correctly
+    derives `calls_tools` from position, but `run_turn` accepts a `tiers`
+    list directly from any caller. `race_tiers` independently derives "top"
+    as `max(tasks_by_index)` (`brain_race.py`); this checks that at most one
+    tier is flagged `calls_tools=True` -- the actual danger WR-01 names, two
+    racing tiers both able to reach the tool host -- and that whichever one
+    is flagged (if any) is that same highest-index tier, so the two
+    derivations of "top" can never disagree. Zero flagged tiers is accepted
+    deliberately: it is strictly more conservative (nothing can call a
+    tool), and `tests/test_turn_controller.py`'s own
+    `test_criterion_4_a_confident_triage_tier_answers_with_zero_tool_calls`
+    exercises exactly that shape to isolate `run_triage_tier`'s behavior.
+    Raises rather than silently proceeding, the same raise-not-return
+    doctrine `config.py` already uses everywhere else.
+    """
+    calls_tools_tiers = [tier for tier in tiers if tier.calls_tools]
+    if len(calls_tools_tiers) > 1:
+        raise BrainError(
+            f"at most one tier may have calls_tools=True (D-05); got {len(calls_tools_tiers)} "
+            f"across tier indices {[tier.index for tier in tiers]!r}"
+        )
+    if not calls_tools_tiers:
+        return
+    top_by_flag = calls_tools_tiers[0]
+    top_by_index = max(tiers, key=lambda tier: tier.index)
+    if top_by_flag is not top_by_index:
+        raise BrainError(
+            "the tier with calls_tools=True must be the highest-index tier (D-05); got "
+            f"calls_tools=True on index {top_by_flag.index}, but the highest index present is "
+            f"{top_by_index.index}"
+        )
 
 
 async def _cancel_state_task(state_task: "asyncio.Task[Any] | None") -> None:
