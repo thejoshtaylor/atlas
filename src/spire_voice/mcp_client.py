@@ -65,7 +65,15 @@ class McpToolHost:
 def mcp_tools_to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
     """Rename and nest each MCP tool's schema into the `tools=[...]` shape
     a chat-completions call expects. A rename and a nest, not a rewrite --
-    `inputSchema` already is a JSON Schema object.
+    the schema already is a JSON Schema object.
+
+    The installed `mcp>=2.2,<3` SDK's `Tool` model exposes this field as the
+    Python attribute `input_schema`; `inputSchema` is only its wire-format
+    alias (`model_dump(by_alias=True)`), not an accessible attribute -- a
+    bare `tool.inputSchema` raises `AttributeError` against a real `Tool`.
+    `getattr` with a fallback, matching `app.py::_tool_result_json` and
+    `turn/controller.py::_is_error`'s own camelCase/snake_case handling,
+    keeps this working against either shape.
     """
     return [
         {
@@ -73,7 +81,8 @@ def mcp_tools_to_openai_tools(tools: list[Tool]) -> list[dict[str, Any]]:
             "function": {
                 "name": tool.name,
                 "description": tool.description or "",
-                "parameters": tool.inputSchema,
+                "parameters": getattr(tool, "input_schema", None)
+                or getattr(tool, "inputSchema", None),
             },
         }
         for tool in tools
