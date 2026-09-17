@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import yaml
 
 from spire_mcp.safety import Policy
+from spire_voice.turn.macros import normalize
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -307,6 +308,82 @@ class McpServerConfig:
 
 
 @dataclass(frozen=True)
+class MacroActionConfig:
+    """One action a macro runs -- the same `tool`/`arguments` shape a
+    model-issued tool call carries.
+
+    `arguments` is not validated here: the tool schema and `allow_call`
+    (`mcp/spire_mcp/safety.py`) both check it at fire time, and duplicating
+    that check in this module would create the second path `safety.py`'s own
+    doctrine forbids.
+    """
+
+    tool: str = ""
+    arguments: dict = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "MacroActionConfig":
+        raw = raw or {}
+        tool = raw.get("tool", "")
+        if not tool:
+            raise ConfigError("a macro action is missing its 'tool' name")
+        return cls(tool=tool, arguments=dict(raw.get("arguments", {})))
+
+
+@dataclass(frozen=True)
+class MacroConfig:
+    """One `macros:` entry: a phrase (plus aliases) that skips the language
+    model and runs a fixed list of actions (D-10, D-11).
+
+    A zero-action macro would make its precached `reply` an unconditional
+    lie -- there is nothing that could have succeeded -- so `from_config`
+    refuses one. `normalized_keys` is the deduplicated set of `normalize()`
+    applied to `phrase` and every alias; `Config.from_config` walks it across
+    the whole macro list to find a cross-macro collision, because that check
+    spans more than one macro and cannot live on a single `MacroConfig`.
+    """
+
+    phrase: str = ""
+    aliases: tuple[str, ...] = field(default_factory=tuple)
+    reply: str = ""
+    actions: tuple[MacroActionConfig, ...] = field(default_factory=tuple)
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "MacroConfig":
+        raw = raw or {}
+        phrase = raw.get("phrase", "")
+        if not phrase:
+            raise ConfigError("a macro is missing its 'phrase'")
+        reply = raw.get("reply", "")
+        if not reply:
+            raise ConfigError(f"macro {phrase!r} is missing its 'reply'")
+        aliases_raw = raw.get("aliases", ())
+        if isinstance(aliases_raw, str):
+            raise ConfigError(f"macro {phrase!r} aliases must be a list, not a string")
+        actions_raw = raw.get("actions", ())
+        if not actions_raw:
+            raise ConfigError(
+                f"macro {phrase!r} has no actions -- a zero-action macro's "
+                "precached reply would be an unconditional lie"
+            )
+        return cls(
+            phrase=phrase,
+            aliases=tuple(aliases_raw),
+            reply=reply,
+            actions=tuple(MacroActionConfig.from_config(a) for a in actions_raw),
+        )
+
+    @property
+    def normalized_keys(self) -> frozenset[str]:
+        """`normalize()` applied to `phrase` and every alias, deduplicated --
+        a macro whose own alias normalizes to its own phrase yields one key,
+        which is what makes that self-collision legal while a cross-macro
+        collision is not.
+        """
+        return frozenset(normalize(k) for k in (self.phrase, *self.aliases))
+
+
+@dataclass(frozen=True)
 class Config:
     """The top-level configuration: one section per subsystem, plus the
     safety policy built from the `safety:` block.
@@ -322,6 +399,9 @@ class Config:
     tts: TtsConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
+    # A tuple, not a dict: `macros:` is a list in the config file and there is
+    # no natural name key the way `mcp.servers` has one.
+    macros: tuple[MacroConfig, ...] = ()
     # The `safety:` block exactly as written, kept alongside the parsed
     # `policy` because the process that ENFORCES the policy is the MCP child,
     # not this one. It receives an explicit env, not this Config object, so
@@ -333,6 +413,9 @@ class Config:
     def from_config(cls, raw: dict | None) -> "Config":
         raw = raw or {}
         mcp_servers_raw = raw.get("mcp", {}).get("servers", {}) or {}
+        macros_raw = raw.get("macros", ()) or ()
+        macros = tuple(MacroConfig.from_config(m) for m in macros_raw)
+        _check_macros_do_not_collide(macros)
         return cls(
             server=ServerConfig.from_config(raw.get("server")),
             stt=SttConfig.from_config(raw.get("stt")),
@@ -343,8 +426,31 @@ class Config:
                 for name, server_raw in mcp_servers_raw.items()
             },
             policy=Policy.from_config(raw.get("safety")),
+            macros=macros,
             raw_safety=raw.get("safety"),
         )
+
+
+def _check_macros_do_not_collide(macros: tuple[MacroConfig, ...]) -> None:
+    """Raise `ConfigError` on the first pair of macros whose normalized keys
+    collide, naming both by their written (un-normalized) phrases.
+
+    Lives at module level, not on `MacroConfig`, because the check spans the
+    whole macro list -- a single macro has no way to know about another one.
+    Naming both macros is what makes the error actionable: an error naming
+    only the second one sends the operator to the wrong line.
+    """
+    seen: dict[str, MacroConfig] = {}
+    for macro in macros:
+        for key in macro.normalized_keys:
+            earlier = seen.get(key)
+            if earlier is not None and earlier is not macro:
+                raise ConfigError(
+                    f"macros {earlier.phrase!r} and {macro.phrase!r} both "
+                    f"normalize to {key!r} -- one would silently shadow the "
+                    "other at runtime"
+                )
+            seen[key] = macro
 
 
 def load_config(path: str | os.PathLike) -> Config:

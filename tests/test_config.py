@@ -213,3 +213,127 @@ def test_xai_brain_resolves_against_top_tier_by_default_and_explicit_model_overr
 
     explicit_brain = XaiBrain(brain_config, model="a")
     assert explicit_brain._model == "a"
+
+
+# --- Task 2: macros: block and the normalization that decides sameness ---
+
+
+def test_normalize_folds_case_punctuation_and_whitespace():
+    from spire_voice.turn.macros import normalize
+
+    assert normalize("  Good, Night!!  ") == "good night"
+    assert normalize("GOOD NIGHT") == "good night"
+
+
+def test_normalize_compares_by_code_point_through_nfkc():
+    from spire_voice.turn.macros import normalize
+
+    # A precomposed accented character and its NFKC-equivalent decomposed
+    # form (base letter + combining accent) differ in code point count and
+    # UTF-8 byte length, but must normalize to the same string.
+    precomposed = "café"
+    decomposed = "café"
+    assert normalize(precomposed) == normalize(decomposed)
+
+
+def test_macro_collision_on_phrase_raises_naming_both():
+    from spire_voice.config import Config, ConfigError
+
+    raw = _minimal_raw_config()
+    raw["macros"] = [
+        {"phrase": "Good Night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
+        {"phrase": "good   night!", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
+    ]
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw)
+    assert "Good Night" in str(exc.value)
+    assert "good   night!" in str(exc.value)
+
+
+def test_macro_alias_colliding_with_another_macros_phrase_raises_naming_both():
+    from spire_voice.config import Config, ConfigError
+
+    raw = _minimal_raw_config()
+    raw["macros"] = [
+        {"phrase": "good night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
+        {
+            "phrase": "movie time",
+            "aliases": ["Good Night"],
+            "reply": "ok",
+            "actions": [{"tool": "ha_call_service"}],
+        },
+    ]
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw)
+    assert "good night" in str(exc.value)
+    assert "movie time" in str(exc.value)
+
+
+def test_macro_alias_matching_its_own_phrase_loads_cleanly_as_one_key():
+    from spire_voice.config import MacroConfig
+
+    macro = MacroConfig.from_config(
+        {
+            "phrase": "good night",
+            "aliases": ["GOOD NIGHT!"],
+            "reply": "ok",
+            "actions": [{"tool": "ha_call_service"}],
+        }
+    )
+    assert macro.normalized_keys == frozenset({"good night"})
+
+
+def test_macro_blank_phrase_is_a_startup_error():
+    from spire_voice.config import ConfigError, MacroConfig
+
+    with pytest.raises(ConfigError):
+        MacroConfig.from_config({"reply": "ok", "actions": [{"tool": "ha_call_service"}]})
+
+
+def test_macro_blank_reply_is_a_startup_error_naming_the_macro():
+    from spire_voice.config import ConfigError, MacroConfig
+
+    with pytest.raises(ConfigError) as exc:
+        MacroConfig.from_config({"phrase": "good night", "actions": [{"tool": "ha_call_service"}]})
+    assert "good night" in str(exc.value)
+
+
+def test_macro_zero_actions_is_a_startup_error_naming_the_macro():
+    from spire_voice.config import ConfigError, MacroConfig
+
+    with pytest.raises(ConfigError) as exc:
+        MacroConfig.from_config({"phrase": "good night", "reply": "ok", "actions": []})
+    assert "good night" in str(exc.value)
+
+
+def test_macro_with_no_aliases_key_loads_cleanly_matching_on_phrase_alone():
+    from spire_voice.config import MacroConfig
+
+    macro = MacroConfig.from_config(
+        {"phrase": "good night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]}
+    )
+    assert macro.aliases == ()
+    assert macro.normalized_keys == frozenset({"good night"})
+
+
+def test_macro_action_blank_tool_name_is_a_startup_error():
+    from spire_voice.config import ConfigError, MacroActionConfig
+
+    with pytest.raises(ConfigError):
+        MacroActionConfig.from_config({"arguments": {}})
+
+    with pytest.raises(ConfigError):
+        MacroActionConfig.from_config({"tool": "", "arguments": {}})
+
+
+def test_config_and_turn_macros_import_in_either_order():
+    """Proves no runtime import cycle between the two modules -- config.py
+    imports normalize() from turn/macros.py, and turn/macros.py must never
+    import spire_voice.config back."""
+    import importlib
+
+    import spire_voice.config  # noqa: F401
+    import spire_voice.turn.macros  # noqa: F401
+
+    importlib.reload(spire_voice.turn.macros)
+    importlib.reload(spire_voice.config)
