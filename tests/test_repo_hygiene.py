@@ -14,6 +14,7 @@ to land by accident in a later phase.
 from __future__ import annotations
 
 import os
+import subprocess
 import re
 from pathlib import Path
 
@@ -60,7 +61,41 @@ def _iter_repo_files(suffixes: set[str] | None = None) -> list[Path]:
         for filename in filenames:
             if suffixes is None or Path(filename).suffix in suffixes:
                 matches.append(Path(dirpath) / filename)
-    return matches
+    return _drop_gitignored(matches)
+
+
+def _drop_gitignored(paths: list[Path]) -> list[Path]:
+    """Remove paths git will never track.
+
+    The guarantee this module enforces is that no real house data reaches the
+    REPOSITORY, which is public. A gitignored path cannot reach it. Several
+    files exist precisely to hold that data locally -- `.env`,
+    `config/*.local.yaml`, `.planning/` -- and scanning them reports the
+    system working as designed as though it were a violation.
+
+    Scope is narrowed to exactly what git would track, and no further. If
+    `git check-ignore` cannot be run at all, every path is kept: a scan that
+    cannot determine what is ignored must over-report, never under-report.
+    """
+    if not paths:
+        return paths
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            input="\n".join(str(p) for p in paths),
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return paths
+    # Exit 0 = some ignored, 1 = none ignored, anything else = it could not
+    # tell, so keep everything rather than silently narrowing the scan.
+    if proc.returncode not in (0, 1):
+        return paths
+    ignored = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return [p for p in paths if str(p) not in ignored]
 
 
 # domain.object_id shape, restricted to Home Assistant domains this project

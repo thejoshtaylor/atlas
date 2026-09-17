@@ -11,6 +11,8 @@ import json
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 from spire_voice.config import SttConfig, TtsConfig
 from spire_voice.providers.base import FinalTranscript, ToolCall
 
@@ -188,3 +190,72 @@ async def test_brain_accumulates_tool_calls_by_index():
     ]
     assert whole_reply.tool_calls == expected
     assert fragmented_reply.tool_calls == expected
+
+
+@pytest.mark.asyncio
+async def test_final_transcript_comes_from_speech_final_not_transcript_done():
+    """The live API puts the final text on a partial, and `done` is empty.
+
+    VERIFIED AGAINST THE LIVE xAI API, 2026-09-17. One spoken sentence produced:
+
+        transcript.partial  is_final=False speech_final=False  "Is the living room light?"
+        transcript.partial  is_final=True  speech_final=False  "Is the living room light sensor on?"
+        transcript.partial  is_final=True  speech_final=True   "Is the living room light sensor on?"
+        transcript.done                                        ""
+
+    The provider previously read the final text off `transcript.done`, whose
+    `text` is always the empty string -- so every real turn threw away a
+    perfect transcription and the assistant said "sorry, i didn't catch that".
+
+    The whole test suite stayed green through that, because `FakeStt` emitted
+    `transcript.done` WITH text: the fake encoded the same assumption the
+    provider did, so the two agreed with each other and neither agreed with
+    the API. This test replays the real frame sequence instead.
+    """
+    import json as _json
+
+    from spire_voice.providers.base import FinalTranscript, PartialTranscript
+    from spire_voice.providers.stt_xai import XaiStt
+    from spire_voice.config import SttConfig
+
+    wire = [
+        {"type": "transcript.partial", "is_final": False, "speech_final": False, "text": "Is the living"},
+        {"type": "transcript.partial", "is_final": True, "speech_final": False, "text": "Is the living room light sensor on?"},
+        {"type": "transcript.partial", "is_final": True, "speech_final": True, "text": "Is the living room light sensor on?"},
+        {"type": "transcript.done", "text": "", "duration": 1.845},
+    ]
+
+    class _Ws:
+        def __init__(self, frames): self._frames = list(frames); self._sent = []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def recv(self): return _json.dumps({"type": "transcript.created", "id": "x"})
+        async def send(self, d): self._sent.append(d)
+        def __aiter__(self):
+            async def gen():
+                for e in self._frames:
+                    yield _json.dumps(e)
+            return gen()
+
+    import spire_voice.providers.stt_xai as mod
+
+    def _connect(*a, **k): return _Ws(wire)
+
+    orig = mod.websockets.connect
+    mod.websockets.connect = _connect
+    try:
+        async def frames():
+            yield b"\x00\x00" * 160
+
+        stt = XaiStt(SttConfig.from_config({"url": "wss://x.invalid", "api_key": "k"}))
+        out = [ev async for ev in stt.stream(frames())]
+    finally:
+        mod.websockets.connect = orig
+
+    finals = [e for e in out if isinstance(e, FinalTranscript)]
+    assert len(finals) == 1, f"expected exactly one final, got {out!r}"
+    assert finals[0].text == "Is the living room light sensor on?", (
+        "the final transcript must come from the speech_final partial, not from "
+        "transcript.done (whose text is always empty)"
+    )
+    assert any(isinstance(e, PartialTranscript) for e in out)

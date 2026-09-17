@@ -77,13 +77,39 @@ class XaiStt:
 
             send_task = asyncio.create_task(sender())
             try:
+                saw_final = False
                 async for raw in ws:
                     event: dict[str, Any] = json.loads(raw)
                     event_type = event.get("type")
                     if event_type == "transcript.partial":
+                        # VERIFIED AGAINST THE LIVE API, 2026-09-17. The final
+                        # transcript arrives as a `transcript.partial` carrying
+                        # `speech_final: true` -- NOT on `transcript.done`,
+                        # which is a terminator whose `text` is always "".
+                        #
+                        # Reading the text off `transcript.done` (what this
+                        # code did, and what RESEARCH.md assumed) discards a
+                        # perfect transcription on every real turn and answers
+                        # "sorry, i didn't catch that". No fake caught it,
+                        # because the fake encoded the same wrong assumption.
+                        #
+                        # Observed sequence for one spoken sentence:
+                        #   partial is_final=False speech_final=False  interim
+                        #   partial is_final=True  speech_final=False  segment
+                        #   partial is_final=True  speech_final=True   FINAL
+                        #   done                                       text=""
+                        if event.get("speech_final"):
+                            saw_final = True
+                            yield FinalTranscript(text=event.get("text", ""))
+                            break
                         yield PartialTranscript(text=event.get("text", ""))
                     elif event_type == "transcript.done":
-                        yield FinalTranscript(text=event.get("text", ""))
+                        # Reached without a `speech_final` partial: the
+                        # utterance genuinely contained no speech. That is
+                        # VOICE-08's empty-transcript path, and an empty final
+                        # is the honest thing to report.
+                        if not saw_final:
+                            yield FinalTranscript(text=event.get("text", ""))
                         break
                     elif event_type == "error":
                         raise SttError(event.get("message", "xAI STT reported an error"))
