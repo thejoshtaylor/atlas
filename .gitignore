@@ -35,3 +35,6 @@ models/
 
 # OS
 .DS_Store
+
+# GSD run-scoped dispatch state (machine-local, never committed)
+.gsd/
