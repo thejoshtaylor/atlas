@@ -15,8 +15,11 @@ live human check, not this file's.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
+import importlib.util
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -28,12 +31,24 @@ from spire_voice.audio.alaw import alaw_to_pcm16, pcm16_to_alaw
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import (
     MAX_RECORD_FILE_SIZE_BYTES,
+    CalibrationRunResult,
     CalibrationRunnerError,
     find_latest_calibration,
     run_echo_calibration,
 )
 from spire_voice.config import CalibrationConfig, CameraConfig
 from spire_voice.transports.base import SourceFormat
+
+# `scripts/` is not on `pythonpath` (only `src`/`mcp` are, per
+# `pyproject.toml`) -- loaded by file path, the same mechanism
+# `tests/test_score_wake_engines.py` already uses for
+# `score_wake_engines.py`.
+_SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "calibrate_echo_path.py"
+_spec = importlib.util.spec_from_file_location("calibrate_echo_path", _SCRIPT_PATH)
+assert _spec is not None and _spec.loader is not None
+calibrate_echo_path = importlib.util.module_from_spec(_spec)
+sys.modules["calibrate_echo_path"] = calibrate_echo_path
+_spec.loader.exec_module(calibrate_echo_path)
 
 SAMPLE_RATE = 8000
 _CHUNK_BYTES = 64
@@ -298,3 +313,94 @@ def test_runner_module_contains_no_reference_to_the_camera_url_field():
     source = Path("src/spire_voice/calibration/runner.py").read_text(encoding="utf-8")
     hits = [line.strip() for line in source.splitlines() if not line.lstrip().startswith("#") and "rtsp_url" in line]
     assert hits == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2 seam: the command-line caller imports run_echo_calibration and
+# nothing from spire_voice.audio.echo_path -- the mechanism that makes the
+# "one implementation" claim checkable rather than aspirational (D-20).
+# ---------------------------------------------------------------------------
+
+
+def _imported_module_names(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name)
+    return names
+
+
+def test_calibrate_echo_path_script_imports_the_runner_and_never_the_measurement_module():
+    imports = _imported_module_names(_SCRIPT_PATH)
+    assert any(name.endswith("calibration.runner") for name in imports)
+    assert not any("audio.echo_path" in name for name in imports)
+
+
+def test_calibrate_echo_path_script_reads_no_environment_variable_directly():
+    tree = ast.parse(_SCRIPT_PATH.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}:
+            pytest.fail(f"scripts/calibrate_echo_path.py touches os.{node.attr} directly")
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
+            if node.value.attr == "environ":
+                pytest.fail("scripts/calibrate_echo_path.py reads os.environ[...] directly")
+
+
+def test_validate_environment_rejects_a_placement_note_shaped_like_a_url(tmp_path):
+    with pytest.raises(calibrate_echo_path.CalibrationScriptError):
+        calibrate_echo_path.validate_environment(tmp_path, "see rtsp://camera.invalid:554/stream1")
+    with pytest.raises(calibrate_echo_path.CalibrationScriptError):
+        calibrate_echo_path.validate_environment(tmp_path, "credentials are admin:hunter2@camera.invalid")
+
+
+def test_validate_environment_rejects_an_unwritable_calibration_directory(tmp_path):
+    unwritable = tmp_path / "locked"
+    unwritable.mkdir()
+    unwritable.chmod(0o400)
+    try:
+        with pytest.raises(calibrate_echo_path.CalibrationScriptError):
+            calibrate_echo_path.validate_environment(unwritable / "calibration", "a fine note")
+    finally:
+        unwritable.chmod(0o700)  # tmp_path cleanup needs write+execute back
+
+
+def test_validate_environment_accepts_a_writable_directory_and_a_plain_note(tmp_path):
+    calibrate_echo_path.validate_environment(tmp_path / "calibration", "camera on the kitchen shelf")
+    # validate_environment's own write-check cleans up after itself -- it
+    # proves the directory is writable, it does not leave a marker behind.
+    assert list((tmp_path / "calibration").glob("*")) == []
+
+
+def test_handle_result_of_a_failed_run_exits_non_zero_and_prints_the_reason(tmp_path, capsys):
+    result = CalibrationRunResult(calibration=None, failure_reason="no correlation peak above threshold")
+    exit_code = calibrate_echo_path._handle_result(result, tmp_path)
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "no correlation peak above threshold" in captured.err
+
+
+async def test_handle_result_of_a_successful_run_exits_zero_and_names_every_measured_number(tmp_path, capsys):
+    fake = _LoopbackFake(delay_samples=100, scale=0.6)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+    run_result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+    )
+    assert run_result.failure_reason is None
+
+    exit_code = calibrate_echo_path._handle_result(run_result, Path(calibration_config.dir))
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "delay" in captured.out
+    assert "gain" in captured.out
+    assert "correlation confidence" in captured.out
+    assert "AGC verdict" in captured.out
+    assert "record written" in captured.out
+    assert "rtsp://" not in captured.out
+    assert "://" not in captured.out
