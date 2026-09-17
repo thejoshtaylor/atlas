@@ -190,7 +190,21 @@ mcp:
   # opening a path from the public internet into the house.
   servers:
     ha:
-      command: ["python3", "-m", "spire_mcp.ha"]
+      # NOT YET CONSUMED. Phase 1 spawns exactly one built-in tool server and
+      # hardcodes how, in McpToolHost.start. This block is the shape Phase 6
+      # reads when a plugin is any MCP server an admin adds; until then it is
+      # declaration, not configuration, and editing it changes nothing.
+      #
+      # `args` carries no interpreter on purpose. The child imports the same
+      # mcp SDK this process does, so it must run under the same interpreter:
+      # McpToolHost.start spawns it with sys.executable. A literal "python3"
+      # here would be whatever PATH resolves first -- outside an activated
+      # virtualenv, the system interpreter, which has no SDK. That failure does
+      # not even announce itself honestly: this repository has its own
+      # top-level mcp/ directory, so `import mcp` finds that namespace package
+      # and the child dies on "No module named 'mcp.server'", taking the whole
+      # application's startup down with it. This config once said "python3".
+      args: ["-m", "spire_mcp.ha"]
       env:
         HA_URL: "${HA_URL}"
         HA_TOKEN: "${HA_TOKEN}"

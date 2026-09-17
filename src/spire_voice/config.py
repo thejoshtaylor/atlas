@@ -194,18 +194,36 @@ class TtsConfig:
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """One `mcp.servers.<name>` block: the stdio child's command and env."""
+    """One `mcp.servers.<name>` block: the stdio child's args and env.
 
-    command: tuple[str, ...] = field(default_factory=tuple)
+    Parsed but not yet consumed. Phase 1 spawns exactly one built-in tool
+    server and hardcodes how, in `McpToolHost.start`; this block is the shape
+    Phase 6 reads once a plugin is any MCP server an admin adds.
+
+    `args` deliberately carries no interpreter. The child imports the same
+    `mcp` SDK this process does, so it must run under the same one --
+    `McpToolHost.start` spawns it with `sys.executable`. A configurable
+    interpreter string is a foot-gun here, not a feature: a literal "python3"
+    is whatever PATH resolves first, and outside an activated virtualenv that
+    is the system interpreter with no SDK installed.
+    """
+
+    args: tuple[str, ...] = field(default_factory=tuple)
     env: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "McpServerConfig":
         raw = raw or {}
-        command = raw.get("command", ())
-        if isinstance(command, str):
-            raise ConfigError("mcp server command must be a list, not a string")
-        return cls(command=tuple(command), env=dict(raw.get("env", {})))
+        if "command" in raw:
+            raise ConfigError(
+                "mcp server blocks take 'args', not 'command': the interpreter is "
+                "not configurable -- the child runs under the same interpreter as "
+                "this process so it shares the mcp SDK"
+            )
+        args = raw.get("args", ())
+        if isinstance(args, str):
+            raise ConfigError("mcp server args must be a list, not a string")
+        return cls(args=tuple(args), env=dict(raw.get("env", {})))
 
 
 @dataclass(frozen=True)

@@ -52,7 +52,7 @@ def _minimal_raw_config() -> dict:
         "mcp": {
             "servers": {
                 "ha": {
-                    "command": ["python3", "-m", "spire_mcp.ha"],
+                    "args": ["-m", "spire_mcp.ha"],
                     "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
                 },
             },
@@ -105,3 +105,31 @@ def test_safety_block_is_handed_to_policy_from_config():
     ]
     with pytest.raises(Denied):
         allow_call(config.policy, "light", "turn_on", "light.example_other")
+
+
+def test_mcp_server_block_rejects_a_configurable_interpreter():
+    """`command:` is refused outright, naming why, rather than silently ignored.
+
+    The old spelling took a full argv whose first element was the interpreter,
+    and `config.example.yaml` shipped `["python3", "-m", "spire_mcp.ha"]`. That
+    value crashes startup everywhere `python3` is not the venv interpreter,
+    because the child needs the same `mcp` SDK this process has. The key was
+    also parsed and then consumed by nothing, so an operator could edit it,
+    observe no effect, and reasonably conclude the interpreter was theirs to
+    choose.
+
+    Failing loudly at load, naming the replacement, is the honest behavior: a
+    config that silently ignores what you wrote is worse than one that refuses
+    it.
+    """
+    import pytest
+
+    from spire_voice.config import ConfigError, McpServerConfig
+
+    with pytest.raises(ConfigError) as exc:
+        McpServerConfig.from_config({"command": ["python3", "-m", "spire_mcp.ha"]})
+    assert "args" in str(exc.value)
+
+    ok = McpServerConfig.from_config({"args": ["-m", "spire_mcp.ha"], "env": {"HA_URL": "u"}})
+    assert ok.args == ("-m", "spire_mcp.ha")
+    assert ok.env == {"HA_URL": "u"}
