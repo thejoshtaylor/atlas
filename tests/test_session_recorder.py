@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from spire_voice.config import SessionConfig
+from spire_voice.session import timeline as timeline_module
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
 
@@ -151,3 +152,88 @@ def test_close_is_idempotent(tmp_path):
     recorder = SessionRecorder(config, timings)
     recorder.close(timings)
     recorder.close(timings)
+
+
+def test_the_timeline_is_written_alongside_the_other_three_artifacts(tmp_path):
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    timings.mark_turn_started()
+    recorder = SessionRecorder(config, timings)
+    recorder.record_event({"type": "reply.text", "text": "turned on the fan"})
+    recorder.close(timings)
+
+    assert (recorder.directory / "timeline.jsonl").exists()
+
+
+def test_timeline_renders_events_in_the_order_the_jsonl_wrote_them(tmp_path):
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    timings.mark_turn_started()
+    timings.mark_stt_final()
+    recorder = SessionRecorder(config, timings)
+    recorder.record_event({"type": "transcript.partial", "text": "turn on"})
+    recorder.record_event({"type": "reply.text", "text": "turned on the fan"})
+    recorder.close(timings)
+
+    lines = (recorder.directory / "timeline.jsonl").read_text(encoding="utf-8").splitlines()
+    rendered = [json.loads(line) for line in lines]
+    event_texts = [entry["text"] for entry in rendered if entry["kind"] == "event"]
+    assert event_texts == ["turn on", "turned on the fan"]
+    stage_labels = [entry["stage"] for entry in rendered if entry["kind"] == "stage"]
+    assert stage_labels == ["turn_started_at", "stt_final_at"]
+
+
+def test_timeline_regenerates_byte_identical_after_deletion(tmp_path):
+    """The property that makes 'derived, never the source of truth' a fact
+    rather than a comment: delete the rendered timeline, rebuild it from
+    the JSONL and the timing record alone, and it must come back
+    byte-identical.
+    """
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    timings.mark_turn_started()
+    timings.mark_stt_final()
+    recorder = SessionRecorder(config, timings)
+    recorder.record_event({"type": "transcript.partial", "text": "turn on"})
+    recorder.record_event({"type": "reply.text", "text": "turned on the fan"})
+    recorder.close(timings)
+
+    timeline_path = recorder.directory / "timeline.jsonl"
+    original = timeline_path.read_bytes()
+
+    timeline_path.unlink()
+    assert not timeline_path.exists()
+
+    timeline_module.regenerate_timeline(recorder.directory)
+
+    assert timeline_path.read_bytes() == original
+
+
+def test_timeline_preserves_written_order_for_events_whose_timestamps_tie():
+    """A pure test of `render_timeline` itself: two events sharing the
+    exact same `recorded_at` value must keep the order they were written
+    in, not an order re-derived from a second clock.
+    """
+    tied_ts = 100.0
+    events = [
+        {"recorded_at": tied_ts, "type": "transcript.partial", "text": "first"},
+        {"recorded_at": tied_ts, "type": "transcript.partial", "text": "second"},
+    ]
+
+    rendered = timeline_module.render_timeline(events, {})
+
+    assert [entry["text"] for entry in rendered] == ["first", "second"]
+
+
+def test_timeline_module_holds_no_state_between_calls():
+    """`render_timeline` computes its view fresh every call -- calling it
+    twice on the same inputs must produce the same output, not a cached
+    or mutated one.
+    """
+    events = [{"recorded_at": 1.0, "type": "reply.text", "text": "hello"}]
+    timing_payload = {"turn_started_at": 0.5}
+
+    first = timeline_module.render_timeline(events, timing_payload)
+    second = timeline_module.render_timeline(events, timing_payload)
+
+    assert first == second

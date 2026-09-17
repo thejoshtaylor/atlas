@@ -27,11 +27,11 @@ only ever receives what `turn/controller.py` taps off the frame iterator
 source and has no code path by which a continuous rolling capture could
 be written.
 
-This module writes three of the session directory's four artifacts:
-the raw audio, the JSONL event stream, and the serialized `TurnTimings`
-record. The fourth -- the merged timeline -- is `session/timeline.py`'s
-own responsibility (plan 02-05 Task 2), which is why `close()` does not
-touch it yet.
+This module writes all four of the session directory's artifacts: the raw
+audio, the JSONL event stream, and the serialized `TurnTimings` record
+directly, and the merged timeline through a deferred call into
+`session/timeline.py` (see `close()`'s own comment for why that import is
+deferred rather than module-level).
 """
 
 from __future__ import annotations
@@ -146,13 +146,18 @@ class SessionRecorder:
             encoding = (self._audio_format or {}).get("encoding", "raw")
             (self.directory / f"audio.{encoding}").write_bytes(audio_bytes)
 
-        # Task 2 (session/timeline.py) adds the fourth artifact here: a
-        # deferred import of `timeline.render_timeline`/`write_timeline`,
-        # called with `self._events` and `timing_payload`. Deferred rather
-        # than module-level because `timeline.py` imports
+        # Deferred, not module-level: `session/timeline.py` imports
         # `EVENTS_FILENAME`/`TIMING_FILENAME` back from this module at load
-        # time -- a module-level import here would deadlock the two
-        # modules' load order.
+        # time, so a module-level import here would deadlock the two
+        # modules' load order. By the time `close()` actually runs, this
+        # module has always finished loading, so importing `timeline` here
+        # only ever fetches or finishes a module that cannot be mid-load on
+        # this side -- the same deferred-import shape `turn/controller.py`
+        # already uses for `app.py`.
+        from spire_voice.session import timeline
+
+        rendered_timeline = timeline.render_timeline(self._events, timing_payload)
+        timeline.write_timeline(self.directory, rendered_timeline)
 
         logger.info(
             "session recorded",
