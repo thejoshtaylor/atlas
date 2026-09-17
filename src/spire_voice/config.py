@@ -127,24 +127,98 @@ class SttConfig:
 
 
 @dataclass(frozen=True)
+class BrainTierConfig:
+    """One entry in `brain.models` -- one candidate model id for the tier race.
+
+    `calls_tools` is not a field here on purpose: which tier calls tools is
+    decided by position (the last entry in `brain.models`, D-05), never by a
+    per-entry flag. `from_config` raises if a config file tries to set one.
+    """
+
+    model: str = ""
+
+    @classmethod
+    def from_config(cls, raw: dict | None, index: int) -> "BrainTierConfig":
+        raw = raw or {}
+        if "calls_tools" in raw:
+            raise ConfigError(
+                f"brain.models[{index}] sets 'calls_tools': which tier calls "
+                "tools is decided by position, not a per-entry flag -- the "
+                "last entry in brain.models is the top tier and the only one "
+                "that reaches Home Assistant (D-05). A per-entry flag would "
+                "let a configuration produce two tool-calling tiers, which is "
+                "the one thing D-05 exists to prevent. Reorder brain.models "
+                "if you want a different tier to call tools."
+            )
+        model = raw.get("model", "")
+        if not model:
+            raise ConfigError(f"brain.models[{index}] is missing a 'model' id")
+        return cls(model=model)
+
+
+@dataclass(frozen=True)
 class BrainConfig:
-    """The `brain:` block: the language model endpoint and tool-round cap."""
+    """The `brain:` block: the language model endpoint, the ordered tier
+    list, and the tool-round cap.
+
+    `models` replaces the old single `model` key (D-01): an ordered list,
+    fastest first, most capable last. `top_tier` (the last entry) is the only
+    tier that calls tools (D-05); `triage_tiers` is every entry before it.
+    There is no default tier list -- an empty or absent `models` key stops
+    startup by name rather than quietly falling back to a hardcoded id,
+    matching this module's own doctrine (see the module docstring).
+    """
 
     base_url: str = "https://api.x.ai/v1"
     api_key: str = ""
-    model: str = "grok-4.6"
+    models: tuple[BrainTierConfig, ...] = ()
+    # D-08's deadline: how long to wait, after the final transcript, before
+    # playing the filler if no answer audio is ready yet. Provisional --
+    # plan 01.1-08 measures the real number (RESEARCH.md Open Question 3).
+    # 0 disables the filler entirely.
+    filler_after_ms: int = 600
     cache_system_prompt: bool = True
     temperature: float = 0.0
     max_tokens: int = 400
     max_tool_rounds: int = 3
 
+    @property
+    def top_tier(self) -> BrainTierConfig:
+        """The last entry in `models` -- the only tier that calls tools."""
+        return self.models[-1]
+
+    @property
+    def triage_tiers(self) -> tuple[BrainTierConfig, ...]:
+        """Every entry before `top_tier` -- triage plus voice, no tools."""
+        return self.models[:-1]
+
     @classmethod
     def from_config(cls, raw: dict | None) -> "BrainConfig":
         raw = raw or {}
+        if "model" in raw:
+            raise ConfigError(
+                "brain.model no longer exists: replaced by brain.models, an "
+                "ordered tier list (D-01) -- see config.example.yaml. Wrap "
+                "the single id in a one-element list, e.g. "
+                'models: [{model: "grok-4.6"}]'
+            )
+        models_raw = raw.get("models", ())
+        if isinstance(models_raw, str):
+            raise ConfigError("brain.models must be a list, not a string")
+        if not models_raw:
+            raise ConfigError(
+                "brain.models is empty: there is no default tier -- configure "
+                "at least one model id"
+            )
+        models = tuple(
+            BrainTierConfig.from_config(entry, index)
+            for index, entry in enumerate(models_raw)
+        )
         return cls(
             base_url=raw.get("base_url", cls.base_url),
             api_key=raw.get("api_key", cls.api_key),
-            model=raw.get("model", cls.model),
+            models=models,
+            filler_after_ms=raw.get("filler_after_ms", cls.filler_after_ms),
             cache_system_prompt=raw.get("cache_system_prompt", cls.cache_system_prompt),
             temperature=raw.get("temperature", cls.temperature),
             max_tokens=raw.get("max_tokens", cls.max_tokens),

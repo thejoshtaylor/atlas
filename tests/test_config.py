@@ -32,7 +32,8 @@ def _minimal_raw_config() -> dict:
         "brain": {
             "base_url": "https://api.x.ai/v1",
             "api_key": "test-key",
-            "model": "grok-4.6",
+            "models": [{"model": "grok-4.20-0309-non-reasoning"}, {"model": "grok-4.6"}],
+            "filler_after_ms": 600,
             "cache_system_prompt": True,
             "temperature": 0.0,
             "max_tokens": 400,
@@ -133,3 +134,82 @@ def test_mcp_server_block_rejects_a_configurable_interpreter():
     ok = McpServerConfig.from_config({"args": ["-m", "spire_mcp.ha"], "env": {"HA_URL": "u"}})
     assert ok.args == ("-m", "spire_mcp.ha")
     assert ok.env == {"HA_URL": "u"}
+
+
+# --- Task 1: brain.models replaces brain.model, position decides the top tier ---
+
+
+def test_brain_models_list_produces_tiers_in_written_order():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config(
+        {"models": [{"model": "grok-4.20-0309-non-reasoning"}, {"model": "grok-4.6"}]}
+    )
+    assert [tier.model for tier in brain.models] == ["grok-4.20-0309-non-reasoning", "grok-4.6"]
+
+
+def test_brain_model_key_is_a_startup_error_naming_models():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"model": "grok-4.6"})
+    assert "models" in str(exc.value)
+
+
+def test_brain_empty_or_absent_models_list_is_a_startup_error():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": []})
+    assert "models" in str(exc.value)
+
+    with pytest.raises(ConfigError):
+        BrainConfig.from_config({})
+
+
+def test_brain_models_must_be_a_list_not_a_string():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError):
+        BrainConfig.from_config({"models": "grok-4.6"})
+
+
+def test_brain_single_tier_is_both_the_only_candidate_and_the_top_tier():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
+    assert brain.top_tier.model == "grok-4.6"
+    assert brain.triage_tiers == ()
+
+
+def test_brain_tier_rejects_a_configurable_calls_tools_key():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": [{"model": "grok-4.6", "calls_tools": True}]})
+    assert "position" in str(exc.value)
+
+
+def test_brain_top_tier_is_the_last_entry_and_triage_tiers_is_the_rest():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config(
+        {"models": [{"model": "a"}, {"model": "b"}, {"model": "c"}]}
+    )
+    assert brain.top_tier.model == "c"
+    assert [tier.model for tier in brain.triage_tiers] == ["a", "b"]
+
+
+def test_xai_brain_resolves_against_top_tier_by_default_and_explicit_model_override():
+    from spire_voice.config import BrainConfig
+    from spire_voice.providers.brain_xai import XaiBrain
+
+    brain_config = BrainConfig.from_config(
+        {"api_key": "test-key", "models": [{"model": "a"}, {"model": "b"}]}
+    )
+
+    default_brain = XaiBrain(brain_config)
+    assert default_brain._model == "b"
+
+    explicit_brain = XaiBrain(brain_config, model="a")
+    assert explicit_brain._model == "a"

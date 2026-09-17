@@ -135,9 +135,29 @@ brain:
   base_url: "https://api.x.ai/v1"
   api_key: "${XAI_API_KEY}"
 
-  # Resolved against GET /v1/models at startup rather than pinned blindly, and
-  # logged. Set an exact id here to pin it.
-  model: "grok-4.6"
+  # D-01: an ordered tier list, fastest first, most capable last -- replaces
+  # the old single `model` key, which no longer exists (a config file still
+  # carrying it stops startup by name). All tiers race concurrently on every
+  # turn; the first confident answer wins and the rest are cancelled. The
+  # last entry is the only one that reaches Home Assistant -- position, not a
+  # per-entry flag, decides this (D-05), so no configuration can produce two
+  # tool-calling tiers. This is the same key Phase 3's admin surface exposes
+  # (D-02), same precedent as the transport selector above.
+  #
+  # Ordered by a real measurement, not a guess: one identical two-pass
+  # tool-calling turn, all three answering correctly --
+  #   grok-4.20-0309-non-reasoning: 1,212 ms
+  #   grok-4.3:                     3,106 ms
+  #   grok-4.6:                     7,401 ms
+  models:
+    - model: "grok-4.20-0309-non-reasoning"
+    - model: "grok-4.3"
+    - model: "grok-4.6"
+
+  # D-08: how long to wait, after the final transcript, before playing the
+  # filler if no answer audio is ready yet. Provisional -- plan 01.1-08
+  # measures the real number. 0 disables the filler entirely.
+  filler_after_ms: 600
 
   # The entity list is injected into the system prompt at startup so the model
   # never needs a discovery round trip to learn what exists. It is large and

@@ -24,13 +24,18 @@ logger = logging.getLogger("spire_voice.providers.brain_xai")
 class XaiBrain:
     """Streaming chat completions against xAI's OpenAI-compatible endpoint."""
 
-    def __init__(self, config: BrainConfig) -> None:
+    def __init__(self, config: BrainConfig, model: str | None = None) -> None:
         self._config = config
         self._client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
-        self._resolved_model = config.model
+        # No explicit model -> the top tier (BrainConfig.top_tier), so
+        # app.py's existing `XaiBrain(config.brain)` call keeps working
+        # unchanged; an explicit model is the seam plan 01.1-04 uses to build
+        # one XaiBrain per tier.
+        self._model = model if model is not None else config.top_tier.model
+        self._resolved_model = self._model
 
     async def resolve_model(self) -> str:
-        """Confirm `BrainConfig.model` against `GET /v1/models`, and log it.
+        """Confirm this instance's model id against `GET /v1/models`, and log it.
 
         `config.example.yaml` documents this as resolved rather than pinned
         blindly. An exact match wins; otherwise the configured value is kept
@@ -41,15 +46,15 @@ class XaiBrain:
         try:
             models = await self._client.models.list()
         except Exception:  # pragma: no cover - network/credential dependent
-            logger.warning("could not resolve brain model %r against /v1/models", self._config.model)
+            logger.warning("could not resolve brain model %r against /v1/models", self._model)
             return self._resolved_model
         ids = {model.id for model in models.data}
-        if self._config.model in ids:
-            self._resolved_model = self._config.model
+        if self._model in ids:
+            self._resolved_model = self._model
         else:
             logger.warning(
                 "configured brain model %r not found in /v1/models; using it unresolved",
-                self._config.model,
+                self._model,
             )
         return self._resolved_model
 
