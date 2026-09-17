@@ -165,9 +165,12 @@ async def _open_speaker_writer(writer: FifoWriter) -> None:
     hang the whole application before the egress supervisor's `ffmpeg`
     child (plan 02-03 Task 2) ever gets a chance to attach as that reader.
     A failure here (the mount not existing yet, for instance) is logged and
-    leaves the writer unopened rather than crashing startup; the FIFO
-    reopen path (`FifoWriter`) has no fixed number of attempts, so this is
-    the only place the failure needs handling.
+    leaves the writer unopened rather than crashing startup. This initial
+    open is the only one with no timeout (module docstring); a later
+    reopen after a reader loss is bounded by `speaker.reopen_timeout_s`
+    and, if it still fails, raises `SpeakerError` out of `writer.write()`
+    instead -- caught and logged by `sources/runner.py`'s own per-chunk
+    containment (CR-03), not here.
     """
     try:
         await writer.open()
@@ -276,7 +279,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Built as a list from the start, even holding one entry here -- plan
     # 02-04 adds the second source, and a list that was always a list needs
     # no restructuring.
-    speaker_writer = FifoWriter(config.speaker.fifo_path)
+    speaker_writer = FifoWriter(config.speaker.fifo_path, reopen_timeout_s=config.speaker.reopen_timeout_s)
     app.state.speaker_writer = speaker_writer
     app.state.background_turns.add(asyncio.create_task(_open_speaker_writer(speaker_writer)))
 

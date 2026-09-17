@@ -333,6 +333,13 @@ class SpeakerConfig:
     the supervisor into a busy loop restarting a dead subprocess with no
     delay between attempts, which is a worse failure than refusing to start
     (RESEARCH.md Pitfalls 4 and 5).
+
+    `reopen_timeout_s` must be positive for the same reason: it bounds how
+    long `FifoWriter.write()` retries reopening the pipe after every reader
+    has closed (CR-04, code review) before giving up and raising
+    `SpeakerError`. Unbounded here means a reader that never comes back
+    hangs the write path forever with no exception and no log line -- the
+    exact silent failure this field exists to rule out.
     """
 
     go2rtc_url: str = "http://frigate:1984"
@@ -340,6 +347,7 @@ class SpeakerConfig:
     ensure_url: str = ""
     fifo_path: str = "/run/spire/speaker.alaw"
     respawn_backoff_s: float = 2.0
+    reopen_timeout_s: float = 10.0
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SpeakerConfig":
@@ -351,12 +359,20 @@ class SpeakerConfig:
                 "-- a zero or negative backoff turns the ffmpeg supervisor into a busy "
                 "loop against a dead subprocess"
             )
+        reopen_timeout_s = float(raw.get("reopen_timeout_s", cls.reopen_timeout_s))
+        if reopen_timeout_s <= 0:
+            raise ConfigError(
+                f"speaker.reopen_timeout_s must be positive, got {reopen_timeout_s!r} "
+                "-- a zero or negative timeout would fail every reopen immediately, "
+                "including one a respawning ffmpeg child was about to win"
+            )
         return cls(
             go2rtc_url=raw.get("go2rtc_url", cls.go2rtc_url),
             stream=raw.get("stream", cls.stream),
             ensure_url=raw.get("ensure_url", cls.ensure_url),
             fifo_path=raw.get("fifo_path", cls.fifo_path),
             respawn_backoff_s=respawn_backoff_s,
+            reopen_timeout_s=reopen_timeout_s,
         )
 
 

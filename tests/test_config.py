@@ -422,6 +422,19 @@ def test_speaker_config_rejects_a_non_positive_respawn_backoff():
         SpeakerConfig.from_config({"respawn_backoff_s": -1.0})
 
 
+def test_speaker_config_rejects_a_non_positive_reopen_timeout():
+    """CR-04: a zero or negative `reopen_timeout_s` would fail every FIFO
+    reopen immediately, including one a respawning ffmpeg child was about
+    to win -- reject it at config load, same posture as respawn_backoff_s
+    above."""
+    from spire_voice.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerConfig.from_config({"reopen_timeout_s": 0})
+    with pytest.raises(ConfigError):
+        SpeakerConfig.from_config({"reopen_timeout_s": -1.0})
+
+
 def test_session_config_rejects_a_non_positive_retention():
     from spire_voice.config import ConfigError, SessionConfig
 

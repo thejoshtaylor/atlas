@@ -61,6 +61,15 @@ speaker:
   fifo_path: "/run/spire/speaker.alaw"
   respawn_backoff_s: 2.0
 
+  # Opening this FIFO blocks at the OS level until a reader attaches. The
+  # first open, at startup, waits as long as it takes -- there is nothing
+  # yet to time out against. A later reopen, after the ffmpeg child above
+  # loses its reader and respawn_backoff_s is already retrying it, is
+  # different: this bounds that wait, so a respawn that stalls or fails
+  # turns into a raised, logged error instead of a permanently silent
+  # assistant. A few respawn_backoff_s cycles is a reasonable floor.
+  reopen_timeout_s: 10.0
+
 wake:
   # openwakeword | vosk
   #

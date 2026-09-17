@@ -19,9 +19,11 @@ import logging
 import os
 import threading
 
+import pytest
+
 from spire_voice.config import SpeakerConfig
 from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
-from spire_voice.speaker.fifo_writer import FifoWriter
+from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
 
 
 class _FakeProcess:
@@ -140,7 +142,19 @@ async def test_dead_child_restarts_after_backoff_and_logs_exit_status(tmp_path, 
 async def test_write_after_reader_loss_reopens_the_pipe(tmp_path):
     """RESEARCH.md Pitfall 5: a write after every reader has closed must
     reopen the pipe rather than propagating `BrokenPipeError` to the
-    caller."""
+    caller.
+
+    The second reader deliberately does not start until the writer's own
+    dead fd is confirmed closed (`writer._fh is None`, set the instant the
+    reopen begins retrying). A FIFO's read-open only needs *some* writer
+    fd to be open, not specifically the writer's *next* one -- start the
+    second reader any earlier, while the first (dead, EPIPE-only) fd is
+    still technically open pending that close, and it can attach to that
+    stale fd instead, read the immediate end-of-file it produces, and exit
+    having proven nothing about the reopen this test exists to check. This
+    was CR-04's own second finding: not a flaky assertion, a race the test
+    itself was running against the code under test.
+    """
     fifo_path = str(tmp_path / "speaker.alaw")
     os.mkfifo(fifo_path)
 
@@ -169,11 +183,17 @@ async def test_write_after_reader_loss_reopens_the_pipe(tmp_path):
             received.append(fh.read(64))
         second_reader_done.set()
 
+    # The write that hits the broken pipe -- must not raise to the caller.
+    # Started as a task, not awaited directly, so this test can hold off
+    # starting the second reader until the dead fd is actually gone (see
+    # the docstring above) instead of racing the two.
+    write_task = asyncio.create_task(writer.write(b"second-chunk"))
+    await _wait_for(lambda: writer._fh is None)
+
     second_reader_thread = threading.Thread(target=_second_reader, daemon=True)
     second_reader_thread.start()
 
-    # The write that hits the broken pipe -- must not raise to the caller.
-    await writer.write(b"second-chunk")
+    await write_task
 
     await asyncio.get_running_loop().run_in_executor(None, second_reader_done.wait, 2)
     assert second_reader_done.is_set(), "the reopened pipe never found its new reader"
@@ -182,3 +202,44 @@ async def test_write_after_reader_loss_reopens_the_pipe(tmp_path):
     await writer.close()
     first_reader_thread.join(timeout=2)
     second_reader_thread.join(timeout=2)
+
+
+async def test_reopen_with_no_reader_fails_instead_of_hanging_forever(tmp_path):
+    """CR-04 (code review, found after this phase's own review had already
+    closed): a reopen that never finds a reader must raise `SpeakerError`
+    within `reopen_timeout_s`, not block the executor thread -- and the
+    coroutine awaiting it -- forever. Before this fix, `write()`'s reopen
+    shared the initial `open()`'s unbounded blocking call: with no reader
+    ever attaching, this test would simply never finish.
+
+    `asyncio.wait_for` wraps the call under test so that if this bound
+    ever regresses back to unbounded, this one test times out on its own
+    schedule instead of hanging the whole suite.
+    """
+    fifo_path = str(tmp_path / "speaker.alaw")
+    os.mkfifo(fifo_path)
+
+    first_reader_done = threading.Event()
+
+    def _first_reader() -> None:
+        with open(fifo_path, "rb", buffering=0) as fh:
+            fh.read(64)
+        first_reader_done.set()
+
+    first_reader_thread = threading.Thread(target=_first_reader, daemon=True)
+    first_reader_thread.start()
+
+    reopen_timeout_s = 0.2
+    writer = FifoWriter(fifo_path, reopen_timeout_s=reopen_timeout_s)
+    await writer.open()
+    await writer.write(b"first-chunk")
+
+    await asyncio.get_running_loop().run_in_executor(None, first_reader_done.wait, 2)
+    assert first_reader_done.is_set(), "the first reader never attached/closed"
+
+    # No second reader ever attaches: the reopen this write triggers has
+    # nothing to find, and must give up rather than wait for it.
+    with pytest.raises(SpeakerError):
+        await asyncio.wait_for(writer.write(b"second-chunk"), timeout=reopen_timeout_s + 5.0)
+
+    first_reader_thread.join(timeout=2)
