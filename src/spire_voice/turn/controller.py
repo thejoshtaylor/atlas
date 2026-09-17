@@ -171,6 +171,7 @@ async def _run_tool_rounds(
                 return content_text
             messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content_text})
 
+    logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
     return _TOO_MANY_ROUNDS_REPLY
 
 
