@@ -283,3 +283,40 @@ async def test_tool_round_cap_is_enforced(fake_audio_source, fake_stt, fake_brai
     assert brain.call_count == max_tool_rounds
     assert tts.received_text == [_TOO_MANY_ROUNDS_REPLY]
     assert timings.turn_outcome == "round_cap"
+
+
+async def test_empty_tool_call_free_reply_falls_back_to_a_spoken_reply(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """WR-01 (phase 01 code review): a `chat.completions` reply with no tool
+    calls and no text is a valid, reachable shape (the model stops early
+    against `max_tokens`, or simply has nothing to add) -- not an error, but
+    left unhandled it reaches text-to-speech as an empty string and the
+    operator hears silence with no indication the turn ended. This asserts
+    the fallback fires instead, the same way VOICE-08's empty-transcript
+    case does.
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _EMPTY_REPLY, run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what do you think")])
+    brain = fake_brain(replies=[BrainReply(text="")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert brain.call_count == 1
+    assert tts.received_text == [_EMPTY_REPLY]
+    assert timings.turn_outcome == "empty_reply"

@@ -34,6 +34,7 @@ logger = logging.getLogger("spire_voice.turn.controller")
 
 _NO_SPEECH_REPLY = "sorry, i didn't catch that"
 _TOO_MANY_ROUNDS_REPLY = "that needs more steps than i can take at once"
+_EMPTY_REPLY = "sorry, i don't have anything to say to that"
 
 # How often the silence-timeout guard rechecks its deadline while waiting on
 # an STT event that may never arrive. Real events short-circuit this --
@@ -230,6 +231,17 @@ async def _run_tool_rounds(
         reply = await brain.chat(messages, tools=tools_schema)
         timings.mark_brain_first_token()
         if not reply.tool_calls:
+            if not reply.text:
+                # A tool-call-free reply with no text is a valid, reachable
+                # chat-completions shape (the model stops early against
+                # `max_tokens`, or simply has nothing to add) -- not an
+                # error, but left unhandled it reaches `_speak` as an empty
+                # string and the operator hears silence with no indication
+                # the turn ended. Handled the same way VOICE-08's
+                # empty-transcript case is: a fixed fallback, and a
+                # `turn_outcome` that keeps this distinguishable in the log.
+                timings.turn_outcome = "empty_reply"
+                return _EMPTY_REPLY
             return reply.text
 
         messages.append(
