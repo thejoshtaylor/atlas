@@ -114,6 +114,28 @@ class _ToolHost(Protocol):
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any: ...
 
 
+class _BargeInMonitor(Protocol):
+    """The shape `sources/runner.py`'s `BargeInMonitor` satisfies (VOICE-07,
+    plan 02-06) -- a structural Protocol, not an import, the same
+    discipline every other provider Protocol in this module already
+    follows: `run_turn` never imports a concrete source-runner module, the
+    same way it never imports a concrete transport (D-02).
+
+    `source.barge_in` (`getattr(source, "barge_in", None)`) is duck-typed,
+    the same way `_emit_event` already reaches for `send_event` below --
+    `None` when the source carries none (every caller that predates this
+    plan, and any source `SourceRunner` did not attach one to), in which
+    case every one of `_speak`'s new checks is a no-op and behavior is
+    byte-for-byte what it was before this plan.
+    """
+
+    enabled: bool
+    interrupt_requested: bool
+
+    def mark_playback_started(self, now: float) -> None: ...
+    def mark_transcript_done(self) -> None: ...
+
+
 class _RecordingAudioSource:
     """Wraps one `AudioSource`, taping the two things Task 3 taps and only
     those two: the frame iterator `run_turn` already drains, and the
@@ -245,6 +267,16 @@ async def run_turn(
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
 
+    # VOICE-07: captured from the *unwrapped* source, before the
+    # `_RecordingAudioSource` wrapping below -- that wrapper delegates
+    # `frames()`/`send_audio()` but does not forward arbitrary attributes,
+    # and `barge_in` is `SourceRunner`'s own duck-typed attachment
+    # (`sources/runner.py`'s module docstring), not part of the `AudioSource`
+    # protocol. `None` for every caller that predates this plan, or any
+    # source `SourceRunner` did not attach one to -- `_speak`'s own checks
+    # below are then no-ops (`_BargeInMonitor`'s docstring).
+    barge_in: _BargeInMonitor | None = getattr(source, "barge_in", None)
+
     # D-15: started here, before the drain below is ever awaited, so the
     # fetch overlaps the operator still speaking and has usually finished by
     # the time the transcript is final -- costing about nothing inside the
@@ -268,6 +300,17 @@ async def run_turn(
             source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
         )
         timings.mark_stt_final()
+
+        if barge_in is not None:
+            # The exact moment `sources/runner.py`'s own listener may safely
+            # become the sole reader of the source's raw frames -- `stt`'s
+            # own frame-reading task has, by construction, already been
+            # cancelled and awaited by the time `_drain_to_final_transcript`
+            # returns (whether by a real final transcript or by the
+            # timeout branch's `stream.aclose()`), so there is no window
+            # here in which two readers are ever active (`sources/runner.py`
+            # module docstring, D-09).
+            barge_in.mark_transcript_done()
 
         final_text = getattr(final, "text", "") if final is not None else ""
         if not final_text:
@@ -318,7 +361,9 @@ async def run_turn(
             # `brain.max_tokens` does not apply to it and there is nothing to
             # truncate against. `_DENIED_FALLBACK_REPLY` covers only the one
             # case where there are no words at all.
-            await _speak(source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer")
+            await _speak(
+                source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer", barge_in=barge_in
+            )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
@@ -410,12 +455,12 @@ async def run_turn(
             # skipped entirely: the turn waits in silence rather than
             # synthesizing at turn time.
             phrase = first_filler or DEFAULT_FILLER
-            await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler")
+            await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler", barge_in=barge_in)
 
         winner = await race_task
         timings.mark_tool_rounds_done()
 
-        await _speak(source, tts, timings, winner.answer, kind="answer")
+        await _speak(source, tts, timings, winner.answer, kind="answer", barge_in=barge_in)
         await _emit_event(source, timings.to_event())
         timings.log()
     finally:
@@ -629,6 +674,7 @@ async def _speak(
     reply_text: str,
     *,
     kind: Literal["filler", "answer"],
+    barge_in: "_BargeInMonitor | None" = None,
 ) -> None:
     """Speak one utterance, and mark whichever timing(s) `kind` calls for.
 
@@ -647,13 +693,39 @@ async def _speak(
     Assignment (guarded exactly like the two mark methods) rather than
     calling them is what makes a shared reading possible; `turn_outcome` is
     already assigned directly from this module the same way.
+
+    VOICE-07 (D-11): `barge_in=None` (the default, and every caller that
+    predates this plan) skips every check below -- byte-for-byte the same
+    loop this function has always run. When given, `tts_xai.py`'s own
+    module docstring already states text-to-speech is a single REST
+    response holding the whole utterance -- there is nothing left to cancel
+    by the time an operator would plausibly interrupt (RESEARCH.md Pitfall
+    6), so the interrupt lands here, on the write loop, between chunks,
+    rather than on `tts.synthesize()`. Once requested, this loop stops
+    calling `source.send_audio()` -- CONTEXT.md's "stops the FIFO write
+    immediately" -- but keeps iterating the (already-downloaded, already
+    fully paid for) remaining chunks with no further cost, only to learn
+    how far the cut reply would have gone (D-11's "how far it got"). This
+    never starts anything: stopping playback and starting a turn are
+    separate paths, and only the wake path may ever start one (T-02-24) --
+    nothing below calls `run_turn`, matches a macro, or opens a
+    transcription stream.
     """
 
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
 
     first_audio_marked = False
+    interrupted = False
+    chunks_sent = 0
+    chunks_total = 0
     async for chunk in tts.synthesize(_one_delta()):
+        chunks_total += 1
+        if interrupted:
+            # Nothing left to cancel (module docstring) -- the rest of this
+            # loop only counts how many chunks the cut reply would have
+            # held, without writing any more of them to the speaker.
+            continue
         if not first_audio_marked:
             first_audio_marked = True
             now = _time.monotonic()
@@ -661,8 +733,20 @@ async def _speak(
                 timings.first_audio_at = now
             if kind == "answer" and timings.answer_audio_at is None:
                 timings.answer_audio_at = now
+            if barge_in is not None and barge_in.enabled:
+                barge_in.mark_playback_started(now)
+        if barge_in is not None and barge_in.enabled and barge_in.interrupt_requested:
+            interrupted = True
+            timings.turn_outcome = "barged_in"
+            continue
         await source.send_audio(chunk)
+        chunks_sent += 1
 
+    if interrupted:
+        await _emit_event(
+            source,
+            {"type": "reply.interrupted", "chunks_sent": chunks_sent, "chunks_total": chunks_total},
+        )
     await _emit_event(source, {"type": "reply.text", "text": reply_text})
 
 

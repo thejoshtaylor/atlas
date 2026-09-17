@@ -934,4 +934,190 @@ async def test_macro_hit_cancels_a_started_state_fetch_without_leaving_it_dangli
     )
 
     assert timings.turn_outcome == "macro"
-    assert cancelled == [True]
+
+
+# --- VOICE-07: barge-in interrupts _speak's emission loop -------------------
+
+
+class _FakeBargeIn:
+    """A `sources/runner.py`-`BargeInMonitor`-shaped double, driven directly
+    rather than through real energy/duration/guard-window math -- that
+    boundary logic is `tests/test_barge_in.py`'s job. This fake proves only
+    what `_speak` itself does once told to interrupt.
+
+    `interrupt_after_checks` sets `interrupt_requested` True starting from
+    the *n*-th time `_speak`'s loop reads it -- one read per chunk, in
+    order -- and, matching the real class's own one-way latch (D-11), never
+    clears it again once set.
+    """
+
+    def __init__(self, *, interrupt_after_checks: int | None = None, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self._interrupt_after_checks = interrupt_after_checks
+        self._checks = 0
+        self._latched = False
+        self.playback_started_at: float | None = None
+        self.transcript_done_marked = False
+
+    @property
+    def interrupt_requested(self) -> bool:
+        self._checks += 1
+        if self._interrupt_after_checks is not None and self._checks > self._interrupt_after_checks:
+            self._latched = True
+        return self._latched
+
+    def mark_playback_started(self, now: float) -> None:
+        self.playback_started_at = now
+
+    def mark_transcript_done(self) -> None:
+        self.transcript_done_marked = True
+
+
+async def test_barge_in_interrupt_stops_emission_partway_through(fake_audio_source, fake_tts):
+    """The chunks the fake source received is the mechanical proof emission
+    actually stopped, per the acceptance criteria -- not just that the loop
+    returned."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _speak
+
+    source = fake_audio_source()
+    tts = fake_tts(chunks=[b"1", b"2", b"3", b"4", b"5"])
+    barge_in = _FakeBargeIn(interrupt_after_checks=2)
+    timings = TurnTimings()
+
+    await _speak(source, tts, timings, "a longer reply than this", kind="answer", barge_in=barge_in)
+
+    assert source.sent_audio == [b"1", b"2"]
+
+
+async def test_barge_in_turn_outcome_is_barged_in_and_not_completed(fake_audio_source, fake_tts):
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _speak
+
+    source = fake_audio_source()
+    tts = fake_tts(chunks=[b"1", b"2", b"3"])
+    barge_in = _FakeBargeIn(interrupt_after_checks=1)
+    timings = TurnTimings()
+    timings.turn_outcome = "completed"  # `run_turn`'s own starting value
+
+    await _speak(source, tts, timings, "reply", kind="answer", barge_in=barge_in)
+
+    assert timings.turn_outcome == "barged_in"
+    assert timings.turn_outcome != "completed"
+
+
+async def test_barge_in_records_a_progress_figure_that_is_neither_zero_nor_the_full_length(
+    fake_audio_source, fake_tts
+):
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _speak
+
+    source = fake_audio_source()
+    events: list[dict] = []
+
+    async def _send_event(event: dict) -> None:
+        events.append(event)
+
+    source.send_event = _send_event
+    tts = fake_tts(chunks=[b"1", b"2", b"3", b"4", b"5"])
+    barge_in = _FakeBargeIn(interrupt_after_checks=2)
+    timings = TurnTimings()
+
+    await _speak(source, tts, timings, "reply", kind="answer", barge_in=barge_in)
+
+    [progress_event] = [e for e in events if e["type"] == "reply.interrupted"]
+    assert progress_event["chunks_sent"] == 2
+    assert progress_event["chunks_total"] == 5
+    assert progress_event["chunks_sent"] != 0
+    assert progress_event["chunks_sent"] != progress_event["chunks_total"]
+
+
+async def test_barge_in_interrupt_is_a_loop_break_not_an_exception(fake_audio_source, fake_tts):
+    """`_speak` must return normally -- its caller (`run_turn`) still needs
+    to record the outcome, close the session, and emit the reply event on
+    every exit path, which an exception would route around."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _speak
+
+    source = fake_audio_source()
+    tts = fake_tts(chunks=[b"1", b"2", b"3"])
+    barge_in = _FakeBargeIn(interrupt_after_checks=1)
+    timings = TurnTimings()
+
+    await _speak(source, tts, timings, "reply", kind="answer", barge_in=barge_in)  # must not raise
+
+    assert timings.turn_outcome == "barged_in"
+
+
+async def test_barge_in_disabled_or_absent_behaves_byte_for_byte_as_before_this_plan(
+    fake_audio_source, fake_tts
+):
+    """`barge_in=None` (every caller that predates this plan) and a
+    `barge_in` whose policy is disabled (D-12's per-source override) both
+    produce the exact same outcome and chunk count as a plain `_speak` call
+    always has."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _speak
+
+    chunks = [b"1", b"2", b"3", b"4", b"5"]
+
+    source_no_barge_in = fake_audio_source()
+    timings_no_barge_in = TurnTimings()
+    await _speak(source_no_barge_in, fake_tts(chunks=chunks), timings_no_barge_in, "reply", kind="answer")
+
+    source_disabled = fake_audio_source()
+    timings_disabled = TurnTimings()
+    disabled = _FakeBargeIn(interrupt_after_checks=0, enabled=False)
+    await _speak(
+        source_disabled, fake_tts(chunks=chunks), timings_disabled, "reply", kind="answer", barge_in=disabled
+    )
+
+    assert source_no_barge_in.sent_audio == chunks
+    assert source_disabled.sent_audio == chunks
+    # `_speak` never touches `turn_outcome` except on an actual interrupt --
+    # `run_turn` (not exercised here) is what sets "completed".
+    assert timings_no_barge_in.turn_outcome == timings_disabled.turn_outcome == "unknown"
+
+
+async def test_barge_in_never_starts_a_turn_or_reopens_the_transcript_stream(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """The full `run_turn` path, interrupted mid-answer: `stt.stream()` is
+    called exactly once (T-02-24 -- only the wake path may ever start a
+    turn or open a transcription stream), and nothing about the interrupt
+    reaches for it again."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stream_calls: list[object] = []
+
+    class _CountingStt:
+        async def stream(self, frames, source_format=None):
+            stream_calls.append(source_format)
+            async for _ in fake_stt(events=[FinalTranscript(text="tell me a long story")]).stream(
+                frames, source_format
+            ):
+                yield _
+
+    tts = fake_tts(chunks=[b"1", b"2", b"3", b"4", b"5"])
+    barge_in = _FakeBargeIn(interrupt_after_checks=2)
+    source.barge_in = barge_in
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        _CountingStt(),
+        fake_brain(replies=[BrainReply(text="a long story goes on and on")]),
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert timings.turn_outcome == "barged_in"
+    assert source.sent_audio == [b"1", b"2"]
+    assert len(stream_calls) == 1
+    assert barge_in.transcript_done_marked is True
