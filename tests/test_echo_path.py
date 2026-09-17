@@ -1,11 +1,11 @@
-"""`audio/alaw.py` and `audio/probe.py` (plan 02-10, Task 1).
+"""`audio/alaw.py`, `audio/probe.py`, and `audio/echo_path.py` (plan 02-10).
 
-A-law conversion round-trips against its own 256-code table, and the probe
-is deterministic and broadband by an asserted property rather than by
-assertion in a comment -- a pure sine of equal duration is asserted to fail
-the same single-peak property, which is the executable reason the probe is
-broadband at all. Task 2 appends `measure_echo_path`'s own cases to this
-same file.
+Every case here is checkable with no camera: A-law conversion round-trips
+against its own 256-code table, the probe is deterministic and broadband by
+an asserted property, and `measure_echo_path` is driven entirely by
+synthetic fixtures with a delay and a gain the test itself injects. That the
+real camera's echo path is measurable at all is plan 02-11's live check, not
+this file's.
 """
 
 from __future__ import annotations
@@ -14,6 +14,13 @@ import numpy as np
 import pytest
 
 from spire_voice.audio.alaw import AlawError, alaw_to_pcm16, bytes_per_sample, pcm16_to_alaw
+from spire_voice.audio.echo_path import (
+    AGC_ABSENT,
+    AGC_INDETERMINATE,
+    AGC_PRESENT,
+    CONFIDENCE_USABLE_THRESHOLD,
+    measure_echo_path,
+)
 from spire_voice.audio.probe import DEFAULT_PROBE_SEED, MIN_DURATION_S, ProbeError, build_probe
 
 SAMPLE_RATE = 8000
@@ -155,3 +162,149 @@ def test_a_pure_sine_of_equal_duration_fails_the_single_peak_property():
 def test_build_probe_below_minimum_duration_raises_named_error():
     with pytest.raises(ProbeError):
         build_probe(SAMPLE_RATE, MIN_DURATION_S - 0.5, seed=1)
+
+
+# ---------------------------------------------------------------------------
+# echo_path.py (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def _build_recording(
+    reference: np.ndarray,
+    *,
+    delay_samples: int,
+    scale: float = 1.0,
+    total_length: int | None = None,
+    noise_rms: float = 0.0,
+    noise_seed: int = 1,
+) -> bytes:
+    """A synthetic recording: silence, then `reference` delayed and scaled,
+    optionally with independent noise added everywhere -- exactly the shape
+    a real echo-path recording has, with the delay and gain the test itself
+    injected rather than measured."""
+    if total_length is None:
+        total_length = delay_samples + len(reference) + delay_samples
+    recording = np.zeros(total_length, dtype=np.float64)
+    end = min(delay_samples + len(reference), total_length)
+    span = end - delay_samples
+    if span > 0:
+        recording[delay_samples:end] = reference[:span].astype(np.float64) * scale
+    if noise_rms > 0:
+        rng = np.random.default_rng(noise_seed)
+        recording += rng.standard_normal(total_length) * noise_rms
+    recording = np.clip(np.round(recording), -32768, 32767)
+    return recording.astype(np.int16).tobytes()
+
+
+@pytest.fixture()
+def probe_reference() -> np.ndarray:
+    _, pcm16_bytes = build_probe(SAMPLE_RATE, 2.0, seed=DEFAULT_PROBE_SEED)
+    return _pcm16_array(pcm16_bytes).astype(np.float64)
+
+
+def test_measure_echo_path_recovers_injected_delay_and_scale(probe_reference):
+    delay_samples = 400
+    scale = 0.6
+    recorded = _build_recording(probe_reference, delay_samples=delay_samples, scale=scale)
+    result = measure_echo_path(
+        _pcm16_bytes(probe_reference), recorded, SAMPLE_RATE
+    )
+    assert result.failure_reason is None
+    assert result.delay_s is not None
+    expected_delay_s = delay_samples / SAMPLE_RATE
+    assert abs(result.delay_s - expected_delay_s) <= 1.0 / SAMPLE_RATE
+    assert result.gain is not None
+    assert abs(result.gain - scale) < 0.05
+
+
+def test_measure_echo_path_with_moderate_noise_still_recovers_delay(probe_reference):
+    delay_samples = 250
+    recorded = _build_recording(
+        probe_reference, delay_samples=delay_samples, scale=0.8, noise_rms=300.0
+    )
+    result = measure_echo_path(_pcm16_bytes(probe_reference), recorded, SAMPLE_RATE)
+    assert result.failure_reason is None
+    assert result.delay_s is not None
+    expected_delay_s = delay_samples / SAMPLE_RATE
+    assert abs(result.delay_s - expected_delay_s) <= 2.0 / SAMPLE_RATE
+    assert result.confidence >= CONFIDENCE_USABLE_THRESHOLD
+
+
+def test_measure_echo_path_of_silence_reports_failure_with_no_delay(probe_reference):
+    silence = np.zeros(len(probe_reference) + 1000, dtype=np.int16).tobytes()
+    result = measure_echo_path(_pcm16_bytes(probe_reference), silence, SAMPLE_RATE)
+    assert result.delay_s is None
+    assert result.failure_reason is not None
+    assert 0.0 <= result.confidence <= 1.0
+
+
+def test_measure_echo_path_of_uncorrelated_noise_reports_failure(probe_reference):
+    rng = np.random.default_rng(3)
+    noise = (rng.standard_normal(len(probe_reference) + 1000) * 500).astype(np.int16).tobytes()
+    result = measure_echo_path(_pcm16_bytes(probe_reference), noise, SAMPLE_RATE)
+    assert result.delay_s is None
+    assert result.failure_reason is not None
+    assert result.confidence < CONFIDENCE_USABLE_THRESHOLD
+
+
+def test_measure_echo_path_agc_absent_for_constant_level(probe_reference):
+    delay_samples = 200
+    recorded = _build_recording(probe_reference, delay_samples=delay_samples, scale=0.7)
+    result = measure_echo_path(_pcm16_bytes(probe_reference), recorded, SAMPLE_RATE)
+    assert result.failure_reason is None
+    assert result.agc_verdict == AGC_ABSENT
+
+
+def test_measure_echo_path_agc_present_for_monotonic_ramp(probe_reference):
+    delay_samples = 200
+    n = len(probe_reference)
+    ramp = np.linspace(0.3, 1.4, n)
+    ramped_reference = probe_reference * ramp
+    recorded = _build_recording(ramped_reference, delay_samples=delay_samples, scale=1.0)
+    result = measure_echo_path(_pcm16_bytes(probe_reference), recorded, SAMPLE_RATE)
+    assert result.failure_reason is None
+    assert result.agc_verdict == AGC_PRESENT
+
+
+def test_measure_echo_path_agc_indeterminate_for_non_monotonic_level(probe_reference):
+    delay_samples = 200
+    n = len(probe_reference)
+    # Rises then falls -- a real trend reversal, not noise -- so no
+    # monotonic verdict can honestly be read from it.
+    half = n // 2
+    wobble = np.concatenate([
+        np.linspace(0.4, 1.6, half),
+        np.linspace(1.6, 0.3, n - half),
+    ])
+    wobbled_reference = probe_reference * wobble
+    recorded = _build_recording(wobbled_reference, delay_samples=delay_samples, scale=1.0)
+    result = measure_echo_path(_pcm16_bytes(probe_reference), recorded, SAMPLE_RATE)
+    assert result.failure_reason is None
+    assert result.agc_verdict == AGC_INDETERMINATE
+
+
+def test_measure_echo_path_reduced_confidence_for_a_shortened_overlap(probe_reference):
+    # The operator stopped the recording before the probe finished playing
+    # -- a real calibration run's "I cut it off too early" mistake. The
+    # aligned overlap is shorter than the full reference, and the delay is
+    # still recoverable from what overlap exists, but with visibly reduced
+    # confidence rather than the full-overlap recording's confidence.
+    delay_samples = 200
+    full_recorded = _build_recording(probe_reference, delay_samples=delay_samples, scale=0.8)
+    full_result = measure_echo_path(_pcm16_bytes(probe_reference), full_recorded, SAMPLE_RATE)
+
+    half_overlap = len(probe_reference) // 2
+    shortened_recorded = _build_recording(
+        probe_reference,
+        delay_samples=delay_samples,
+        scale=0.8,
+        total_length=delay_samples + half_overlap,
+    )
+    partial_result = measure_echo_path(
+        _pcm16_bytes(probe_reference), shortened_recorded, SAMPLE_RATE
+    )
+
+    assert full_result.failure_reason is None
+    assert partial_result.failure_reason is None
+    assert partial_result.delay_s == pytest.approx(full_result.delay_s, abs=1.0 / SAMPLE_RATE)
+    assert partial_result.confidence < full_result.confidence
