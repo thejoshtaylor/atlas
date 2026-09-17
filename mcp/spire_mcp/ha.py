@@ -37,15 +37,29 @@ async def handle_call_service(
     token: str,
     domain: str,
     service: str,
-    entity_id: str,
+    entity_id: str | None = None,
+    *,
+    area_id: str | None = None,
+    device_id: str | None = None,
+    label_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one Home Assistant service call, gated by `allow_call`.
 
     `allow_call` runs before any `httpx` request is constructed. A denied
-    call never reaches this function's `client.post` line at all -- it
-    raises before that line runs.
+    call, or a call carrying an `area_id`/`device_id`/`label_id` that was
+    never expanded to entity ids, never reaches this function's
+    `client.post` line at all -- both raise before that line runs.
+
+    Per D-15 this phase builds no registry expansion: `area_id`,
+    `device_id`, and `label_id` are accepted so the caller's target is
+    never silently dropped, then handed to `allow_call`'s
+    `unresolved_targets` so it can refuse rather than guess. SAFE-03 in
+    Phase 3 is what fills the expansion in.
     """
-    domain, service, entity_ids = allow_call(policy, domain, service, entity_id)
+    unresolved_targets = [t for t in (area_id, device_id, label_id) if t]
+    domain, service, entity_ids = allow_call(
+        policy, domain, service, entity_id, unresolved_targets=unresolved_targets
+    )
     response = await client.post(
         f"{base_url}/api/services/{domain}/{service}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -57,6 +71,37 @@ async def handle_call_service(
         # way, because nothing recorded the failure (CMD-01).
         return {"error": f"home assistant returned {response.status_code}"}
     return {"changed": response.json()}
+
+
+async def handle_get_state(
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    entity_id: str,
+) -> dict[str, Any]:
+    """Read one entity's current state and attributes, gated by `allow_read`.
+
+    `allow_read` runs first even though a read is never denied -- it is the
+    call site a future write-shaped tool inherits by being copied from this
+    handler, not a special case for the read path (RESEARCH.md Pitfall 5).
+    A denied entity's state, including its power draw, is answered exactly
+    like any other entity's.
+    """
+    entity_id = allow_read(entity_id)
+    response = await client.get(
+        f"{base_url}/api/states/{entity_id}", headers={"Authorization": f"Bearer {token}"}
+    )
+    if response.status_code == 404:
+        # A question about an entity Home Assistant does not have must not
+        # answer as though it did.
+        return {"error": f"no such entity: {entity_id}"}
+    response.raise_for_status()
+    state = response.json()
+    return {
+        "entity_id": state["entity_id"],
+        "state": state["state"],
+        "attributes": state.get("attributes", {}),
+    }
 
 
 async def handle_list_entities(
@@ -103,10 +148,40 @@ _token: str = ""
 
 
 @mcp_server.tool()
-async def ha_call_service(domain: str, service: str, entity_id: str) -> dict[str, Any]:
-    """Run one Home Assistant service call against an allowed entity."""
+async def ha_call_service(
+    domain: str,
+    service: str,
+    entity_id: str | None = None,
+    area_id: str | None = None,
+    device_id: str | None = None,
+    label_id: str | None = None,
+) -> dict[str, Any]:
+    """Run one Home Assistant service call against an allowed entity.
+
+    `area_id`, `device_id`, and `label_id` are accepted so a target selector
+    is never silently dropped, but any of them being non-empty is refused
+    rather than expanded -- this phase builds no registry expansion (D-15).
+    """
     assert _http_client is not None, "ha_call_service invoked before startup"
-    return await handle_call_service(_policy, _http_client, _base_url, _token, domain, service, entity_id)
+    return await handle_call_service(
+        _policy,
+        _http_client,
+        _base_url,
+        _token,
+        domain,
+        service,
+        entity_id,
+        area_id=area_id,
+        device_id=device_id,
+        label_id=label_id,
+    )
+
+
+@mcp_server.tool()
+async def ha_get_state(entity_id: str) -> dict[str, Any]:
+    """Read one Home Assistant entity's current state and attributes."""
+    assert _http_client is not None, "ha_get_state invoked before startup"
+    return await handle_get_state(_http_client, _base_url, _token, entity_id)
 
 
 @mcp_server.tool()
