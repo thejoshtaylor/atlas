@@ -30,6 +30,7 @@ from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.session.recorder import SessionRecorder
+from spire_voice.session.retention import RetentionScheduler
 from spire_voice.sources.runner import SourceRunner
 from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
 from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
@@ -291,7 +292,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     wake_detector = _build_wake_detector(config.wake.resolve("camera"))
     app.state.wake_detector = wake_detector
 
-    camera_source = CameraAudioSource(config.camera, speaker_writer)
+    # `on_reconnect=ffmpeg_supervisor.handle_reconnect` closes a gap plan
+    # 02-07 recorded and deliberately left open (outside its own file
+    # scope): without this, a camera that drops and reconnects gets its
+    # microphone back but never re-issues the go2rtc backchannel PUT, so
+    # the speaker stays silent after a recovery nothing else would notice
+    # (T-02-33's same "audio outlives what nobody noticed" shape, applied
+    # to the speaker rather than the recordings). `backoff_s` is left on
+    # its own default -- this plan does not change it.
+    camera_source = CameraAudioSource(config.camera, speaker_writer, on_reconnect=ffmpeg_supervisor.handle_reconnect)
     camera_source.start()
     app.state.camera_source = camera_source
 
@@ -305,6 +314,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.source_runners = [camera_runner]
     app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]
 
+    # The retention sweep (DBG-06, plan 02-08): runs once at startup and
+    # again every `debug.expiry_interval_s`, for the life of the process --
+    # the same `start()`/`stop()` shape `ffmpeg_supervisor` above already
+    # uses, and no scheduling dependency, since this is one loop that
+    # sleeps and calls one function.
+    retention_scheduler = RetentionScheduler(
+        config.session.dir,
+        config.session.retain_days,
+        config.session.expiry_interval_s,
+    )
+    retention_scheduler.start()
+    app.state.retention_scheduler = retention_scheduler
+
     yield
 
     for task in app.state.source_runner_tasks:
@@ -314,6 +336,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await camera_source.close()
     wake_detector.close()
     await ffmpeg_supervisor.stop()
+    await retention_scheduler.stop()
     await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()

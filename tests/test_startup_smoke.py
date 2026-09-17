@@ -39,6 +39,7 @@ something a fake can stand in for.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +77,10 @@ _EXPECTED_STATE_ATTRS = [
     "source_runners",
     "source_runner_tasks",
     "ffmpeg_supervisor",
+    # Plan 02-08: the retention sweep. Starts and stops on the same
+    # lifespan-owned pattern as `ffmpeg_supervisor` above; needs no
+    # reachable session directory on disk to land on `app.state`.
+    "retention_scheduler",
 ]
 
 
@@ -183,7 +188,17 @@ class _FakeFfmpegSupervisor:
     """Stands in for `FfmpegSupervisor`: the real one spawns an actual
     `ffmpeg` child pointed at `speaker.fifo_path`, which this test never
     creates. `start()`/`stop()` are no-ops -- proving `lifespan`'s wiring
-    without requiring the `ffmpeg` binary or a real FIFO to be present."""
+    without requiring the `ffmpeg` binary or a real FIFO to be present.
+
+    `handle_reconnect()` counts its own calls rather than being a no-op:
+    `test_camera_reconnect_is_wired_to_the_speaker_backchannel` below calls
+    whatever `app.py` passed as `CameraAudioSource`'s `on_reconnect`
+    argument and asserts this counter moved, proving the wiring is a real
+    connection between the two supervisors and not merely a non-`None`
+    value (Rule 2 fix, plan 02-08)."""
+
+    def __init__(self) -> None:
+        self.reconnect_count = 0
 
     def start(self) -> None:
         return None
@@ -191,9 +206,39 @@ class _FakeFfmpegSupervisor:
     async def stop(self) -> None:
         return None
 
+    async def handle_reconnect(self) -> None:
+        self.reconnect_count += 1
+
 
 def _fake_build_ffmpeg_supervisor(config: object, http_client: object) -> _FakeFfmpegSupervisor:
     return _FakeFfmpegSupervisor()
+
+
+class _FakeCameraSource:
+    """Stands in for `CameraAudioSource`: real construction below is only
+    there to prove `app.py` actually passes `on_reconnect` through, never
+    to exercise RTSP/PyAV against a fake URL. Records the `on_reconnect`
+    keyword argument it was constructed with; `start()`/`close()` are
+    no-ops, matching every other lifespan resource this file fakes."""
+
+    def __init__(self, config: object, speaker: object, *, on_reconnect=None, **_kwargs: object) -> None:
+        self.on_reconnect = on_reconnect
+
+    def start(self) -> None:
+        return None
+
+    async def frames(self):
+        # An immediately-finished, empty stream -- `SourceRunner.run()`'s
+        # `async for` loop just ends, matching `_FakeWakeDetector`'s own
+        # "no real camera/model reachable" posture for this smoke test.
+        return
+        yield  # pragma: no cover -- makes this an async generator
+
+    def decode_for_detector(self, chunk: bytes) -> bytes:
+        return chunk
+
+    async def close(self) -> None:
+        return None
 
 
 def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch):
@@ -212,4 +257,38 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
         assert not missing, (
             "lifespan never assigned app.state." + ", app.state.".join(missing) + " -- "
             "this is the exact defect shape three of Phase 1's Critical findings shared"
+        )
+
+
+def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypatch):
+    """Rule 2 fix, plan 02-08: plan 02-07 added `CameraAudioSource`'s
+    `on_reconnect` hook and `FfmpegSupervisor.handle_reconnect()`, but
+    `app.py` was outside that plan's file scope and never connected the
+    two. Left unfixed, a camera that drops and reconnects gets its
+    microphone back while the speaker stays silent, and nothing raises --
+    the failure is invisible until an operator notices the house cannot
+    answer. This constructs the real `lifespan` and calls whatever
+    `on_reconnect` it actually passed, proving the wiring is a real
+    connection between the two supervisors rather than merely present."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        camera_source = app_module.app.state.camera_source
+        assert camera_source.on_reconnect is not None, (
+            "app.py must construct CameraAudioSource with on_reconnect="
+            "ffmpeg_supervisor.handle_reconnect, or a camera reconnect never "
+            "re-establishes the go2rtc speaker backchannel"
+        )
+
+        asyncio.run(camera_source.on_reconnect())
+
+        assert app_module.app.state.ffmpeg_supervisor.reconnect_count == 1, (
+            "on_reconnect must be the real ffmpeg_supervisor.handle_reconnect -- "
+            "calling it did not reach the supervisor that owns the backchannel"
         )
