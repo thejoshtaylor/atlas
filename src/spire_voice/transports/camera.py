@@ -29,6 +29,32 @@ The RTSP URL (`CameraConfig.rtsp_url`) carries the camera's own credentials
 embedded in it. No log line, exception message, or test fixture in this
 module may ever include it or the raw text of an exception that might
 repeat it back -- connection failures are logged by exception *type* only.
+
+**The reconnect supervisor (SRC-04, plan 02-07):** neither PyAV nor the
+FFmpeg libraries beneath it retry a dropped RTSP session on their own
+(RESEARCH.md Pattern 4). `start()` schedules `_supervise()`, an outer loop
+around one connect-and-drain attempt at a time: an attempt that ends via an
+exception -- the open itself failed, or the stream dropped mid-read -- is
+logged and followed by a backoff wait, then another attempt, forever, until
+`close()`. An attempt that ends with no exception at all is not a drop
+(practically never happens on a live RTSP stream; it is what a genuinely
+finite source -- a test fixture file -- looks like once it has nothing left
+to give) and is never retried, the same single-attempt behavior this module
+had before this plan. Two properties are held as explicit state on the instance rather
+than as an emergent consequence of the loop shape, so a reader (and a test)
+can see the guarantee directly: `reconnect()` is a no-op while already
+connected (T-02-29's first half) and a no-op while another attempt is
+already in flight (T-02-29's second half) -- a supervisor retry racing a
+link that recovered on its own must never leave two readers consuming the
+same camera's packets. `frames()` itself never learns any of this happened:
+the end-of-iteration sentinel is queued exactly once, when the supervisor
+loop itself ends at shutdown, never after an individual dropped attempt --
+so a caller mid-read across a drop simply sees a gap in the audio, which is
+the truth, rather than a premature end of stream it must not have expected
+(the sentinel-per-attempt shape this replaces is exactly what let a
+`frames()` reader wait forever for a second sentinel that a different
+reader, active during a turn, had already consumed -- see 02-06-SUMMARY.md's
+Deviations).
 """
 
 from __future__ import annotations
@@ -36,7 +62,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import av
 from av.audio.resampler import AudioResampler
@@ -49,6 +75,14 @@ logger = logging.getLogger("spire_voice.transports.camera")
 _DETECTOR_FORMAT = "s16"
 _DETECTOR_LAYOUT = "mono"
 _DETECTOR_SAMPLE_RATE = 16000
+
+# Matches `SpeakerConfig.respawn_backoff_s`'s own default (config.py) -- one
+# named backoff shape reused for both directions of the camera connection
+# (RESEARCH.md Pattern 4), not a second retry policy invented here. Wiring
+# this source into `app.py` should pass `config.speaker.respawn_backoff_s`
+# explicitly for `backoff_s`; `CameraConfig` itself carries no backoff field
+# of its own, precisely so there is only ever one place this number lives.
+_DEFAULT_BACKOFF_S = 2.0
 
 
 class _SpeakerSink(Protocol):
@@ -86,9 +120,10 @@ class CameraAudioSource:
     inbound track). `start()` schedules that task and returns immediately:
     the actual RTSP open can block for seconds or fail outright if the
     camera or network is unreachable, and doing that inline would block
-    `lifespan` itself. A camera that never connects leaves this source
-    idle and logs it (T-02-13, accepted risk) -- the rest of the
-    application keeps working.
+    `lifespan` itself. A camera that never connects, or that drops mid-
+    stream, no longer just leaves this source idle (T-02-13's original
+    accepted risk) -- the reconnect supervisor keeps retrying it, logging
+    every attempt, until it succeeds or `close()` ends the process (T-02-28).
     """
 
     def __init__(
@@ -97,10 +132,16 @@ class CameraAudioSource:
         speaker: _SpeakerSink,
         *,
         open_container: Callable[[CameraConfig], Any] = _open_rtsp_container,
+        backoff_s: float = _DEFAULT_BACKOFF_S,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_reconnect: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._config = config
         self._speaker = speaker
         self._open_container = open_container
+        self._backoff_s = backoff_s
+        self._sleep = sleep
+        self._on_reconnect = on_reconnect
         self._queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._consumer_task: asyncio.Task[None] | None = None
         self._container: Any | None = None
@@ -114,14 +155,25 @@ class CameraAudioSource:
         # not just "the bytes match" but "no codec ran on that path").
         self.detector_decode_calls = 0
 
+        # The reconnect supervisor's own explicit state (module docstring):
+        # `_connected` and `_attempt_task` are what `reconnect()` reads to
+        # decide "no-op" versus "actually try" -- never an incidentally
+        # acquired lock, so both guarantees are visible to a reader.
+        self._connected = False
+        self._ever_connected = False
+        self._attempt_task: asyncio.Task[Exception | None] | None = None
+        self._last_error: Exception | None = None
+        self._shutting_down = False
+
     def start(self) -> None:
-        """Start the one long-lived RTSP consumer task. Never awaited by
-        the caller -- see the class docstring."""
-        loop = asyncio.get_running_loop()
-        self._consumer_task = asyncio.create_task(self._run(loop))
+        """Start the reconnect supervisor. Never awaited by the caller --
+        see the class docstring."""
+        self._consumer_task = asyncio.create_task(self._supervise())
 
     async def frames(self) -> AsyncIterator[bytes]:
-        """Yield the camera's own undecoded packet bytes until the stream ends."""
+        """Yield the camera's own undecoded packet bytes until this source
+        is closed. A dropped-and-reconnected link is invisible here -- see
+        the module docstring's sentinel-timing note."""
         while True:
             chunk = await self._queue.get()
             if chunk is None:
@@ -164,8 +216,49 @@ class CameraAudioSource:
                 out += bytes(resampled.planes[0])[:valid_length]
         return bytes(out)
 
+    async def reconnect(self) -> None:
+        """Establish the connection if this source is not already
+        connected, holding to exactly one attempt at a time (T-02-29).
+
+        A no-op while already connected: a supervisor retry racing a link
+        that recovered on its own must not leave two readers on one
+        camera. A no-op while another attempt is already in flight: a
+        second request during that window waits for nothing and starts
+        nothing, rather than opening a second container. Both checks run
+        with no `await` between them, so two concurrent calls can never
+        interleave past this method's own guard -- asyncio only switches
+        tasks at an `await` point.
+        """
+        if self._connected:
+            return
+        if self._attempt_task is not None and not self._attempt_task.done():
+            return
+        self._attempt_task = asyncio.ensure_future(self._attempt_once())
+        try:
+            await self._attempt_task
+        finally:
+            self._attempt_task = None
+
     async def close(self) -> None:
-        """Cancel the consumer task and release the container, best effort."""
+        """End the reconnect supervisor and release the container, best
+        effort.
+
+        Shutdown is checked at the top of `_supervise()`'s loop and again
+        after its backoff wait (T-02-30): a source torn down mid-attempt
+        ends that attempt rather than reviving itself. The consumer task is
+        cancelled and awaited *before* this method ever touches the
+        container -- `container.close()` from this (the event loop) thread
+        while `_read_loop`'s worker thread is still stepping its own
+        `container.demux()` generator is a real concurrent-access hazard
+        against PyAV's C extension, not merely a style choice (a genuine
+        segfault, reproduced this session). `_read_loop`'s own `finally`
+        block closes the container itself once the worker thread is done
+        with it, from that same thread -- this method's own close call
+        below is only for the case a container was left behind with no
+        worker thread still running against it at all (a mid-open failure,
+        or `_read_loop` already having returned).
+        """
+        self._shutting_down = True
         if self._consumer_task is not None:
             self._consumer_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -174,29 +267,102 @@ class CameraAudioSource:
             with contextlib.suppress(Exception):
                 self._container.close()
 
-    async def _run(self, loop: asyncio.AbstractEventLoop) -> None:
-        try:
-            await asyncio.to_thread(self._read_loop, loop)
-        finally:
-            loop.call_soon_threadsafe(self._queue.put_nowait, None)
+    async def _supervise(self) -> None:
+        """The reconnect loop: one `reconnect()` attempt, a log line naming
+        what ended it and how long until the next one, then a cancellable
+        backoff wait -- until `close()` sets `_shutting_down`, or until an
+        attempt ends with no exception at all.
 
-    def _read_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        A clean, exception-free end of `container.demux()` is not a drop --
+        for a live RTSP stream it practically never happens (the network
+        simply stays open, or an error interrupts it); it is what a
+        genuinely finite source (a test fixture file, PROV-07's own
+        byte-identity tests) looks like once it legitimately has nothing
+        left to give. Retrying that would be wrong twice over: it is not a
+        failure to recover from, and it would turn every one of those
+        tests into an infinite retry loop against the very fixture that
+        already proved its point. Only an exception -- the open call
+        failing, or `demux()` raising mid-read -- counts as a drop worth
+        retrying (T-02-28).
+        """
+        try:
+            while not self._shutting_down:
+                await self.reconnect()
+                if self._shutting_down:
+                    return
+                exc = self._last_error
+                if exc is None:
+                    return
+                logger.warning(
+                    "camera RTSP source disconnected (%s); reconnecting in %.1fs",
+                    type(exc).__name__,
+                    self._backoff_s,
+                )
+                await self._sleep(self._backoff_s)
+                if self._shutting_down:
+                    return
+        finally:
+            # Queued exactly once, here, when the supervisor itself ends --
+            # never per dropped attempt (module docstring). `_supervise`
+            # already runs on the event loop thread (only `_read_loop` runs
+            # in a worker thread), so no `call_soon_threadsafe` is needed.
+            self._queue.put_nowait(None)
+
+    async def _attempt_once(self) -> Exception | None:
+        """One connect-and-drain attempt, off the event loop thread
+        (`container.demux()` blocks). Records whatever ended it -- an
+        exception, or `None` for a clean stream end -- for `_supervise()`'s
+        own retry log line."""
+        loop = asyncio.get_running_loop()
+        self._last_error = await asyncio.to_thread(self._read_loop, loop)
+        return self._last_error
+
+    def _fire_on_reconnect(self) -> None:
+        """Runs on the event loop thread via `call_soon_threadsafe`,
+        scheduled only for a genuine *re*-connect (never the first-ever
+        connect): fires `on_reconnect` -- the speaker's backchannel needs
+        re-establishing here too, not only at startup, since whatever
+        dropped the camera link may have taken the receiving service's
+        producer for the speaker down with it. Scheduling this alone
+        through `call_soon_threadsafe`, and never `self._connected` itself
+        (see `_read_loop`), is deliberate: `self._connected` must flip
+        True and back to False in strict program order on the *same*
+        thread that owns the attempt, or a fast-failing attempt's own
+        `finally` could reset it to False before a delayed callback ever
+        set it True, leaving it stuck True forever (reproduced this
+        session as a tight, CPU-pinned `reconnect()` no-op loop).
+        """
+        if self._on_reconnect is not None:
+            asyncio.ensure_future(self._on_reconnect())
+
+    def _read_loop(self, loop: asyncio.AbstractEventLoop) -> Exception | None:
         """Runs in a worker thread: `container.demux()` is a blocking
         call, and bridging it onto the event loop's queue happens through
-        `call_soon_threadsafe` rather than blocking that loop directly."""
+        `call_soon_threadsafe` rather than blocking that loop directly.
+
+        Returns the exception that ended this attempt (the open itself
+        failed, or the stream dropped mid-read), or `None` for a clean end
+        -- `_supervise()` logs whichever it was and retries either way.
+        """
         try:
             container = self._open_container(self._config)
-        except Exception as exc:  # noqa: BLE001 -- any open failure leaves this source idle (T-02-13), never crashes lifespan
-            # Deliberately logs the exception's TYPE only, never its message
-            # or `self._config.rtsp_url`: both may carry the camera's
-            # embedded RTSP credentials (module docstring).
-            logger.warning(
-                "camera RTSP source failed to open (%s); leaving this source idle",
-                type(exc).__name__,
-            )
-            return
+        except Exception as exc:  # noqa: BLE001 -- any open failure is retried by the supervisor (T-02-28), never crashes lifespan
+            # Returned, not logged here: `_supervise()` logs the exception's
+            # TYPE only, never its message or `self._config.rtsp_url` --
+            # both may carry the camera's embedded RTSP credentials (module
+            # docstring) -- and it is the one place that already logs every
+            # retry, open failure or mid-stream drop alike.
+            return exc
 
         self._container = container
+        # Both set here, directly, on this same worker thread -- not via
+        # `call_soon_threadsafe` -- so this attempt's own `finally` below
+        # can never race a delayed event-loop callback (see
+        # `_fire_on_reconnect`'s docstring for the hazard this avoids).
+        self._connected = True
+        if self._ever_connected:
+            loop.call_soon_threadsafe(self._fire_on_reconnect)
+        self._ever_connected = True
         try:
             audio_stream = container.streams.audio[0]
             self._detector_codec_context = self._build_detector_codec_context(audio_stream)
@@ -205,9 +371,11 @@ class CameraAudioSource:
                     continue  # the end-of-stream flush packet, not audio
                 raw = bytes(packet)
                 loop.call_soon_threadsafe(self._queue.put_nowait, raw)
-        except Exception as exc:  # noqa: BLE001 -- a mid-stream drop also leaves this source idle; plan 02-07 adds the reconnect supervisor
-            logger.warning("camera RTSP source dropped mid-stream (%s)", type(exc).__name__)
+            return None
+        except Exception as exc:  # noqa: BLE001 -- a mid-stream drop is retried by the supervisor (T-02-28)
+            return exc
         finally:
+            self._connected = False
             with contextlib.suppress(Exception):
                 container.close()
 
