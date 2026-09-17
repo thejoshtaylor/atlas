@@ -75,6 +75,7 @@ _EXPECTED_STATE_ATTRS = [
     "camera_source",
     "source_runners",
     "source_runner_tasks",
+    "ffmpeg_supervisor",
 ]
 
 
@@ -178,12 +179,30 @@ def _fake_build_wake_detector(wake_config: object) -> _FakeWakeDetector:
     return _FakeWakeDetector()
 
 
+class _FakeFfmpegSupervisor:
+    """Stands in for `FfmpegSupervisor`: the real one spawns an actual
+    `ffmpeg` child pointed at `speaker.fifo_path`, which this test never
+    creates. `start()`/`stop()` are no-ops -- proving `lifespan`'s wiring
+    without requiring the `ffmpeg` binary or a real FIFO to be present."""
+
+    def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+def _fake_build_ffmpeg_supervisor(config: object, http_client: object) -> _FakeFfmpegSupervisor:
+    return _FakeFfmpegSupervisor()
+
+
 def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
     with TestClient(app_module.app) as client:
         response = client.get("/transport")

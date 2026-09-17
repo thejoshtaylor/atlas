@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
+import httpx
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +30,7 @@ from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.sources.runner import SourceRunner
+from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
 from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
 from spire_voice.timing import TurnTimings
 from spire_voice.transports.camera import CameraAudioSource
@@ -140,6 +142,17 @@ def _build_wake_detector(wake_config: WakeConfig) -> WakeDetector:
         "has no trained 'hey spire' model and no detector class in this "
         "phase (RESEARCH.md Pitfall 3)"
     )
+
+
+def _build_ffmpeg_supervisor(config: Config, http_client: httpx.AsyncClient) -> FfmpegSupervisor:
+    """Build the egress supervisor -- a separate, monkeypatchable function
+    for the same reason `_build_wake_detector` is one: `tests/
+    test_startup_smoke.py` replaces this with a fake whose `start()`/
+    `stop()` never spawn a real `ffmpeg` process, so the smoke test needs
+    neither the `ffmpeg` binary nor a real `speaker.fifo_path` to reach a
+    running application (T-02-13's same posture, extended to this
+    resource)."""
+    return FfmpegSupervisor(config.speaker, http_client=http_client)
 
 
 async def _open_speaker_writer(writer: FifoWriter) -> None:
@@ -263,6 +276,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.speaker_writer = speaker_writer
     app.state.background_turns.add(asyncio.create_task(_open_speaker_writer(speaker_writer)))
 
+    # The supervisor's own client, not the browser's httpx usage elsewhere
+    # in this file (there isn't one shared today) -- opened and closed with
+    # the supervisor's own lifetime, since nothing else in this process
+    # needs to issue the go2rtc backchannel PUT.
+    speaker_http_client = httpx.AsyncClient()
+    ffmpeg_supervisor = _build_ffmpeg_supervisor(config, speaker_http_client)
+    ffmpeg_supervisor.start()
+    app.state.ffmpeg_supervisor = ffmpeg_supervisor
+
     wake_detector = _build_wake_detector(config.wake.resolve("camera"))
     app.state.wake_detector = wake_detector
 
@@ -288,6 +310,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await task
     await camera_source.close()
     wake_detector.close()
+    await ffmpeg_supervisor.stop()
+    await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()
 

@@ -45,10 +45,29 @@ class FifoWriter:
             ) from exc
 
     async def write(self, chunk: bytes) -> None:
+        """Write `chunk`, transparently reopening the FIFO if every reader
+        has closed since the last write.
+
+        A FIFO's writer and reader are independent opens against the same
+        path (RESEARCH.md Pitfall 5): once every reader closes, the next
+        write raises `BrokenPipeError`, and respawning the egress
+        supervisor's `ffmpeg` child alone does not repair this side's own
+        file descriptor. Catching that here, closing, and reopening (which
+        again blocks until the *new* child attaches) is what makes losing a
+        reader a reopen rather than a permanent end to every future reply --
+        the caller never sees the broken pipe at all.
+        """
         if self._fh is None:
             raise SpeakerError("FifoWriter.write called before open()")
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._fh.write, chunk)
+        try:
+            await loop.run_in_executor(None, self._fh.write, chunk)
+        except BrokenPipeError:
+            logger.warning("speaker FIFO reader disappeared; reopening %r", self._fifo_path)
+            await loop.run_in_executor(None, self._fh.close)
+            self._fh = None
+            await self.open()
+            await loop.run_in_executor(None, self._fh.write, chunk)
 
     async def close(self) -> None:
         if self._fh is not None:
