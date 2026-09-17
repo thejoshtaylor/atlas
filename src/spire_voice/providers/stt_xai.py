@@ -21,6 +21,7 @@ connection that looks fine and quietly does the wrong thing:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any, AsyncIterator
 from urllib.parse import urlencode
@@ -87,4 +88,16 @@ class XaiStt:
                     elif event_type == "error":
                         raise SttError(event.get("message", "xAI STT reported an error"))
             finally:
-                await send_task
+                # `sender()` drains `frames` -- the mic source -- into
+                # `ws.send()`. It has no reason to finish just because the
+                # transcript did: a live mic keeps streaming mid-turn (the
+                # operator's own start/stop toggle is the only thing that
+                # ends it), so once `transcript.done` has been yielded (or
+                # an error breaks the loop), the outbound audio no longer
+                # matters and `sender()` must be cancelled, not awaited to
+                # completion. Awaiting it here instead is CR-02's bug: this
+                # generator could never reach `StopAsyncIteration` while the
+                # mic stayed open, which is always, mid-turn.
+                send_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await send_task

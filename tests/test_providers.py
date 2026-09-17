@@ -6,11 +6,13 @@ are pure functions, tested directly against invented config values and
 fake streamed chunks.
 """
 
+import asyncio
+import json
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from spire_voice.config import SttConfig, TtsConfig
-from spire_voice.providers.base import ToolCall
+from spire_voice.providers.base import FinalTranscript, ToolCall
 
 
 def test_stt_url_uses_wire_parameter_names():
@@ -55,6 +57,97 @@ def test_tts_session_update_requests_browser_playable_codec():
     message = tts.build_session_update()
 
     assert message["output_format"] == {"codec": "pcm", "sample_rate": 24000}
+
+
+class _NeverEndingFrames:
+    """Mirrors a live mic: keeps streaming past the turn's own end.
+
+    Real production audio sources only stop on the operator's own
+    start/stop toggle (`index.html`'s "single on/off toggle only" design),
+    never because a reply arrived -- so a faithful frames double for
+    testing `XaiStt.stream()` must not stop on its own either.
+    """
+
+    async def __call__(self):
+        while True:
+            yield b"\x00\x00"
+            await asyncio.sleep(0.01)
+
+
+class _FakeXaiWebsocket:
+    """A minimal double for `websockets.connect()`'s return value.
+
+    Reproduces the real xAI STT wire shape closely enough to exercise
+    `XaiStt.stream()`'s own control flow: an async context manager,
+    `recv()` for the `transcript.created` handshake, `send()` for outbound
+    audio, and `async for` for inbound JSON events ending in
+    `transcript.done`.
+    """
+
+    def __init__(self, events):
+        self._events = list(events)
+        self.sent: list[bytes] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def recv(self):
+        return json.dumps({"type": "transcript.created"})
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def __aiter__(self):
+        for event in self._events:
+            yield json.dumps(event)
+
+
+async def test_stream_ends_promptly_once_final_transcript_arrives_even_if_mic_keeps_streaming(monkeypatch):
+    """CR-02 regression.
+
+    `XaiStt.stream()`'s `finally` clause once awaited its own `sender()`
+    task to completion, and `sender()` only finishes once `frames` (the mic
+    source) is exhausted -- which a live mic never is mid-turn. That made
+    `stream()` hang past `transcript.done` instead of reaching
+    `StopAsyncIteration`, in turn making the controller's lookahead call in
+    `_drain_to_final_transcript` block indefinitely. This reproduces that
+    exact shape (a `frames` source that never ends on its own) and asserts
+    `stream()` still finishes promptly -- it hangs past the timeout below
+    against the pre-fix code, where `finally: await send_task` never
+    returns while `frames` keeps yielding.
+    """
+    from spire_voice.providers.stt_xai import XaiStt
+
+    fake_ws = _FakeXaiWebsocket([{"type": "transcript.done", "text": "turn on the fan"}])
+    monkeypatch.setattr(
+        "spire_voice.providers.stt_xai.websockets.connect",
+        lambda *args, **kwargs: fake_ws,
+    )
+
+    cfg = SttConfig(
+        url="wss://api.x.ai/v1/stt",
+        api_key="test-key",
+        endpointing_ms=200,
+        smart_turn=0.7,
+        smart_turn_timeout_ms=1200,
+        vad_threshold=0.08,
+        interim_results=True,
+        language="en",
+    )
+    stt = XaiStt(cfg)
+
+    async def drain():
+        events = []
+        async for event in stt.stream(_NeverEndingFrames()()):
+            events.append(event)
+        return events
+
+    events = await asyncio.wait_for(drain(), timeout=1.0)
+
+    assert events == [FinalTranscript(text="turn on the fan")]
 
 
 def _chunk(content=None, tool_calls=None):
