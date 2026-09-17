@@ -401,6 +401,12 @@ def test_example_config_loads_end_to_end(monkeypatch):
     assert config.barge_in.resolve("camera").enabled is False
     assert config.session.retain_days == 7
 
+    # Plan 02-11's gap closure: the calibration block loads, and its route
+    # ships off by default (T-02-47) -- the example file and the parser
+    # drifting apart on this specific key is the failure this line prevents.
+    assert config.calibration.dir == "/data/calibration"
+    assert config.calibration.route_enabled is False
+
 
 # --- Task 3: one rejection test per Phase 2 configuration path ---
 
@@ -545,3 +551,57 @@ def test_wake_source_override_of_a_nested_engine_block_rejects_a_non_mapping():
     with pytest.raises(ConfigError) as exc:
         WakeConfig.from_config({"sources": {"camera": {"openwakeword": 0.9}}})
     assert "openwakeword" in str(exc.value)
+
+
+# --- Plan 02-11: CalibrationConfig's three named ConfigError rejections ---
+
+
+def test_calibration_config_rejects_a_non_positive_probe_duration():
+    from spire_voice.config import CalibrationConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        CalibrationConfig.from_config({"probe_duration_s": 0})
+    assert "probe_duration_s" in str(exc.value)
+
+    with pytest.raises(ConfigError):
+        CalibrationConfig.from_config({"probe_duration_s": -1.0})
+
+
+def test_calibration_config_rejects_a_negative_settle_period():
+    from spire_voice.config import CalibrationConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        CalibrationConfig.from_config({"settle_s": -0.1})
+    assert "settle_s" in str(exc.value)
+
+    # Zero is a valid settle period -- "negative" is the rejection, not
+    # "non-positive": a calibration with no settle wait at all is a real,
+    # if aggressive, operator choice, and never having to wait is not a
+    # configuration error the way a negative duration is.
+    CalibrationConfig.from_config({"settle_s": 0})
+
+
+def test_calibration_config_rejects_a_non_positive_max_age_days():
+    from spire_voice.config import CalibrationConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        CalibrationConfig.from_config({"max_age_days": 0})
+    assert "max_age_days" in str(exc.value)
+
+    with pytest.raises(ConfigError):
+        CalibrationConfig.from_config({"max_age_days": -5})
+
+
+def test_calibration_config_rejects_a_negative_tail():
+    from spire_voice.config import CalibrationConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        CalibrationConfig.from_config({"tail_s": -0.01})
+    assert "tail_s" in str(exc.value)
+
+
+def test_calibration_config_route_enabled_defaults_off():
+    from spire_voice.config import CalibrationConfig
+
+    assert CalibrationConfig.from_config(None).route_enabled is False
+    assert CalibrationConfig.from_config({}).route_enabled is False

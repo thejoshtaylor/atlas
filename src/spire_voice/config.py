@@ -25,6 +25,7 @@ from dataclasses import MISSING, dataclass, field, fields, replace
 import yaml
 
 from spire_mcp.safety import Policy
+from spire_voice.calibration.record import DEFAULT_CALIBRATION_DIR
 from spire_voice.turn.macros import normalize
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -421,6 +422,67 @@ class SessionConfig:
             retain_days=retain_days,
             stdout_summary=raw.get("stdout_summary", cls.stdout_summary),
             expiry_interval_s=expiry_interval_s,
+        )
+
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    """The `calibration:` block: where a Tier 1 echo-path measurement
+    (VOICE-07, `audio/echo_path.py`, `calibration/runner.py`) is written,
+    how its probe is timed, and whether the HTTP route that can trigger a
+    live run is served at all.
+
+    `route_enabled` defaults to `False` (D-20). That route makes a real
+    home play a sound and record the room, and Phase 2 has no account
+    system, no roles, and no session to stand in front of it -- the
+    authentication that belongs there is WEB-01/WEB-04, in the same phase
+    as the wizard that drives it. Shipping the route registered but
+    switched off (`app.py`, plan 02-11 Task 3) is the honest middle:
+    turning this on before then is a deliberate operator choice, never a
+    default.
+    """
+
+    dir: str = DEFAULT_CALIBRATION_DIR
+    probe_duration_s: float = 2.0
+    settle_s: float = 0.5
+    tail_s: float = 0.5
+    max_age_days: int = 30
+    route_enabled: bool = False
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "CalibrationConfig":
+        raw = raw or {}
+        probe_duration_s = float(raw.get("probe_duration_s", cls.probe_duration_s))
+        if probe_duration_s <= 0:
+            raise ConfigError(
+                f"calibration.probe_duration_s must be positive, got {probe_duration_s!r} -- "
+                "a zero or negative probe plays nothing for measure_echo_path to correlate against"
+            )
+        settle_s = float(raw.get("settle_s", cls.settle_s))
+        if settle_s < 0:
+            raise ConfigError(
+                f"calibration.settle_s must not be negative, got {settle_s!r} -- "
+                "a negative settle period has no meaning as a wait"
+            )
+        tail_s = float(raw.get("tail_s", cls.tail_s))
+        if tail_s < 0:
+            raise ConfigError(
+                f"calibration.tail_s must not be negative, got {tail_s!r} -- a negative tail "
+                "would record less than the probe's own duration, clipping a delay close to it"
+            )
+        max_age_days = raw.get("max_age_days", cls.max_age_days)
+        if not isinstance(max_age_days, int) or isinstance(max_age_days, bool) or max_age_days <= 0:
+            raise ConfigError(
+                f"calibration.max_age_days must be a positive integer, got {max_age_days!r} -- "
+                "a zero or negative age would call every calibration stale the instant it is taken"
+            )
+        return cls(
+            dir=raw.get("dir", cls.dir),
+            probe_duration_s=probe_duration_s,
+            settle_s=settle_s,
+            tail_s=tail_s,
+            max_age_days=max_age_days,
+            route_enabled=raw.get("route_enabled", cls.route_enabled),
         )
 
 
@@ -864,6 +926,7 @@ class Config:
     gate: GateConfig
     barge_in: BargeInConfig
     session: SessionConfig
+    calibration: CalibrationConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
     # A tuple, not a dict: `macros:` is a list in the config file and there is
@@ -894,6 +957,7 @@ class Config:
             gate=GateConfig.from_config(raw.get("gate")),
             barge_in=BargeInConfig.from_config(raw.get("barge_in")),
             session=SessionConfig.from_config(raw.get("debug")),
+            calibration=CalibrationConfig.from_config(raw.get("calibration")),
             mcp_servers={
                 name: McpServerConfig.from_config(server_raw)
                 for name, server_raw in mcp_servers_raw.items()

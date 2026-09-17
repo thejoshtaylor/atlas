@@ -372,3 +372,37 @@ debug:
 
   # Also emit a one-line summary per interaction to stdout for kubectl logs.
   stdout_summary: true
+
+calibration:
+  # Echo-path calibration (Tier 1, VOICE-07): plays a known probe out of the
+  # camera speaker, records it back from the camera microphone, and measures
+  # the round-trip delay, the echo level, the gain, and whether the camera
+  # applies automatic gain control. Run it with scripts/dev-calibrate-echo.sh
+  # today; Phase 3's admin wizard drives the same run_echo_calibration
+  # through the routes below once it exists (D-20).
+  dir: "/data/calibration"
+
+  # How long the probe itself plays. Below audio/probe.py's own
+  # MIN_DURATION_S (1.0s) is a startup error -- shorter gives the correlator
+  # too few independent samples to resolve a single delay from.
+  probe_duration_s: 2.0
+
+  # Silence held before the probe is written, so a real microphone has time
+  # to settle past whatever was mid-flight when it opened.
+  settle_s: 0.5
+
+  # Recorded past the probe's own duration, so a round-trip delay near the
+  # top of the plausible range is still inside the recorded window.
+  tail_s: 0.5
+
+  # Past this many days, a stored calibration is treated as stale and
+  # Phase 3's wizard offers a re-run rather than silently trusting an old
+  # measurement -- software cannot detect that somebody moved the camera.
+  max_age_days: 30
+
+  # The HTTP route that runs a live calibration makes a real home play a
+  # sound and records the room. Off by default: Phase 2 has no account
+  # system, no roles, and no session to put in front of it. Turning this on
+  # is a deliberate operator choice until WEB-01/WEB-04 (Phase 3) ship
+  # authentication in front of it.
+  route_enabled: false
