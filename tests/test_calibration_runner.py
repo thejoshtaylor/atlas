@@ -19,13 +19,18 @@ import ast
 import asyncio
 import dataclasses
 import importlib.util
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
+
+import spire_voice.app as app_module
 
 from spire_voice.audio.alaw import alaw_to_pcm16, pcm16_to_alaw
 from spire_voice.calibration.record import EchoCalibration
@@ -55,7 +60,16 @@ _CHUNK_BYTES = 64
 
 
 def _make_camera_config() -> CameraConfig:
-    return CameraConfig(rtsp_url="", encoding="alaw", sample_rate=SAMPLE_RATE, channels=1)
+    # A realistic, credential-shaped -- but fictional -- URL, so the
+    # no-URL-in-response/no-URL-in-log assertions in this file are
+    # checking against something that could actually leak, not an empty
+    # string that would pass by accident.
+    return CameraConfig(
+        rtsp_url="rtsp://redacted@camera.invalid/stream1",
+        encoding="alaw",
+        sample_rate=SAMPLE_RATE,
+        channels=1,
+    )
 
 
 def _make_calibration_config(tmp_path: Path, **overrides: object) -> CalibrationConfig:
@@ -404,3 +418,130 @@ async def test_handle_result_of_a_successful_run_exits_zero_and_names_every_meas
     assert "record written" in captured.out
     assert "rtsp://" not in captured.out
     assert "://" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Task 3 seam: app.py's two routes both call run_echo_calibration and
+# never spire_voice.audio.echo_path directly.
+# ---------------------------------------------------------------------------
+
+
+def test_app_module_imports_the_runner_and_never_the_measurement_module_for_calibration():
+    imports = _imported_module_names(Path("src/spire_voice/app.py"))
+    assert any(name.endswith("calibration.runner") for name in imports)
+    assert not any("audio.echo_path" in name for name in imports)
+
+
+def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_path, monkeypatch):
+    """Full boot, real HTTP: the shipped default (no `calibration:` block
+    in the fake config, matching `config.example.yaml`'s own
+    `route_enabled: false`) must make both routes answer with a client
+    error naming the key that would turn them on -- not a 404 that looks
+    like a typo, and not a server error."""
+    import test_startup_smoke as smoke
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", smoke._FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", smoke._fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", smoke._fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", smoke._FakeCameraSource)
+
+    with TestClient(app_module.app) as client:
+        read_response = client.get("/calibration/echo-path")
+        assert read_response.status_code == 403
+        assert "calibration.route_enabled" in read_response.json()["detail"]
+
+        run_response = client.post("/calibration/echo-path/run", json={"placement_note": "note"})
+        assert run_response.status_code == 403
+        assert "calibration.route_enabled" in run_response.json()["detail"]
+
+
+def _install_calibration_state(camera_config, calibration_config, camera_source, speaker_writer) -> None:
+    """Sets exactly the `app.state` attributes the two calibration routes
+    read, with no real lifespan boot -- the route handlers are plain
+    coroutines FastAPI's `@app.get`/`@app.post` decorators register and
+    return unchanged, so calling them directly here needs no ASGI
+    machinery, no tool host, no brain tier, and no wake detector."""
+    app_module.app.state.config = SimpleNamespace(calibration=calibration_config, camera=camera_config)
+    app_module.app.state.camera_source = camera_source
+    app_module.app.state.speaker_writer = speaker_writer
+    app_module.app.state.calibration_in_progress = False
+
+
+async def test_read_route_returns_not_found_when_no_calibration_exists(tmp_path):
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    _install_calibration_state(_make_camera_config(), calibration_config, None, None)
+
+    with pytest.raises(HTTPException) as exc:
+        await app_module.get_echo_path_calibration()
+    assert exc.value.status_code == 404
+
+
+async def test_read_route_returns_the_stored_record_and_its_age_with_no_url_in_the_response(tmp_path):
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(delay_samples=100, scale=0.5)
+    run_result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "kitchen shelf",
+        now=_fixed_clock(datetime(2020, 1, 1, tzinfo=timezone.utc)),
+        sleep=_make_traced_sleep(fake),
+    )
+    assert run_result.failure_reason is None
+    _install_calibration_state(camera_config, calibration_config, None, None)
+
+    response = await app_module.get_echo_path_calibration()
+
+    assert response["agc_verdict"] == run_result.calibration.agc_verdict
+    assert response["age_days"] > 0
+    body = json.dumps(response)
+    assert "rtsp://" not in body
+    assert "redacted" not in body
+    assert "://" not in body
+
+
+async def test_run_route_returns_measured_numbers_when_enabled_with_no_url_in_the_response(tmp_path):
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(delay_samples=120, scale=0.6)
+    _install_calibration_state(camera_config, calibration_config, fake, fake)
+
+    response = await app_module.run_echo_path_calibration(
+        app_module.CalibrationRunRequest(placement_note="kitchen shelf")
+    )
+
+    assert response["gain"] == pytest.approx(0.6, abs=0.05)
+    assert response["agc_verdict"] in {"absent", "present", "indeterminate"}
+    assert app_module.app.state.calibration_in_progress is False
+    body = json.dumps(response)
+    assert "rtsp://" not in body
+    assert "redacted" not in body
+
+
+async def test_run_route_returns_conflict_when_a_run_is_already_in_progress(tmp_path):
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    _install_calibration_state(camera_config, calibration_config, None, None)
+    app_module.app.state.calibration_in_progress = True
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await app_module.run_echo_path_calibration(app_module.CalibrationRunRequest())
+        assert exc.value.status_code == 409
+    finally:
+        app_module.app.state.calibration_in_progress = False
+
+
+async def test_run_route_reports_a_failed_measurement_by_name_rather_than_a_partial_record(tmp_path):
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(silence=True)
+    _install_calibration_state(camera_config, calibration_config, fake, fake)
+
+    with pytest.raises(HTTPException) as exc:
+        await app_module.run_echo_path_calibration(app_module.CalibrationRunRequest())
+
+    assert exc.value.status_code == 422
+    assert exc.value.detail
+    assert list(Path(calibration_config.dir).glob("*")) == []

@@ -13,16 +13,19 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import httpx
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from spire_voice.audio.ring import PrerollBuffer
+from spire_voice.calibration.record import EchoCalibration
+from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import Config, WakeConfig, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.providers.stt_xai import XaiStt
@@ -307,6 +310,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     camera_source.start()
     app.state.camera_source = camera_source
 
+    # Plan 02-11 Task 3: the single in-flight guard the run route below
+    # checks before calling run_echo_calibration against these same
+    # camera_source/speaker_writer resources -- two probes playing at once
+    # would measure each other (T-02-51).
+    app.state.calibration_in_progress = False
+
     # CR-01 fix (code review): every one of these used to be omitted, which
     # left `SourceRunner.__init__`'s own "absent configuration" fallbacks in
     # force for the one runner the application actually builds -- no
@@ -397,6 +406,100 @@ async def get_transport() -> dict[str, str]:
     """
     config: Config = app.state.config
     return {"transport": config.server.transport}
+
+
+class CalibrationRunRequest(BaseModel):
+    placement_note: str = ""
+
+
+def _calibration_disabled_error() -> HTTPException:
+    """The client error both calibration routes return when
+    `calibration.route_enabled` is off, the shipped default (T-02-47).
+
+    Registered unconditionally and checked at request time, never
+    registered conditionally: a disabled route must be distinguishable
+    from a route nobody wrote, which is exactly what Phase 3's wizard
+    needs to be able to tell apart (this plan's own objective).
+    """
+    return HTTPException(
+        status_code=403,
+        detail=(
+            "echo-path calibration is disabled -- set calibration.route_enabled: true "
+            "to allow this route. It makes a real home play a sound and record the "
+            "room; Phase 2 has no authentication in front of it yet (WEB-01/WEB-04 "
+            "add that in Phase 3)."
+        ),
+    )
+
+
+def _calibration_response(calibration: EchoCalibration, now: datetime) -> dict[str, Any]:
+    """Everything a caller needs to show a result or an age -- never the
+    camera's own configuration, never a URL. Every field here is either a
+    measured number, an identifier, or operator-supplied text, mirroring
+    `EchoCalibration`'s own field-level guarantee (`calibration/record.py`).
+    T-02-48's own test asserts this against the JSON-serialized body, not
+    just this dict, since a route is where a stray field would actually
+    escape.
+    """
+    return {
+        "delay_s": calibration.delay_s,
+        "gain": calibration.gain,
+        "confidence": calibration.confidence,
+        "agc_verdict": calibration.agc_verdict,
+        "source": calibration.source,
+        "placement_note": calibration.placement_note,
+        "taken_at": calibration.taken_at.isoformat(),
+        "age_days": (now - calibration.taken_at).total_seconds() / 86400.0,
+    }
+
+
+@app.get("/calibration/echo-path")
+async def get_echo_path_calibration() -> dict[str, Any]:
+    """The last stored echo-path calibration and its age, or the
+    not-found status when nothing has been measured yet -- the state this
+    project ships in, not an error."""
+    config: Config = app.state.config
+    if not config.calibration.route_enabled:
+        raise _calibration_disabled_error()
+    calibration = find_latest_calibration(config.calibration.dir)
+    if calibration is None:
+        raise HTTPException(status_code=404, detail="no echo-path calibration has been taken yet")
+    return _calibration_response(calibration, datetime.now(timezone.utc))
+
+
+@app.post("/calibration/echo-path/run")
+async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str, Any]:
+    """Run a live echo-path calibration against this process's own
+    camera source and speaker writer -- never a second RTSP connection or
+    a second FIFO writer alongside the ones `lifespan` already holds open.
+
+    Guarded by a single in-flight flag (T-02-51): a second request while a
+    run is already going gets a conflict, never a second probe playing at
+    the same time as the first.
+    """
+    config: Config = app.state.config
+    if not config.calibration.route_enabled:
+        raise _calibration_disabled_error()
+    if app.state.calibration_in_progress:
+        raise HTTPException(status_code=409, detail="a calibration run is already in progress")
+
+    app.state.calibration_in_progress = True
+    try:
+        result = await run_echo_calibration(
+            app.state.camera_source,
+            app.state.speaker_writer,
+            config.camera,
+            config.calibration,
+            payload.placement_note,
+        )
+    finally:
+        app.state.calibration_in_progress = False
+
+    if result.failure_reason is not None:
+        raise HTTPException(status_code=422, detail=result.failure_reason)
+
+    assert result.calibration is not None
+    return _calibration_response(result.calibration, datetime.now(timezone.utc))
 
 
 class WebrtcOfferPayload(BaseModel):
