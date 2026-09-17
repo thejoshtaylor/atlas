@@ -19,6 +19,20 @@ dependencies = [
     "mcp>=2.2,<3",
     "aiortc>=1.15,<2",
     "pyyaml",
+    # Human-approved 2026-09-17 after RESEARCH.md's Package Legitimacy Audit
+    # returned [SUS] for all four (unknown-downloads/too-new/no-repository
+    # metadata gaps, not a content red flag) -- operator confirmed each
+    # PyPI project page and its source repository before this install ran
+    # (02-01-PLAN.md Task 1, gate="blocking-human", never auto-approved).
+    "openwakeword==0.6.0",
+    "vosk==0.3.44",
+    "onnxruntime>=1.30,<2",
+    # No version pin: this phase computes buffer/energy math against it
+    # directly rather than only inheriting it transitively through av/
+    # onnxruntime. Left unpinned deliberately -- see 02-01-SUMMARY.md for
+    # the resolved version, recorded the way 01.1-01-SUMMARY.md recorded
+    # jiter's cross-package pin conflict.
+    "numpy",
 ]
 
 [project.optional-dependencies]
