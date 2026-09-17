@@ -8,6 +8,7 @@ the resolved brain model id, and the entity catalog are all opened once in
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from spire_voice.config import Config, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
@@ -25,6 +27,7 @@ from spire_voice.providers.brain_xai import XaiBrain
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.timing import TurnTimings
+from spire_voice.transports.webrtc import WebrtcTransport, create_offer_answer
 from spire_voice.transports.websocket import WebSocketAudioSource
 from spire_voice.turn.controller import run_turn
 
@@ -102,6 +105,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     entities = _tool_result_json(entities_result)
     app.state.system_prompt = _system_prompt(entities if isinstance(entities, list) else [])
 
+    # Background WebRTC turns (see `webrtc_offer` below) run detached from
+    # the HTTP request that started them -- this set is what keeps asyncio
+    # from garbage-collecting a still-running task the moment the request
+    # handler returns, a well-known `asyncio.create_task` pitfall.
+    app.state.background_turns = set()
+
     yield
 
     await tool_host.aclose()
@@ -114,6 +123,77 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/transport")
+async def get_transport() -> dict[str, str]:
+    """The one thing the page needs to pick a transport without guessing.
+
+    Selected straight from `ServerConfig.transport` -- an unrecognized
+    value already stopped startup back in `config.py`, so by the time this
+    route can answer, the value is guaranteed to be one of the two the page
+    knows how to branch on.
+    """
+    config: Config = app.state.config
+    return {"transport": config.server.transport}
+
+
+class WebrtcOfferPayload(BaseModel):
+    sdp: str
+    type: str
+
+
+class WebrtcAnswerPayload(BaseModel):
+    sdp: str
+    type: str
+
+
+@app.post("/webrtc/offer")
+async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
+    """The one stateless request/response the WebRTC path signals over.
+
+    This route does not check `ServerConfig.transport` before answering --
+    it always exists and always answers whatever offer arrives. Which
+    transport gets *used* is a client-side decision the page makes from
+    `GET /transport`; this route has no second event channel of its own to
+    grow, matching the WebSocket transport's own single-socket shape.
+    """
+    transport = WebrtcTransport()
+    answer = await create_offer_answer(transport, {"sdp": offer.sdp, "type": offer.type})
+
+    config: Config = app.state.config
+    timings = TurnTimings()
+    task = asyncio.create_task(
+        _run_webrtc_turn(
+            transport,
+            app.state.stt,
+            app.state.brain,
+            app.state.tts,
+            app.state.tool_host,
+            app.state.tools_schema,
+            app.state.system_prompt,
+            config.brain.max_tool_rounds,
+            timings,
+        )
+    )
+    app.state.background_turns.add(task)
+    task.add_done_callback(app.state.background_turns.discard)
+
+    return WebrtcAnswerPayload(**answer)
+
+
+async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any) -> None:
+    """Run one turn against `transport`, then close its peer connection.
+
+    T-1-13 accepts the DoS risk of repeated offers because "a peer
+    connection is closed when its turn ends" -- the `finally` here is what
+    makes that true regardless of whether the turn finished cleanly or
+    raised.
+    """
+    try:
+        await run_turn(transport, *args)
+    finally:
+        await transport.close()
 
 
 @app.websocket("/ws/turn")
