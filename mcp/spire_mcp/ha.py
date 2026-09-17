@@ -21,6 +21,7 @@ model ever rewording it.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -134,14 +135,41 @@ async def handle_list_entities(
 
 mcp_server = MCPServer("spire-ha")
 
-# Built once at process start, never per call, matching `safety.py`'s own
-# `from_config` habit. The child process receives only `HA_URL`, `HA_TOKEN`,
-# and `PYTHONPATH` from its parent (see `mcp_client.py`) -- no `safety:`
-# config reaches this process, so the default policy applies here. A
-# database-backed, per-house policy threaded through the child process is
-# Phase 3 (CONTEXT.md); the generic deny domains/services in `safety.py`
-# already gate the destructive/administrative surface in the meantime.
-_policy: Policy = Policy.from_config(None)
+def _load_policy() -> Policy:
+    """Build this process's policy from the `safety:` block its parent sent.
+
+    This is the process that calls Home Assistant, so this is the process
+    whose policy decides. It cannot read the config file: it receives an
+    explicit env rather than an inherited one, which is what keeps
+    `XAI_API_KEY` out of here. `mcp_client.py` therefore sends the raw block
+    as JSON in `SPIRE_SAFETY`.
+
+    Absent means the operator wrote no `safety:` block, and `safety.py`'s
+    compiled defaults apply -- the generic destructive domains and services,
+    no entity rules.
+
+    Malformed is different, and fails closed by refusing to start. A policy
+    the operator wrote and this process could not parse must never degrade
+    into "no entity rules": that is the silent failure where a denylist looks
+    configured and enforces nothing. Dying at startup is loud, and the
+    operator finds out before a sentence does.
+
+    A database-backed, per-house policy is still Phase 3 (CONTEXT.md D-13);
+    reading it from configuration was always Phase 1's job.
+    """
+    raw = os.environ.get("SPIRE_SAFETY")
+    if raw is None:
+        return Policy.from_config(None)
+    try:
+        block = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"SPIRE_SAFETY is not valid JSON: {exc}") from exc
+    if block is not None and not isinstance(block, dict):
+        raise SystemExit(f"SPIRE_SAFETY must be a mapping, got {type(block).__name__}")
+    return Policy.from_config(block)
+
+
+_policy: Policy = _load_policy()
 _http_client: httpx.AsyncClient | None = None
 _base_url: str = ""
 _token: str = ""

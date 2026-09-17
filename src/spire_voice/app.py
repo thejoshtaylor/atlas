@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ha_url=ha_env.get("HA_URL", ""),
         ha_token=ha_env.get("HA_TOKEN", ""),
         mcp_root=MCP_ROOT,
+        safety_block=config.raw_safety,
     )
     app.state.tool_host = tool_host
     app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools)

@@ -23,6 +23,7 @@ directly can see it.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from contextlib import AsyncExitStack
@@ -41,11 +42,35 @@ class McpToolHost:
         self.session: ClientSession | None = None
         self.tools: list[Tool] = []
 
-    async def start(self, ha_url: str, ha_token: str, mcp_root: str | os.PathLike[str]) -> None:
+    async def start(
+        self,
+        ha_url: str,
+        ha_token: str,
+        mcp_root: str | os.PathLike[str],
+        safety_block: dict | None = None,
+    ) -> None:
+        """Spawn the tool server. `safety_block` is the raw `safety:` config.
+
+        The child is the process that actually calls Home Assistant, so it is
+        the process whose `Policy` decides. It cannot read the config file --
+        it receives an explicit env, not an inherited one, which is what keeps
+        `XAI_API_KEY` out of it -- so the block travels as JSON on that same
+        explicit env under `SPIRE_SAFETY`.
+
+        Passing `None` leaves the child on `safety.py`'s compiled defaults:
+        the generic destructive domains and services, and no entity rules. An
+        empty house policy is a real choice an operator can make; a policy the
+        operator wrote and the enforcing process never received is not, which
+        is why the child refuses to start on a malformed block rather than
+        quietly falling back to defaults.
+        """
+        env = {"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)}
+        if safety_block is not None:
+            env["SPIRE_SAFETY"] = json.dumps(safety_block)
         server_params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "spire_mcp.ha"],
-            env={"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)},
+            env=env,
         )
         read, write = await self._stack.enter_async_context(stdio_client(server_params))
         self.session = await self._stack.enter_async_context(ClientSession(read, write))

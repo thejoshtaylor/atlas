@@ -242,6 +242,12 @@ class Config:
     tts: TtsConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
+    # The `safety:` block exactly as written, kept alongside the parsed
+    # `policy` because the process that ENFORCES the policy is the MCP child,
+    # not this one. It receives an explicit env, not this Config object, so
+    # the block is forwarded to it verbatim rather than re-serialized from
+    # `Policy` -- one parser, in `safety.py`, on both sides of the boundary.
+    raw_safety: dict | None = None
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "Config":
@@ -257,6 +263,7 @@ class Config:
                 for name, server_raw in mcp_servers_raw.items()
             },
             policy=Policy.from_config(raw.get("safety")),
+            raw_safety=raw.get("safety"),
         )
 
 
