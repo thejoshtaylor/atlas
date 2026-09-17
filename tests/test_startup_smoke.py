@@ -65,6 +65,16 @@ _EXPECTED_STATE_ATTRS = [
     "macros",
     "filler_cache",
     "background_turns",
+    # Plan 02-03: the room-listens spine. None of these need a reachable
+    # camera, go2rtc, or wake model to land on `app.state` -- a camera that
+    # never connects, a speaker FIFO nobody reads yet, and a fake wake
+    # detector (below) are all expected, not-yet-reachable states, never
+    # startup errors (T-02-13).
+    "speaker_writer",
+    "wake_detector",
+    "camera_source",
+    "source_runners",
+    "source_runner_tasks",
 ]
 
 
@@ -151,11 +161,29 @@ async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voi
     return {text: b"" for text in texts}
 
 
+class _FakeWakeDetector:
+    """Stands in for `VoskWakeDetector`: the real one needs a model
+    directory that is a deployment artifact and is not in this repository
+    (RESEARCH.md Pitfall 3). This fake proves `lifespan`'s wiring lands the
+    detector on `app.state` without ever loading a real model."""
+
+    def process(self, chunk: bytes) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _fake_build_wake_detector(wake_config: object) -> _FakeWakeDetector:
+    return _FakeWakeDetector()
+
+
 def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
 
     with TestClient(app_module.app) as client:
         response = client.get("/transport")

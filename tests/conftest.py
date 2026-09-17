@@ -90,6 +90,68 @@ def fake_stt():
     return FakeStt
 
 
+class RecordingFakeStt:
+    """Like `FakeStt`, but actually drains `frames` and records every chunk
+    it received, byte-identical, before yielding its scripted events.
+
+    `FakeStt` "accepts and ignores" whatever audio it is handed -- it can
+    never prove VOICE-03 (nothing reaches the transcriber before a wake
+    hit) or PROV-07 (what it does receive is the camera's raw bytes, not a
+    decoded form), because it never touches the frames it is given.
+    `tests/test_room_tracer.py` uses this instead, precisely because it
+    IS a real consumer of `frames`.
+    """
+
+    def __init__(self, events: Sequence[object] = ()) -> None:
+        self._events = list(events)
+        self.received: list[bytes] = []
+
+    async def stream(self, frames, source_format: SourceFormat | None = None) -> AsyncIterator[object]:
+        async for chunk in frames:
+            self.received.append(chunk)
+        for event in self._events:
+            yield event
+
+
+@pytest.fixture
+def recording_fake_stt():
+    """Factory: `recording_fake_stt(events=[...])` builds a `RecordingFakeStt`."""
+    return RecordingFakeStt
+
+
+@dataclass
+class FakeWakeDetector:
+    """A `WakeDetector` that fires on a configurable chunk index.
+
+    `fire_at_call=0` (the default) fires on the very first chunk it is
+    handed -- the shape `test_room_tracer.py` wants, so nearly the whole
+    fixture stream is left for `RecordingFakeStt` to receive and prove
+    byte identity against. `score` is the fixed value every hit reports.
+    """
+
+    fire_at_call: int = 0
+    score: float = 1.0
+    calls: int = field(default=0, init=False)
+    closed: bool = field(default=False, init=False)
+
+    def process(self, chunk: bytes) -> "FakeWakeHit | None":
+        call_index = self.calls
+        self.calls += 1
+        if call_index != self.fire_at_call:
+            return None
+        return FakeWakeHit(score=self.score)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class FakeWakeHit:
+    """Structurally identical to `spire_voice.wake.base.WakeHit`."""
+
+    score: float
+
+
 class FakeBrain:
     """A streaming, tool-calling language model fake.
 

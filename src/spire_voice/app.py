@@ -9,6 +9,7 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -21,17 +22,22 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from spire_voice.config import Config, load_config
+from spire_voice.config import Config, WakeConfig, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
+from spire_voice.sources.runner import SourceRunner
+from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
 from spire_voice.timing import TurnTimings
+from spire_voice.transports.camera import CameraAudioSource
 from spire_voice.transports.webrtc import WebrtcTransport, create_offer_answer
 from spire_voice.transports.websocket import WebSocketAudioSource
 from spire_voice.turn import brain_race
 from spire_voice.turn.controller import run_turn
+from spire_voice.wake.base import WakeDetector, WakeError
+from spire_voice.wake.vosk_engine import VoskWakeDetector
 
 logger = logging.getLogger("spire_voice.app")
 
@@ -115,6 +121,77 @@ def _tool_result_json(result: Any) -> Any:
     return []
 
 
+def _build_wake_detector(wake_config: WakeConfig) -> WakeDetector:
+    """Build the wake engine `wake_config.engine` names.
+
+    A separate, easily monkeypatched function -- `tests/test_startup_smoke.py`
+    replaces this with a fake rather than exercising the real engine, since
+    the real one needs a model directory that is a deployment artifact and
+    is not in this repository (Task 1's own `<read_first>` note). A real
+    deployment missing that model directory hits `VoskWakeDetector`'s own
+    `WakeError` here and stops startup by name, which is the intended
+    behavior, not a bug this function papers over.
+    """
+    if wake_config.engine == "vosk":
+        return VoskWakeDetector(wake_config.vosk, wake_config.phrase)
+    raise WakeError(
+        f"wake.engine {wake_config.engine!r} has no implementation yet -- "
+        "openwakeword ships as configuration (PROJECT.md Key Decision) but "
+        "has no trained 'hey spire' model and no detector class in this "
+        "phase (RESEARCH.md Pitfall 3)"
+    )
+
+
+async def _open_speaker_writer(writer: FifoWriter) -> None:
+    """Open `writer` in the background, never inline in `lifespan`.
+
+    Opening a FIFO for writing blocks until a reader attaches
+    (`fifo_writer.py`'s own module docstring) -- doing this inline would
+    hang the whole application before the egress supervisor's `ffmpeg`
+    child (plan 02-03 Task 2) ever gets a chance to attach as that reader.
+    A failure here (the mount not existing yet, for instance) is logged and
+    leaves the writer unopened rather than crashing startup; the FIFO
+    reopen path (`FifoWriter`) has no fixed number of attempts, so this is
+    the only place the failure needs handling.
+    """
+    try:
+        await writer.open()
+    except SpeakerError:
+        logger.warning("speaker FIFO not yet available at startup", exc_info=True)
+
+
+def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], Any]:
+    """Build the one-argument `run_turn` caller `SourceRunner` needs.
+
+    A fresh `TurnTimings()` per call -- never shared across turns, the same
+    per-turn lifetime the WebSocket/WebRTC routes below already give it --
+    is why this returns a closure rather than a bound partial over a single
+    `TurnTimings` instance.
+    """
+
+    async def _run(source: Any) -> None:
+        timings = TurnTimings()
+        await run_turn(
+            source,
+            app.state.stt,
+            app.state.brain,
+            app.state.tts,
+            app.state.tool_host,
+            app.state.tools_schema,
+            app.state.catalog_prompt,
+            config.brain.max_tool_rounds,
+            timings,
+            config.stt.max_utterance_s,
+            tiers=app.state.tier_brains,
+            filler_after_ms=config.brain.filler_after_ms,
+            filler_cache=app.state.filler_cache,
+            macros=config.macros,
+            state_fetch=_make_state_fetch(app.state.tool_host),
+        )
+
+    return _run
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = load_config(CONFIG_PATH)
@@ -177,8 +254,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # handler returns, a well-known `asyncio.create_task` pitfall.
     app.state.background_turns = set()
 
+    # The room-listens spine (plan 02-03): the speaker FIFO, the wake
+    # detector, the camera source, and one `SourceRunner` task per source.
+    # Built as a list from the start, even holding one entry here -- plan
+    # 02-04 adds the second source, and a list that was always a list needs
+    # no restructuring.
+    speaker_writer = FifoWriter(config.speaker.fifo_path)
+    app.state.speaker_writer = speaker_writer
+    app.state.background_turns.add(asyncio.create_task(_open_speaker_writer(speaker_writer)))
+
+    wake_detector = _build_wake_detector(config.wake.resolve("camera"))
+    app.state.wake_detector = wake_detector
+
+    camera_source = CameraAudioSource(config.camera, speaker_writer)
+    camera_source.start()
+    app.state.camera_source = camera_source
+
+    camera_runner = SourceRunner(
+        "camera",
+        camera_source,
+        wake_detector,
+        camera_source.decode_for_detector,
+        _make_run_turn_for_source(app, config),
+    )
+    app.state.source_runners = [camera_runner]
+    app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]
+
     yield
 
+    for task in app.state.source_runner_tasks:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    await camera_source.close()
+    wake_detector.close()
+    await speaker_writer.close()
     await tool_host.aclose()
 
 
