@@ -110,3 +110,23 @@ class TierReply(BaseModel):
                 "it must not arrive disguised as a confident answer"
             )
         return self
+
+    @model_validator(mode="after")
+    def _confident_and_needs_tool_are_mutually_exclusive(self) -> "TierReply":
+        # WR-02: the field docstrings already claim these are mutually
+        # exclusive outcomes -- `confident` means the answer is complete with
+        # no tool call needed, `needs_tool` means one is required. Nothing
+        # enforced that until now, and `race_tiers` only ever reads
+        # `.confident`, so a reply carrying both flags `True` would win the
+        # race exactly like any ordinary confident reply. That is the direct
+        # mechanism feeding CR-01: a triage tier that has no tool schema and
+        # no code-level penalty for asserting confidence on an action
+        # request. Same impossible-by-construction treatment already given
+        # to the filler enum in this file.
+        if self.confident and self.needs_tool:
+            raise ValueError(
+                "a TierReply cannot be both confident and needs_tool -- confident means no "
+                "tool call is needed, needs_tool means one is required; a reply can claim at "
+                "most one of the two"
+            )
+        return self

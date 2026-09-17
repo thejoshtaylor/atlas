@@ -41,3 +41,13 @@ def test_filler_text_and_filler_phrase_do_not_drift():
 def test_confident_reply_must_carry_a_non_empty_answer():
     with pytest.raises(ValidationError):
         TierReply(answer="", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+
+
+def test_confident_and_needs_tool_cannot_both_be_true():
+    """WR-02: the two fields are documented as mutually exclusive outcomes.
+    Without this validator, a reply carrying both flags `True` passes
+    validation and would win a tier race exactly like any other confident
+    reply -- `race_tiers` only ever reads `.confident`, never `.needs_tool`.
+    """
+    with pytest.raises(ValidationError):
+        TierReply(answer="sure", confident=True, needs_tool=True, filler=FillerPhrase.LET_ME_CHECK)
