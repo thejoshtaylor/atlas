@@ -48,6 +48,7 @@ from fastapi.testclient import TestClient
 from mcp.types import Tool
 
 import spire_voice.app as app_module
+from spire_voice.transports.base import SourceFormat
 from spire_voice.turn.brain_race import TierBrain
 
 # Every attribute `lifespan` assigns to `app.state`, read off `app.py` by
@@ -84,11 +85,16 @@ _EXPECTED_STATE_ATTRS = [
 ]
 
 
-def _write_fake_config(tmp_path: Path) -> Path:
+def _write_fake_config(tmp_path: Path, *, extra: dict | None = None) -> Path:
     """A full config, shaped like `config.example.yaml`, with plainly
     fictional values -- no `${NAME}` placeholder and no `.env` read, since
     this test never expands the environment, matching `tests/test_config.py`
     `_minimal_raw_config()`'s convention: never a real host or entity id.
+
+    `extra` merges additional top-level sections (`camera`, `wake`, `gate`,
+    `barge_in`, ...) into the base dict below -- every key `Config.from_config`
+    reads is optional (`raw.get(name)`), so a caller only names the section
+    it actually needs a non-default value from.
     """
     raw = {
         "server": {"bind_host": "127.0.0.1", "port": 8080, "transport": "websocket"},
@@ -114,6 +120,7 @@ def _write_fake_config(tmp_path: Path) -> Path:
         },
         "safety": {},
     }
+    raw.update(extra or {})
     path = tmp_path / "smoke-config.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     return path
@@ -223,6 +230,7 @@ class _FakeCameraSource:
 
     def __init__(self, config: object, speaker: object, *, on_reconnect=None, **_kwargs: object) -> None:
         self.on_reconnect = on_reconnect
+        self._config = config
 
     def start(self) -> None:
         return None
@@ -236,6 +244,13 @@ class _FakeCameraSource:
 
     def decode_for_detector(self, chunk: bytes) -> bytes:
         return chunk
+
+    def source_format(self) -> SourceFormat:
+        # `app.py` calls this to size the `PrerollBuffer` it builds for the
+        # runner (CR-01 fix) -- read off the fake config's own `camera`
+        # section the same way the real `CameraAudioSource.source_format()`
+        # reads `CameraConfig`, rather than a value this fake invents.
+        return SourceFormat(encoding=self._config.encoding, sample_rate=self._config.sample_rate)
 
     async def close(self) -> None:
         return None
@@ -292,3 +307,72 @@ def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypa
             "on_reconnect must be the real ffmpeg_supervisor.handle_reconnect -- "
             "calling it did not reach the supervisor that owns the backchannel"
         )
+
+
+def test_camera_runner_is_wired_with_the_configured_gate_and_barge_in_policy(tmp_path, monkeypatch):
+    """CR-01 fix (code review): `app.py`'s only production `SourceRunner`
+    used to be built with none of `wake_config`/`gate_config`/
+    `barge_in_config`/`preroll` -- every one of `SourceRunner.__init__`'s
+    own "absent configuration" fallbacks then applied silently: refractory
+    0.0, an empty mute list, `BargeInConfig(enabled=False)` regardless of
+    what the config file said, and no `PrerollBuffer` at all. Two plans'
+    own SUMMARY files recorded this as a gap for a later plan to close, and
+    no later plan did -- `test_lifespan_starts_and_assigns_every_owned_resource`
+    above only asserts each resource is *assigned* to `app.state`, never
+    that it is *configured*, so nothing in the suite caught it either.
+
+    This sets distinctive, non-default values for every one of those four
+    and inspects the constructed runner's own resolved state directly --
+    the shape this test's own docstring, and CR-01's own Fix text, asks
+    for -- rather than a behavioral test that would need to boot a real STT/
+    brain/TTS pipeline just to observe a wake hit's side effects.
+    """
+    extra = {
+        "camera": {"preroll_ms": 640, "encoding": "alaw", "sample_rate": 8000},
+        "wake": {"refractory_s": 9.5},
+        "gate": {"mute_when_playing": ["media_player.example_smoke_test_tv"]},
+        "barge_in": {"min_duration_ms": 555},
+    }
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        runner = app_module.app.state.source_runners[0]
+
+        # The gate (WakeConfig.refractory_s + GateConfig.mute_when_playing,
+        # resolved against "camera") -- reading `WakeGate`'s own private
+        # state is what "inspects the constructed runner's resolved gate ...
+        # state" (CR-01's Fix text) actually means: there is no public
+        # accessor, and the previous bug's whole shape was this exact state
+        # silently resolving to its inert default.
+        assert runner._gate._refractory_s == 9.5, (
+            "wake_config was not threaded through to SourceRunner -- the "
+            "configured refractory window never takes effect"
+        )
+        assert runner._gate._mute_when_playing == ("media_player.example_smoke_test_tv",), (
+            "gate_config was not threaded through to SourceRunner -- a "
+            "configured mute_when_playing list is silently ignored"
+        )
+
+        # Barge-in: the resolved BargeInConfig, not the inert
+        # BargeInConfig(enabled=False) SourceRunner.__init__ falls back to
+        # when barge_in_config=None.
+        assert runner._barge_in_config.min_duration_ms == 555, (
+            "barge_in_config was not threaded through to SourceRunner -- "
+            "the configured value never reaches BargeInMonitor"
+        )
+
+        # Pre-roll: a PrerollBuffer sized from the camera's own declared
+        # format and config.camera.preroll_ms, not the "no preroll at all"
+        # default.
+        assert runner._preroll is not None, (
+            "no PrerollBuffer was constructed -- VOICE-06 never replays "
+            "pre-wake audio into the transcriber"
+        )
+        # alaw is 1 byte/sample at 8000 Hz: 8 bytes/ms * 640ms.
+        assert runner._preroll._max_bytes == 8 * 640

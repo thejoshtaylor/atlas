@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from spire_voice.audio.ring import PrerollBuffer
 from spire_voice.config import Config, WakeConfig, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.providers.stt_xai import XaiStt
@@ -304,12 +305,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     camera_source.start()
     app.state.camera_source = camera_source
 
+    # CR-01 fix (code review): every one of these used to be omitted, which
+    # left `SourceRunner.__init__`'s own "absent configuration" fallbacks in
+    # force for the one runner the application actually builds -- no
+    # refractory window, no gate, no pre-roll replay, and barge-in forced to
+    # `BargeInConfig(enabled=False)` regardless of what `config.example.yaml`
+    # said. `wake_config`/`gate_config`/`barge_in_config` are the *global*
+    # `Config` sections, not pre-resolved -- `SourceRunner.__init__` itself
+    # calls `.resolve("camera")` on each, the same way `wake_detector` above
+    # already resolves `config.wake` for engine selection. `is_media_playing`
+    # is left at its default (`None`, resolving to "nothing is ever playing"
+    # inside `WakeGate`): no real Home-Assistant-backed implementation exists
+    # yet, and `config.example.yaml`'s own `gate.mute_when_playing` ships
+    # empty, so the callable is never actually reached with the shipped
+    # default (`wake/gate.py`'s own short-circuit). Wiring a live one is
+    # future work, not something this fix pass invents untested.
+    preroll = PrerollBuffer(camera_source.source_format(), config.camera.preroll_ms)
+
     camera_runner = SourceRunner(
         "camera",
         camera_source,
         wake_detector,
         camera_source.decode_for_detector,
         _make_run_turn_for_source(app, config),
+        wake_config=config.wake,
+        gate_config=config.gate,
+        barge_in_config=config.barge_in,
+        preroll=preroll,
     )
     app.state.source_runners = [camera_runner]
     app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]
