@@ -28,6 +28,14 @@ imports `spire_voice.turn.brain_race` at load time; `brain_race.py` imports
 `_run_tool_rounds` back from this module, but only inside a function body
 (deferred past both modules' load), so the two import in either order with
 no cycle.
+
+Plan 01.1-05 inserts a macro check between the empty-transcript guard and
+the tier dispatch: a transcript matching a configured macro (`turn/macros.py`)
+never reaches the tier race at all (MACRO-02), and the macro's actions run
+through the same `tool_host.call_tool` / `allow_call` path a model-issued
+call uses. `turn/macros.py` imports `_is_error`/`_result_text` back from
+this module the same deferred, function-body way `brain_race.py` already
+does, so this module can import `turn.macros` at load time with no cycle.
 """
 
 from __future__ import annotations
@@ -40,10 +48,12 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
+from spire_voice.config import MacroConfig
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
 from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
+from spire_voice.turn.macros import fire_macro, match as match_macro
 
 logger = logging.getLogger("spire_voice.turn.controller")
 
@@ -126,20 +136,27 @@ async def run_turn(
     tiers: list[brain_race.TierBrain] | None = None,
     filler_after_ms: float = 600.0,
     filler_cache: Mapping[str, bytes] | None = None,
+    macros: tuple[MacroConfig, ...] = (),
 ) -> None:
-    """Drive one turn end to end: frames -> transcript -> tier race -> speech.
+    """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
     `max_utterance_s`, `clock`, `poll_interval_s`, `tiers`, `filler_after_ms`,
-    and `filler_cache` all default to their Phase 01 (or Phase 01 shape-only)
-    behavior, so every caller that predates this plan (the WebSocket/WebRTC
-    routes in `app.py`, the safety-integration test) keeps working
-    unmodified. `clock` exists so a test can drive the silence-timeout guard
-    and the filler deadline without waiting out the real configured duration
-    -- see `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+    `filler_cache`, and `macros` all default to their Phase 01 (or Phase 01
+    shape-only) behavior, so every caller that predates this plan (the
+    WebSocket/WebRTC routes in `app.py`, the safety-integration test) keeps
+    working unmodified. `clock` exists so a test can drive the silence-timeout
+    guard and the filler deadline without waiting out the real configured
+    duration -- see `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
 
     `tiers=None` wraps `brain` in a one-element tier list and races that --
     there is one code path, always the list; a one-entry list is the
     degenerate case, not a bypass.
+
+    `filler_cache` doubles as the macro-reply cache: `app.py`'s `lifespan`
+    (plan 01.1-05) precaches every macro's `reply` into the same dict it
+    builds every holding phrase into, so a macro's confirmation is served
+    through the exact `CachedTts` adapter the filler already uses -- no
+    second cache, no second miss-handling path.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -160,6 +177,31 @@ async def run_turn(
         # distinguishable in the log even though the reply path is shared.
         timings.turn_outcome = "timeout" if final is None else "empty_transcript"
         await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
+        await _emit_event(source, timings.to_event())
+        timings.log()
+        return
+
+    # The macro check runs here, before a single tier task is created:
+    # placed after the dispatch below, the model round trip would already
+    # have been paid and MACRO-02 would be false while every other
+    # behavioral test still passed. `match_macro` on an empty `macros` tuple
+    # (the default) always returns `None`, so a caller that predates this
+    # plan reaches the tier race exactly as before, at no observable cost.
+    matched_macro = match_macro(macros, final_text)
+    if matched_macro is not None:
+        outcome = await fire_macro(matched_macro, tool_host)
+        timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
+        # A macro reply is an answer, not a holding phrase -- it is the one
+        # utterance in this system that is both the answer and instant. On
+        # failure `outcome.cacheable` is always False (MacroOutcome's own
+        # doctrine): the failure text is composed at turn time from whichever
+        # action actually failed, so it was never precached, and this turn
+        # deliberately pays the live synthesis cost and loses the sub-1.5
+        # second claim. Losing it here is correct: CMD-07 forbids a cached
+        # confirmation of something that did not happen, and the latency
+        # cost is the honest price of not lying.
+        speaking_tts = CachedTts(filler_cache or {}) if outcome.cacheable else tts
+        await _speak(source, speaking_tts, timings, outcome.text, kind="answer")
         await _emit_event(source, timings.to_event())
         timings.log()
         return

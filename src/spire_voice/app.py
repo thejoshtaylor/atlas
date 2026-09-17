@@ -113,14 +113,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     entities = _tool_result_json(entities_result)
     app.state.system_prompt = _system_prompt(entities if isinstance(entities, list) else [])
 
-    # Every filler phrase plus every operator-configured extra (short
-    # confirmations, per `config.example.yaml`'s own `tts.precache` comment)
-    # is rendered once, here, against the browser sink -- Phase 1's only
-    # consumer. A failure here propagates uncaught, matching this function's
-    # existing posture toward `tool_host.start()`: a broken startup should
-    # stop the process, not start it half-configured with a filler path that
-    # will fall over on the first turn.
-    filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache]
+    app.state.macros = config.macros
+
+    # Every filler phrase, every operator-configured extra (short
+    # confirmations, per `config.example.yaml`'s own `tts.precache` comment),
+    # and every configured macro's `reply` is rendered once, here, against
+    # the browser sink -- Phase 1's only consumer. A macro reply missing
+    # from this list would raise at turn time instead of here (Pitfall 4,
+    # 01.1-RESEARCH.md), the exact silent-REST-call regression this precache
+    # step exists to prevent. A failure here propagates uncaught, matching
+    # this function's existing posture toward `tool_host.start()`: a broken
+    # startup should stop the process, not start it half-configured with a
+    # filler (or macro-reply) path that will fall over on the first turn.
+    filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in config.macros)]
     app.state.filler_cache = await precache_all(
         app.state.tts,
         Path(config.tts.cache_dir),
@@ -203,6 +208,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             tiers=app.state.tier_brains,
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
+            macros=config.macros,
         )
     )
     app.state.background_turns.add(task)
@@ -215,10 +221,11 @@ async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any
     """Run one turn against `transport`, then close its peer connection.
 
     `**kwargs` forwards `run_turn`'s keyword-only `tiers`/`filler_after_ms`/
-    `filler_cache` -- `*args` alone cannot carry them. Missing this forward
-    would leave the WebRTC transport silently running Phase 01's
-    single-model path while the WebSocket transport races tiers, which is
-    exactly the two-different-systems failure this plan exists to avoid.
+    `filler_cache`/`macros` -- `*args` alone cannot carry them. Missing this
+    forward would leave the WebRTC transport silently running Phase 01's
+    single-model path while the WebSocket transport races tiers (or skips
+    macros entirely, per plan 01.1-05), which is exactly the
+    two-different-systems failure this plan exists to avoid.
 
     T-1-13 accepts the DoS risk of repeated offers because "a peer
     connection is closed when its turn ends" -- the `finally` here is what
@@ -251,6 +258,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         tiers=websocket.app.state.tier_brains,
         filler_after_ms=config.brain.filler_after_ms,
         filler_cache=websocket.app.state.filler_cache,
+        macros=config.macros,
     )
 
 

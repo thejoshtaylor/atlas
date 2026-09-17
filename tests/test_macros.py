@@ -273,3 +273,212 @@ def test_normalize_still_exported_from_this_module():
     # Guards against an accidental rename/removal of plan 01.1-02's own
     # contribution while this plan extends the same file.
     assert normalize("Good  Night!") == "good night"
+
+
+# --- run_turn(): the macro check runs before the model (MACRO-02) ------
+#
+# These drive the full `run_turn` pipeline rather than `match`/`fire_macro`
+# in isolation -- the claim is about the turn, not about the matcher.
+
+
+class _RaisingToolHost:
+    """A tool host that fails the test the instant it is called.
+
+    Used to prove a code path never reaches the safety boundary at all --
+    a stronger claim than "the boundary denied it," which still requires a
+    call to have happened.
+    """
+
+    async def call_tool(self, name: str, arguments: dict):
+        raise AssertionError(f"tool_host.call_tool must not be called here, got: {name}")
+
+
+async def test_macro_hit_skips_brain(fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha):
+    """A phrase matching a configured macro skips the tier race entirely --
+    a macro is a latency mechanism, not only a convenience (MACRO-01)."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = _macro(phrase="good night", reply="good night")
+    policy = Policy.from_config({})
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    # An empty reply list: FakeBrain.chat raises AssertionError the instant
+    # it is called at all, so a regression fails loudly rather than by an
+    # unchecked counter reaching a nonzero value quietly.
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])
+    tool_host = _MacroToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        filler_cache={"good night": b"\x01\x02"},
+    )
+
+    assert brain.call_count == 0
+    assert timings.turn_outcome == "macro"
+
+
+async def test_macro_success_speaks_from_the_cache_with_zero_live_tts_calls(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = _macro(phrase="good night", reply="good night")
+    policy = Policy.from_config({})
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])  # the LIVE provider -- must never be touched
+    tool_host = _MacroToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        filler_cache={"good night": b"\x01\x02"},
+    )
+
+    assert len(tts.received_text) == 0
+    assert source.sent_audio == [b"\x01\x02"]
+    assert timings.turn_outcome == "macro"
+
+
+async def test_macro_failure_speaks_live_exactly_once_and_loses_the_cache(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """A macro whose action is refused pays the live synthesis cost --
+    CMD-07 forbids a cached confirmation of something that did not happen."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = _macro(
+        phrase="good night",
+        reply="good night",
+        actions=(
+            MacroActionConfig(
+                tool="ha_call_service",
+                arguments={
+                    "domain": "switch",
+                    "service": "turn_off",
+                    "entity_id": "switch.example_server_socket",
+                },
+            ),
+        ),
+    )
+    policy = Policy.from_config({"deny_entities": ["switch.example_server_socket"]})
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[b"\x03\x04"])
+    tool_host = _MacroToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        # Deliberately does not contain the failure text: a failure reason
+        # is composed at turn time and was never precached, so a lookup
+        # here would be the wrong path entirely if this branch ever tried it.
+        filler_cache={"good night": b"\x01\x02"},
+    )
+
+    assert tts.received_text == ["that one is off limits"]
+    assert timings.turn_outcome == "macro_failed"
+    assert len(fake_ha.requests) == 0
+
+
+async def test_empty_transcript_never_reaches_the_macro_check(fake_audio_source, fake_stt, fake_brain, fake_tts):
+    """VOICE-08's guard ends the turn before the macro check ever runs --
+    an empty transcript reaches neither the tier race nor a macro's tool
+    host."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = _macro(phrase="good night", reply="good night")
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        _RaisingToolHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+    )
+
+    assert timings.turn_outcome == "empty_transcript"
+    assert brain.call_count == 0
+
+
+async def test_a_transcript_matching_no_macro_still_reaches_the_tier_race(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """A macro check that costs nothing observable when it misses -- the
+    non-macro path is unchanged from Phase 01."""
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = _macro(phrase="good night", reply="good night")
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what time is it")])
+    brain = fake_brain(replies=[BrainReply(text="it is noon")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        _RaisingToolHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+    )
+
+    assert brain.call_count == 1
+    assert tts.received_text == ["it is noon"]
+    assert timings.turn_outcome == "completed"
