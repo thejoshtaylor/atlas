@@ -196,12 +196,55 @@ tts:
 
   # Short confirmations are the same handful of sentences forever. Rendering
   # them once to disk removes the whole TTS round trip from the common path.
+  # The startup precache also synthesizes every holding phrase (the closed
+  # filler-phrase set) and every macro's reply automatically, so the list
+  # below is the operator's own additions, not the whole set that gets
+  # rendered.
   cache_dir: "/data/tts-cache"
   precache:
     - "ok"
     - "done"
     - "sorry, i didn't catch that"
     - "i can't do that one"
+
+macros:
+  # Macros are the one path that skips the language model entirely
+  # (MACRO-02), and the only path that can complete end to end inside 1.5
+  # seconds, because the reply below is precached rather than synthesized at
+  # turn time. A phrase matches by exact comparison against a normalized
+  # transcript (lowercased, punctuation stripped, whitespace collapsed)
+  # against the macro's phrase and every alias -- there is no fuzzy matching
+  # and no embeddings, because a fuzzy match that fires the wrong macro
+  # switches real power (D-11). Every action below still passes the same
+  # allow_call safety check a model-issued tool call does, so a macro is a
+  # shortcut past the model and never past the boundary (D-12); the
+  # precached reply plays only after every action returns success.
+  #
+  # Postgres (Phase 3) and the webapp editor (Phase 4, MACRO-03) both read
+  # this same shape.
+  - phrase: "good night"
+    aliases: ["goodnight", "night night"]
+    reply: "good night"
+    actions:
+      - tool: "ha_call_service"
+        arguments:
+          domain: "switch"
+          service: "turn_off"
+          entity_id: "switch.example_fan"
+      - tool: "ha_call_service"
+        arguments:
+          domain: "light"
+          service: "turn_off"
+          entity_id: "light.example_lamp"
+
+  - phrase: "movie time"
+    reply: "ok"
+    actions:
+      - tool: "ha_call_service"
+        arguments:
+          domain: "light"
+          service: "turn_off"
+          entity_id: "light.example_lamp"
 
 mcp:
   # Spoken over stdio to a child process. The tool server is never exposed to

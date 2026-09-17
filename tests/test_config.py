@@ -337,3 +337,50 @@ def test_config_and_turn_macros_import_in_either_order():
 
     importlib.reload(spire_voice.turn.macros)
     importlib.reload(spire_voice.config)
+
+
+# --- Task 3: the two tts: precache keys, wired end to end ---
+
+
+def test_tts_config_parses_cache_dir_and_precache():
+    from spire_voice.config import TtsConfig
+
+    tts = TtsConfig.from_config({"cache_dir": "/tmp/cache", "precache": ["ok", "done"]})
+    assert tts.cache_dir == "/tmp/cache"
+    assert tts.precache == ("ok", "done")
+
+
+def test_tts_config_defaults_cache_dir_and_precache_when_absent():
+    from spire_voice.config import TtsConfig
+
+    tts = TtsConfig.from_config({})
+    assert tts.cache_dir == "/data/tts-cache"
+    assert tts.precache == ()
+
+
+def test_example_config_loads_end_to_end(monkeypatch):
+    from spire_voice.config import load_config
+
+    for name in (
+        "XAI_API_KEY",
+        "TAPO_USER",
+        "TAPO_PASSWORD",
+        "SPEAKER_ENSURE_URL",
+        "HA_URL",
+        "HA_TOKEN",
+    ):
+        monkeypatch.setenv(name, "test-value")
+
+    config = load_config("config/config.example.yaml")
+
+    assert len(config.brain.models) == 3
+    assert config.brain.top_tier.model == "grok-4.6"
+    assert len(config.macros) == 2
+    assert config.macros[0].normalized_keys == {"good night", "goodnight", "night night"}
+    assert config.tts.cache_dir == "/data/tts-cache"
+    assert config.tts.precache == (
+        "ok",
+        "done",
+        "sorry, i didn't catch that",
+        "i can't do that one",
+    )

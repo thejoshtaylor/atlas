@@ -253,6 +253,11 @@ class TtsConfig:
     # a long sentence, short enough that a hung call cannot hold a turn open
     # past the point an operator would have given up and spoken again.
     request_timeout_s: float = 20.0
+    # config.example.yaml has declared both of these since Phase 01; this is
+    # wiring an already-declared key, not inventing one. Both are optional --
+    # unlike brain.models, an absent tts: block should not stop startup.
+    cache_dir: str = "/data/tts-cache"
+    precache: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "TtsConfig":
@@ -270,6 +275,8 @@ class TtsConfig:
                 "optimize_streaming_latency", cls.optimize_streaming_latency
             ),
             request_timeout_s=float(raw.get("request_timeout_s", cls.request_timeout_s)),
+            cache_dir=raw.get("cache_dir", cls.cache_dir),
+            precache=tuple(raw.get("precache", cls.precache)),
         )
 
 
