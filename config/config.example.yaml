@@ -73,6 +73,16 @@ speaker:
 wake:
   # openwakeword | vosk
   #
+  # wake-default-evidence: provisional
+  #
+  # The line above is the one machine-readable statement of whether this
+  # default came from a score. A test (tests/test_score_wake_engines.py)
+  # fails the whole suite if DBG-04 is marked complete in
+  # .planning/REQUIREMENTS.md while this line still says provisional, and
+  # fails it the other way too if this line ever says measured while
+  # DBG-04 stays unmarked -- see docs/runbooks/wake-engine-corpus.md for
+  # the recording session and the scoring run that change it, together.
+  #
   # Vosk ships live today. This is PROVISIONAL, not measured (D-08): plan
   # 02-09 built scripts/capture_wake_corpus.py and scripts/score_wake_engines.py,
   # the harness that scores both engines offline against identical recorded

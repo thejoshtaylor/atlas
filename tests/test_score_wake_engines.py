@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -612,3 +614,82 @@ def test_main_with_an_unwritable_report_out_fails_before_any_engine_loads(tmp_pa
 
     assert exit_code == 1
     assert "error:" in capsys.readouterr().err
+
+
+# --- the wake-default-evidence line (plan 02-13, Task 2) --------------------
+
+_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"
+_RUNBOOK_PATH = _REPO_ROOT / "docs" / "runbooks" / "wake-engine-corpus.md"
+
+
+def test_real_config_has_exactly_one_wake_default_evidence_line():
+    evidence = score_wake_engines.parse_wake_default_evidence(_CONFIG_PATH.read_text())
+
+    assert evidence.classification in ("provisional", "measured")
+
+
+def test_parse_wake_default_evidence_provisional_requires_nothing_further():
+    evidence = score_wake_engines.parse_wake_default_evidence(
+        "wake:\n  # wake-default-evidence: provisional\n"
+    )
+
+    assert evidence.classification == "provisional"
+    assert evidence.date is None
+    assert evidence.positives is None
+    assert evidence.negative_duration_s is None
+
+
+def test_parse_wake_default_evidence_measured_requires_date_positives_and_duration():
+    text = (
+        "wake:\n  # wake-default-evidence: measured date=2026-09-20 "
+        "positives=24 negative_duration_s=185.3\n"
+    )
+
+    evidence = score_wake_engines.parse_wake_default_evidence(text)
+
+    assert evidence.classification == "measured"
+    assert evidence.date == "2026-09-20"
+    assert evidence.positives == 24
+    assert evidence.negative_duration_s == pytest.approx(185.3)
+
+
+def test_parse_wake_default_evidence_measured_missing_fields_raises():
+    with pytest.raises(ValueError):
+        score_wake_engines.parse_wake_default_evidence("wake:\n  # wake-default-evidence: measured\n")
+
+
+def test_parse_wake_default_evidence_rejects_zero_or_multiple_lines():
+    with pytest.raises(ValueError):
+        score_wake_engines.parse_wake_default_evidence("wake:\n  engine: vosk\n")
+    with pytest.raises(ValueError):
+        score_wake_engines.parse_wake_default_evidence(
+            "wake:\n  # wake-default-evidence: provisional\n  # wake-default-evidence: provisional\n"
+        )
+
+
+def test_runbook_names_only_scripts_that_exist():
+    text = _RUNBOOK_PATH.read_text()
+    referenced = set(re.findall(r"scripts/[\w.\-]+\.(?:py|sh)", text))
+
+    assert referenced, "expected the runbook to name at least one script"
+    for rel_path in referenced:
+        path = _REPO_ROOT / rel_path
+        assert path.exists(), f"{rel_path} named in the runbook does not exist"
+        if rel_path.endswith(".sh"):
+            assert os.access(path, os.X_OK), f"{rel_path} is not executable"
+
+
+def test_runbook_states_the_same_floor_score_wake_engines_enforces():
+    text = _RUNBOOK_PATH.read_text()
+    match = re.search(r"floor is \*\*(\d+)\*\*", text)
+
+    assert match is not None, "expected the runbook to state the floor as **N** somewhere"
+    assert int(match.group(1)) == score_wake_engines._FLOOR_POSITIVES
+
+
+def test_runbook_names_the_two_closing_edits_and_the_coupling_test():
+    text = _RUNBOOK_PATH.read_text()
+
+    assert "wake-default-evidence" in text
+    assert "DBG-04" in text
+    assert "fails" in text.lower()
