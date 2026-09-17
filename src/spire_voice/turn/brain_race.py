@@ -52,6 +52,24 @@ class TierBrain:
     calls_tools: bool
 
 
+@dataclass
+class ToolCommitment:
+    """A mutable, per-turn flag: set True the instant the top tier's tool
+    round makes a real call to the tool host.
+
+    CR-01: a cancelled tool call has no rollback -- once this is True, a
+    stdio round trip to the MCP child has already happened and cannot be
+    un-sent. `race_tiers` must not let a triage tier's confident reply end
+    the race in the top tier's place once this is True; only the top tier's
+    own settled outcome may describe what actually happened. One instance
+    is created per turn in `controller.run_turn` and threaded through both
+    `run_top_tier` (which sets it) and `race_tiers` (which reads it) -- it
+    is not shared across turns.
+    """
+
+    committed: bool = False
+
+
 def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
     """One `TierBrain` per `brain.models` entry, in list order.
 
@@ -105,6 +123,7 @@ async def run_top_tier(
     messages: list[dict[str, Any]],
     max_tool_rounds: int,
     timings: Any,
+    commitment: ToolCommitment | None = None,
 ) -> TierReply:
     """The existing, unmodified tool-calling loop, then one structured
     envelope call over the settled conversation.
@@ -128,7 +147,9 @@ async def run_top_tier(
     # always succeeds.
     from spire_voice.turn.controller import _run_tool_rounds
 
-    settled_text = await _run_tool_rounds(tier.brain, tool_host, tools_schema, messages, max_tool_rounds, timings)
+    settled_text = await _run_tool_rounds(
+        tier.brain, tool_host, tools_schema, messages, max_tool_rounds, timings, commitment=commitment
+    )
 
     if tier.envelope_client is None:
         # The degenerate one-tier case (`run_turn`'s `tiers=None` default):
@@ -147,7 +168,10 @@ async def run_top_tier(
     )
 
 
-async def race_tiers(tasks_by_index: dict[int, "asyncio.Task[TierReply]"]) -> TierReply:
+async def race_tiers(
+    tasks_by_index: dict[int, "asyncio.Task[TierReply]"],
+    commitment: ToolCommitment | None = None,
+) -> TierReply:
     """Resolve to the first confident reply, always breaking ties by index.
 
     Inside every `asyncio.wait` batch that contains more than one done task,
@@ -157,6 +181,14 @@ async def race_tiers(tasks_by_index: dict[int, "asyncio.Task[TierReply]"]) -> Ti
     reads: there is nothing above it to escalate to. A triage tier that
     raises is logged and dropped from the race; the top tier raising
     propagates, because there is no fallback behind it.
+
+    CR-01: once `commitment.committed` is True -- the top tier has already
+    made a real, uncancellable tool call this turn -- a triage tier's
+    confident reply is dropped rather than ending the race. Continuing to
+    wait for the top tier's own outcome is the only choice that cannot
+    discard an already-executed side effect; `commitment=None` (the
+    default) preserves the exact prior behavior for any caller that races
+    tiers with no top-tier tool round at all.
 
     When a winner is found, every still-pending task is cancelled and its
     unwind is awaited (`return_exceptions=True`) before this function
@@ -187,7 +219,16 @@ async def race_tiers(tasks_by_index: dict[int, "asyncio.Task[TierReply]"]) -> Ti
                         raise
                     logger.exception("triage tier %d raised; dropped from the race", index)
                     continue
-                if reply.confident or index == top_index:
+                if index == top_index:
+                    winner = reply
+                    break
+                if reply.confident:
+                    if commitment is not None and commitment.committed:
+                        # The top tier already reached the tool host this
+                        # turn -- its own outcome is the only one allowed to
+                        # end the race now (CR-01). Drop this reply and keep
+                        # waiting.
+                        continue
                     winner = reply
                     break
     except Exception:

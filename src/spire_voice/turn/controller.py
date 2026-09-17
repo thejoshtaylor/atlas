@@ -303,16 +303,24 @@ async def run_turn(
         # and no instructor client -- working unchanged.
         tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]
 
+    # CR-01: one instance per turn, shared between the top tier's tool
+    # round and the race -- set True the instant a real tool call is made,
+    # so a triage tier's confident reply can no longer end the race in the
+    # top tier's place once its action is no longer cancellable.
+    commitment = brain_race.ToolCommitment()
+
     tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
     for tier in tiers:
         tier_messages = list(messages)
         if tier.calls_tools:
-            coro = brain_race.run_top_tier(tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings)
+            coro = brain_race.run_top_tier(
+                tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings, commitment
+            )
         else:
             coro = brain_race.run_triage_tier(tier, tier_messages)
         tier_tasks[tier.index] = asyncio.create_task(coro)
 
-    race_task = asyncio.create_task(brain_race.race_tiers(tier_tasks))
+    race_task = asyncio.create_task(brain_race.race_tiers(tier_tasks, commitment))
 
     filler_deadline = clock() + filler_after_ms / 1000
     first_filler: FillerPhrase | None = None
@@ -426,6 +434,7 @@ async def _run_tool_rounds(
     messages: list[dict[str, Any]],
     max_tool_rounds: int,
     timings: TurnTimings,
+    commitment: "brain_race.ToolCommitment | None" = None,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
@@ -433,6 +442,13 @@ async def _run_tool_rounds(
     misunderstanding, not a complex request (per `BrainConfig.max_tool_rounds`'s
     own doctrine) -- the turn ends by saying so, never with a success
     confirmation, per CMD-01's transparency prohibition.
+
+    `commitment`, when given, is set the instant a call to `tool_host.call_tool`
+    returns -- whichever way it resolved (CR-01). A stdio round trip to the
+    MCP child cannot be un-sent once dispatched, so from that point on
+    `race_tiers` must not let a triage tier's confident reply end the race
+    in this tier's place; only this tier's own settled outcome may describe
+    what actually happened.
     """
     for _round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
@@ -467,6 +483,8 @@ async def _run_tool_rounds(
 
         for i, tc in enumerate(reply.tool_calls):
             result = await tool_host.call_tool(tc.name, tc.arguments)
+            if commitment is not None:
+                commitment.committed = True
             content_text = _result_text(result)
             if _is_error(result):
                 # An error-shaped result short-circuits straight to speech --

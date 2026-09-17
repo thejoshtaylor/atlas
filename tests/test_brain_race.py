@@ -427,3 +427,144 @@ async def test_race_tiers_cancels_pending_siblings_when_the_top_tier_itself_rais
 
     assert triage_task.cancelled()
     assert triage_finally_ran
+
+
+async def test_a_committed_top_tier_cannot_lose_the_race_to_a_confident_triage_reply():
+    """CR-01, at the `race_tiers` unit level: once the top tier has made a
+    real, uncancellable tool call (`commitment.committed=True`), a triage
+    tier's confident reply must not end the race in its place. Without the
+    fix, `race_tiers` ends the instant any confident reply lands regardless
+    of what the top tier has already done to the house.
+    """
+    import asyncio
+
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    commitment = brain_race.ToolCommitment(committed=True)
+
+    triage_reply = TierReply(
+        answer="Sure, I'll handle that.", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+    top_reply = TierReply(
+        answer="turned off the lamp", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+
+    async def _triage() -> TierReply:
+        return triage_reply
+
+    async def _top() -> TierReply:
+        await asyncio.sleep(0.01)
+        return top_reply
+
+    tasks = {0: asyncio.create_task(_triage()), 1: asyncio.create_task(_top())}
+    winner = await brain_race.race_tiers(tasks, commitment=commitment)
+
+    assert winner is top_reply
+
+
+async def test_a_committed_top_tier_survives_a_confident_triage_reply_end_to_end(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """CR-01, end to end through `run_turn`: the top tier calls a tool in
+    round 1 (a real, uncancellable action against the fake house), then is
+    slow to settle round 2. A faster triage tier answers `confident=True`
+    while round 2 is still in flight. The operator must hear the top tier's
+    own eventual answer, not the triage tier's -- and the tool host must
+    show exactly the one call the top tier made, proving the race did not
+    end mid-action.
+
+    Without the fix, `race_tiers` ends the instant the triage tier's
+    confident reply lands, `tts.received_text` becomes the triage tier's
+    generic non-confirmation, and nothing in the turn's own output reveals
+    that the top tier's tool call already happened.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    class _RecordingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    class _TwoRoundBrain:
+        """Round 1 calls a tool with no delay; round 2 is slow enough for a
+        fast triage tier's confident reply to land first."""
+
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        async def chat(self, messages, tools=None) -> BrainReply:
+            self.call_count += 1
+            if self.call_count == 1:
+                return BrainReply(
+                    tool_calls=[
+                        ToolCall(
+                            name="ha_call_service",
+                            arguments={
+                                "domain": "light",
+                                "service": "turn_off",
+                                "entity_id": "light.example_lamp",
+                            },
+                        )
+                    ]
+                )
+            await asyncio.sleep(0.05)
+            return BrainReply(text="turned off the lamp, still working on the fan")
+
+    triage_reply = TierReply(
+        answer="Sure, I'll handle that.", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=triage_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+
+    top_answer = "turned off the lamp, still working on the fan"
+    top_reply = TierReply(answer=top_answer, confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+    top_brain = _TwoRoundBrain()
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    tool_host = _RecordingToolHost()
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the lamp and the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=1000,
+        filler_cache=None,
+    )
+
+    assert tool_host.calls == [
+        ("ha_call_service", {"domain": "light", "service": "turn_off", "entity_id": "light.example_lamp"})
+    ]
+    assert tts.received_text == [top_answer]
