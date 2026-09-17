@@ -178,6 +178,11 @@ class FakeEnvelopeClient:
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
 
     async def _create(self, **kwargs: Any) -> object:
+        # D-05's structural guarantee, enforced here rather than only by
+        # inspection: an envelope call -- triage or top tier -- never
+        # carries a `tools` keyword. `run_top_tier`'s tool rounds go through
+        # `tool_host.call_tool`, never through this client.
+        assert "tools" not in kwargs, "an envelope call must never carry a 'tools' keyword (D-05)"
         self.calls.append(kwargs)
         if self._delay_s:
             await asyncio.sleep(self._delay_s)
