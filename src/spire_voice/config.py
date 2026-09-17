@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 
 import yaml
 
@@ -410,9 +410,11 @@ class SessionConfig:
 
 def _validate_and_normalize_override(cls: type, raw_override: dict, label: str) -> dict:
     """Validate `raw_override`'s keys against `cls`'s own fields, coercing a
-    list into a tuple for any field whose global default is a tuple --
-    matching what `from_config` would have done had the same value arrived
-    globally rather than per-source.
+    list into a tuple for any field whose global default is a tuple, and
+    rebuilding a nested sub-config field (one built via
+    `field(default_factory=...)`, such as `WakeConfig.openwakeword`) through
+    its own `from_config` -- matching what `from_config` would have done had
+    the same value arrived globally rather than per-source.
 
     Shared by `WakeConfig`, `GateConfig` and `BargeInConfig`'s per-source
     overrides (D-04, D-12): one shape, reused three times, rather than a
@@ -420,16 +422,41 @@ def _validate_and_normalize_override(cls: type, raw_override: dict, label: str) 
     naming the first field `cls` does not have -- an override targeting a
     typo'd field name silently doing nothing is the failure mode this
     validation exists for.
+
+    A field built via `default_factory` has no class-level attribute at all
+    (`getattr(cls, key, None)` returns `None` for it, the same as for any
+    other unset name) -- `fields(cls)` is consulted instead, so a raw dict
+    naming a real nested field (`wake.sources.camera.openwakeword`, say)
+    cannot slip through untouched. Left unhandled, that raw dict would pass
+    this validation (the field name is real) and only fail much later, as
+    an `AttributeError` inside `_resolve_threshold`, when a caller expects a
+    real sub-config and gets a plain `dict` instead -- exactly the "raised,
+    not returned" doctrine this module states for itself (module docstring)
+    being silently missed for one specific field shape (found in code
+    review).
     """
-    valid_fields = {f.name for f in fields(cls) if f.name != "sources"}
+    field_by_name = {f.name: f for f in fields(cls) if f.name != "sources"}
     normalized: dict = {}
     for key, value in raw_override.items():
-        if key not in valid_fields:
+        field_def = field_by_name.get(key)
+        if field_def is None:
             raise ConfigError(
                 f"{label} sets unknown field {key!r} -- valid fields are "
-                f"{sorted(valid_fields)!r}"
+                f"{sorted(field_by_name)!r}"
             )
         default_value = getattr(cls, key, None)
+        if default_value is None and field_def.default_factory is not MISSING:
+            nested_default = field_def.default_factory()
+            nested_from_config = getattr(type(nested_default), "from_config", None)
+            if nested_from_config is not None:
+                if not isinstance(value, dict):
+                    raise ConfigError(
+                        f"{label}.{key} must be a mapping, not "
+                        f"{type(value).__name__} -- it configures a nested "
+                        f"{type(nested_default).__name__} block"
+                    )
+                normalized[key] = nested_from_config(value)
+                continue
         if isinstance(default_value, tuple) and not isinstance(value, tuple):
             if isinstance(value, str):
                 raise ConfigError(f"{label}.{key} must be a list, not a string")

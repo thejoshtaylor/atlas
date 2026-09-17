@@ -484,3 +484,44 @@ def test_wake_threshold_survives_the_load_as_a_float_with_no_rounding():
     wake = WakeConfig.from_config({"openwakeword": {"threshold": 0.123456}})
     assert wake.openwakeword.threshold == 0.123456
     assert isinstance(wake.openwakeword.threshold, float)
+
+
+def test_wake_source_override_of_a_nested_engine_block_builds_a_real_subconfig():
+    """WR-01 fix: `openwakeword`/`vosk` are built via
+    `field(default_factory=...)`, so `getattr(WakeConfig, "openwakeword",
+    None)` is `None` -- before this fix, `_validate_and_normalize_override`
+    only knew how to coerce a field whose *global* default was a `tuple`,
+    so a per-source override of a nested engine block passed through as a
+    raw `dict` untouched. `WakeConfig.resolve("camera").openwakeword` would
+    then be a `dict`, not an `OpenWakeWordConfig`, and the very next
+    `_resolve_threshold(...)` call in `sources/runner.py` would raise
+    `AttributeError: 'dict' object has no attribute 'threshold'` at
+    startup -- a crash whose message does not point at the actual mistake,
+    contradicting this module's own "raised, not returned" doctrine."""
+    from spire_voice.config import OpenWakeWordConfig, WakeConfig
+
+    wake = WakeConfig.from_config(
+        {
+            "engine": "openwakeword",
+            "sources": {"camera": {"openwakeword": {"threshold": 0.9}}},
+        }
+    )
+    resolved = wake.resolve("camera").openwakeword
+    assert isinstance(resolved, OpenWakeWordConfig), (
+        f"a per-source openwakeword override must build a real OpenWakeWordConfig, "
+        f"not a {type(resolved).__name__}"
+    )
+    assert resolved.threshold == 0.9
+    # The rest of the sub-config falls back to OpenWakeWordConfig's own
+    # defaults, the same as a top-level `openwakeword:` block would.
+    assert resolved.model_path == OpenWakeWordConfig().model_path
+    # The *global* wake config is untouched by the per-source override.
+    assert wake.openwakeword.threshold == OpenWakeWordConfig().threshold
+
+
+def test_wake_source_override_of_a_nested_engine_block_rejects_a_non_mapping():
+    from spire_voice.config import ConfigError, WakeConfig
+
+    with pytest.raises(ConfigError) as exc:
+        WakeConfig.from_config({"sources": {"camera": {"openwakeword": 0.9}}})
+    assert "openwakeword" in str(exc.value)
