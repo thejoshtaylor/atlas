@@ -36,6 +36,18 @@ through the same `tool_host.call_tool` / `allow_call` path a model-issued
 call uses. `turn/macros.py` imports `_is_error`/`_result_text` back from
 this module the same deferred, function-body way `brain_race.py` already
 does, so this module can import `turn.macros` at load time with no cycle.
+
+Plan 01.1-06 starts a caller-supplied `state_fetch` awaitable as a task
+immediately after the turn starts -- before `_drain_to_final_transcript` is
+ever awaited -- so it overlaps the operator still speaking and has usually
+finished before the transcript is final (D-15). Its result becomes the
+second of three messages a tier sees: a stable catalog system message (the
+`system_prompt` positional, unchanged in shape), a volatile state system
+message built from the fetch, and the user message. `_state_message` lives
+in `app.py` alongside `_catalog_prompt` (D-14); this module reaches it with
+the same deferred, function-body import `brain_race.py` already uses for
+`_run_tool_rounds`, since `app.py` imports `run_turn` back from this module
+at load time.
 """
 
 from __future__ import annotations
@@ -145,16 +157,18 @@ async def run_turn(
     filler_after_ms: float = 600.0,
     filler_cache: Mapping[str, bytes] | None = None,
     macros: tuple[MacroConfig, ...] = (),
+    state_fetch: Callable[[], Any] | None = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
     `max_utterance_s`, `clock`, `poll_interval_s`, `tiers`, `filler_after_ms`,
-    `filler_cache`, and `macros` all default to their Phase 01 (or Phase 01
-    shape-only) behavior, so every caller that predates this plan (the
-    WebSocket/WebRTC routes in `app.py`, the safety-integration test) keeps
-    working unmodified. `clock` exists so a test can drive the silence-timeout
-    guard and the filler deadline without waiting out the real configured
-    duration -- see `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+    `filler_cache`, `macros`, and `state_fetch` all default to their Phase 01
+    (or Phase 01 shape-only) behavior, so every caller that predates this
+    plan (the WebSocket/WebRTC routes in `app.py`, the safety-integration
+    test) keeps working unmodified. `clock` exists so a test can drive the
+    silence-timeout guard and the filler deadline without waiting out the
+    real configured duration -- see
+    `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
 
     `tiers=None` wraps `brain` in a one-element tier list and races that --
     there is one code path, always the list; a one-entry list is the
@@ -165,9 +179,27 @@ async def run_turn(
     builds every holding phrase into, so a macro's confirmation is served
     through the exact `CachedTts` adapter the filler already uses -- no
     second cache, no second miss-handling path.
+
+    `state_fetch`, when given, is an awaitable factory the caller supplies
+    -- never a tool-host call this function constructs itself, so this
+    module keeps knowing nothing about which tool provides state, the same
+    defaulting discipline `tiers`/`filler_cache`/`macros` already follow.
+    `state_fetch=None` (the default) produces the exact two-message list
+    (`system_prompt`, user text) this function always has; supplying it adds
+    a second, volatile system message built from the fetch's result, so a
+    tier sees three messages in catalog-state-user order (D-14).
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
+
+    # D-15: started here, before the drain below is ever awaited, so the
+    # fetch overlaps the operator still speaking and has usually finished by
+    # the time the transcript is final -- costing about nothing inside the
+    # measured budget. Started after the drain returns instead, it would pay
+    # its full latency inside that exact window. `state_fetch is None` skips
+    # the task entirely: no fetch, no cost, no behavior change for a caller
+    # that predates this plan.
+    state_task: asyncio.Task[Any] | None = asyncio.create_task(state_fetch()) if state_fetch is not None else None
 
     final = await _drain_to_final_transcript(
         source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
@@ -184,6 +216,7 @@ async def run_turn(
         # arrived and decoded to nothing). `turn_outcome` keeps the two
         # distinguishable in the log even though the reply path is shared.
         timings.turn_outcome = "timeout" if final is None else "empty_transcript"
+        await _cancel_state_task(state_task)
         await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
         await _emit_event(source, timings.to_event())
         timings.log()
@@ -197,6 +230,13 @@ async def run_turn(
     # plan reaches the tier race exactly as before, at no observable cost.
     matched_macro = match_macro(macros, final_text)
     if matched_macro is not None:
+        # A macro turn never builds the message list and never consumes the
+        # state fetch's result -- but the fetch was already started above
+        # (state_fetch does not know yet whether this turn will match a
+        # macro), so it must be cancelled and its cancellation awaited here,
+        # never left dangling. Same cancel-then-await shape `race_tiers`
+        # already uses for a losing tier -- not a second mechanism.
+        await _cancel_state_task(state_task)
         outcome = await fire_macro(matched_macro, tool_host)
         timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
         # A macro reply is an answer, not a holding phrase -- it is the one
@@ -220,10 +260,40 @@ async def run_turn(
         timings.log()
         return
 
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": final_text},
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    if state_task is not None:
+        # `state_task` was started before the drain above, so by now it has
+        # usually already finished -- this await rarely actually waits. A
+        # fetch that raised is logged and treated as "nothing known" rather
+        # than ending the turn: an assistant that cannot read current state
+        # can still take a command, and failing the whole turn over a
+        # stale-state fetch would be a worse outcome than answering without
+        # it (T-01.1-17).
+        try:
+            states_payload = await state_task
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("state fetch raised; continuing turn with no known state")
+            states_payload = []
+        states = (
+            {entity["entity_id"]: entity["state"] for entity in states_payload}
+            if isinstance(states_payload, list)
+            else {}
+        )
+        # Deferred, not module-level: `app.py` imports `run_turn` from this
+        # module at load time, so a module-level import here of anything
+        # from `app.py` would deadlock the two modules' load order. By the
+        # time this line actually runs, this module has always finished
+        # loading -- there is no way to call `run_turn` without importing
+        # `spire_voice.turn.controller` first -- so importing `app.py` here,
+        # even the first time, only ever fetches or finishes a module that
+        # cannot be mid-load on this side. Same deferred-import shape
+        # `brain_race.py` already uses for `_run_tool_rounds`.
+        from spire_voice.app import _state_message
+
+        messages.append({"role": "system", "content": _state_message(states)})
+    messages.append({"role": "user", "content": final_text})
 
     if tiers is None:
         # The degenerate one-tier case: no instructor client exists, so
@@ -275,6 +345,20 @@ async def run_turn(
     await _speak(source, tts, timings, winner.answer, kind="answer")
     await _emit_event(source, timings.to_event())
     timings.log()
+
+
+async def _cancel_state_task(state_task: "asyncio.Task[Any] | None") -> None:
+    """Cancel a still-pending state-fetch task and await its unwind.
+
+    Same cancel-then-gather shape `race_tiers` already uses for a tier that
+    lost the race -- reused rather than inventing a second mechanism for the
+    same kind of cleanup. A no-op if `state_task` is `None` or already done,
+    so every early-return call site can call this unconditionally.
+    """
+    if state_task is None or state_task.done():
+        return
+    state_task.cancel()
+    await asyncio.gather(state_task, return_exceptions=True)
 
 
 async def _drain_to_final_transcript(

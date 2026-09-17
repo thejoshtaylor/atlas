@@ -6,6 +6,7 @@ turn does not wedge the next one, and the tool-round cap -- are turned green
 by plan 01-05.
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -616,3 +617,321 @@ def test_cache_key_changes_with_any_field_and_is_stable_otherwise():
     assert cache_key("eve", "alaw", 24000, "one moment") != base
     assert cache_key("eve", "pcm", 8000, "one moment") != base
     assert cache_key("eve", "pcm", 24000, "let me check") != base
+
+
+# --- 01.1-06: the state fetch overlaps the drain, and a tier sees three
+# messages in catalog-state-user order (D-14, D-15) ----------------------
+
+
+class _RecordingBrain:
+    """A `_BrainProvider`-shaped double recording every `messages` list it
+    was called with, so a test can assert on message count/order/content
+    directly -- no tool round and no tier race in the way.
+    """
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.received_messages: list[list[dict]] = []
+
+    async def chat(self, messages, tools=None):
+        self.received_messages.append([dict(m) for m in messages])
+        if not self._replies:
+            raise AssertionError("_RecordingBrain.chat called more times than scripted")
+        return self._replies.pop(0)
+
+
+async def test_state_fetch_starts_before_the_transcript_is_drained(fake_audio_source, fake_brain, fake_tts):
+    """The state fetch is started before `_drain_to_final_transcript` is
+    ever awaited: recorded order, not elapsed time, is the assertion -- a
+    duration threshold is flaky on a loaded machine and proves less than an
+    ordering one.
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    order: list[str] = []
+
+    class _OrderRecordingStt:
+        """Actually consumes `frames()`, unlike `FakeStt` -- which ignores
+        its `frames` argument entirely and so could never prove an ordering
+        claim about frame consumption.
+        """
+
+        async def stream(self, frames):
+            async for _frame in frames:
+                order.append("first_frame_consumed")
+                break
+            yield FinalTranscript(text="what is the temperature")
+
+    async def _state_fetch():
+        order.append("state_fetch_started")
+        return []
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    brain = fake_brain(replies=[BrainReply(text="it is warm")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        _OrderRecordingStt(),
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_state_fetch,
+    )
+
+    assert order == ["state_fetch_started", "first_frame_consumed"]
+
+
+async def test_slow_state_fetch_is_awaited_not_abandoned(fake_audio_source, fake_stt, fake_brain, fake_tts):
+    """A state fetch slower than the transcript still completes the turn,
+    awaited rather than abandoned once the drain finishes first.
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    async def _slow_state_fetch():
+        await asyncio.sleep(0.05)
+        return [{"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"}]
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="is the lamp on")])
+    brain = fake_brain(replies=[BrainReply(text="yes, it's on")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_slow_state_fetch,
+    )
+
+    assert tts.received_text == ["yes, it's on"]
+    assert timings.turn_outcome == "completed"
+
+
+async def test_a_raising_state_fetch_still_reaches_speech(fake_audio_source, fake_stt, fake_brain, fake_tts):
+    """A state fetch that raises is logged and treated as no known state
+    rather than ending the turn (T-01.1-17): the assistant that cannot read
+    current state can still take a command.
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    async def _raising_state_fetch():
+        raise RuntimeError("home assistant unreachable")
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_raising_state_fetch,
+    )
+
+    assert tts.received_text == ["turned on the fan"]
+    assert timings.turn_outcome == "completed"
+
+
+async def test_three_messages_reach_the_tier_in_catalog_state_user_order(fake_audio_source, fake_stt, fake_tts):
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    async def _state_fetch():
+        return [{"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"}]
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="is the lamp on")])
+    brain = _RecordingBrain(replies=[BrainReply(text="yes, it's on")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="catalog: light.example_lamp",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_state_fetch,
+    )
+
+    assert len(brain.received_messages) == 1
+    messages = brain.received_messages[0]
+    assert [m["role"] for m in messages] == ["system", "system", "user"]
+    assert messages[0] == {"role": "system", "content": "catalog: light.example_lamp"}
+    assert "light.example_lamp" in messages[1]["content"]
+    assert "on" in messages[1]["content"]
+    assert messages[2] == {"role": "user", "content": "is the lamp on"}
+
+
+async def test_no_state_fetch_produces_the_old_two_message_list(fake_audio_source, fake_stt, fake_tts):
+    """`state_fetch=None` (the default) must not change Phase 01's shape --
+    every earlier test in this file drives `run_turn` this way and must
+    keep passing unmodified.
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert len(brain.received_messages) == 1
+    messages = brain.received_messages[0]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert messages[0] == {"role": "system", "content": "you control a home"}
+    assert messages[1] == {"role": "user", "content": "turn on the fan"}
+
+
+async def test_criterion_4_a_confident_triage_tier_answers_with_zero_tool_calls(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """An ordinary question the injected live state already covers is
+    answered by a triage tier with zero calls to the tool host and exactly
+    one inference pass -- the whole point of injecting live state at all.
+    The tool-host double raises on any call, so a regression fails loudly
+    rather than by an unchecked counter.
+    """
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    class _RaisingToolHost:
+        async def call_tool(self, name, arguments):
+            raise AssertionError(f"tool_host.call_tool must not be called here, got: {name}")
+
+    async def _state_fetch():
+        return [{"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"}]
+
+    triage_reply = TierReply(answer="yes, it's on", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=triage_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="is the lamp on")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        _RaisingToolHost(),
+        tools_schema=[],
+        system_prompt="catalog: light.example_lamp",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier],
+        state_fetch=_state_fetch,
+    )
+
+    assert tts.received_text == ["yes, it's on"]
+    assert len(triage_tier.envelope_client.calls) == 1
+
+
+async def test_macro_hit_cancels_a_started_state_fetch_without_leaving_it_dangling(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """A macro turn never consumes the state fetch's result -- but the fetch
+    was already started before the macro check ran, so it must be cancelled
+    and its cancellation awaited, never left dangling for asyncio to
+    complain about at garbage-collection time.
+    """
+    from spire_voice.config import MacroActionConfig, MacroConfig
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = MacroConfig(
+        phrase="good night",
+        aliases=(),
+        reply="good night",
+        actions=(
+            MacroActionConfig(
+                tool="ha_call_service",
+                arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+            ),
+        ),
+    )
+    policy = Policy.from_config(None)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    cancelled: list[bool] = []
+
+    async def _hanging_state_fetch():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        return []
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        filler_cache={"good night": b"\x01\x02"},
+        state_fetch=_hanging_state_fetch,
+    )
+
+    assert timings.turn_outcome == "macro"
+    assert cancelled == [True]
