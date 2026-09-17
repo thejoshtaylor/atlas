@@ -384,3 +384,103 @@ def test_example_config_loads_end_to_end(monkeypatch):
         "sorry, i didn't catch that",
         "i can't do that one",
     )
+
+    # Phase 2's six new sections: the example file and the parser drifting
+    # apart is the failure this block prevents.
+    assert config.camera.rtsp_url
+    assert config.speaker.fifo_path
+    assert config.wake.engine == "vosk"
+    assert config.gate.sources  # the browser override is written explicitly
+    assert config.barge_in.enabled is True
+    assert config.session.retain_days == 7
+
+
+# --- Task 3: one rejection test per Phase 2 configuration path ---
+
+
+def test_camera_config_rejects_an_unsupported_encoding():
+    from spire_voice.config import CameraConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        CameraConfig.from_config({"encoding": "opus"})
+    assert "opus" in str(exc.value)
+
+
+def test_speaker_config_rejects_a_non_positive_respawn_backoff():
+    from spire_voice.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerConfig.from_config({"respawn_backoff_s": 0})
+    with pytest.raises(ConfigError):
+        SpeakerConfig.from_config({"respawn_backoff_s": -1.0})
+
+
+def test_session_config_rejects_a_non_positive_retention():
+    from spire_voice.config import ConfigError, SessionConfig
+
+    with pytest.raises(ConfigError):
+        SessionConfig.from_config({"retain_days": 0})
+    with pytest.raises(ConfigError):
+        SessionConfig.from_config({"retain_days": -7})
+
+
+def test_wake_config_rejects_an_unknown_engine():
+    from spire_voice.config import ConfigError, WakeConfig
+
+    with pytest.raises(ConfigError) as exc:
+        WakeConfig.from_config({"engine": "shazam"})
+    assert "openwakeword" in str(exc.value)
+    assert "vosk" in str(exc.value)
+
+
+def test_gate_config_still_carrying_an_identity_key_is_a_startup_error():
+    from spire_voice.config import ConfigError, GateConfig
+
+    with pytest.raises(ConfigError) as exc:
+        GateConfig.from_config({"require_face": True})
+    assert "require_face" in str(exc.value)
+
+    with pytest.raises(ConfigError) as exc:
+        GateConfig.from_config({"face_names": ["placeholder"]})
+    assert "face_names" in str(exc.value)
+
+    with pytest.raises(ConfigError) as exc:
+        GateConfig.from_config({"face_window_s": 10})
+    assert "face_window_s" in str(exc.value)
+
+
+def test_source_override_naming_an_unknown_field_is_a_startup_error():
+    from spire_voice.config import ConfigError, GateConfig
+
+    with pytest.raises(ConfigError) as exc:
+        GateConfig.from_config({"sources": {"browser": {"require_video": True}}})
+    assert "require_video" in str(exc.value)
+
+
+def test_gate_resolve_returns_global_policy_unchanged_with_no_override():
+    from spire_voice.config import GateConfig
+
+    gate = GateConfig.from_config({"mute_when_playing": ["media_player.example_tv"]})
+    assert gate.resolve("camera") == gate
+
+
+def test_gate_resolve_returns_merged_policy_for_a_source_with_an_override():
+    from spire_voice.config import GateConfig
+
+    gate = GateConfig.from_config(
+        {
+            "mute_when_playing": ["media_player.example_tv"],
+            "sources": {"browser": {"mute_when_playing": []}},
+        }
+    )
+    resolved = gate.resolve("browser")
+    assert resolved.mute_when_playing == ()
+    assert gate.mute_when_playing == ("media_player.example_tv",)
+
+
+def test_wake_threshold_survives_the_load_as_a_float_with_no_rounding():
+    from spire_voice.config import WakeConfig
+
+    wake = WakeConfig.from_config({"openwakeword": {"threshold": 0.123456}})
+    assert wake.openwakeword.threshold == 0.123456
+    assert isinstance(wake.openwakeword.threshold, float)

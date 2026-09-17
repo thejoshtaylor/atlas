@@ -64,12 +64,18 @@ speaker:
 wake:
   # openwakeword | vosk
   #
-  # Pick this from a real recording, not from the docs. openwakeword's models
-  # were trained on 16 kHz synthetic speech and this camera gives 8 kHz
-  # narrowband, which costs it recall. Vosk descends from Kaldi telephony work
-  # and handles the band better, and a one-phrase grammar makes it very hard to
-  # false-fire -- at the cost of needing the phrase to be in its lexicon.
-  engine: openwakeword
+  # Vosk ships live today. This is PROVISIONAL, not measured: no "hey spire"
+  # model exists for openwakeword yet, and producing one is an offline
+  # training pipeline (synthetic TTS positives plus real recordings, run
+  # through openWakeWord's own notebooks) outside this phase's scope. Vosk
+  # needs no such model -- it descends from Kaldi telephony work, which
+  # already suits this camera's 8 kHz narrowband, and restricting its decoder
+  # to a one-phrase grammar makes a false fire hard. Plan 02-09 records both
+  # engines scored offline against the same recordings and this default is
+  # replaced by that result, or left as-is with the reason written down if
+  # the corpus falls short (D-08). Both engines still ship as code below --
+  # openwakeword remains a live option once its model exists.
+  engine: vosk
   phrase: "hey spire"
 
   openwakeword:
@@ -91,19 +97,64 @@ wake:
 
 gate:
   # Voice is an ambient trigger: the camera microphone hears the television, and
-  # a television can say any sentence in the language. These gates decide when
+  # a television can say any sentence in the language. This gate decides when
   # the wake word is even allowed to count.
-
-  # Reuse Frigate's face recognition the same way the gesture pod does: only
-  # listen if a known face was seen on this camera recently. Costs nothing
-  # extra -- Frigate is already publishing it.
-  require_face: true
-  face_names: ["placeholder"]
-  face_window_s: 10
+  #
+  # Identity gating (Frigate face recognition, the way the gesture pod uses it)
+  # was considered and removed: PROJECT.md's Out of Scope says the operator
+  # chose to let anyone in earshot command the house. The denylist in
+  # mcp/spire_mcp/safety.py is what protects it, not who is standing in the
+  # room -- setting require_face, face_names, or face_window_s here is a
+  # startup error naming the key, not a silent no-op.
 
   # Do not listen while these entities are playing. The most common false
-  # trigger source is your own television.
+  # trigger source is your own television, and a television can say any
+  # sentence in the language -- but only the operator knows which of the
+  # house's media players that actually is. This ships empty on purpose and
+  # is never pre-populated with a guess: a wrong guess silently disables the
+  # one gate that exists for an ambient trigger.
   mute_when_playing: []
+
+  # Per-source override (D-04): a source inherits the policy above unless
+  # named here. The browser microphone is a development source behind an
+  # authenticated admin page with no television in the loop, so it runs with
+  # no suppression list -- stated explicitly rather than left as a hardcoded
+  # special case, so a second camera or a second browser client inherits
+  # sane behavior with no code change.
+  sources:
+    browser:
+      mute_when_playing: []
+
+barge_in:
+  # Self-speech is suppressed by known output, not acoustic echo cancellation
+  # (D-09): this process wrote every byte it sent to the speaker FIFO, so it
+  # knows exactly what is playing and when. The camera has no AEC and the
+  # microphone and speaker are the same device, so an interrupt fires on
+  # sustained energy that does not correlate with the known output -- not a
+  # single frame, and explicitly not requiring the wake word again (D-10).
+  enabled: true
+
+  # Same unit as stt.vad_threshold below (0.08), the only noise-floor
+  # measurement this camera has today -- no conversion happens anywhere on
+  # this path, so a configured floor means one thing only. PROVISIONAL until
+  # real camera sessions exist to tune it directly (CD-3).
+  energy_floor: 0.08
+
+  # Sustained, not a single frame: long enough that a cough or a door does
+  # not read as an interrupt, short enough that a real interruption still
+  # feels immediate.
+  min_duration_ms: 300
+
+  # Ignore energy for this long after playback starts. The FIFO write and the
+  # speaker's own acoustic path both carry some latency, and without this
+  # guard the tail of the assistant's own first syllable can read as an
+  # interruption of itself.
+  post_playback_guard_ms: 150
+
+  # Per-source override (D-12), same shape as gate.sources above: on by
+  # default everywhere, overridable per source. No source needs to override
+  # it yet -- declared empty for shape parity, not omitted.
+  sources: {}
 
 stt:
   url: "wss://api.x.ai/v1/stt"
@@ -276,11 +327,21 @@ debug:
   # One directory per interaction, holding the audio, every event with an
   # arrival timestamp, and a merged timeline. This is the raw material for
   # tuning thresholds later, so it is on by default and verbose on purpose.
+  # Only the pre-roll a wake hit actually replays is recorded here -- there
+  # is no continuous rolling capture (D-15).
   dir: "/data/sessions"
   record_audio: true
 
-  # Sessions are small (a few hundred KB each). Keep plenty.
-  retain_days: 30
+  # Seven days: a conservative floor on how long audio of a real home stays
+  # on disk. This is not a cache size -- the operator raises it deliberately,
+  # never lowers it for convenience (D-14). The retention sweep below is what
+  # enforces it, and it logs what it removed.
+  retain_days: 7
+
+  # How often the retention sweep runs, in seconds. Well under a day so a
+  # long-running process sweeps expired sessions more than once between
+  # restarts.
+  expiry_interval_s: 3600
 
   # Also emit a one-line summary per interaction to stdout for kubectl logs.
   stdout_summary: true
