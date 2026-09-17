@@ -30,6 +30,7 @@ import websockets
 
 from spire_voice.config import SttConfig
 from spire_voice.providers.base import FinalTranscript, PartialTranscript, SttError
+from spire_voice.transports.base import SourceFormat
 
 
 class XaiStt:
@@ -38,16 +39,21 @@ class XaiStt:
     def __init__(self, config: SttConfig) -> None:
         self._config = config
 
-    def build_url(self) -> str:
+    def build_url(self, source_format: SourceFormat) -> str:
         """The full connect URL, wire parameter names only.
 
-        `encoding`/`sample_rate` describe the browser microphone's own
-        capture format (16 kHz mono PCM16, per `pcm-worklet.js`) -- Phase 1's
-        only audio source, so this is not itself a config value.
+        `encoding`/`sample_rate` name what `source_format` says the calling
+        `AudioSource` actually produces. Phase 1 had one source, always 16
+        kHz mono PCM16, so hardcoding the pair was safe; Phase 2 adds a
+        second source at 8 kHz A-law, and assuming here would open the
+        socket for one format while a different one arrives. xAI's own wire
+        values for both encodings this repository produces are `"pcm"` and
+        `"alaw"`, matching `SourceFormat.encoding` exactly -- no translation
+        table entry exists for an encoding no source here produces.
         """
         params = {
-            "encoding": "pcm",
-            "sample_rate": 16000,
+            "encoding": source_format.encoding,
+            "sample_rate": source_format.sample_rate,
             "endpointing": self._config.endpointing_ms,
             "smart_turn": self._config.smart_turn,
             "smart_turn_timeout": self._config.smart_turn_timeout_ms,
@@ -57,15 +63,16 @@ class XaiStt:
         }
         return f"{self._config.url}?{urlencode(params)}"
 
-    async def stream(self, frames: AsyncIterator[bytes]) -> AsyncIterator[PartialTranscript | FinalTranscript]:
+    async def stream(
+        self, frames: AsyncIterator[bytes], source_format: SourceFormat
+    ) -> AsyncIterator[PartialTranscript | FinalTranscript]:
         """Open the socket, stream `frames`, and yield transcript events.
 
-        Opened the instant the turn starts (mic toggle pressed), not at end
-        of speech -- with no wake word in Phase 1, that is the whole
-        definition of "turn starts."
+        Opened the instant the turn starts (mic toggle pressed, or the wake
+        word firing on the camera path), not at end of speech.
         """
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
-        async with websockets.connect(self.build_url(), additional_headers=headers) as ws:
+        async with websockets.connect(self.build_url(source_format), additional_headers=headers) as ws:
             ready = json.loads(await ws.recv())
             if ready.get("type") != "transcript.created":
                 raise SttError(f"unexpected first event from xAI STT: {ready!r}")

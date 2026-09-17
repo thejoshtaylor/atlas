@@ -54,6 +54,15 @@ async def test_websocket_yields_pcm16():
     assert frames == EXPECTED_PCM16_FRAMES
 
 
+def test_websocket_declares_its_own_format():
+    from spire_voice.transports.base import SourceFormat
+    from spire_voice.transports.websocket import WebSocketAudioSource
+
+    source = WebSocketAudioSource(_FakeWebSocket([]))
+
+    assert source.source_format() == SourceFormat("pcm", 16000)
+
+
 def _pcm16_audio_frame(data: bytes, *, sample_rate: int = 16000, layout: str = "mono") -> av.AudioFrame:
     """Build an `av.AudioFrame` carrying `data` as raw interleaved s16 samples."""
     channels = 2 if layout == "stereo" else 1
@@ -98,6 +107,15 @@ async def test_webrtc_yields_pcm16():
     frames = [chunk async for chunk in transport.frames()]
 
     assert frames == EXPECTED_PCM16_FRAMES
+
+
+def test_webrtc_declares_its_own_format():
+    from spire_voice.transports.base import SourceFormat
+    from spire_voice.transports.webrtc import WebrtcTransport
+
+    transport = WebrtcTransport()
+
+    assert transport.source_format() == SourceFormat("pcm", 16000)
 
 
 async def test_webrtc_resamples_non_16khz_mono_frames():

@@ -15,12 +15,11 @@ import pytest
 
 from spire_voice.config import SttConfig, TtsConfig
 from spire_voice.providers.base import FinalTranscript, ToolCall
+from spire_voice.transports.base import SourceFormat
 
 
-def test_stt_url_uses_wire_parameter_names():
-    from spire_voice.providers.stt_xai import XaiStt
-
-    cfg = SttConfig(
+def _stt_cfg() -> SttConfig:
+    return SttConfig(
         url="wss://api.x.ai/v1/stt",
         api_key="test-key",
         endpointing_ms=200,
@@ -30,8 +29,13 @@ def test_stt_url_uses_wire_parameter_names():
         interim_results=True,
         language="en",
     )
-    stt = XaiStt(cfg)
-    url = stt.build_url()
+
+
+def test_stt_url_uses_wire_parameter_names():
+    from spire_voice.providers.stt_xai import XaiStt
+
+    stt = XaiStt(_stt_cfg())
+    url = stt.build_url(SourceFormat("pcm", 16000))
 
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
@@ -40,6 +44,31 @@ def test_stt_url_uses_wire_parameter_names():
     assert query["smart_turn"] == ["0.7"]
     assert query["smart_turn_timeout"] == ["1200"]
     assert not any(name.endswith("_ms") for name in query)
+
+
+def test_stt_url_renders_the_16khz_pcm_source_it_is_given():
+    """`build_url` reads `source_format` rather than assuming Phase 1's one
+    source -- a 16 kHz PCM `AudioSource` renders exactly that pair."""
+    from spire_voice.providers.stt_xai import XaiStt
+
+    stt = XaiStt(_stt_cfg())
+    query = parse_qs(urlparse(stt.build_url(SourceFormat("pcm", 16000))).query)
+
+    assert query["encoding"] == ["pcm"]
+    assert query["sample_rate"] == ["16000"]
+
+
+def test_stt_url_renders_the_8khz_alaw_source_it_is_given():
+    """PROV-07: an 8 kHz A-law `AudioSource` (the camera) must never be
+    streamed into a socket opened for 16 kHz PCM -- `build_url` renders the
+    A-law source's own sample rate, not a hardcoded 16000."""
+    from spire_voice.providers.stt_xai import XaiStt
+
+    stt = XaiStt(_stt_cfg())
+    query = parse_qs(urlparse(stt.build_url(SourceFormat("alaw", 8000))).query)
+
+    assert query["encoding"] == ["alaw"]
+    assert query["sample_rate"] == ["8000"]
 
 
 def test_tts_session_update_requests_browser_playable_codec():
@@ -129,21 +158,11 @@ async def test_stream_ends_promptly_once_final_transcript_arrives_even_if_mic_ke
         lambda *args, **kwargs: fake_ws,
     )
 
-    cfg = SttConfig(
-        url="wss://api.x.ai/v1/stt",
-        api_key="test-key",
-        endpointing_ms=200,
-        smart_turn=0.7,
-        smart_turn_timeout_ms=1200,
-        vad_threshold=0.08,
-        interim_results=True,
-        language="en",
-    )
-    stt = XaiStt(cfg)
+    stt = XaiStt(_stt_cfg())
 
     async def drain():
         events = []
-        async for event in stt.stream(_NeverEndingFrames()()):
+        async for event in stt.stream(_NeverEndingFrames()(), SourceFormat("pcm", 16000)):
             events.append(event)
         return events
 
@@ -248,7 +267,7 @@ async def test_final_transcript_comes_from_speech_final_not_transcript_done():
             yield b"\x00\x00" * 160
 
         stt = XaiStt(SttConfig.from_config({"url": "wss://x.invalid", "api_key": "k"}))
-        out = [ev async for ev in stt.stream(frames())]
+        out = [ev async for ev in stt.stream(frames(), SourceFormat("pcm", 16000))]
     finally:
         mod.websockets.connect = orig
 

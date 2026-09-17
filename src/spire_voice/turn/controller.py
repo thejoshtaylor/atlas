@@ -62,6 +62,7 @@ from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
 from spire_voice.config import MacroConfig
 from spire_voice.providers.base import BrainError
+from spire_voice.transports.base import SourceFormat
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
 from spire_voice.timing import TurnTimings
@@ -93,10 +94,11 @@ _DEFAULT_POLL_INTERVAL_S = 0.05
 class _AudioSource(Protocol):
     def frames(self) -> AsyncIterator[bytes]: ...
     async def send_audio(self, chunk: bytes) -> None: ...
+    def source_format(self) -> SourceFormat: ...
 
 
 class _SttProvider(Protocol):
-    def stream(self, frames: AsyncIterator[bytes]) -> AsyncIterator[Any]: ...
+    def stream(self, frames: AsyncIterator[bytes], source_format: SourceFormat) -> AsyncIterator[Any]: ...
 
 
 class _BrainProvider(Protocol):
@@ -434,7 +436,7 @@ async def _drain_to_final_transcript(
     deadline passed, never the latency of an ordinary turn.
     """
     timings.mark_stt_socket_open()
-    stream = stt.stream(source.frames())
+    stream = stt.stream(source.frames(), source.source_format())
     deadline = clock() + max_utterance_s
     pending: Any | None = None
     next_event_task = asyncio.ensure_future(stream.__anext__())

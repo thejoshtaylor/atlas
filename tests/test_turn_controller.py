@@ -657,7 +657,7 @@ async def test_state_fetch_starts_before_the_transcript_is_drained(fake_audio_so
         claim about frame consumption.
         """
 
-        async def stream(self, frames):
+        async def stream(self, frames, source_format=None):
             async for _frame in frames:
                 order.append("first_frame_consumed")
                 break

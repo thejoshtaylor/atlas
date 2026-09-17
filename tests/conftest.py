@@ -18,6 +18,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from spire_voice.transports.base import SourceFormat
+
 
 @dataclass
 class PartialTranscript:
@@ -71,9 +73,9 @@ class FakeStt:
         self._events = list(events)
         self._hang = hang
 
-    async def stream(self, frames) -> AsyncIterator[object]:
-        # `frames` is accepted and ignored: this fake replays its scripted
-        # events regardless of what audio it was handed.
+    async def stream(self, frames, source_format: SourceFormat | None = None) -> AsyncIterator[object]:
+        # `frames` and `source_format` are accepted and ignored: this fake
+        # replays its scripted events regardless of what audio it was handed.
         for event in self._events:
             yield event
         if self._hang:
@@ -152,6 +154,11 @@ class FakeAudioSource:
 
     async def send_audio(self, chunk: bytes) -> None:
         self.sent_audio.append(chunk)
+
+    def source_format(self) -> SourceFormat:
+        """Every existing test scripts 16 kHz mono PCM16 frames; this fake
+        declares exactly that, matching both real browser transports."""
+        return SourceFormat("pcm", 16000)
 
 
 @pytest.fixture

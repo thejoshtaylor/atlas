@@ -49,6 +49,8 @@ from aiortc import (
 )
 from av.audio.resampler import AudioResampler
 
+from spire_voice.transports.base import SourceFormat
+
 logger = logging.getLogger("spire_voice.transports.webrtc")
 
 _TARGET_FORMAT = "s16"
@@ -108,6 +110,11 @@ class WebrtcTransport:
 
     async def send_event(self, event: dict[str, Any]) -> None:
         self._send(json.dumps(event), "event")
+
+    def source_format(self) -> SourceFormat:
+        """`_frame_to_pcm16` always resamples to 16 kHz mono PCM16, whatever the
+        inbound track actually negotiated."""
+        return SourceFormat("pcm", _TARGET_SAMPLE_RATE)
 
     async def close(self) -> None:
         """Close the peer connection.

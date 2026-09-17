@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Protocol
 
+from spire_voice.transports.base import SourceFormat
+
 
 class _Sendable(Protocol):
     """The subset of `starlette.websockets.WebSocket` this transport uses."""
@@ -46,3 +48,7 @@ class WebSocketAudioSource:
 
     async def send_event(self, event: dict[str, Any]) -> None:
         await self._ws.send_text(json.dumps(event))
+
+    def source_format(self) -> SourceFormat:
+        """Raw binary WebSocket frames are 16 kHz mono PCM16, unchanged."""
+        return SourceFormat("pcm", 16000)
