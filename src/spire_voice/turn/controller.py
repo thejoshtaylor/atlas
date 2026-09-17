@@ -60,6 +60,14 @@ logger = logging.getLogger("spire_voice.turn.controller")
 _NO_SPEECH_REPLY = "sorry, i didn't catch that"
 _TOO_MANY_ROUNDS_REPLY = "that needs more steps than i can take at once"
 _EMPTY_REPLY = "sorry, i don't have anything to say to that"
+# Spoken whenever an error-shaped tool result's extracted text is empty --
+# in both `_run_tool_rounds`'s short-circuit below and the macro path's
+# failure branch above. Names the case without asserting an outcome: an
+# operator hearing this reads it as "that was refused and i cannot tell you
+# more," never as a confirmation. Silence after a spoken command is
+# indistinguishable from a dropped turn, and an operator who cannot tell a
+# refusal from a crash will stop trusting the refusals.
+_DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to tell you about it"
 
 # How often the silence-timeout guard rechecks its deadline while waiting on
 # an STT event that may never arrive. Real events short-circuit this --
@@ -201,7 +209,13 @@ async def run_turn(
         # confirmation of something that did not happen, and the latency
         # cost is the honest price of not lying.
         speaking_tts = CachedTts(filler_cache or {}) if outcome.cacheable else tts
-        await _speak(source, speaking_tts, timings, outcome.text, kind="answer")
+        # `outcome.text` is the boundary's own words verbatim (CMD-08) --
+        # nothing prepended, appended, or reworded here, and no length check
+        # or truncation either: a refusal never passes through a model, so
+        # `brain.max_tokens` does not apply to it and there is nothing to
+        # truncate against. `_DENIED_FALLBACK_REPLY` covers only the one
+        # case where there are no words at all.
+        await _speak(source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer")
         await _emit_event(source, timings.to_event())
         timings.log()
         return
@@ -381,7 +395,12 @@ async def _run_tool_rounds(
                 # tool result can end a turn without another round -- it
                 # covers both a refusal and an ordinary tool-level failure,
                 # and neither one reaches the caller as a confirmation.
-                return content_text
+                # No length check or truncation applies: a refusal never
+                # passes through a model, so `brain.max_tokens` has nothing
+                # to say about it. `_DENIED_FALLBACK_REPLY` covers only the
+                # case where `content_text` itself is empty, so a refusal is
+                # never indistinguishable from a dropped turn.
+                return content_text or _DENIED_FALLBACK_REPLY
             # A non-2xx Home Assistant response (see `handle_call_service`)
             # is not a refusal -- it comes back as an ordinary, non-error
             # result whose content names the failure, so the next brain call
