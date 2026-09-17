@@ -10,8 +10,11 @@ recording a block rather than dropping it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+
+import pytest
 
 from spire_voice.config import GateConfig, WakeConfig
 from spire_voice.sources.runner import SourceRunner
@@ -246,3 +249,111 @@ async def test_source_without_override_runs_global_policy_source_with_override_r
     # callable, which reports the player playing, so the hit is blocked.
     assert browser_calls == [("media_player.example_tv",)]
     assert browser_turns == []
+
+
+# --- SourceRunner.run(): per-chunk exception containment (CR-03) -------
+
+
+class _MissThenRaiseThenHitWakeDetector:
+    """A no-hit chunk, then a chunk whose processing raises, then a real
+    hit -- the shape CR-03's own report names (PyAV can raise on a
+    malformed packet, Vosk's native bindings can raise). Fires on exactly
+    the third call, so a test can prove the loop reaches it *after* the
+    second call's exception, not merely that some later chunk (which a
+    trigger-value-based fake could accidentally fire on too) still works."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    def process(self, chunk: bytes) -> FakeWakeHit | None:
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        if self.calls == 2:
+            raise self._exc
+        return FakeWakeHit(score=1.0)
+
+    def close(self) -> None:
+        pass
+
+
+async def test_an_exception_processing_one_chunk_is_logged_and_the_loop_keeps_listening(caplog):
+    """Before CR-03's fix, an exception raised while processing one chunk
+    propagated straight out of `run()`'s own `async for` loop and ended the
+    task permanently: every chunk after the one that raised -- including a
+    real wake hit -- was never seen again, and the assistant silently
+    stopped being able to hear the wake word for the rest of the process's
+    life. This detector raises on its second chunk and fires a real hit on
+    its third; without the fix, `run()` ends at the second chunk and
+    `turns_started` stays empty."""
+    source = FakeAudioSource(frames=[b"\x00", b"\x01", b"\x02"])
+    detector = _MissThenRaiseThenHitWakeDetector(exc=RuntimeError("native binding exploded"))
+    wake_config = WakeConfig(engine="vosk", refractory_s=0.0)
+    gate_config = GateConfig()
+
+    turns_started: list[object] = []
+
+    async def _run_turn(src: object) -> None:
+        turns_started.append(src)
+
+    runner = SourceRunner(
+        "camera",
+        source,
+        detector,
+        lambda chunk: chunk,
+        _run_turn,
+        wake_config=wake_config,
+        gate_config=gate_config,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="spire_voice.sources.runner"):
+        await runner.run()
+
+    assert len(turns_started) == 1, (
+        "the wake hit on the chunk AFTER the exception must still start a "
+        "turn -- run() must not end, or skip further chunks, just because "
+        "one chunk's processing raised"
+    )
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "camera" in errors[0].getMessage()
+
+
+class _NeverEndingSource:
+    """Yields one chunk, then blocks forever -- proving `run()` can still
+    be cancelled normally (CR-03's fix must never swallow
+    `asyncio.CancelledError`, only real processing exceptions)."""
+
+    def __init__(self, first_chunk: bytes) -> None:
+        self._first_chunk = first_chunk
+
+    async def frames(self):
+        yield self._first_chunk
+        await asyncio.Event().wait()
+
+
+async def test_cancellation_still_propagates_out_of_run():
+    source = _NeverEndingSource(b"\x00")
+    detector = _AlwaysHitWakeDetector(score=1.0)
+    wake_config = WakeConfig(engine="vosk", refractory_s=0.0)
+    gate_config = GateConfig()
+
+    async def _run_turn(src: object) -> None:
+        return None
+
+    runner = SourceRunner(
+        "camera",
+        source,
+        detector,
+        lambda chunk: chunk,
+        _run_turn,
+        wake_config=wake_config,
+        gate_config=gate_config,
+    )
+
+    task = asyncio.ensure_future(runner.run())
+    await asyncio.sleep(0)  # let run() reach the never-ending await
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

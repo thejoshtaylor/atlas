@@ -299,46 +299,78 @@ class SourceRunner:
 
     async def run(self) -> None:
         """Consume `source.frames()` until it ends, running one turn per
-        wake hit the gate allows along the way."""
+        wake hit the gate allows along the way.
+
+        Each chunk's processing is contained (CR-03, code review): before
+        this fix, an exception from `self._wake_detector.process(...)` or
+        `self._decode_for_detector(...)` -- both real possibilities, since
+        PyAV can raise on a malformed packet after a lossy reconnect and
+        Vosk's native bindings can raise -- propagated straight out of this
+        `async for` loop and ended the task permanently, with nothing
+        supervising or restarting it: the assistant would silently stop
+        hearing the wake word for the rest of the process's life. Every
+        other long-lived loop this phase built (the camera reconnect
+        supervisor, the ffmpeg egress supervisor, the retention scheduler)
+        already has this discipline; this loop did not. `source.frames()`
+        itself is deliberately outside the `try` -- a raise from the
+        iterator itself is the underlying source's own reconnect
+        supervisor's problem (`transports/camera.py`'s module docstring),
+        not this loop's to retry.
+        """
         async for chunk in self._source.frames():
-            if self._preroll is not None:
-                self._preroll.push(chunk)
+            try:
+                await self._process_chunk(chunk)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "source %r: error processing one audio chunk -- continuing to listen "
+                    "for the wake word rather than ending the whole source's task",
+                    self._name,
+                )
 
-            detector_chunk = self._decode_for_detector(chunk)
-            if not detector_chunk:
-                continue
-            hit = self._wake_detector.process(detector_chunk)
-            if hit is None:
-                continue
+    async def _process_chunk(self, chunk: bytes) -> None:
+        """One chunk of `run()`'s own loop body, split out so `run()` can
+        wrap it in the containment `try`/`except` above without also
+        catching an exception from `self._source.frames()` itself."""
+        if self._preroll is not None:
+            self._preroll.push(chunk)
 
-            now = self._clock()
-            decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
-            if not decision.allowed:
-                self._record_blocked_hit(hit.score, decision.reason, now)
-                continue
+        detector_chunk = self._decode_for_detector(chunk)
+        if not detector_chunk:
+            return
+        hit = self._wake_detector.process(detector_chunk)
+        if hit is None:
+            return
 
-            self._last_hit_at = now
-            logger.info("wake hit on source %r (score=%.3f)", self._name, hit.score)
+        now = self._clock()
+        decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
+        if not decision.allowed:
+            self._record_blocked_hit(hit.score, decision.reason, now)
+            return
 
-            turn_source = self._source
-            if self._preroll is not None:
-                preroll_chunks = self._preroll.drain()
-                if preroll_chunks:
-                    turn_source = PrerollReplayingSource(self._source, preroll_chunks)
+        self._last_hit_at = now
+        logger.info("wake hit on source %r (score=%.3f)", self._name, hit.score)
 
-            monitor = BargeInMonitor(
-                floor=self._barge_in_config.energy_floor,
-                min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,
-                guard_window_s=self._barge_in_config.post_playback_guard_ms / 1000.0,
-                enabled=self._barge_in_config.enabled,
-            )
-            # Duck-typed, the same way `turn/controller.py`'s own
-            # `_emit_event` already reaches for `send_event` -- `run_turn`
-            # and `_speak` read this back with `getattr(source, "barge_in",
-            # None)` rather than a positional `run_turn_fn` never had.
-            turn_source.barge_in = monitor
+        turn_source = self._source
+        if self._preroll is not None:
+            preroll_chunks = self._preroll.drain()
+            if preroll_chunks:
+                turn_source = PrerollReplayingSource(self._source, preroll_chunks)
 
-            await self._run_one_turn(turn_source, monitor)
+        monitor = BargeInMonitor(
+            floor=self._barge_in_config.energy_floor,
+            min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,
+            guard_window_s=self._barge_in_config.post_playback_guard_ms / 1000.0,
+            enabled=self._barge_in_config.enabled,
+        )
+        # Duck-typed, the same way `turn/controller.py`'s own
+        # `_emit_event` already reaches for `send_event` -- `run_turn`
+        # and `_speak` read this back with `getattr(source, "barge_in",
+        # None)` rather than a positional `run_turn_fn` never had.
+        turn_source.barge_in = monitor
+
+        await self._run_one_turn(turn_source, monitor)
 
     async def _run_one_turn(self, turn_source: Any, monitor: "BargeInMonitor") -> None:
         """Run one turn, plus its own barge-in listener -- see the module

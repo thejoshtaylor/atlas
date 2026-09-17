@@ -9,7 +9,6 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import os
@@ -351,10 +350,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    # CR-03 fix (code review): `SourceRunner.run()` now contains a
+    # per-chunk exception rather than letting it end the task (see that
+    # method's own docstring), but a task can still end with a stored
+    # exception from somewhere this loop cannot anticipate (a bug in
+    # `run_turn` itself, say). `return_exceptions=True` is what keeps that
+    # possibility from mattering here: `task.cancel()` on an already-done
+    # task is a no-op, and `await task` on one that ended with a
+    # non-cancellation exception used to re-raise it, aborting every
+    # cleanup call below (`camera_source.close()`, `ffmpeg_supervisor.
+    # stop()`, `retention_scheduler.stop()`, `speaker_writer.close()`,
+    # `tool_host.aclose()`) and leaving the ffmpeg child, the MCP child,
+    # and the FIFO's open handle behind uncleanly on process exit.
     for task in app.state.source_runner_tasks:
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+    await asyncio.gather(*app.state.source_runner_tasks, return_exceptions=True)
     await camera_source.close()
     wake_detector.close()
     await ffmpeg_supervisor.stop()
