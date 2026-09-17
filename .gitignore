@@ -13,6 +13,13 @@ config/*.local.yaml
 data/
 sessions/
 
+# The measurement harness's fixture (plan 01.1-07): a real person's voice
+# naming real things in a real house. DEP-05 keeps entity names, addresses,
+# and credentials out of the repository and its history -- a committed WAV
+# is unrecoverable from history in a way a committed string is not, so the
+# operator supplies this file locally and the repo never ships one.
+tests/fixtures/*.wav
+
 # Python
 __pycache__/
 *.py[cod]
