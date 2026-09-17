@@ -21,6 +21,7 @@ import: `scripts/` is not on `pythonpath` (only `src`/`mcp` are, per
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -366,3 +367,248 @@ def test_load_manifest_returns_empty_list_when_no_corpus_exists_yet(tmp_path):
     recordings = score_wake_engines.load_manifest(tmp_path / "no_such_corpus")
 
     assert recordings == []
+
+
+# --- the durable report (plan 02-13, Task 1) --------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# config.example.yaml's ${...} placeholders load_config must expand -- these
+# tests drive main() against the real example config, so they need the same
+# fictional values tests/test_config.py's own end-to-end case sets.
+_CONFIG_ENV_VARS = ("XAI_API_KEY", "TAPO_USER", "TAPO_PASSWORD", "SPEAKER_ENSURE_URL", "HA_URL", "HA_TOKEN")
+
+
+def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _CONFIG_ENV_VARS:
+        monkeypatch.setenv(name, "test-value")
+
+
+def _engine_report(
+    *, available: bool = True, unavailable_reason: str | None = None, sweep: tuple = ()
+) -> "score_wake_engines.EngineReport":
+    return score_wake_engines.EngineReport(
+        name="test-engine",
+        available=available,
+        unavailable_reason=unavailable_reason,
+        positive_scores=(0.9,) if available else (),
+        negative_scores=(0.1,) if available else (),
+        threshold_sweep=sweep,
+    )
+
+
+def _floor(*, meets_floor: bool = True, reasons: tuple[str, ...] = ()) -> "score_wake_engines.FloorReport":
+    return score_wake_engines.FloorReport(
+        positive_count=25,
+        distances=frozenset({"close", "far"}),
+        speakers=frozenset({"a", "b"}),
+        has_negative_run=True,
+        negative_duration_s=180.0,
+        meets_floor=meets_floor,
+        reasons=reasons,
+    )
+
+
+def test_validate_report_path_is_a_no_op_when_report_out_is_none():
+    score_wake_engines.validate_report_path(None)  # must not raise
+
+
+def test_validate_report_path_creates_the_parent_and_leaves_no_probe_file(tmp_path):
+    report_out = tmp_path / "reports" / "run.json"
+
+    score_wake_engines.validate_report_path(report_out)
+
+    assert report_out.parent.is_dir()
+    assert list(report_out.parent.iterdir()) == []
+
+
+def test_validate_report_path_raises_report_path_error_when_the_parent_is_a_file(tmp_path):
+    not_a_dir = tmp_path / "not_a_dir"
+    not_a_dir.write_text("x")
+
+    with pytest.raises(score_wake_engines.ReportPathError):
+        score_wake_engines.validate_report_path(not_a_dir / "run.json")
+
+
+def test_classify_recommendation_below_floor_corpus_is_provisional():
+    floor = _floor(meets_floor=False, reasons=("only 5 positive(s) recorded, floor is 20",))
+    sweep = score_wake_engines.threshold_sweep([0.9], [0.1], 180.0)
+    reports = {"vosk": _engine_report(sweep=sweep), "openwakeword": _engine_report(sweep=sweep)}
+
+    classification, recommendation, reasons = score_wake_engines.classify_recommendation(floor, reports, "vosk")
+
+    assert classification == "provisional"
+    assert recommendation == "vosk"
+    assert any("floor is 20" in reason for reason in reasons)
+
+
+def test_classify_recommendation_single_engine_run_is_provisional():
+    floor = _floor(meets_floor=True)
+    reports = {
+        "vosk": _engine_report(sweep=score_wake_engines.threshold_sweep([0.9], [0.1], 180.0)),
+        "openwakeword": _engine_report(available=False, unavailable_reason="model not present at /models/x.onnx"),
+    }
+
+    classification, recommendation, reasons = score_wake_engines.classify_recommendation(floor, reports, "vosk")
+
+    assert classification == "provisional"
+    assert recommendation == "vosk"
+    assert any("only one engine could run" in reason for reason in reasons)
+
+
+def test_classify_recommendation_identical_sweeps_is_provisional():
+    floor = _floor(meets_floor=True)
+    sweep = score_wake_engines.threshold_sweep([0.9, 0.4], [0.1], 180.0)
+    reports = {"vosk": _engine_report(sweep=sweep), "openwakeword": _engine_report(sweep=sweep)}
+
+    classification, recommendation, reasons = score_wake_engines.classify_recommendation(floor, reports, "vosk")
+
+    assert classification == "provisional"
+    assert any("no separation" in reason for reason in reasons)
+
+
+def test_classify_recommendation_two_engines_meeting_floor_with_separation_is_measured():
+    floor = _floor(meets_floor=True)
+    strong_sweep = score_wake_engines.threshold_sweep([0.9, 0.9, 0.9], [0.0, 0.0], 180.0)
+    weak_sweep = score_wake_engines.threshold_sweep([0.9, None, None], [0.9, 0.9], 180.0)
+    reports = {"vosk": _engine_report(sweep=strong_sweep), "openwakeword": _engine_report(sweep=weak_sweep)}
+
+    classification, recommendation, reasons = score_wake_engines.classify_recommendation(floor, reports, "vosk")
+
+    assert classification == "measured"
+    assert recommendation == "vosk"
+    assert reasons == ()
+
+
+def test_build_report_includes_the_corpus_fingerprint(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    manifest = corpus_dir / score_wake_engines._MANIFEST_FILENAME
+    manifest.write_text('{"file": "a.alaw", "label": "positive"}\n')
+    floor = _floor(meets_floor=False, reasons=("only 1 positive(s) recorded, floor is 20",))
+
+    report = score_wake_engines.build_report(
+        corpus_dir=corpus_dir, floor=floor, reports={}, current_default="vosk"
+    )
+
+    assert report["corpus_dir"] == str(corpus_dir)
+    assert report["positive_count"] == floor.positive_count
+    assert report["negative_duration_s"] == floor.negative_duration_s
+    assert report["manifest_digest"] == score_wake_engines._manifest_digest(corpus_dir)
+    assert report["manifest_digest"] is not None
+    assert report["classification"] == "provisional"
+
+
+def test_build_report_manifest_digest_is_none_for_an_empty_corpus(tmp_path):
+    corpus_dir = tmp_path / "empty_corpus"
+    corpus_dir.mkdir()
+
+    report = score_wake_engines.build_report(
+        corpus_dir=corpus_dir, floor=_floor(meets_floor=False), reports={}, current_default="vosk"
+    )
+
+    assert report["manifest_digest"] is None
+
+
+def test_build_report_unavailable_engine_is_a_named_row_not_an_absent_section(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    reports = {
+        "vosk": _engine_report(sweep=score_wake_engines.threshold_sweep([0.9], [0.1], 180.0)),
+        "openwakeword": _engine_report(available=False, unavailable_reason="model not present at /models/x.onnx"),
+    }
+
+    report = score_wake_engines.build_report(
+        corpus_dir=corpus_dir, floor=_floor(meets_floor=True), reports=reports, current_default="vosk"
+    )
+
+    assert set(report["engines"]) == {"vosk", "openwakeword"}
+    assert report["engines"]["openwakeword"]["available"] is False
+    assert "/models/x.onnx" in report["engines"]["openwakeword"]["unavailable_reason"]
+
+
+def test_written_report_contains_no_transcript_audio_or_rtsp_derived_content(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    reports = {
+        "vosk": _engine_report(sweep=score_wake_engines.threshold_sweep([0.9], [0.1], 180.0)),
+        "openwakeword": _engine_report(available=False, unavailable_reason="model not present at /models/x.onnx"),
+    }
+    report_out = tmp_path / "report.json"
+
+    score_wake_engines._write_report(
+        report_out,
+        score_wake_engines.build_report(
+            corpus_dir=corpus_dir, floor=_floor(meets_floor=True), reports=reports, current_default="vosk"
+        ),
+    )
+    text = report_out.read_text()
+
+    assert "rtsp://" not in text
+    assert "TAPO_USER" not in text
+    assert "TAPO_PASSWORD" not in text
+    assert str(corpus_dir) in text
+    assert "/models/x.onnx" in text  # the one deliberately-named exception (D-08)
+
+
+def test_main_without_report_out_behaves_as_before(tmp_path, capsys, monkeypatch):
+    _set_config_env_vars(monkeypatch)
+    empty_corpus = tmp_path / "empty_corpus"
+
+    exit_code = score_wake_engines.main(["--corpus-dir", str(empty_corpus)])
+
+    assert exit_code == 0
+    assert "no corpus recorded yet" in capsys.readouterr().out
+
+
+def test_main_with_report_out_writes_exactly_one_file_and_the_same_exit_code(tmp_path, monkeypatch):
+    _set_config_env_vars(monkeypatch)
+    empty_corpus = tmp_path / "empty_corpus"
+    report_path = tmp_path / "out" / "report.json"
+
+    without_flag = score_wake_engines.main(["--corpus-dir", str(empty_corpus)])
+    with_flag = score_wake_engines.main(
+        ["--corpus-dir", str(empty_corpus), "--report-out", str(report_path)]
+    )
+
+    assert without_flag == with_flag == 0
+    assert report_path.exists()
+    assert list(report_path.parent.iterdir()) == [report_path]
+    written = json.loads(report_path.read_text())
+    assert written["positive_count"] == 0
+
+
+def test_main_with_an_unwritable_report_out_fails_before_any_engine_loads(tmp_path, capsys, monkeypatch):
+    _set_config_env_vars(monkeypatch)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    # Points at a file that does not exist, so if validation were skipped
+    # this would instead fail deep inside decode_corpus with a raw,
+    # unhandled file-not-found error -- proving, by its absence, that
+    # validation really does run first.
+    (corpus_dir / score_wake_engines._MANIFEST_FILENAME).write_text(
+        json.dumps(
+            {
+                "file": "does-not-exist.alaw",
+                "label": "positive",
+                "distance": "close",
+                "speaker": "a",
+                "position_index": 1,
+                "global_index": 0,
+                "timestamp": "2026-09-17T00:00:00Z",
+                "duration_s": 2.0,
+                "source": "test",
+            }
+        )
+        + "\n"
+    )
+    not_a_dir = tmp_path / "not_a_dir"
+    not_a_dir.write_text("x")
+    report_path = not_a_dir / "report.json"
+
+    exit_code = score_wake_engines.main(
+        ["--corpus-dir", str(corpus_dir), "--report-out", str(report_path)]
+    )
+
+    assert exit_code == 1
+    assert "error:" in capsys.readouterr().err

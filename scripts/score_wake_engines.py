@@ -29,15 +29,31 @@ literal, not a shared import -- `scripts/` is not a package). Optionally
 also scores recorded session directories as additional negative material
 (`--session-dir`, repeatable): real microphone bytes from an actual turn,
 scored the same way corpus negatives are.
+
+**`--report-out` (plan 02-13, DBG-04's operator-facing half)** writes a
+durable JSON report alongside the printed run: the corpus fingerprint
+(directory, positive count, negative duration, a digest of the manifest),
+every engine's result including one that could not run, and a
+`measured`/`provisional` classification of the recommendation. The report
+renders the same `FloorReport`/`EngineReport` structures this script
+already computes and never recomputes a score, so it cannot disagree with
+what the run printed. `config/config.example.yaml`'s `wake-default-evidence`
+line (parsed by `parse_wake_default_evidence` below) is the one place this
+project states whether that classification is `measured` -- see
+`docs/runbooks/wake-engine-corpus.md` for the two edits a real `measured`
+run calls for.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -401,6 +417,211 @@ async def decode_corpus(recordings: Sequence[CorpusRecording]) -> list[tuple[Cor
     return decoded
 
 
+# --- the durable report (plan 02-13, DBG-04's operator-facing half) -------
+
+
+class ReportPathError(ValueError):
+    """Raised before any engine is loaded -- discovering an unwritable
+    `--report-out` path after a long scoring run wastes the run, the same
+    discipline `capture_wake_corpus.py`'s `CorpusCaptureError` applies to
+    its own inputs before opening the RTSP stream."""
+
+
+def validate_report_path(report_out: Path | None) -> None:
+    """No-op when `--report-out` was not given. Otherwise creates the
+    parent directory if needed and proves it is writable with a throwaway
+    probe file, raising `ReportPathError` on failure -- called before any
+    engine is constructed or any corpus decoded."""
+    if report_out is None:
+        return
+    parent = report_out.parent
+    probe = parent / ".report-write-check"
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        probe.write_text("")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ReportPathError(
+            f"--report-out path is not writable: {report_out} ({type(exc).__name__})"
+        ) from exc
+
+
+def _manifest_digest(corpus_dir: Path) -> str | None:
+    """A sha256 digest over `manifest.jsonl`'s raw bytes, so a report can
+    be matched to the exact corpus it scored and two runs compared. `None`
+    when no manifest exists (an empty corpus) -- never a fabricated
+    digest of nothing."""
+    manifest_path = corpus_dir / _MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return None
+    return hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def _engine_report_dict(report: EngineReport) -> dict[str, Any]:
+    """Renders one `EngineReport` for the written file -- counts, rates,
+    and thresholds only. An unavailable engine keeps its named cause; a
+    detector that could not run is a row with a reason, never an absent
+    section (D-08)."""
+    if not report.available:
+        return {"available": False, "unavailable_reason": report.unavailable_reason}
+    return {
+        "available": True,
+        "positive_detected": sum(1 for s in report.positive_scores if s is not None),
+        "positive_total": len(report.positive_scores),
+        "threshold_sweep": [
+            {
+                "threshold": row.threshold,
+                "positive_detections": row.positive_detections,
+                "positive_total": row.positive_total,
+                "false_accepts_per_hour": row.false_accepts_per_hour,
+            }
+            for row in report.threshold_sweep
+        ],
+    }
+
+
+def _best_engine(available: dict[str, EngineReport]) -> str:
+    """Picks the engine whose sweep detects more positives for fewer false
+    accepts, summed across the whole sweep -- only ever called once the
+    caller has already confirmed the two sweeps actually differ."""
+
+    def _score(report: EngineReport) -> tuple[int, float]:
+        detections = sum(row.positive_detections for row in report.threshold_sweep)
+        false_accepts = sum(row.false_accepts_per_hour or 0.0 for row in report.threshold_sweep)
+        return (detections, -false_accepts)
+
+    return max(sorted(available), key=lambda name: _score(available[name]))
+
+
+def classify_recommendation(
+    floor: FloorReport,
+    reports: dict[str, EngineReport],
+    current_default: str,
+) -> tuple[str, str, tuple[str, ...]]:
+    """Classifies the run's recommendation as `measured` or `provisional`
+    and names the recommended engine, never rounding a clean-looking score
+    on a short or single-engine corpus up into a measurement (D-07, D-08).
+
+    `measured` requires all three: the corpus meets its stated floor,
+    every engine in `reports` actually ran, and their threshold sweeps
+    show real separation -- a sweep with no separation between the two
+    proves nothing about which is better. Anything else is `provisional`,
+    and D-08's fallback applies: `current_default` ships, and every
+    reason is named rather than rounded away.
+    """
+    reasons: list[str] = []
+    if not floor.meets_floor:
+        reasons.extend(floor.reasons)
+
+    available = {name: r for name, r in reports.items() if r.available}
+    unavailable_names = sorted(name for name in reports if name not in available)
+    if unavailable_names:
+        reasons.append(f"engine(s) unavailable: {', '.join(unavailable_names)}")
+    if len(available) < 2:
+        reasons.append("only one engine could run -- a comparison needs two")
+
+    if reasons:
+        return "provisional", current_default, tuple(reasons)
+
+    names = sorted(available)
+    first, second = available[names[0]], available[names[1]]
+    if first.threshold_sweep == second.threshold_sweep:
+        reasons.append("the threshold sweep shows no separation between the two engines")
+        return "provisional", current_default, tuple(reasons)
+
+    return "measured", _best_engine(available), ()
+
+
+def build_report(
+    *,
+    corpus_dir: Path,
+    floor: FloorReport,
+    reports: dict[str, EngineReport],
+    current_default: str,
+    generated_at: str | None = None,
+) -> dict[str, Any]:
+    """Renders a JSON-serializable report from structures this script
+    already computed -- `FloorReport` and the per-engine `EngineReport`s
+    -- recomputing nothing, so the written file cannot disagree with what
+    the run printed to the terminal. Names counts, durations, thresholds,
+    rates and paths inside the corpus and report directories only, plus
+    the missing-model path an unavailable engine names by design (D-08) --
+    never transcript text, never audio, never anything derived from the
+    RTSP URL, which this script never even reads (camera credentials are
+    expanded once, inside `load_config`, and never touch this path).
+    """
+    classification, recommendation, reasons = classify_recommendation(floor, reports, current_default)
+    return {
+        "generated_at": generated_at or datetime.now(timezone.utc).isoformat(),
+        "corpus_dir": str(corpus_dir),
+        "positive_count": floor.positive_count,
+        "negative_duration_s": floor.negative_duration_s,
+        "manifest_digest": _manifest_digest(corpus_dir),
+        "floor_met": floor.meets_floor,
+        "floor_reasons": list(floor.reasons),
+        "engines": {name: _engine_report_dict(r) for name, r in reports.items()},
+        "recommendation": recommendation,
+        "classification": classification,
+        "classification_reasons": list(reasons),
+    }
+
+
+def _write_report(report_out: Path, report: dict[str, Any]) -> None:
+    report_out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+# --- the wake-default-evidence line (plan 02-13) ---------------------------
+#
+# The single machine-readable line in `config/config.example.yaml`'s `wake:`
+# block stating whether the shipped default came from a score. Read here
+# rather than re-derived, because Task 3's coupling test (tests/) parses the
+# exact same grammar this defines -- one place spells out what the line
+# means, on both sides of the coupling.
+
+_EVIDENCE_LINE_RE = re.compile(
+    r"^\s*#\s*wake-default-evidence:\s*(?P<classification>provisional|measured)(?P<rest>.*)$"
+)
+_EVIDENCE_FIELD_RE = re.compile(r"(\w+)=(\S+)")
+_EVIDENCE_REQUIRED_FIELDS = ("date", "positives", "negative_duration_s")
+
+
+@dataclass(frozen=True)
+class WakeDefaultEvidence:
+    classification: str  # "provisional" | "measured"
+    date: str | None = None
+    positives: int | None = None
+    negative_duration_s: float | None = None
+
+
+def parse_wake_default_evidence(config_text: str) -> WakeDefaultEvidence:
+    """Parses the one `wake-default-evidence:` line out of `config_text`
+    (the raw text of `config/config.example.yaml`, or a synthetic
+    fixture shaped the same way). Raises `ValueError` when the line is
+    missing, duplicated, or a `measured` line omits `date`, `positives`,
+    or `negative_duration_s` -- a measured claim without the numbers
+    behind it is exactly what this line exists to prevent.
+    """
+    matches = [m for m in (_EVIDENCE_LINE_RE.match(line) for line in config_text.splitlines()) if m]
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one wake-default-evidence line, found {len(matches)}")
+
+    match = matches[0]
+    classification = match.group("classification")
+    if classification == "provisional":
+        return WakeDefaultEvidence(classification="provisional")
+
+    fields = dict(_EVIDENCE_FIELD_RE.findall(match.group("rest")))
+    missing = [key for key in _EVIDENCE_REQUIRED_FIELDS if key not in fields]
+    if missing:
+        raise ValueError(f"wake-default-evidence: measured requires {missing} on the same line")
+    return WakeDefaultEvidence(
+        classification="measured",
+        date=fields["date"],
+        positives=int(fields["positives"]),
+        negative_duration_s=float(fields["negative_duration_s"]),
+    )
+
+
 # --- report printing ---------------------------------------------------
 
 
@@ -472,6 +693,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="session_dirs",
         help="an additional recorded session directory to score as negative material; repeatable",
     )
+    parser.add_argument(
+        "--report-out",
+        type=Path,
+        default=None,
+        dest="report_out",
+        help=(
+            "write a durable JSON report here: the corpus fingerprint, the floor verdict, "
+            "every engine's result including one that could not run, and the "
+            "measured-or-provisional classification (default: no report written)"
+        ),
+    )
     return parser
 
 
@@ -486,6 +718,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
+    try:
+        validate_report_path(args.report_out)
+    except ReportPathError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     config = load_config(args.config)
 
     recordings = load_manifest(args.corpus_dir)
@@ -496,6 +734,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if not recordings:
         print("\nno corpus recorded yet -- nothing to score. Run capture_wake_corpus.py first.")
+        if args.report_out is not None:
+            _write_report(
+                args.report_out,
+                build_report(
+                    corpus_dir=args.corpus_dir, floor=floor, reports={}, current_default=config.wake.engine
+                ),
+            )
         return 0
 
     engines = _build_engines(config.wake.vosk, config.wake.phrase, config.wake.openwakeword)
@@ -506,6 +751,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not floor.meets_floor:
         print("\ncorpus is below its stated floor -- no tuned default is claimed from this run.")
+
+    if args.report_out is not None:
+        _write_report(
+            args.report_out,
+            build_report(
+                corpus_dir=args.corpus_dir, floor=floor, reports=reports, current_default=config.wake.engine
+            ),
+        )
 
     return 0
 
