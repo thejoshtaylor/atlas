@@ -174,6 +174,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             app.state.system_prompt,
             config.brain.max_tool_rounds,
             timings,
+            config.stt.max_utterance_s,
         )
     )
     app.state.background_turns.add(task)
@@ -212,6 +213,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         websocket.app.state.system_prompt,
         config.brain.max_tool_rounds,
         timings,
+        config.stt.max_utterance_s,
     )
 
 

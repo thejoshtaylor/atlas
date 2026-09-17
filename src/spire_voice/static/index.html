@@ -6,8 +6,11 @@
   <style>
     body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; line-height: 1.5; }
     #partial { color: #888; }
-    #timing { font-variant-numeric: tabular-nums; color: #555; }
     button { font-size: 1rem; padding: 0.5rem 1rem; }
+    #timingHistory { font-variant-numeric: tabular-nums; color: #555; }
+    .timing-entry { border-top: 1px solid #ddd; padding: 0.5rem 0; }
+    .timing-entry .headline { color: #111; }
+    .timing-entry .stage-row { font-size: 0.9rem; }
   </style>
 </head>
 <body>
@@ -19,13 +22,53 @@
   <button id="toggle">Start listening</button>
   <p id="partial"></p>
   <p id="reply"></p>
-  <p id="timing"></p>
+  <h2>Stage timings</h2>
+  <p>
+    Newest turn first. Every number here came from the server -- this page
+    computes no duration of its own.
+  </p>
+  <div id="timingHistory"></div>
 
   <script>
     const toggleButton = document.getElementById("toggle");
     const partialEl = document.getElementById("partial");
     const replyEl = document.getElementById("reply");
-    const timingEl = document.getElementById("timing");
+    const timingHistoryEl = document.getElementById("timingHistory");
+
+    // Labels for the seven stages `spire_voice.timing.TurnTimings` records,
+    // keyed by the same field names the server sends -- this page renders
+    // the labels, never invents or reorders the stages themselves.
+    const STAGE_LABELS = {
+      turn_started_at: "turn started",
+      stt_socket_open_at: "stt socket open",
+      first_partial_at: "first partial",
+      stt_final_at: "stt final (end of speech)",
+      brain_first_token_at: "brain first token",
+      tool_rounds_done_at: "tool rounds done",
+      first_audio_at: "first audio",
+    };
+    const STAGE_ORDER = Object.keys(STAGE_LABELS);
+
+    function formatMs(ms) {
+      return ms === null || ms === undefined ? "not reached" : `${ms.toFixed(1)} ms`;
+    }
+
+    // Renders one turn's timing event -- every number in `msg` was computed
+    // on the server (`TurnTimings.stage_durations_ms()`); this function only
+    // formats and appends, per D-17's "the browser renders numbers it was
+    // given" contract. Previous turns are kept, newest first, so the
+    // operator reads a range across several turns rather than one sample.
+    function renderTimingTurn(msg) {
+      const rows = STAGE_ORDER.map(
+        (stage) => `<div class="stage-row">${STAGE_LABELS[stage]}: ${formatMs(msg.stage_durations_ms[stage])}</div>`
+      ).join("");
+      const entry = document.createElement("div");
+      entry.className = "timing-entry";
+      entry.innerHTML =
+        `<div class="headline">end of speech to first audio: ${formatMs(msg.end_of_speech_to_first_audio_ms)}` +
+        ` (${msg.turn_outcome})</div>${rows}`;
+      timingHistoryEl.prepend(entry);
+    }
 
     let listening = false;
     let activeTransport = null; // { close() } from whichever path is running
@@ -69,7 +112,7 @@
           replyEl.textContent = msg.text;
           partialEl.textContent = "";
         } else if (msg.type === "turn.timing") {
-          timingEl.textContent = `end of speech to first audio: ${msg.end_of_speech_to_first_audio_ms} ms`;
+          renderTimingTurn(msg);
         }
         return;
       }
