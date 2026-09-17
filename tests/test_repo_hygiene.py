@@ -169,6 +169,14 @@ def test_repository_holds_no_credential_literal():
 # which is exactly why this check reads `git ls-files` directly instead:
 # a directory `_iter_repo_files` never walks into can never surface a
 # violation through it.
+#
+# `"calibration"` is deliberately NOT in this set: plan 02-10 adds a
+# legitimately tracked `src/spire_voice/calibration/` source package, and a
+# generic directory-name check here would flag that code as though it were
+# the runtime data directory. `test_calibration_directory_default_location_
+# is_gitignored` below checks the actual runtime path
+# (`calibration.record.DEFAULT_CALIBRATION_DIR`) instead, which is the
+# artifact T-02-43 is actually about.
 _SESSION_DIR_NAMES = {"data", "sessions"}
 
 # Session audio and the TTS cache both write raw codec bytes under these
@@ -200,4 +208,25 @@ def test_no_session_path_or_audio_extension_is_tracked_by_git():
     assert not violations, (
         "found a tracked session path or a tracked captured-audio file "
         f"(D-16 -- the data root must be gitignored before the first write): {violations}"
+    )
+
+
+def test_calibration_directory_default_location_is_gitignored():
+    """T-02-43: `calibration.record.DEFAULT_CALIBRATION_DIR` falls under
+    the repository's existing ignore rules, checked directly with
+    `git check-ignore` rather than assumed from `_SESSION_DIR_NAMES` alone
+    -- this is the ordering plan 02-01 used for the session store, applied
+    before this plan's calibration record is ever written for real.
+    """
+    from spire_voice.calibration.record import DEFAULT_CALIBRATION_DIR
+
+    candidate = Path(DEFAULT_CALIBRATION_DIR.lstrip("/")) / "echo_path.json"
+    proc = subprocess.run(
+        ["git", "check-ignore", "--quiet", str(candidate)],
+        cwd=_REPO_ROOT,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"{candidate} is not covered by the repository's ignore rules -- "
+        "a calibration record written to the default directory would be trackable by git"
     )
