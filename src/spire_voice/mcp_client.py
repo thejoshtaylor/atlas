@@ -43,6 +43,17 @@ class McpToolHost:
         self.tools = result.tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Call one tool and return the SDK's own `CallToolResult` unchanged.
+
+        This is what makes a refusal a distinguishable result rather than a
+        generic error string: `ClientSession.call_tool` never raises for a
+        tool-level failure. A `Denied` raised inside `spire_mcp.ha` becomes,
+        on the wire, `CallToolResult(is_error=True, content=[TextContent(text=
+        str(exc))])` -- and `str(exc)` on a `Denied` is exactly `reason` (see
+        `spire_mcp.safety.Denied.__init__`). The turn controller reads
+        `is_error` and `content[0].text` straight off this return value, so
+        the reason crosses this boundary unchanged, not paraphrased.
+        """
         if self.session is None:
             raise RuntimeError("McpToolHost.call_tool called before start()")
         return await self.session.call_tool(name, arguments)

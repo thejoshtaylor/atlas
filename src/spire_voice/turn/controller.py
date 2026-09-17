@@ -166,9 +166,21 @@ async def _run_tool_rounds(
             result = await tool_host.call_tool(tc.name, tc.arguments)
             content_text = _result_text(result)
             if _is_error(result):
-                # A refused or failed tool call reaches the reply path
-                # directly -- no second brain call reworks it.
+                # An error-shaped result short-circuits straight to speech --
+                # no second brain call touches it. For a refusal this is the
+                # boundary's own doctrine: `spire_mcp.safety.Denied.reason`
+                # crosses the MCP boundary as `content_text` unchanged (see
+                # `mcp_client.py`'s module docstring), so `content_text` here
+                # IS `Denied.reason`, verbatim, with nothing in between to
+                # reword it. This branch is deliberately the only place a
+                # tool result can end a turn without another round -- it
+                # covers both a refusal and an ordinary tool-level failure,
+                # and neither one reaches the caller as a confirmation.
                 return content_text
+            # A non-2xx Home Assistant response (see `handle_call_service`)
+            # is not a refusal -- it comes back as an ordinary, non-error
+            # result whose content names the failure, so the next brain call
+            # reports it rather than confirming success.
             messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content_text})
 
     logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
