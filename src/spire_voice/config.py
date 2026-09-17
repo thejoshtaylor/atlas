@@ -752,12 +752,54 @@ class BargeInConfig:
     camera sessions exist to tune it directly. The floor and the measure
     compared against it are in the same unit everywhere on this path, with
     no implicit conversion: a configured floor means one thing only.
+
+    **Plan 02-12 (Tier 2, D-18/D-19) adds the correlation itself, inert by
+    default.** `correlation_enabled` is what actually turns the known-output
+    comparison on -- `sources/runner.py`'s `BargeInMonitor` reads it as one
+    further condition alongside the floor, the duration, and the guard
+    window above, never as a replacement for them. Correlation compares
+    microphone energy against `speaker/output_trace.py`'s `EmittedAudioTrace`
+    (what was actually written to the FIFO), shifted by a stored
+    `calibration/record.py` `EchoCalibration`'s measured round-trip delay --
+    it is still, and will remain, unable to separate a voice speaking at the
+    exact moment the assistant is (that case stays open; full acoustic echo
+    cancellation is the only thing that would close it, per CONTEXT.md's
+    Deferred section). `correlation_tolerance` is the headroom, in this same
+    energy unit, that observed energy may exceed the predicted echo by and
+    still count as explained -- measurement noise, not a second floor.
+    `tracking_adaptation_rate` only matters when a calibration's
+    `agc_verdict` is not `"absent"` (present or indeterminate): it is the
+    exponential-moving-average weight given to each new explained reading
+    when updating the running gain estimate, and it is never applied to an
+    unexplained reading or once an interrupt has already been requested
+    (`BargeInMonitor`'s own docstring states why: an interrupting voice
+    would otherwise teach the estimator that the interruption was the
+    assistant's own voice getting louder). `app.py`'s startup refuses to
+    turn `correlation_enabled` on for a source with no valid, non-stale
+    calibration on file -- this config section alone cannot make the
+    correlation run without one.
     """
 
     enabled: bool = True
     energy_floor: float = 0.08
     min_duration_ms: int = 300
     post_playback_guard_ms: int = 150
+    correlation_enabled: bool = False
+    # A fraction of full-scale RMS amplitude (the same unit `energy_floor`
+    # and `audio/energy.py`'s `rms_amplitude` both use) -- roughly a third
+    # of `energy_floor`'s own default, chosen so ordinary measurement noise
+    # around a correctly-predicted echo level does not itself count as
+    # unexplained, while staying well short of masking a real interruption
+    # arriving at the same or greater level. PROVISIONAL until a real
+    # camera corpus during active playback exists to tune it directly, the
+    # same posture `energy_floor`'s own docstring already states.
+    correlation_tolerance: float = 0.03
+    # A conservative exponential-moving-average weight: fast enough to
+    # follow the gradual multi-second AGC creep Tier 1's calibration probe
+    # is built to detect, slow enough that the handful of readings inside
+    # one `min_duration_ms` window cannot swing the estimate before the
+    # duration threshold itself would fire on a genuine interruption.
+    tracking_adaptation_rate: float = 0.1
     sources: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
@@ -768,6 +810,19 @@ class BargeInConfig:
             name: _validate_and_normalize_override(cls, override or {}, f"barge_in.sources.{name}")
             for name, override in sources_raw.items()
         }
+        correlation_tolerance = float(raw.get("correlation_tolerance", cls.correlation_tolerance))
+        if correlation_tolerance < 0:
+            raise ConfigError(
+                f"barge_in.correlation_tolerance must not be negative, got {correlation_tolerance!r} -- "
+                "a negative tolerance would count perfectly explained energy as unexplained"
+            )
+        tracking_adaptation_rate = float(raw.get("tracking_adaptation_rate", cls.tracking_adaptation_rate))
+        if not (0 < tracking_adaptation_rate <= 1):
+            raise ConfigError(
+                f"barge_in.tracking_adaptation_rate must be greater than 0 and at most 1, got "
+                f"{tracking_adaptation_rate!r} -- zero never adapts the running gain estimate at all, "
+                "and a value above 1 lets a single reading overshoot past it"
+            )
         return cls(
             enabled=raw.get("enabled", cls.enabled),
             energy_floor=float(raw.get("energy_floor", cls.energy_floor)),
@@ -775,6 +830,9 @@ class BargeInConfig:
             post_playback_guard_ms=raw.get(
                 "post_playback_guard_ms", cls.post_playback_guard_ms
             ),
+            correlation_enabled=raw.get("correlation_enabled", cls.correlation_enabled),
+            correlation_tolerance=correlation_tolerance,
+            tracking_adaptation_rate=tracking_adaptation_rate,
             sources=sources,
         )
 

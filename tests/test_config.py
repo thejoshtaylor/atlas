@@ -605,3 +605,57 @@ def test_calibration_config_route_enabled_defaults_off():
 
     assert CalibrationConfig.from_config(None).route_enabled is False
     assert CalibrationConfig.from_config({}).route_enabled is False
+
+
+# --- Plan 02-12: BargeInConfig's two correlation ConfigError rejections ---
+
+
+def test_barge_in_config_rejects_a_negative_correlation_tolerance():
+    from spire_voice.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BargeInConfig.from_config({"correlation_tolerance": -0.01})
+    assert "correlation_tolerance" in str(exc.value)
+
+    # Zero is a valid tolerance -- "negative" is the rejection.
+    BargeInConfig.from_config({"correlation_tolerance": 0})
+
+
+def test_barge_in_config_rejects_an_adaptation_rate_outside_its_bounds():
+    from spire_voice.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BargeInConfig.from_config({"tracking_adaptation_rate": 0})
+    assert "tracking_adaptation_rate" in str(exc.value)
+
+    with pytest.raises(ConfigError):
+        BargeInConfig.from_config({"tracking_adaptation_rate": 1.5})
+
+    with pytest.raises(ConfigError):
+        BargeInConfig.from_config({"tracking_adaptation_rate": -0.1})
+
+    # Exactly 1 is the inclusive upper bound -- a valid, if aggressive,
+    # adaptation rate.
+    BargeInConfig.from_config({"tracking_adaptation_rate": 1.0})
+
+
+def test_barge_in_config_correlation_defaults_off():
+    from spire_voice.config import BargeInConfig
+
+    resolved = BargeInConfig.from_config(None)
+    assert resolved.correlation_enabled is False
+
+
+def test_barge_in_config_correlation_enabled_survives_a_per_source_override_round_trip():
+    """The camera's own override sets `enabled: false` (the shipped
+    default) alongside whatever `correlation_enabled` the global block
+    carries -- proving the two keys coexist under `resolve()` the same way
+    every other barge-in field already does."""
+    from spire_voice.config import BargeInConfig
+
+    config = BargeInConfig.from_config(
+        {"correlation_enabled": True, "sources": {"camera": {"enabled": False}}}
+    )
+    resolved = config.resolve("camera")
+    assert resolved.enabled is False
+    assert resolved.correlation_enabled is True

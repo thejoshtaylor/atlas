@@ -9,10 +9,10 @@ on the emission loop, and the recorded turn outcome) are covered by
 validation map: those need `run_turn`'s own fakes (`FakeTts`,
 `FakeAudioSource`), not this file's.
 
-Plan 02-12 Task 1 adds one more section at the bottom: `EmittedAudioTrace`
-alone, indexed by playback offset and never by a clock, plus the tap that
-appends to it from `turn/controller.py`'s `_speak`. Task 2 adds the
-correlation gate built on top of it in a later commit.
+Plan 02-12 adds two more sections at the bottom: `EmittedAudioTrace` alone
+(indexed by playback offset, never a clock), and the correlation gate built
+on top of it -- the known-output comparison CONTEXT.md's Barge-in section
+specified and the code review (CR-02) found absent.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import pytest
 
 from spire_voice.audio.alaw import pcm16_to_alaw
 from spire_voice.audio.energy import rms_amplitude
+from spire_voice.calibration.record import EchoCalibration
 from spire_voice.speaker.output_trace import EmittedAudioTrace
 from spire_voice.sources.runner import BargeInMonitor
 
@@ -370,3 +371,268 @@ async def test_speak_appends_nothing_to_the_trace_after_an_interrupt_is_requeste
 
     assert source.sent_audio == chunks[:2]
     assert len(trace) == 2
+
+
+# --- Plan 02-12 Task 2: the correlation -- fixed and tracking modes ---------
+
+
+def _calibration(*, delay_s: float = 0.0, gain: float = 1.0, agc_verdict: str = "absent") -> EchoCalibration:
+    """A plainly fictional `EchoCalibration` -- only the fields the
+    correlation actually reads (`delay_s`, `gain`, `agc_verdict`) vary
+    between tests; everything else is a fixed, valid placeholder."""
+    from datetime import datetime, timezone
+
+    return EchoCalibration(
+        schema_version=1,
+        probe_format_version=1,
+        probe_seed=1,
+        source="camera",
+        delay_s=delay_s,
+        confidence=1.0,
+        echo_level=0.1,
+        gain=gain,
+        agc_verdict=agc_verdict,
+        segment_levels=(0.1, 0.1, 0.1),
+        encoding="pcm",
+        sample_rate=1000,
+        channels=1,
+        placement_note="test fixture, no real room",
+        taken_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+_CORR_FLOOR = 0.01
+_CORR_MIN_DURATION_S = 2.0
+_CORR_GUARD_S = 0.0
+_CORR_TOLERANCE = 0.05
+
+
+def _correlated_monitor(
+    *, trace: EmittedAudioTrace, calibration: EchoCalibration, adaptation_rate: float = 0.5
+) -> BargeInMonitor:
+    return BargeInMonitor(
+        floor=_CORR_FLOOR,
+        min_duration_s=_CORR_MIN_DURATION_S,
+        guard_window_s=_CORR_GUARD_S,
+        enabled=True,
+        trace=trace,
+        calibration=calibration,
+        correlation_tolerance=_CORR_TOLERANCE,
+        tracking_adaptation_rate=adaptation_rate,
+    )
+
+
+def test_correlation_off_every_existing_case_in_this_file_is_unaffected():
+    """Direct proof that adding `trace`/`calibration` params changed
+    nothing for a monitor built the plain way -- every test above this
+    section already exercises `_monitor()`, which passes neither."""
+    monitor = _monitor()
+    assert monitor.trace is None
+    assert monitor.calibration is None
+
+
+def test_fixed_mode_energy_explained_by_known_output_never_interrupts():
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    calibration = _calibration(delay_s=0.0, gain=2.0, agc_verdict="absent")
+    monitor = _correlated_monitor(trace=trace, calibration=calibration)
+    # `mark_playback_started` resets `trace` -- appended *after*, matching
+    # the real call order `_speak` always uses (mark, then write).
+    monitor.mark_playback_started(0.0)
+    trace.append(_tone(2000, 5000))  # one long chunk, 5s, a known constant level
+
+    emitted_level = trace.level_at(0.0)
+    observed = emitted_level * calibration.gain  # exactly what the assistant's own voice explains
+
+    now = _CORR_GUARD_S
+    while now < _CORR_GUARD_S + _CORR_MIN_DURATION_S + 3.0:
+        monitor.process_energy(observed, now=now)
+        now += 0.5
+
+    assert monitor.interrupt_requested is False
+
+
+def test_fixed_mode_energy_unexplained_by_known_output_interrupts():
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    calibration = _calibration(delay_s=0.0, gain=2.0, agc_verdict="absent")
+    monitor = _correlated_monitor(trace=trace, calibration=calibration)
+    monitor.mark_playback_started(0.0)
+    trace.append(_tone(2000, 5000))
+
+    emitted_level = trace.level_at(0.0)
+    predicted = emitted_level * calibration.gain
+    unexplained = predicted + _CORR_TOLERANCE + 1.0  # far past any tolerance -- a real voice
+
+    now = _CORR_GUARD_S
+    while now < _CORR_GUARD_S + _CORR_MIN_DURATION_S + 0.5:
+        monitor.process_energy(unexplained, now=now)
+        now += 0.5
+
+    assert monitor.interrupt_requested is True
+
+
+def test_fixed_mode_energy_where_nothing_is_playing_interrupts():
+    """`level_at` returning `None` (nothing traced at that offset) means
+    nothing explains the energy -- it falls through to ordinary
+    floor-and-duration accumulation, same as it would with no correlation
+    at all."""
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    calibration = _calibration(delay_s=0.0, gain=2.0, agc_verdict="absent")
+    monitor = _correlated_monitor(trace=trace, calibration=calibration)
+    monitor.mark_playback_started(0.0)
+
+    now = _CORR_GUARD_S
+    while now < _CORR_GUARD_S + _CORR_MIN_DURATION_S + 0.5:
+        monitor.process_energy(1.0, now=now)
+        now += 0.5
+
+    assert monitor.interrupt_requested is True
+
+
+def test_tracking_mode_a_ramping_gain_does_not_interrupt_where_fixed_mode_would():
+    """The AGC-present case: the gain drifts steadily across the utterance.
+    Tracking mode's slowly-adapting estimate follows the ramp and never
+    reads it as unexplained; a fixed-mode monitor fed the identical input
+    is shown failing on it, proving the two modes actually differ and are
+    not just two names for the same arithmetic."""
+    emitted_level = 0.2
+    ramp_gains = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
+
+    def _fresh_trace() -> EmittedAudioTrace:
+        # Empty here on purpose: `mark_playback_started` resets a trace, so
+        # the one long chunk is appended *after* it below, matching the
+        # real call order `_speak` always uses (mark, then write).
+        return EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=20.0)
+
+    tracking_trace = _fresh_trace()
+    tracking = _correlated_monitor(
+        trace=tracking_trace,
+        calibration=_calibration(delay_s=0.0, gain=ramp_gains[0], agc_verdict="present"),
+        adaptation_rate=0.5,
+    )
+    tracking.mark_playback_started(0.0)
+    tracking_trace.append(_level_chunk(emitted_level, duration_s=10.0, sample_rate=1000))
+
+    fixed_trace = _fresh_trace()
+    fixed = _correlated_monitor(
+        trace=fixed_trace,
+        calibration=_calibration(delay_s=0.0, gain=ramp_gains[0], agc_verdict="absent"),
+    )
+    fixed.mark_playback_started(0.0)
+    fixed_trace.append(_level_chunk(emitted_level, duration_s=10.0, sample_rate=1000))
+
+    for step, gain in enumerate(ramp_gains, start=1):
+        now = float(step)
+        energy = emitted_level * gain
+        tracking.process_energy(energy, now=now)
+        fixed.process_energy(energy, now=now)
+
+    assert tracking.interrupt_requested is False
+    assert fixed.interrupt_requested is True
+
+
+def test_tracking_mode_a_genuine_voice_on_top_of_the_ramp_still_interrupts():
+    """Tracking is not a license to explain everything away: a real voice
+    riding on top of the same ramp still reads as unexplained and still
+    interrupts."""
+    emitted_level = 0.2
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=20.0)
+    monitor = _correlated_monitor(
+        trace=trace,
+        calibration=_calibration(delay_s=0.0, gain=1.0, agc_verdict="present"),
+        adaptation_rate=0.5,
+    )
+    monitor.mark_playback_started(0.0)
+    trace.append(_level_chunk(emitted_level, duration_s=10.0, sample_rate=1000))
+
+    # Three gentle, explained ramp steps first, so the estimate has
+    # somewhere to track from -- then a loud, unexplained voice for long
+    # enough to cross the minimum duration.
+    for step, gain in enumerate([1.0, 1.1, 1.2], start=1):
+        monitor.process_energy(emitted_level * gain, now=float(step))
+
+    loud = emitted_level * 5.0
+    monitor.process_energy(loud, now=4.0)
+    monitor.process_energy(loud, now=6.0)
+
+    assert monitor.interrupt_requested is True
+
+
+def test_tracking_estimate_never_updates_once_an_interrupt_is_requested():
+    emitted_level = 0.2
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=20.0)
+    monitor = _correlated_monitor(
+        trace=trace,
+        calibration=_calibration(delay_s=0.0, gain=1.0, agc_verdict="present"),
+        adaptation_rate=0.5,
+    )
+    monitor.mark_playback_started(0.0)
+    trace.append(_level_chunk(emitted_level, duration_s=20.0, sample_rate=1000))
+
+    # One explained reading to move the estimate off its seed, then a loud
+    # unexplained run that crosses the interrupt threshold.
+    monitor.process_energy(emitted_level * 1.0, now=1.0)
+    estimate_before = monitor._estimated_gain
+
+    loud = emitted_level * 5.0
+    monitor.process_energy(loud, now=2.0)
+    monitor.process_energy(loud, now=4.0)  # crosses _CORR_MIN_DURATION_S (2.0)
+    assert monitor.interrupt_requested is True
+    estimate_at_interrupt = monitor._estimated_gain
+
+    # Further loud readings, after the latch -- must never reach the
+    # estimator at all (D-11's one-way latch, applied to the estimate too).
+    monitor.process_energy(loud, now=6.0)
+    monitor.process_energy(loud * 10, now=8.0)
+
+    assert monitor._estimated_gain == estimate_at_interrupt
+    assert monitor._estimated_gain == estimate_before, (
+        "the unexplained loud readings must never have updated the estimate at all"
+    )
+
+
+def test_indeterminate_verdict_selects_tracking_mode():
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    trace.append(_tone(1000, 100))
+    monitor = _correlated_monitor(trace=trace, calibration=_calibration(agc_verdict="indeterminate"))
+    assert monitor._tracking_mode is True
+
+
+def test_absent_verdict_selects_fixed_mode():
+    trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    trace.append(_tone(1000, 100))
+    monitor = _correlated_monitor(trace=trace, calibration=_calibration(agc_verdict="absent"))
+    assert monitor._tracking_mode is False
+
+
+def test_the_delay_shift_is_applied_the_unshifted_offset_gives_the_opposite_answer():
+    """Two chunks: a quiet one, then a loud one. The microphone hears the
+    loud chunk's level `delay_s` after it was actually emitted. Shifting by
+    the calibrated delay lands on the loud chunk and explains the energy;
+    querying the raw, un-shifted offset instead lands past the end of what
+    was ever written and calls the same energy unexplained -- the opposite
+    verdict, from the same trace and the same reading."""
+    emitted_level = 0.4
+    observed = emitted_level * 1.0  # gain=1.0, matches the *second* chunk's level exactly
+    now = 2.0
+
+    shifted_trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    shifted = _correlated_monitor(trace=shifted_trace, calibration=_calibration(delay_s=1.0, gain=1.0))
+    shifted.mark_playback_started(0.0)
+    shifted_trace.append(_level_chunk(0.05, duration_s=1.0, sample_rate=1000))
+    shifted_trace.append(_level_chunk(emitted_level, duration_s=1.0, sample_rate=1000))
+    for step in range(6):
+        shifted.process_energy(observed, now=now + step * 0.5)
+    assert shifted.interrupt_requested is False, (
+        "shifted by the measured delay, the second chunk's own level explains this energy"
+    )
+
+    unshifted_trace = EmittedAudioTrace(encoding="pcm", sample_rate=1000, span_s=10.0)
+    unshifted = _correlated_monitor(trace=unshifted_trace, calibration=_calibration(delay_s=0.0, gain=1.0))
+    unshifted.mark_playback_started(0.0)
+    unshifted_trace.append(_level_chunk(0.05, duration_s=1.0, sample_rate=1000))
+    unshifted_trace.append(_level_chunk(emitted_level, duration_s=1.0, sample_rate=1000))
+    for step in range(6):
+        unshifted.process_energy(observed, now=now + step * 0.5)
+    assert unshifted.interrupt_requested is True, (
+        "querying the un-shifted offset lands past the end of the trace -- nothing explains it"
+    )

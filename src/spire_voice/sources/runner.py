@@ -81,7 +81,9 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
 from spire_voice.audio.energy import rms_amplitude
 from spire_voice.audio.ring import PrerollBuffer
+from spire_voice.calibration.record import EchoCalibration
 from spire_voice.config import BargeInConfig, GateConfig, WakeConfig
+from spire_voice.speaker.output_trace import EmittedAudioTrace
 from spire_voice.wake.base import WakeDetector
 from spire_voice.wake.gate import WakeGate
 
@@ -145,28 +147,85 @@ class BargeInMonitor:
     finish a sentence. The two thresholds are not the same decision and
     must not be harmonized to look alike.
 
-    **What this class does not do, stated plainly (found in code review):**
-    it never reads or compares against the bytes `_speak` actually wrote to
-    the speaker FIFO. Every input here is the energy floor, the sustained
-    duration, and the guard window above -- nothing about *known output*.
-    On a device whose microphone and speaker are the same unit with no
-    acoustic echo cancellation, that means the assistant's own voice
-    returning through the open mic can satisfy floor-and-duration past the
-    guard window and read as a real interruption. `BargeInConfig`'s own
-    docstring (`config.py`) and `config.example.yaml`'s
-    `barge_in.sources.camera.enabled: false` are this project's answer
-    until a real camera corpus proves the guard window sufficient.
+    **What this class did not do, until plan 02-12 (found in code
+    review):** it never read or compared against the bytes `_speak`
+    actually wrote to the speaker FIFO. Every input was the energy floor,
+    the sustained duration, and the guard window above -- nothing about
+    *known output*. On a device whose microphone and speaker are the same
+    unit with no acoustic echo cancellation, that meant the assistant's own
+    voice returning through the open mic could satisfy floor-and-duration
+    past the guard window and read as a real interruption.
+
+    **What is true now (D-18, D-19):** when constructed with both a `trace`
+    (`speaker/output_trace.py`'s `EmittedAudioTrace`) and a `calibration`
+    (`calibration/record.py`'s `EchoCalibration`), `process_energy` gains
+    one further condition, checked after the floor and before the
+    sustained-duration accumulation: is the observed energy explained by
+    what was actually playing, `calibration.delay_s` earlier? A camera
+    whose `agc_verdict` is `"absent"` gets a fixed comparison against the
+    calibrated gain; `"present"` or `"indeterminate"` gets a slowly-tracking
+    estimate instead, because a static comparison drifts wrong the moment
+    the camera's own gain control moves the echo path underneath it, and an
+    indeterminate verdict is not evidence the path is stable (D-19).
+    Neither mode's estimate is ever updated from a reading that was *not*
+    explained, and `process_energy`'s own top-of-function guard means
+    neither mode's estimate can ever update again once `interrupt_requested`
+    is set for this turn -- an interrupting voice raising the
+    observed-to-emitted ratio must never teach the estimator that the
+    interruption was the assistant's own voice getting louder.
+
+    **What is still not true, and will not become true here:** this cannot
+    separate a voice speaking at the exact moment the assistant is from the
+    assistant's own echo -- it answers "is this energy explained by what I
+    am playing," not "is this a person," and a television talking over a
+    reply interrupts it exactly as a person would (accepted risk, T-02-54).
+    Closing that gap is full acoustic echo cancellation, deferred per
+    CONTEXT.md's own Deferred section, worth revisiting only against
+    evidence this tier is insufficient on real hardware. Constructed with
+    no `trace` or no `calibration` (every call site and every test that
+    predates plan 02-12, and every source whose `BargeInConfig.
+    correlation_enabled` is left off), this class behaves exactly as it
+    did before this plan -- `config/config.example.yaml`'s
+    `barge_in.sources.camera.enabled: false` and its `correlation_enabled`
+    defaulting off are this project's answer until a real calibration and a
+    real camera corpus both exist.
     """
 
-    def __init__(self, *, floor: float, min_duration_s: float, guard_window_s: float, enabled: bool) -> None:
+    def __init__(
+        self,
+        *,
+        floor: float,
+        min_duration_s: float,
+        guard_window_s: float,
+        enabled: bool,
+        trace: EmittedAudioTrace | None = None,
+        calibration: EchoCalibration | None = None,
+        correlation_tolerance: float = 0.0,
+        tracking_adaptation_rate: float = 0.0,
+    ) -> None:
         self.floor = floor
         self.min_duration_s = min_duration_s
         self.guard_window_s = guard_window_s
         self.enabled = enabled
+        self.trace = trace
+        self.calibration = calibration
+        self.correlation_tolerance = correlation_tolerance
+        self.tracking_adaptation_rate = tracking_adaptation_rate
         self.playback_started_at: float | None = None
         self.interrupt_requested = False
         self.transcript_done = asyncio.Event()
         self._above_floor_since: float | None = None
+        # Correlation is active only when both a trace to compare against
+        # and a calibration to align/scale by exist -- absent either, this
+        # monitor behaves exactly as it did before Tier 2 (D-18's own
+        # "constructed with no trace or no calibration" clause above).
+        self._correlation_active = trace is not None and calibration is not None
+        # D-19: "absent" gets the fixed comparison; "present" and
+        # "indeterminate" both get tracking -- a verdict that could not be
+        # established is treated exactly as conservatively as one that
+        # found gain control, never decayed into the fixed case.
+        self._tracking_mode = calibration is not None and calibration.agc_verdict != "absent"
+        self._estimated_gain = calibration.gain if calibration is not None else 0.0
 
     def mark_transcript_done(self) -> None:
         """`run_turn` calls this once, right after draining the final
@@ -179,9 +238,16 @@ class BargeInMonitor:
         """`_speak` calls this on the first chunk of every utterance it
         writes -- filler and answer alike restart the guard window, because
         each is a fresh moment of "the assistant's own speech just started
-        arriving in the room," not a continuation of a previous one."""
+        arriving in the room," not a continuation of a previous one.
+
+        Also resets `trace` (plan 02-12), for the same reason: a fresh
+        utterance's playback offsets start at zero again, never continuing
+        the previous utterance's cursor. A no-op when `trace` is `None`.
+        """
         self.playback_started_at = now
         self._above_floor_since = None
+        if self.trace is not None:
+            self.trace.reset()
 
     def process_energy(self, energy: float, now: float) -> None:
         """Feed one energy reading at time `now`; sets `interrupt_requested`
@@ -206,10 +272,51 @@ class BargeInMonitor:
             # transient (a door closing) must not interrupt a reply (D-10).
             self._above_floor_since = None
             return
+        if self._correlation_active and self._explained_by_known_output(energy, now):
+            # D-18: known output explains this reading -- treat it exactly
+            # like at-or-below-the-floor energy, resetting any run in
+            # progress rather than letting the assistant's own echo
+            # accumulate toward an interrupt.
+            self._above_floor_since = None
+            return
         if self._above_floor_since is None:
             self._above_floor_since = now
         if (now - self._above_floor_since) >= self.min_duration_s:
             self.interrupt_requested = True
+
+    def _explained_by_known_output(self, energy: float, now: float) -> bool:
+        """D-18's alignment: the sound arriving at the microphone at `now`
+        was emitted at playback offset `(now - playback_started_at) -
+        delay_s`, never the un-shifted `now - playback_started_at` -- write
+        time and playback time are different quantities (`speaker/
+        output_trace.py`'s own module docstring), and only playback time is
+        comparable against a microphone reading taken at a real moment.
+
+        `level_at` returning `None` means nothing was playing at that
+        offset, so nothing explains this energy -- `False`, unconditionally,
+        with no estimate update. Only an *explained* reading ever updates
+        the tracking estimate (D-19's own docstring paragraph above): an
+        unexplained reading is exactly the shape a real interruption takes,
+        and updating from one would teach the estimator to explain away the
+        very thing this class exists to detect.
+        """
+        assert self.trace is not None and self.calibration is not None
+        offset = (now - self.playback_started_at) - self.calibration.delay_s
+        level = self.trace.level_at(offset)
+        if level is None:
+            return False
+        if self._tracking_mode:
+            predicted = level * self._estimated_gain
+            explained = energy <= predicted + self.correlation_tolerance
+            if explained and level > 0:
+                ratio = energy / level
+                self._estimated_gain = (
+                    (1 - self.tracking_adaptation_rate) * self._estimated_gain
+                    + self.tracking_adaptation_rate * ratio
+                )
+            return explained
+        predicted = level * self.calibration.gain
+        return energy <= predicted + self.correlation_tolerance
 
 
 class PrerollReplayingSource:
@@ -259,6 +366,7 @@ class SourceRunner:
         is_media_playing: Callable[[tuple[str, ...]], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         preroll: PrerollBuffer | None = None,
+        calibration: EchoCalibration | None = None,
     ) -> None:
         self._name = name
         self._source = source
@@ -267,6 +375,13 @@ class SourceRunner:
         self._run_turn_fn = run_turn_fn
         self._clock = clock
         self._preroll = preroll
+        # Plan 02-12 Task 3: `app.py`'s own startup refusal is what keeps
+        # this from ever being a *stale or missing* calibration for a
+        # source whose policy has correlation turned on -- by the time it
+        # reaches here, it is either `None` (correlation not requested, or
+        # not yet measured) or a calibration already proven valid and
+        # current enough to trust.
+        self._calibration = calibration
 
         # Resolved once, here, against this runner's own name -- never
         # re-resolved per hit, and never branched on by name anywhere in
@@ -358,11 +473,28 @@ class SourceRunner:
             if preroll_chunks:
                 turn_source = PrerollReplayingSource(self._source, preroll_chunks)
 
+        # D-18: correlation is only ever wired up when this source's own
+        # resolved policy asks for it *and* a calibration is actually on
+        # hand -- `app.py`'s startup refusal is what guarantees the second
+        # half of that whenever the first half is true (Task 3), so this
+        # constructor-time check is a second, cheap confirmation, never the
+        # only one. A fresh `EmittedAudioTrace` every turn, sized from this
+        # source's own declared format, mirrors `PrerollBuffer`'s own
+        # per-source-format construction just above.
+        correlation_active = self._barge_in_config.correlation_enabled and self._calibration is not None
+        trace: EmittedAudioTrace | None = None
+        if correlation_active:
+            source_format = self._source.source_format()
+            trace = EmittedAudioTrace(encoding=source_format.encoding, sample_rate=source_format.sample_rate)
         monitor = BargeInMonitor(
             floor=self._barge_in_config.energy_floor,
             min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,
             guard_window_s=self._barge_in_config.post_playback_guard_ms / 1000.0,
             enabled=self._barge_in_config.enabled,
+            trace=trace,
+            calibration=self._calibration if correlation_active else None,
+            correlation_tolerance=self._barge_in_config.correlation_tolerance,
+            tracking_adaptation_rate=self._barge_in_config.tracking_adaptation_rate,
         )
         # Duck-typed, the same way `turn/controller.py`'s own
         # `_emit_event` already reaches for `send_event` -- `run_turn`
@@ -444,6 +576,7 @@ class SourceRunnerSpec:
     is_media_playing: Callable[[tuple[str, ...]], bool] | None = None
     clock: Callable[[], float] = field(default=time.monotonic)
     preroll: PrerollBuffer | None = None
+    calibration: EchoCalibration | None = None
 
 
 def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[SourceRunner]:
@@ -475,6 +608,7 @@ def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[Sourc
             is_media_playing=spec.is_media_playing,
             clock=spec.clock,
             preroll=spec.preroll,
+            calibration=spec.calibration,
         )
         for name, spec in specs.items()
     ]
