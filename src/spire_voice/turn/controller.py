@@ -127,6 +127,12 @@ class _BargeInMonitor(Protocol):
     plan, and any source `SourceRunner` did not attach one to), in which
     case every one of `_speak`'s new checks is a no-op and behavior is
     byte-for-byte what it was before this plan.
+
+    `trace` (plan 02-12, D-18) is the same kind of optional attribute,
+    read the same way (`getattr(barge_in, "trace", None)`) rather than
+    declared here as a required field -- a `BargeInMonitor` with
+    correlation disabled, and every fake that predates plan 02-12, carries
+    no `trace` at all.
     """
 
     enabled: bool
@@ -710,6 +716,18 @@ async def _speak(
     separate paths, and only the wake path may ever start one (T-02-24) --
     nothing below calls `run_turn`, matches a macro, or opens a
     transcription stream.
+
+    Plan 02-12 (D-18): every chunk actually written to `source.send_audio()`
+    is also appended to `barge_in.trace` -- the emitted-output record
+    `sources/runner.py`'s correlation compares microphone energy against.
+    `trace` is read with `getattr`, never assumed present, so a `barge_in`
+    double that carries no `trace` attribute (every test predating this
+    plan) is untouched: the same duck-typed-optional discipline this
+    module already applies to `source.barge_in` and `source.send_event`.
+    Appended only for a chunk that is actually sent -- never one already
+    skipped by the `interrupted` branch above, matching CONTEXT.md's "stops
+    the FIFO write immediately": nothing is appended for bytes that were
+    never written.
     """
 
     async def _one_delta() -> AsyncIterator[str]:
@@ -741,6 +759,10 @@ async def _speak(
             continue
         await source.send_audio(chunk)
         chunks_sent += 1
+        if barge_in is not None and barge_in.enabled:
+            trace = getattr(barge_in, "trace", None)
+            if trace is not None:
+                trace.append(chunk)
 
     if interrupted:
         await _emit_event(
