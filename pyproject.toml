@@ -6,7 +6,14 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.141,<0.142",
     "uvicorn[standard]>=0.34",
-    "openai>=3.14,<4",
+    # Pinned below Phase 01's original >=3.14 floor: every openai release from
+    # 3.3.1 onward requires jiter>=0.16.0, and every instructor release (up to
+    # and including the 1.17.0 this phase installs) requires jiter<0.15 --
+    # verified against PyPI's per-version metadata for both packages, this
+    # session. 3.0.0-3.3.0 is the newest contiguous range where both
+    # constraints hold at once; see 01.1-01-SUMMARY.md for the version survey.
+    "openai>=3.0,<3.3.1",
+    "instructor>=1.17,<2",
     "websockets>=17.1,<18",
     "httpx>=0.28,<0.29",
     "mcp>=2.2,<3",
