@@ -16,6 +16,18 @@ like the real ones from `spire_voice.providers.base`.
 `reason` becomes the text handed to text-to-speech, with no second language
 model call in between to reword it. That is the one thing this path must
 not do, per `spire_mcp.safety.Denied`'s own doctrine.
+
+Plan 01.1-04 replaces the single `_run_tool_rounds` call with a raced tier
+list (`turn/brain_race.py`): every tier is dispatched concurrently, the
+first confident reply wins, and a holding phrase from the startup cache
+covers the wait past `filler_after_ms` if the race is still running. `tiers`
+defaults to `None`, in which case `run_turn` wraps its `brain` positional
+argument in a one-element tier list and races that -- there is one code
+path, and a single tier is its degenerate case, not a bypass. This module
+imports `spire_voice.turn.brain_race` at load time; `brain_race.py` imports
+`_run_tool_rounds` back from this module, but only inside a function body
+(deferred past both modules' load), so the two import in either order with
+no cycle.
 """
 
 from __future__ import annotations
@@ -26,9 +38,12 @@ import json
 import logging
 import time as _time
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Protocol
+from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
+from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
+from spire_voice.providers.tts_cache import CachedTts
 from spire_voice.timing import TurnTimings
+from spire_voice.turn import brain_race
 
 logger = logging.getLogger("spire_voice.turn.controller")
 
@@ -108,15 +123,23 @@ async def run_turn(
     *,
     clock: Callable[[], float] = _time.monotonic,
     poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
+    tiers: list[brain_race.TierBrain] | None = None,
+    filler_after_ms: float = 600.0,
+    filler_cache: Mapping[str, bytes] | None = None,
 ) -> None:
-    """Drive one turn end to end: frames -> transcript -> tool calls -> speech.
+    """Drive one turn end to end: frames -> transcript -> tier race -> speech.
 
-    `max_utterance_s`, `clock`, and `poll_interval_s` all default to their
-    production values, so every caller that predates this plan (the
-    WebSocket/WebRTC routes in `app.py`, the safety-integration test) keeps
-    working unmodified. `clock` exists so a test can drive the silence-timeout
-    guard without waiting out the real configured duration -- see
-    `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+    `max_utterance_s`, `clock`, `poll_interval_s`, `tiers`, `filler_after_ms`,
+    and `filler_cache` all default to their Phase 01 (or Phase 01 shape-only)
+    behavior, so every caller that predates this plan (the WebSocket/WebRTC
+    routes in `app.py`, the safety-integration test) keeps working
+    unmodified. `clock` exists so a test can drive the silence-timeout guard
+    and the filler deadline without waiting out the real configured duration
+    -- see `tests/test_turn_controller.py::test_silence_timeout_closes_turn`.
+
+    `tiers=None` wraps `brain` in a one-element tier list and races that --
+    there is one code path, always the list; a one-entry list is the
+    degenerate case, not a bypass.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -146,10 +169,54 @@ async def run_turn(
         {"role": "user", "content": final_text},
     ]
 
-    reply_text = await _run_tool_rounds(brain, tool_host, tools_schema, messages, max_tool_rounds, timings)
+    if tiers is None:
+        # The degenerate one-tier case: no instructor client exists, so
+        # `run_top_tier` wraps its settled text locally as a confident
+        # `TierReply` instead of calling out. This is the seam that keeps
+        # every Phase 01 test -- which drives `run_turn` with a `FakeBrain`
+        # and no instructor client -- working unchanged.
+        tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]
+
+    tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
+    for tier in tiers:
+        tier_messages = list(messages)
+        if tier.calls_tools:
+            coro = brain_race.run_top_tier(tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings)
+        else:
+            coro = brain_race.run_triage_tier(tier, tier_messages)
+        tier_tasks[tier.index] = asyncio.create_task(coro)
+
+    race_task = asyncio.create_task(brain_race.race_tiers(tier_tasks))
+
+    filler_deadline = clock() + filler_after_ms / 1000
+    first_filler: FillerPhrase | None = None
+    inspected: set[asyncio.Task[TierReply]] = set()
+    while not race_task.done() and clock() < filler_deadline:
+        await asyncio.sleep(poll_interval_s)
+        for task in tier_tasks.values():
+            if task.done() and task not in inspected:
+                inspected.add(task)
+                if task.cancelled() or task.exception() is not None:
+                    continue
+                reply = task.result()
+                if not reply.confident and first_filler is None:
+                    first_filler = reply.filler
+
+    if not race_task.done() and filler_cache:
+        # D-08/D-09: the holding phrase plays on a deadline, from the
+        # startup cache only, and is awaited to completion before the
+        # answer -- that sequential await is what makes D-09 true (the
+        # filler finishes before the answer can start) with no second
+        # mechanism. When `filler_cache` is empty or `None`, this branch is
+        # skipped entirely: the turn waits in silence rather than
+        # synthesizing at turn time.
+        phrase = first_filler or DEFAULT_FILLER
+        await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler")
+
+    winner = await race_task
     timings.mark_tool_rounds_done()
 
-    await _speak(source, tts, timings, reply_text)
+    await _speak(source, tts, timings, winner.answer, kind="answer")
     await _emit_event(source, timings.to_event())
     timings.log()
 
@@ -284,7 +351,22 @@ async def _run_tool_rounds(
     return _TOO_MANY_ROUNDS_REPLY
 
 
-async def _speak(source: _AudioSource, tts: _TtsProvider, timings: TurnTimings, reply_text: str) -> None:
+async def _speak(
+    source: _AudioSource,
+    tts: _TtsProvider,
+    timings: TurnTimings,
+    reply_text: str,
+    *,
+    kind: Literal["filler", "answer"],
+) -> None:
+    """Speak one utterance, and mark whichever timing(s) `kind` calls for.
+
+    `kind` has no default on purpose: it is the one thing keeping a filler
+    from setting the answer mark. Both kinds mark `first_audio` on the first
+    chunk (criterion 6 wants "any audio, filler included" for that mark);
+    only the answer utterance also marks `answer_audio`.
+    """
+
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
 
@@ -293,6 +375,8 @@ async def _speak(source: _AudioSource, tts: _TtsProvider, timings: TurnTimings, 
         if not first_audio_marked:
             timings.mark_first_audio()
             first_audio_marked = True
+            if kind == "answer":
+                timings.mark_answer_audio()
         await source.send_audio(chunk)
 
     await _emit_event(source, {"type": "reply.text", "text": reply_text})

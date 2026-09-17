@@ -23,12 +23,14 @@ from pydantic import BaseModel
 
 from spire_voice.config import Config, load_config
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
-from spire_voice.providers.brain_xai import XaiBrain
 from spire_voice.providers.stt_xai import XaiStt
+from spire_voice.providers.tier_reply import FILLER_TEXT
+from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.timing import TurnTimings
 from spire_voice.transports.webrtc import WebrtcTransport, create_offer_answer
 from spire_voice.transports.websocket import WebSocketAudioSource
+from spire_voice.turn import brain_race
 from spire_voice.turn.controller import run_turn
 
 logger = logging.getLogger("spire_voice.app")
@@ -83,12 +85,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.config = config
 
     app.state.stt = XaiStt(config.stt)
-    brain = XaiBrain(config.brain)
-    app.state.brain = brain
+    tier_brains = brain_race.build_tiers(config.brain)
+    app.state.tier_brains = tier_brains
+    # Nothing else in this file reads `app.state.brain` today, but it stays
+    # pointed at the top tier's `XaiBrain` so any future reader keeps seeing
+    # the one that actually reaches Home Assistant.
+    app.state.brain = tier_brains[-1].brain
     app.state.tts = XaiTts(config.tts)
 
-    resolved_model = await brain.resolve_model()
-    logger.info("resolved brain model: %s", resolved_model)
+    for tier in tier_brains:
+        resolved_model = await tier.brain.resolve_model()
+        logger.info("resolved brain tier %d model: %s", tier.index, resolved_model)
 
     tool_host = McpToolHost()
     ha_config = config.mcp_servers.get("ha")
@@ -105,6 +112,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     entities_result = await tool_host.call_tool("ha_list_entities", {})
     entities = _tool_result_json(entities_result)
     app.state.system_prompt = _system_prompt(entities if isinstance(entities, list) else [])
+
+    # Every filler phrase plus every operator-configured extra (short
+    # confirmations, per `config.example.yaml`'s own `tts.precache` comment)
+    # is rendered once, here, against the browser sink -- Phase 1's only
+    # consumer. A failure here propagates uncaught, matching this function's
+    # existing posture toward `tool_host.start()`: a broken startup should
+    # stop the process, not start it half-configured with a filler path that
+    # will fall over on the first turn.
+    filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache]
+    app.state.filler_cache = await precache_all(
+        app.state.tts,
+        Path(config.tts.cache_dir),
+        filler_phrases,
+        config.tts.voice_id,
+        app.state.tts.browser_sink(),
+    )
+    logger.info("precached %d phrases", len(app.state.filler_cache))
 
     # Background WebRTC turns (see `webrtc_offer` below) run detached from
     # the HTTP request that started them -- this set is what keeps asyncio
@@ -176,6 +200,9 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             config.brain.max_tool_rounds,
             timings,
             config.stt.max_utterance_s,
+            tiers=app.state.tier_brains,
+            filler_after_ms=config.brain.filler_after_ms,
+            filler_cache=app.state.filler_cache,
         )
     )
     app.state.background_turns.add(task)
@@ -184,8 +211,14 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     return WebrtcAnswerPayload(**answer)
 
 
-async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any) -> None:
+async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any) -> None:
     """Run one turn against `transport`, then close its peer connection.
+
+    `**kwargs` forwards `run_turn`'s keyword-only `tiers`/`filler_after_ms`/
+    `filler_cache` -- `*args` alone cannot carry them. Missing this forward
+    would leave the WebRTC transport silently running Phase 01's
+    single-model path while the WebSocket transport races tiers, which is
+    exactly the two-different-systems failure this plan exists to avoid.
 
     T-1-13 accepts the DoS risk of repeated offers because "a peer
     connection is closed when its turn ends" -- the `finally` here is what
@@ -193,7 +226,7 @@ async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any) -> None:
     raised.
     """
     try:
-        await run_turn(transport, *args)
+        await run_turn(transport, *args, **kwargs)
     finally:
         await transport.close()
 
@@ -215,6 +248,9 @@ async def turn_ws(websocket: WebSocket) -> None:
         config.brain.max_tool_rounds,
         timings,
         config.stt.max_utterance_s,
+        tiers=websocket.app.state.tier_brains,
+        filler_after_ms=config.brain.filler_after_ms,
+        filler_cache=websocket.app.state.filler_cache,
     )
 
 

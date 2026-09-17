@@ -11,7 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Sequence
+from types import SimpleNamespace
+from typing import Any, AsyncIterator, Sequence
 
 import httpx
 import pytest
@@ -157,6 +158,36 @@ class FakeAudioSource:
 def fake_audio_source():
     """Factory: `fake_audio_source(frames=[...])` builds a `FakeAudioSource`."""
     return FakeAudioSource
+
+
+class FakeEnvelopeClient:
+    """A fake `instructor`-wrapped client for a `brain_race.TierBrain`.
+
+    Only `.chat.completions.create(...)` exists -- the one method
+    `run_triage_tier`/`run_top_tier` actually call. Returns a scripted
+    `TierReply`, optionally after a real `asyncio.sleep`, so a test can make
+    one tier "return later" than another without a real network call.
+    Records every call's keyword arguments, so a test can assert a `tools`
+    keyword never reached a triage tier's client.
+    """
+
+    def __init__(self, reply: object, delay_s: float = 0.0) -> None:
+        self._reply = reply
+        self._delay_s = delay_s
+        self.calls: list[dict[str, Any]] = []
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs: Any) -> object:
+        self.calls.append(kwargs)
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
+        return self._reply
+
+
+@pytest.fixture
+def fake_envelope_client():
+    """Factory: `fake_envelope_client(reply=..., delay_s=...)` builds one."""
+    return FakeEnvelopeClient
 
 
 # Every entity id below is invented. No real house appears in this file,
