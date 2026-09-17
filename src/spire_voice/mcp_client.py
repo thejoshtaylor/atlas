@@ -5,15 +5,26 @@ Opened once, in the FastAPI lifespan, and held until shutdown -- never
 per-turn. The subprocess's `env` is built explicitly, with exactly three
 keys, rather than inherited from this process's environment: `HA_URL` and
 `HA_TOKEN` are what the child needs, and `PYTHONPATH` is what lets
-`python3 -m spire_mcp.ha` resolve. Building it literally, not by copying and
+`-m spire_mcp.ha` resolve. Building it literally, not by copying and
 filtering `os.environ`, is what keeps `XAI_API_KEY` out of the child process
 -- the parent's provider credential has no reason to exist inside the
 process that only ever talks to Home Assistant.
+
+The child runs under `sys.executable`, never a bare `python3`. The child
+imports the same `mcp` SDK this process does, so it must be the same
+interpreter. A bare `python3` is whatever comes first on PATH, which outside
+an activated virtualenv is the system interpreter with no SDK installed --
+and because this repository has its own top-level `mcp/` directory, the
+failure surfaces as a namespace-package shadow (`No module named
+'mcp.server'`) rather than an honest "SDK not installed". That import runs
+inside the child, at startup, so no unit test that imports the tool handlers
+directly can see it.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -32,7 +43,7 @@ class McpToolHost:
 
     async def start(self, ha_url: str, ha_token: str, mcp_root: str | os.PathLike[str]) -> None:
         server_params = StdioServerParameters(
-            command="python3",
+            command=sys.executable,
             args=["-m", "spire_mcp.ha"],
             env={"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)},
         )

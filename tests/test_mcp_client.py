@@ -12,6 +12,7 @@ test builds one for real, the way the installed SDK does, so this class of
 attribute-name drift fails loudly again if it ever recurs.
 """
 
+import inspect
 from mcp.types import Tool
 
 from spire_voice.mcp_client import mcp_tools_to_openai_tools
@@ -68,3 +69,30 @@ def test_mcp_tools_to_openai_tools_keeps_a_falsy_but_present_schema():
     (openai_tool,) = mcp_tools_to_openai_tools([tool])
 
     assert openai_tool["function"]["parameters"] == {}
+
+
+def test_mcp_child_runs_under_this_interpreter_not_a_bare_python3():
+    """The MCP child must inherit the parent's interpreter, not PATH's `python3`.
+
+    The child imports the same `mcp` SDK this process does. A bare `python3`
+    is whatever PATH resolves first, which outside an activated virtualenv is
+    the system interpreter with no SDK installed. Because this repository has
+    its own top-level `mcp/` directory, that failure does not surface as an
+    honest "SDK not installed" -- the repo directory satisfies `import mcp` as
+    a namespace package, and the child dies on `No module named 'mcp.server'`,
+    taking the FastAPI lifespan down with it.
+
+    No test that imports the tool handlers directly can catch this, because
+    the import happens inside the child process at startup. This asserts on
+    the spawn parameters instead, which is the one place the choice is made.
+    """
+    from spire_voice.mcp_client import McpToolHost
+
+    source = inspect.getsource(McpToolHost.start)
+    assert "command=sys.executable" in source, (
+        "McpToolHost.start must spawn the child with sys.executable; a bare "
+        '"python3" resolves to the system interpreter, which has no mcp SDK'
+    )
+    assert 'command="python3"' not in source, (
+        "a bare python3 command is still present in McpToolHost.start"
+    )
