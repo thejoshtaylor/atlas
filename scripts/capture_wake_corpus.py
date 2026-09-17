@@ -54,7 +54,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from spire_voice.config import CameraConfig, ConfigError, load_config
 from spire_voice.transports.camera import CameraAudioSource

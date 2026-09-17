@@ -64,17 +64,27 @@ speaker:
 wake:
   # openwakeword | vosk
   #
-  # Vosk ships live today. This is PROVISIONAL, not measured: no "hey spire"
-  # model exists for openwakeword yet, and producing one is an offline
-  # training pipeline (synthetic TTS positives plus real recordings, run
-  # through openWakeWord's own notebooks) outside this phase's scope. Vosk
-  # needs no such model -- it descends from Kaldi telephony work, which
-  # already suits this camera's 8 kHz narrowband, and restricting its decoder
-  # to a one-phrase grammar makes a false fire hard. Plan 02-09 records both
-  # engines scored offline against the same recordings and this default is
-  # replaced by that result, or left as-is with the reason written down if
-  # the corpus falls short (D-08). Both engines still ship as code below --
-  # openwakeword remains a live option once its model exists.
+  # Vosk ships live today. This is PROVISIONAL, not measured (D-08): plan
+  # 02-09 built scripts/capture_wake_corpus.py and scripts/score_wake_engines.py,
+  # the harness that scores both engines offline against identical recorded
+  # audio -- but no corpus exists in this environment (no camera, no
+  # /models, no Vosk model directory), so the harness has never actually
+  # run against a real recording. It is tested against synthetic scores,
+  # not audio; the live recording-and-scoring run is tracked as
+  # live-verification debt, and DBG-04 stays unticked until it happens.
+  #
+  # Separately, and regardless of any corpus: no "hey spire" model exists
+  # for openwakeword, and producing one is an offline training pipeline
+  # (synthetic TTS positives plus real recordings, run through
+  # openWakeWord's own notebooks) outside this codebase's scope --
+  # scripts/score_wake_engines.py reports it as unavailable with the
+  # missing path named, never as a silent absence. Vosk needs no such
+  # model -- it descends from Kaldi telephony work, which already suits
+  # this camera's 8 kHz narrowband, and restricting its decoder to a
+  # one-phrase grammar makes a false fire hard. That is the only evidence
+  # behind this default until the harness actually runs against a
+  # recording: an argument, not a score. Both engines still ship as code
+  # below -- openwakeword remains a live option once its model exists.
   engine: vosk
   phrase: "hey spire"
 
