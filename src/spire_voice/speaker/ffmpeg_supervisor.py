@@ -101,6 +101,20 @@ class FfmpegSupervisor:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
+    async def handle_reconnect(self) -> None:
+        """The third trigger for the backchannel request (plan 02-07),
+        alongside startup and every child restart: a camera whose network
+        path came back may well have lost the receiving service's producer
+        for its own speaker along with it, and a working microphone with a
+        dead speaker is a turn that runs and answers into nothing.
+
+        Called as a callback -- something else's composition wires this
+        method to a camera source's own reconnect supervisor, never an
+        import of that module into this one, so the two supervisors stay
+        independent enough to reason about alone (module docstring).
+        """
+        await self._ensure_backchannel()
+
     async def _supervise(self) -> None:
         argv = self._build_argv(self._config)
         while not self._stopping:
@@ -117,8 +131,9 @@ class FfmpegSupervisor:
             await asyncio.sleep(self._config.respawn_backoff_s)
 
     async def _ensure_backchannel(self) -> None:
-        """Issue the idempotent go2rtc backchannel PUT, at startup and
-        again after every restart.
+        """Issue the idempotent go2rtc backchannel PUT, at startup, again
+        after every child restart, and again on a camera reconnect
+        (`handle_reconnect`, plan 02-07).
 
         `ensure_url` arrives whole from a secret and already encodes
         everything go2rtc needs (`config.example.yaml`'s own comment) --
@@ -130,6 +145,14 @@ class FfmpegSupervisor:
         if not self._config.ensure_url or self._http_client is None:
             return
         try:
+            # No request body is sent. RESEARCH.md's Open Question 2 could
+            # not confirm go2rtc's exact expected request shape for this
+            # endpoint (query params vs. body) -- this is a deliberate,
+            # documented gap in what this codebase has verified, not
+            # evidence that go2rtc wants no body. Treated as an integration
+            # detail the operator resolves when constructing `ensure_url`
+            # itself, per this module's own "issues, never assembles"
+            # posture above.
             response = await self._http_client.put(self._config.ensure_url, timeout=10.0)
             if response.status_code >= 400:
                 logger.warning("speaker backchannel ensure_url PUT failed: %s", response.status_code)
