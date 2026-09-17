@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>spire-voice dev harness</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; line-height: 1.5; }
+    #partial { color: #888; }
+    #timing { font-variant-numeric: tabular-nums; color: #555; }
+    button { font-size: 1rem; padding: 0.5rem 1rem; }
+  </style>
+</head>
+<body>
+  <h1>spire-voice</h1>
+  <p>
+    A dev harness for one voice turn: no camera, no wake word. Press the
+    button, speak one command, and the reply plays back through this page.
+  </p>
+  <button id="toggle">Start listening</button>
+  <p id="partial"></p>
+  <p id="reply"></p>
+  <p id="timing"></p>
+
+  <script>
+    const toggleButton = document.getElementById("toggle");
+    const partialEl = document.getElementById("partial");
+    const replyEl = document.getElementById("reply");
+    const timingEl = document.getElementById("timing");
+
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let player = null;
+    let listening = false;
+
+    // Multi-buffer scheduling against AudioContext.currentTime -- an
+    // AudioBufferSourceNode can't be appended to once assigned, so gapless
+    // playback means scheduling each new chunk right after the last one ends.
+    class GaplessPlayer {
+      constructor(ctx, sampleRate) {
+        this.ctx = ctx;
+        this.sampleRate = sampleRate;
+        this.nextStartTime = 0;
+      }
+
+      playChunk(int16Array) {
+        const float32 = Float32Array.from(int16Array, (s) => (s < 0 ? s / 32768 : s / 32767));
+        const buffer = this.ctx.createBuffer(1, float32.length, this.sampleRate);
+        buffer.copyToChannel(float32, 0);
+        const src = this.ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(this.ctx.destination);
+        const startAt = Math.max(this.ctx.currentTime, this.nextStartTime);
+        src.start(startAt);
+        this.nextStartTime = startAt + buffer.duration;
+      }
+    }
+
+    async function startListening() {
+      // The browser's own hardware/OS-level echo cancellation is free here,
+      // unlike the 8kHz camera in Phase 2, which has none to begin with --
+      // there is no reason to disable it on this dev-harness source.
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 16000,
+        },
+      });
+
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      await audioContext.audioWorklet.addModule("/static/pcm-worklet.js");
+      const source = audioContext.createMediaStreamSource(mediaStream);
+      const worklet = new AudioWorkletNode(audioContext, "pcm-worklet");
+
+      // 24kHz matches tts.browser_sample_rate in config.example.yaml.
+      player = new GaplessPlayer(audioContext, 24000);
+
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${scheme}://${window.location.host}/ws/turn`);
+      ws.binaryType = "arraybuffer";
+
+      ws.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "transcript.partial") {
+            partialEl.textContent = msg.text;
+          } else if (msg.type === "reply.text") {
+            replyEl.textContent = msg.text;
+            partialEl.textContent = "";
+          } else if (msg.type === "turn.timing") {
+            timingEl.textContent = `end of speech to first audio: ${msg.end_of_speech_to_first_audio_ms} ms`;
+          }
+          return;
+        }
+        player.playChunk(new Int16Array(event.data));
+      };
+
+      ws.onopen = () => {
+        worklet.port.onmessage = (e) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(e.data);
+          }
+        };
+        source.connect(worklet);
+      };
+
+      listening = true;
+      toggleButton.textContent = "Stop listening";
+    }
+
+    function stopListening() {
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+      }
+      if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+      }
+      listening = false;
+      toggleButton.textContent = "Start listening";
+    }
+
+    // A single on/off toggle only: end of speech is the server's decision,
+    // from the speech-to-text provider's own endpointing and smart-turn
+    // signals -- nothing in this page decides when speech ends.
+    toggleButton.addEventListener("click", () => {
+      if (listening) {
+        stopListening();
+      } else {
+        startListening();
+      }
+    });
+  </script>
+</body>
+</html>
