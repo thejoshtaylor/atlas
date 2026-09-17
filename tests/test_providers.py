@@ -259,3 +259,77 @@ async def test_final_transcript_comes_from_speech_final_not_transcript_done():
         "transcript.done (whose text is always empty)"
     )
     assert any(isinstance(e, PartialTranscript) for e in out)
+
+
+@pytest.mark.asyncio
+async def test_tts_posts_rest_and_yields_audio_not_websocket():
+    """xAI TTS is REST. VERIFIED AGAINST THE LIVE API, 2026-09-17.
+
+        POST https://api.x.ai/v1/tts
+        {"text","voice_id","language","output_format":{"codec","sample_rate"}}
+        -> 200, Content-Type: audio/pcm, the whole utterance as raw bytes
+
+    This provider used to open a WebSocket to that same `https://` URL and died
+    on `InvalidURI: scheme isn't ws or wss` the first time a real turn reached
+    speech -- after a correct transcription and a correct Home Assistant read,
+    so everything upstream was working and the operator still heard nothing.
+
+    `wss://api.x.ai/v1/tts` does exist but rejected every parameter shape tried
+    against it with HTTP 400. Omitting `language` returns a 422 naming the
+    missing field, which is how the required shape above was established.
+    """
+    import httpx as _httpx
+
+    from spire_voice.config import TtsConfig
+    from spire_voice.providers.tts_xai import XaiTts
+
+    captured = {}
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content)
+        return _httpx.Response(200, content=b"\x01\x02" * 1000,
+                               headers={"content-type": "audio/pcm"})
+
+    transport = _httpx.MockTransport(handler)
+    real_client = _httpx.AsyncClient
+
+    def _client(*a, **k):
+        k.pop("timeout", None)
+        return real_client(transport=transport)
+
+    import spire_voice.providers.tts_xai as mod
+    mod.httpx.AsyncClient = _client
+    try:
+        tts = XaiTts(TtsConfig.from_config(
+            {"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}
+        ))
+
+        async def deltas():
+            yield "the light "
+            yield "is off"
+
+        chunks = [c async for c in tts.synthesize(deltas())]
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    assert captured["url"].startswith("https://"), "TTS is REST, not a websocket"
+    assert captured["body"]["text"] == "the light is off", "deltas must be joined"
+    assert captured["body"]["language"], "language is required; omitting it is a 422"
+    assert set(captured["body"]["output_format"]) == {"codec", "sample_rate"}
+    assert b"".join(chunks) == b"\x01\x02" * 1000, "all audio must reach the caller"
+    assert len(chunks) > 1, "audio is chunked so the iterator contract survives"
+
+
+@pytest.mark.asyncio
+async def test_tts_skips_the_call_entirely_for_empty_text():
+    """An empty reply must not bill a synthesis request or emit silence."""
+    from spire_voice.config import TtsConfig
+    from spire_voice.providers.tts_xai import XaiTts
+
+    tts = XaiTts(TtsConfig.from_config({"url": "https://x.invalid", "api_key": "k"}))
+
+    async def nothing():
+        yield "   "
+
+    assert [c async for c in tts.synthesize(nothing())] == []

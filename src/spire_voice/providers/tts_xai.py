@@ -11,16 +11,18 @@ the other's values.
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import json
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-import websockets
+import httpx
 
 from spire_voice.config import TtsConfig
 from spire_voice.providers.base import TtsError
+
+
+# 20 ms of 16 kHz mono PCM16. Matches the frame size the browser plays and the
+# camera speaker will want, so no consumer has to re-chunk.
+_CHUNK_BYTES = 640
 
 
 @dataclass(frozen=True)
@@ -60,25 +62,57 @@ class XaiTts:
     async def synthesize(
         self, text_deltas: AsyncIterator[str], sink: SinkFormat | None = None
     ) -> AsyncIterator[bytes]:
+        """Render `text_deltas` to audio and yield it.
+
+        VERIFIED AGAINST THE LIVE xAI API, 2026-09-17. This endpoint is REST,
+        not a WebSocket:
+
+            POST https://api.x.ai/v1/tts
+            {"text": ..., "voice_id": ..., "language": ...,
+             "output_format": {"codec": "pcm", "sample_rate": 16000}}
+            -> 200, Content-Type: audio/pcm, the whole utterance as raw bytes
+
+        This module previously opened a WebSocket to that same `https://` URL
+        and died on `InvalidURI: scheme isn't ws or wss` the first time a real
+        turn reached speech. The configured URL was right; the transport was
+        not. `wss://api.x.ai/v1/tts` exists but rejected every parameter shape
+        tried against it with HTTP 400, so REST is the path that works today.
+
+        **A real latency consequence, stated rather than hidden:** REST returns
+        the complete utterance in one response, so there is no first-chunk
+        streaming. Time-to-first-audio is therefore full synthesis time, not
+        time-to-first-delta, and `optimize_streaming_latency` has nothing to
+        act on over this transport. That cost lands squarely in the
+        end-of-speech-to-first-audio budget and is the honest reason a reply
+        cannot start before the whole sentence is rendered. If xAI documents a
+        working streaming socket later, this is the one function to change.
+
+        The audio is yielded in chunks rather than as one object so the
+        consumer's contract (an async iterator of bytes) stays identical
+        across a future switch back to a streaming transport.
+        """
+        text = "".join([delta async for delta in text_deltas])
+        if not text.strip():
+            return
+
+        sink = sink or self.browser_sink()
+        payload = {
+            "text": text,
+            "voice_id": self._config.voice_id,
+            "language": self._config.language,
+            "output_format": {"codec": sink.codec, "sample_rate": sink.sample_rate},
+        }
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
-        async with websockets.connect(self._config.url, additional_headers=headers) as ws:
-            await ws.send(json.dumps(self.build_session_update(sink)))
 
-            async def sender() -> None:
-                async for delta in text_deltas:
-                    await ws.send(json.dumps({"type": "text.delta", "delta": delta}))
-                await ws.send(json.dumps({"type": "text.done"}))
+        async with httpx.AsyncClient(timeout=self._config.request_timeout_s) as client:
+            response = await client.post(self._config.url, headers=headers, json=payload)
+            if response.status_code != 200:
+                # 422 is a schema rejection and names the offending field --
+                # surface it verbatim rather than flattening it to "TTS failed".
+                raise TtsError(
+                    f"xAI TTS returned {response.status_code}: {response.text[:300]}"
+                )
+            audio = response.content
 
-            send_task = asyncio.create_task(sender())
-            try:
-                async for raw in ws:
-                    event = json.loads(raw)
-                    event_type = event.get("type")
-                    if event_type == "audio.delta":
-                        yield base64.b64decode(event["delta"])
-                    elif event_type == "audio.done":
-                        break
-                    elif event_type == "error":
-                        raise TtsError(event.get("message", "xAI TTS reported an error"))
-            finally:
-                await send_task
+        for start in range(0, len(audio), _CHUNK_BYTES):
+            yield audio[start : start + _CHUNK_BYTES]

@@ -173,6 +173,11 @@ class TtsConfig:
     browser_codec: str = "pcm"
     browser_sample_rate: int = 24000
     optimize_streaming_latency: int = 2
+    # Synthesis is one REST call that returns the whole utterance, so this is
+    # a ceiling on the entire reply, not on a first chunk. Generous enough for
+    # a long sentence, short enough that a hung call cannot hold a turn open
+    # past the point an operator would have given up and spoken again.
+    request_timeout_s: float = 20.0
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "TtsConfig":
@@ -189,6 +194,7 @@ class TtsConfig:
             optimize_streaming_latency=raw.get(
                 "optimize_streaming_latency", cls.optimize_streaming_latency
             ),
+            request_timeout_s=float(raw.get("request_timeout_s", cls.request_timeout_s)),
         )
 
 
