@@ -35,7 +35,7 @@
     const replyEl = document.getElementById("reply");
     const timingHistoryEl = document.getElementById("timingHistory");
 
-    // Labels for the seven stages `spire_voice.timing.TurnTimings` records,
+    // Labels for the eight stages `spire_voice.timing.TurnTimings` records,
     // keyed by the same field names the server sends -- this page renders
     // the labels, never invents or reorders the stages themselves.
     const STAGE_LABELS = {
@@ -46,6 +46,7 @@
       brain_first_token_at: "brain first token",
       tool_rounds_done_at: "tool rounds done",
       first_audio_at: "first audio",
+      answer_audio_at: "answer audio",
     };
     const STAGE_ORDER = Object.keys(STAGE_LABELS);
 
@@ -65,8 +66,10 @@
       const entry = document.createElement("div");
       entry.className = "timing-entry";
       entry.innerHTML =
-        `<div class="headline">end of speech to first audio: ${formatMs(msg.end_of_speech_to_first_audio_ms)}` +
-        ` (${msg.turn_outcome})</div>${rows}`;
+        `<div class="headline">end of speech to first audio (any audio, filler included): ` +
+        `${formatMs(msg.end_of_speech_to_first_audio_ms)}</div>` +
+        `<div class="headline">end of speech to answer audio: ` +
+        `${formatMs(msg.end_of_speech_to_answer_audio_ms)} (${msg.turn_outcome})</div>${rows}`;
       timingHistoryEl.prepend(entry);
     }
 
