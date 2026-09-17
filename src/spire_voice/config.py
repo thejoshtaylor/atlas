@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 
 import yaml
 
@@ -408,6 +408,263 @@ class SessionConfig:
         )
 
 
+def _validate_and_normalize_override(cls: type, raw_override: dict, label: str) -> dict:
+    """Validate `raw_override`'s keys against `cls`'s own fields, coercing a
+    list into a tuple for any field whose global default is a tuple --
+    matching what `from_config` would have done had the same value arrived
+    globally rather than per-source.
+
+    Shared by `WakeConfig`, `GateConfig` and `BargeInConfig`'s per-source
+    overrides (D-04, D-12): one shape, reused three times, rather than a
+    second configuration pattern invented for barge-in. Raises `ConfigError`
+    naming the first field `cls` does not have -- an override targeting a
+    typo'd field name silently doing nothing is the failure mode this
+    validation exists for.
+    """
+    valid_fields = {f.name for f in fields(cls) if f.name != "sources"}
+    normalized: dict = {}
+    for key, value in raw_override.items():
+        if key not in valid_fields:
+            raise ConfigError(
+                f"{label} sets unknown field {key!r} -- valid fields are "
+                f"{sorted(valid_fields)!r}"
+            )
+        default_value = getattr(cls, key, None)
+        if isinstance(default_value, tuple) and not isinstance(value, tuple):
+            if isinstance(value, str):
+                raise ConfigError(f"{label}.{key} must be a list, not a string")
+            value = tuple(value)
+        normalized[key] = value
+    return normalized
+
+
+_WAKE_ENGINES = ("openwakeword", "vosk")
+
+
+@dataclass(frozen=True)
+class OpenWakeWordConfig:
+    """The `wake.openwakeword` sub-block: model path, detection threshold,
+    and how many consecutive frames must clear it before a hit counts.
+
+    Ships as code regardless of which engine is selected (a PROJECT.md Key
+    Decision) -- `model_path` names a file that does not exist yet
+    (RESEARCH.md Pitfall 3); this class parses the shape without asserting
+    the file is present.
+    """
+
+    model_path: str = "/models/hey_spire.onnx"
+    threshold: float = 0.55
+    trigger_frames: int = 2
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "OpenWakeWordConfig":
+        raw = raw or {}
+        threshold = float(raw.get("threshold", cls.threshold))
+        if not 0.0 <= threshold <= 1.0:
+            raise ConfigError(
+                f"wake.openwakeword.threshold must be within [0.0, 1.0], got {threshold!r}"
+            )
+        return cls(
+            model_path=raw.get("model_path", cls.model_path),
+            threshold=threshold,
+            trigger_frames=raw.get("trigger_frames", cls.trigger_frames),
+        )
+
+
+@dataclass(frozen=True)
+class VoskWakeConfig:
+    """The `wake.vosk` sub-block: model path and the grammar restricting the
+    decoder to the wake phrase plus `[unk]`, which is what turns a full ASR
+    engine into a cheap, low-false-positive wake detector.
+    """
+
+    model_path: str = "/models/vosk-model-small-en-us-0.15"
+    grammar: tuple[str, ...] = ("hey spire", "[unk]")
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "VoskWakeConfig":
+        raw = raw or {}
+        grammar_raw = raw.get("grammar", cls.grammar)
+        if isinstance(grammar_raw, str):
+            raise ConfigError("wake.vosk.grammar must be a list, not a string")
+        return cls(
+            model_path=raw.get("model_path", cls.model_path),
+            grammar=tuple(grammar_raw),
+        )
+
+
+@dataclass(frozen=True)
+class WakeConfig:
+    """The `wake:` block: the engine selector, the phrase, the refractory
+    window, and both engines' sub-blocks -- both ship as code regardless of
+    which is selected (a PROJECT.md Key Decision). Read by the wake-word
+    detector (plan 02-04).
+
+    `engine` is a closed set of two, mirroring `ServerConfig.from_config`'s
+    own transport-selector rejection: an unrecognized engine raises at load
+    rather than silently falling back to one. The default is `vosk`, not
+    `openwakeword`: no "hey spire" model exists for openWakeWord yet, and
+    producing one is an offline training pipeline outside this phase's scope
+    (RESEARCH.md Pitfall 3, D-08) -- the shipped default must be the engine
+    that can actually run today.
+
+    `threshold` (on `OpenWakeWordConfig`) stays a float end to end with no
+    rounding anywhere on the path from configuration to comparison: plan
+    02-04 asserts the comparison semantics against exactly the value this
+    class returns.
+
+    Carries the same per-source override shape `GateConfig` and
+    `BargeInConfig` use (D-04, D-12): a global policy plus an optional
+    mapping from source name to a partial override, resolved through
+    `resolve()`.
+    """
+
+    engine: str = "vosk"
+    phrase: str = "hey spire"
+    refractory_s: float = 2.0
+    openwakeword: OpenWakeWordConfig = field(default_factory=OpenWakeWordConfig)
+    vosk: VoskWakeConfig = field(default_factory=VoskWakeConfig)
+    sources: dict[str, dict] = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "WakeConfig":
+        raw = raw or {}
+        engine = raw.get("engine", cls.engine)
+        if engine not in _WAKE_ENGINES:
+            raise ConfigError(f"wake.engine {engine!r} is not one of {_WAKE_ENGINES!r}")
+        refractory_s = float(raw.get("refractory_s", cls.refractory_s))
+        if refractory_s < 0:
+            raise ConfigError(f"wake.refractory_s must be non-negative, got {refractory_s!r}")
+        sources_raw = raw.get("sources", {}) or {}
+        sources = {
+            name: _validate_and_normalize_override(cls, override or {}, f"wake.sources.{name}")
+            for name, override in sources_raw.items()
+        }
+        return cls(
+            engine=engine,
+            phrase=raw.get("phrase", cls.phrase),
+            refractory_s=refractory_s,
+            openwakeword=OpenWakeWordConfig.from_config(raw.get("openwakeword")),
+            vosk=VoskWakeConfig.from_config(raw.get("vosk")),
+            sources=sources,
+        )
+
+    def resolve(self, source: str) -> "WakeConfig":
+        """The effective wake policy for `source`: the global policy
+        unchanged if `source` has no override, or the merged policy
+        otherwise (D-04, D-12)."""
+        override = self.sources.get(source)
+        if not override:
+            return self
+        return replace(self, **override)
+
+
+_REMOVED_GATE_IDENTITY_KEYS = ("require_face", "face_names", "face_window_s")
+
+
+@dataclass(frozen=True)
+class GateConfig:
+    """The `gate:` block: which media players suppress the wake word, with a
+    per-source override (D-04). Read by the gate that decides whether a wake
+    hit counts (plan 02-04/02-05).
+
+    The three identity keys (`require_face`, `face_names`, `face_window_s`)
+    are deleted, not defaulted off (D-01): PROJECT.md's Out of Scope says
+    the operator chose to let anyone in earshot command the house, and the
+    denylist in `mcp/spire_mcp/safety.py` is what protects it, not identity.
+    Following `BrainConfig.from_config`'s own precedent for a deliberately
+    removed key, a configuration file still setting any of the three stops
+    startup by name -- an operator whose file predates this phase must be
+    told the gate is gone, not left believing a removed gate still protects
+    them.
+    """
+
+    mute_when_playing: tuple[str, ...] = ()
+    sources: dict[str, dict] = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "GateConfig":
+        raw = raw or {}
+        for key in _REMOVED_GATE_IDENTITY_KEYS:
+            if key in raw:
+                raise ConfigError(
+                    f"gate.{key} no longer exists: identity gating was removed by "
+                    "project decision (PROJECT.md Out of Scope, D-01) -- the "
+                    "operator chose to let anyone in earshot command the house, and "
+                    "the denylist in code is what protects it, not identity. Remove "
+                    "this key from your configuration."
+                )
+        mute_raw = raw.get("mute_when_playing", cls.mute_when_playing)
+        if isinstance(mute_raw, str):
+            raise ConfigError("gate.mute_when_playing must be a list, not a string")
+        sources_raw = raw.get("sources", {}) or {}
+        sources = {
+            name: _validate_and_normalize_override(cls, override or {}, f"gate.sources.{name}")
+            for name, override in sources_raw.items()
+        }
+        return cls(mute_when_playing=tuple(mute_raw), sources=sources)
+
+    def resolve(self, source: str) -> "GateConfig":
+        """The effective gate policy for `source`: the global policy
+        unchanged if `source` has no override, or the merged policy
+        otherwise (D-04)."""
+        override = self.sources.get(source)
+        if not override:
+            return self
+        return replace(self, **override)
+
+
+@dataclass(frozen=True)
+class BargeInConfig:
+    """The `barge_in:` block: known-output suppression, not acoustic echo
+    cancellation (D-09) -- the interrupt triggers on sustained energy above
+    a floor for a minimum duration, never a single frame and never the wake
+    word (D-10). Global with a per-source override (D-12), same shape as
+    `GateConfig`. Read by `_speak`'s interrupt point in
+    `turn/controller.py` (plan 02-06).
+
+    `energy_floor` is derived from `SttConfig.vad_threshold`, already tuned
+    for this camera's across-a-room noise floor -- the only noise-floor
+    measurement this camera has today (CD-3). It is provisional until real
+    camera sessions exist to tune it directly. The floor and the measure
+    compared against it are in the same unit everywhere on this path, with
+    no implicit conversion: a configured floor means one thing only.
+    """
+
+    enabled: bool = True
+    energy_floor: float = 0.08
+    min_duration_ms: int = 300
+    post_playback_guard_ms: int = 150
+    sources: dict[str, dict] = field(default_factory=dict)
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "BargeInConfig":
+        raw = raw or {}
+        sources_raw = raw.get("sources", {}) or {}
+        sources = {
+            name: _validate_and_normalize_override(cls, override or {}, f"barge_in.sources.{name}")
+            for name, override in sources_raw.items()
+        }
+        return cls(
+            enabled=raw.get("enabled", cls.enabled),
+            energy_floor=float(raw.get("energy_floor", cls.energy_floor)),
+            min_duration_ms=raw.get("min_duration_ms", cls.min_duration_ms),
+            post_playback_guard_ms=raw.get(
+                "post_playback_guard_ms", cls.post_playback_guard_ms
+            ),
+            sources=sources,
+        )
+
+    def resolve(self, source: str) -> "BargeInConfig":
+        """The effective barge-in policy for `source`: the global policy
+        unchanged if `source` has no override, or the merged policy
+        otherwise (D-12)."""
+        override = self.sources.get(source)
+        if not override:
+            return self
+        return replace(self, **override)
+
+
 @dataclass(frozen=True)
 class McpServerConfig:
     """One `mcp.servers.<name>` block: the stdio child's args and env.
@@ -527,10 +784,13 @@ class Config:
     configuration (D-12, D-13) -- `Policy` is imported from
     `spire_mcp.safety`, never copied or re-implemented here.
 
-    Phase 2 adds three sections here: `camera` and `speaker` are read by the
+    Phase 2 adds six sections here: `camera` and `speaker` are read by the
     camera `AudioSource` and its FIFO-backed speaker supervisor (plan
-    02-03); `session` is read by the session recorder and the retention
-    sweep (plan 02-07/02-08).
+    02-03); `wake` is read by the wake-word detector (plan 02-04); `gate` is
+    read by the gate that decides whether a wake hit counts (plan
+    02-04/02-05); `barge_in` is read by `_speak`'s interrupt point in
+    `turn/controller.py` (plan 02-06); `session` is read by the session
+    recorder and the retention sweep (plan 02-07/02-08).
     """
 
     server: ServerConfig
@@ -539,6 +799,9 @@ class Config:
     tts: TtsConfig
     camera: CameraConfig
     speaker: SpeakerConfig
+    wake: WakeConfig
+    gate: GateConfig
+    barge_in: BargeInConfig
     session: SessionConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
@@ -566,6 +829,9 @@ class Config:
             tts=TtsConfig.from_config(raw.get("tts")),
             camera=CameraConfig.from_config(raw.get("camera")),
             speaker=SpeakerConfig.from_config(raw.get("speaker")),
+            wake=WakeConfig.from_config(raw.get("wake")),
+            gate=GateConfig.from_config(raw.get("gate")),
+            barge_in=BargeInConfig.from_config(raw.get("barge_in")),
             session=SessionConfig.from_config(raw.get("debug")),
             mcp_servers={
                 name: McpServerConfig.from_config(server_raw)
