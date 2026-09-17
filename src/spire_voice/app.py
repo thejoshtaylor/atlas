@@ -14,7 +14,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
@@ -42,10 +42,14 @@ STATIC_DIR = Path(__file__).parent / "static"
 MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
 
 
-def _system_prompt(entities: list[dict[str, Any]]) -> str:
-    """A stable prefix listing every known entity, so the model never needs
-    a discovery round trip -- and so `brain.cache_system_prompt` has a
-    byte-identical prefix to cache across turns.
+def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
+    """Byte-identical across every turn -- the cacheable prefix.
+
+    Carries only each known entity's id and friendly name, never a state
+    value: a single volatile value here would invalidate
+    `brain.cache_system_prompt`'s cached prefix on every turn any entity's
+    state changed, defeating the whole split D-14 exists to make. Live
+    state lives in `_state_message` instead, rebuilt every turn.
     """
     lines = [
         "You control a home over voice through the tools you are given. "
@@ -53,8 +57,40 @@ def _system_prompt(entities: list[dict[str, Any]]) -> str:
         "Known entities:",
     ]
     for entity in entities:
-        lines.append(f"- {entity['entity_id']} ({entity['friendly_name']}): {entity['state']}")
+        lines.append(f"- {entity['entity_id']} ({entity['friendly_name']})")
     return "\n".join(lines)
+
+
+def _state_message(states: dict[str, str]) -> str:
+    """Rebuilt every turn -- deliberately not part of the cached prefix.
+
+    An empty mapping still renders the header with no entity lines: that is
+    a message the model can read as "nothing is known," which is a
+    different claim than no message at all reaching it.
+    """
+    lines = ["Current state:"]
+    for entity_id, state in states.items():
+        lines.append(f"- {entity_id}: {state}")
+    return "\n".join(lines)
+
+
+def _make_state_fetch(tool_host: McpToolHost) -> Callable[[], Any]:
+    """Build the per-turn `state_fetch` factory `run_turn` awaits
+    concurrently with the operator still speaking (D-15).
+
+    This is a read, gated by `allow_read` inside the MCP child -- a denied
+    entity's state is still returned and injected into the prompt. SAFE-02
+    is deliberate here, not an oversight: a question about a denied entity
+    is exactly the case that must keep working. Reuses `_tool_result_json`
+    rather than re-implementing the MCP payload walk a second time.
+    """
+
+    async def _fetch() -> list[dict[str, Any]]:
+        result = await tool_host.call_tool("ha_list_entities", {})
+        entities = _tool_result_json(result)
+        return entities if isinstance(entities, list) else []
+
+    return _fetch
 
 
 def _tool_result_json(result: Any) -> Any:
@@ -111,7 +147,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     entities_result = await tool_host.call_tool("ha_list_entities", {})
     entities = _tool_result_json(entities_result)
-    app.state.system_prompt = _system_prompt(entities if isinstance(entities, list) else [])
+    app.state.catalog_prompt = _catalog_prompt(entities if isinstance(entities, list) else [])
 
     app.state.macros = config.macros
 
@@ -201,7 +237,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             app.state.tts,
             app.state.tool_host,
             app.state.tools_schema,
-            app.state.system_prompt,
+            app.state.catalog_prompt,
             config.brain.max_tool_rounds,
             timings,
             config.stt.max_utterance_s,
@@ -209,6 +245,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
             macros=config.macros,
+            state_fetch=_make_state_fetch(app.state.tool_host),
         )
     )
     app.state.background_turns.add(task)
@@ -251,7 +288,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         websocket.app.state.tts,
         websocket.app.state.tool_host,
         websocket.app.state.tools_schema,
-        websocket.app.state.system_prompt,
+        websocket.app.state.catalog_prompt,
         config.brain.max_tool_rounds,
         timings,
         config.stt.max_utterance_s,
@@ -259,6 +296,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         filler_after_ms=config.brain.filler_after_ms,
         filler_cache=websocket.app.state.filler_cache,
         macros=config.macros,
+        state_fetch=_make_state_fetch(websocket.app.state.tool_host),
     )
 
 
