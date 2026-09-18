@@ -425,6 +425,27 @@ class FakePolicyRepository:
             {"action": action, "detail": detail, "actor_user_id": actor_user_id}
         )
 
+    async def add_rule(
+        self, *, kind: str, value: str, note: str | None, created_by_user_id: int | None
+    ) -> PolicyRule:
+        rule = PolicyRule(
+            id=self._next_rule_id,
+            kind=kind,
+            value=value,
+            note=note,
+            created_at=datetime.now(timezone.utc),
+            created_by_user_id=created_by_user_id,
+        )
+        self.rules.append(rule)
+        self._next_rule_id += 1
+        return rule
+
+    async def remove_rule(self, rule_id: int) -> None:
+        self.rules = [r for r in self.rules if r.id != rule_id]
+
+    async def set_mode(self, mode: str, *, updated_by_user_id: int | None) -> None:
+        self.mode = mode
+
 
 @pytest.fixture
 def fake_policy_repository():
