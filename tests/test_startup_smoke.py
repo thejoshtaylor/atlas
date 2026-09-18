@@ -58,6 +58,7 @@ can stand in for.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -131,6 +132,10 @@ _EXPECTED_STATE_ATTRS = [
     # Plan 03-05: the account repository `require_setup_complete` and
     # every account/invite route read off `app.state`.
     "account_repo",
+    # Plan 03-07: the credential repository the resolution order reads
+    # before any provider is constructed, and `routes/credentials.py`'s
+    # own list/write routes read off `app.state` the same way.
+    "credential_repo",
 ]
 
 
@@ -293,6 +298,7 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
     return {
         "policy_repo": conftest.FakePolicyRepository(),
         "account_repo": account_repo,
+        "credential_repo": conftest.FakeCredentialRepository(),
     }
 
 
@@ -736,6 +742,7 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
         return {
             "policy_repo": conftest.FakePolicyRepository(),
             "account_repo": conftest.FakeAccountRepository(),
+            "credential_repo": conftest.FakeCredentialRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
@@ -767,3 +774,117 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
         after = client.get("/transport")
         assert after.status_code == 200
         assert "transport" in after.json()
+
+
+# --- Plan 03-07 Task 3: credential resolution, through a real boot ---------
+
+
+def _write_fake_config_with_credential(tmp_path: Path, *, api_key: str, ha_token: str) -> Path:
+    """Like `_write_fake_config`, but with every provider credential set
+    to exactly `api_key`/`ha_token` -- `_write_fake_config`'s own base
+    dict already carries `"test-key"`/`"test-token"`, but this file's two
+    new tests below need full control over the value (empty, to prove a
+    clean boot with nothing stored and nothing in the environment; a
+    single known literal, to prove startup logs its source and never its
+    value)."""
+    extra = {
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": api_key},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": api_key,
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {
+            "url": "https://tts.invalid/v1/tts",
+            "api_key": api_key,
+            "voice_id": "eve",
+            "cache_dir": str(tmp_path / "tts-cache"),
+        },
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": ha_token},
+                },
+            },
+        },
+    }
+    return _write_fake_config(tmp_path, extra=extra)
+
+
+def test_the_application_starts_with_every_credential_slot_unset(tmp_path, monkeypatch):
+    """No stored credential and no environment value for any slot -- the
+    clean-install state DEP-03 describes -- must be a boot, not an error,
+    and `GET /api/credentials` must answer every slot unset rather than
+    failing."""
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config_with_credential(tmp_path, api_key="", ha_token="")),
+    )
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app) as client:
+        # `_fake_build_repositories` pre-seeds one fake admin (id=1) so
+        # this file's own unrelated wiring assertions are not all 503s
+        # (that function's own docstring) -- sign in as that admin to
+        # reach the admin-only credentials listing route.
+        security = SecurityConfig()
+        token = issue_access_token(user_id=1, role="admin", security=security)
+        client.cookies.set(security.cookie_name, token)
+
+        response = client.get("/api/credentials")
+        assert response.status_code == 200, response.text
+        entries = response.json()
+        assert len(entries) == 4
+        for entry in entries:
+            assert entry["is_set"] is False, f"{entry['slot']} was reported set on a clean boot"
+            assert entry["source"] == "unset"
+
+
+def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeypatch, caplog):
+    """T-03-43: startup logs the winning source per slot, by name, and no
+    log line anywhere carries a credential value."""
+    secret_value = "a-plainly-fictional-test-provider-value-never-a-real-secret"
+
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config_with_credential(tmp_path, api_key=secret_value, ha_token=secret_value)),
+    )
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    resolution_records = [r for r in caplog.records if "credential slot" in r.getMessage()]
+    assert len(resolution_records) == 4, (
+        f"expected one resolution log line per slot, got {[r.getMessage() for r in resolution_records]!r}"
+    )
+    for record in resolution_records:
+        message = record.getMessage()
+        assert "resolved from environment" in message
+        assert secret_value not in message
+
+    for record in caplog.records:
+        assert secret_value not in record.getMessage(), (
+            f"a credential value leaked into a log line: {record.getMessage()!r}"
+        )

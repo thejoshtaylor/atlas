@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -29,8 +30,14 @@ from spire_voice.auth.tokens import validate_secret_key_strength
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import Config, ConfigError, WakeConfig, load_config
+from spire_voice.crypto.credentials import CredentialSlot, resolve_credential_value
 from spire_voice.db.engine import build_engine, run_migrations
-from spire_voice.db.postgres import PostgresAccountRepository, PostgresPolicyRepository
+from spire_voice.db.postgres import (
+    PostgresAccountRepository,
+    PostgresCredentialRepository,
+    PostgresPolicyRepository,
+)
+from spire_voice.db.repository import CredentialRepository
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
@@ -187,7 +194,21 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
     return {
         "policy_repo": PostgresPolicyRepository(sessionmaker),
         "account_repo": PostgresAccountRepository(sessionmaker),
+        "credential_repo": PostgresCredentialRepository(sessionmaker),
     }
+
+
+async def _resolve_and_log_credential(
+    slot: CredentialSlot, config: Config, credential_repo: CredentialRepository
+) -> str:
+    """`resolve_credential_value`, plus the one required log line: which
+    source won, by slot name only, never by value (T-03-43). The one
+    place `lifespan` asks "what is this credential, really" -- see
+    `spire_voice.crypto.credentials`'s own module docstring for why the
+    database-vs-environment decision itself lives there, not here."""
+    value, source = await resolve_credential_value(slot, config, credential_repo)
+    logger.info("credential slot %s resolved from %s", slot.value, source)
+    return value
 
 
 async def _open_speaker_writer(writer: FifoWriter) -> None:
@@ -293,15 +314,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     for _repo_name, _repo in repositories.items():
         setattr(app.state, _repo_name, _repo)
     policy_repo = repositories["policy_repo"]
+    credential_repo = repositories["credential_repo"]
 
-    app.state.stt = XaiStt(config.stt)
-    tier_brains = brain_race.build_tiers(config.brain)
+    # Every provider credential is resolved exactly once, here, in the one
+    # order D-07 states: the database wins when an operator has saved a
+    # value through the webapp, the configuration file's own environment
+    # expansion wins otherwise, and an unset slot resolves to an empty
+    # string -- never a fresh env read, never a per-provider conditional
+    # (see `spire_voice.crypto.credentials`'s own module docstring for why
+    # the decision itself lives there, not here).
+    resolved_stt_key = await _resolve_and_log_credential(
+        CredentialSlot.STT, config, credential_repo
+    )
+    resolved_brain_key = await _resolve_and_log_credential(
+        CredentialSlot.BRAIN, config, credential_repo
+    )
+    resolved_tts_key = await _resolve_and_log_credential(
+        CredentialSlot.TTS, config, credential_repo
+    )
+    resolved_ha_token = await _resolve_and_log_credential(
+        CredentialSlot.HOME_ASSISTANT, config, credential_repo
+    )
+
+    app.state.stt = XaiStt(replace(config.stt, api_key=resolved_stt_key))
+    tier_brains = brain_race.build_tiers(replace(config.brain, api_key=resolved_brain_key))
     app.state.tier_brains = tier_brains
     # Nothing else in this file reads `app.state.brain` today, but it stays
     # pointed at the top tier's `XaiBrain` so any future reader keeps seeing
     # the one that actually reaches Home Assistant.
     app.state.brain = tier_brains[-1].brain
-    app.state.tts = XaiTts(config.tts)
+    app.state.tts = XaiTts(replace(config.tts, api_key=resolved_tts_key))
 
     for tier in tier_brains:
         resolved_model = await tier.brain.resolve_model()
@@ -318,7 +360,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     safety_block = safety_block_from_policy(await policy_repo.load_policy())
     await tool_host.start(
         ha_url=ha_env.get("HA_URL", ""),
-        ha_token=ha_env.get("HA_TOKEN", ""),
+        ha_token=resolved_ha_token,
         mcp_root=MCP_ROOT,
         safety_block=safety_block,
     )

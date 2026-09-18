@@ -20,11 +20,12 @@ from spire_voice.db.models import (
     AuditRow,
     InviteRow,
     PolicyRuleRow,
+    ProviderCredentialRow,
     RefreshTokenRow,
     SafetyPolicyRow,
     UserRow,
 )
-from spire_voice.db.repository import Invite, PolicyRule, RefreshToken, User
+from spire_voice.db.repository import Credential, Invite, PolicyRule, RefreshToken, User
 
 # `safety_policy` is a single-row table -- `id` is always this value, never
 # generated, so `load_policy`/a future write path never has to discover it.
@@ -90,6 +91,59 @@ class PostgresPolicyRepository:
                     detail=detail,
                 )
             )
+            await session.commit()
+
+    async def add_rule(
+        self, *, kind: str, value: str, note: str | None, created_by_user_id: int | None
+    ) -> PolicyRule:
+        async with self._sessionmaker() as session:
+            row = PolicyRuleRow(
+                kind=kind,
+                value=value,
+                note=note,
+                created_at=datetime.now(timezone.utc),
+                created_by_user_id=created_by_user_id,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return PolicyRule(
+                id=row.id,
+                kind=row.kind,
+                value=row.value,
+                note=row.note,
+                created_at=row.created_at,
+                created_by_user_id=row.created_by_user_id,
+            )
+
+    async def remove_rule(self, rule_id: int) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(PolicyRuleRow, rule_id)
+            if row is not None:
+                await session.delete(row)
+                await session.commit()
+
+    async def set_mode(self, mode: str, *, updated_by_user_id: int | None) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(SafetyPolicyRow, _SINGLETON_POLICY_ID)
+            now = datetime.now(timezone.utc)
+            if row is None:
+                # Defensive: 0001's own seed always inserts this singleton
+                # row, but a mode switch must not depend on that having
+                # happened -- an absent row is created here rather than
+                # raising, so this method's own contract ("set the single
+                # active mode") holds regardless of seed history.
+                row = SafetyPolicyRow(
+                    id=_SINGLETON_POLICY_ID,
+                    mode=mode,
+                    updated_at=now,
+                    updated_by_user_id=updated_by_user_id,
+                )
+                session.add(row)
+            else:
+                row.mode = mode
+                row.updated_at = now
+                row.updated_by_user_id = updated_by_user_id
             await session.commit()
 
 
@@ -326,3 +380,74 @@ class PostgresAccountRepository:
                 current.revoked_at = now
             next_id = current.rotated_to_id
             current = await session.get(RefreshTokenRow, next_id) if next_id is not None else None
+
+
+def _credential_from_row(row: ProviderCredentialRow) -> Credential:
+    return Credential(
+        slot=row.slot,
+        ciphertext=row.ciphertext,
+        key_version=row.key_version,
+        updated_at=row.updated_at,
+        updated_by_user_id=row.updated_by_user_id,
+    )
+
+
+class PostgresCredentialRepository:
+    """`CredentialRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.CredentialRepository`
+    (a `typing.Protocol`) -- there is no base class to inherit from,
+    matching `PostgresPolicyRepository`'s and `PostgresAccountRepository`'s
+    own convention above. Every method here moves ciphertext only; nothing
+    in this class ever decrypts a value.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def get_credential(self, slot: str) -> Credential | None:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(ProviderCredentialRow).where(ProviderCredentialRow.slot == slot)
+                )
+            ).scalar_one_or_none()
+            return _credential_from_row(row) if row is not None else None
+
+    async def list_credentials(self) -> list[Credential]:
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(select(ProviderCredentialRow))).scalars().all()
+            return [_credential_from_row(r) for r in rows]
+
+    async def upsert_credential(
+        self,
+        slot: str,
+        *,
+        ciphertext: bytes,
+        key_version: int,
+        updated_by_user_id: int | None,
+    ) -> Credential:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(ProviderCredentialRow).where(ProviderCredentialRow.slot == slot)
+                )
+            ).scalar_one_or_none()
+            now = datetime.now(timezone.utc)
+            if row is None:
+                row = ProviderCredentialRow(
+                    slot=slot,
+                    ciphertext=ciphertext,
+                    key_version=key_version,
+                    updated_at=now,
+                    updated_by_user_id=updated_by_user_id,
+                )
+                session.add(row)
+            else:
+                row.ciphertext = ciphertext
+                row.key_version = key_version
+                row.updated_at = now
+                row.updated_by_user_id = updated_by_user_id
+            await session.commit()
+            await session.refresh(row)
+            return _credential_from_row(row)

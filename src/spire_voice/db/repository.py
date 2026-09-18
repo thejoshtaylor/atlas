@@ -56,6 +56,29 @@ class PolicyRepository(Protocol):
         """Write one `audit_log` row."""
         ...
 
+    async def add_rule(
+        self, *, kind: str, value: str, note: str | None, created_by_user_id: int | None
+    ) -> PolicyRule:
+        """Insert one denylist/allowlist rule and return it. The caller
+        (`routes/policy.py`) is responsible for validating `kind`/`value`
+        against the shapes `mcp/spire_mcp/safety.py` enforces before
+        calling this -- this method itself does not re-validate, so a
+        caller cannot rely on it to paper over a skipped check."""
+        ...
+
+    async def remove_rule(self, rule_id: int) -> None:
+        """Delete one rule by id. A no-op when `rule_id` does not exist --
+        removing a rule that is already gone is not an error."""
+        ...
+
+    async def set_mode(self, mode: str, *, updated_by_user_id: int | None) -> None:
+        """Set the single active mode. The caller is responsible for
+        validating `mode` against `spire_mcp.safety.Mode`'s two literal
+        values before calling this, and for writing the audit row
+        (`record_audit`) that makes the change accountable -- this method
+        only changes the row."""
+        ...
+
 
 @dataclass(frozen=True)
 class User:
@@ -215,4 +238,58 @@ class AccountRepository(Protocol):
         chain from an old, already-rotated token forward to its still-live
         descendant) are the same operation from this method's point of
         view."""
+        ...
+
+
+@dataclass(frozen=True)
+class Credential:
+    """One row from `provider_credentials`, as a plain value object --
+    ciphertext only, the same reason `Invite.token_hash` and
+    `RefreshToken.token_hash` never carry a plaintext bearer value. This
+    class never decrypts anything: decryption is
+    `spire_voice.crypto.credentials.decrypt_credential`, called from
+    exactly one place (that module's own docstring), never from a
+    repository."""
+
+    slot: str
+    ciphertext: bytes
+    key_version: int
+    updated_at: datetime
+    updated_by_user_id: int | None
+
+
+class CredentialRepository(Protocol):
+    """What provider-credential storage must answer (PROV-04, D-07).
+
+    Three members, all over ciphertext: `get_credential`/`list_credentials`
+    are reads, `upsert_credential` is the one write path. No member of
+    this protocol, nor of either implementation, ever returns a plaintext
+    value -- that boundary lives entirely in
+    `spire_voice.crypto.credentials`, and only at the one call site that
+    module's docstring names.
+    """
+
+    async def get_credential(self, slot: str) -> Credential | None:
+        """The stored row for `slot`, or `None` when nothing has been
+        saved for it yet."""
+        ...
+
+    async def list_credentials(self) -> Sequence[Credential]:
+        """Every stored row -- the closed slot set itself lives in
+        `spire_voice.crypto.credentials.CredentialSlot`, not here; a
+        caller walks that set and calls `get_credential` per slot, or
+        calls this for every row actually present."""
+        ...
+
+    async def upsert_credential(
+        self,
+        slot: str,
+        *,
+        ciphertext: bytes,
+        key_version: int,
+        updated_by_user_id: int | None,
+    ) -> Credential:
+        """Insert or replace the one row for `slot` and return it. The
+        caller (`routes/credentials.py`) is responsible for validating
+        `slot` against the closed set before calling this."""
         ...
