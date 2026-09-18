@@ -48,9 +48,12 @@ from spire_voice.db.repository import (
     SetupStep,
     User,
     WorkflowRun,
+    WorkflowRunNotAppendableError,
+    WorkflowRunNotFoundError,
     WorkflowStep,
     WorkflowStepSpec,
     assign_step_due_ats,
+    next_append_due_at,
     push_out_due_at,
 )
 from spire_voice.turn.macros import normalize as _normalize_macro_key
@@ -985,6 +988,11 @@ class PostgresMacroRepository:
 # mechanism.
 _WORKFLOW_CLAIMABLE_RUN_STATUSES = ("pending", "firing")
 
+# `cancel_run`'s own refusal set (plan 05-02): a run already in one of
+# these has nothing further for cancellation to do -- returns False,
+# changes nothing.
+_WORKFLOW_TERMINAL_RUN_STATUSES = ("completed", "cancelled", "failed")
+
 
 def _workflow_step_from_row(row: WorkflowStepRow) -> WorkflowStep:
     return WorkflowStep(
@@ -1215,3 +1223,189 @@ class PostgresWorkflowRepository:
 
             await session.commit()  # releases the row lock
             return True
+
+    async def list_runs(self, *, statuses: "Sequence[str] | None" = None) -> "list[WorkflowRun]":
+        async with self._sessionmaker() as session:
+            # Explicit ORDER BY on the run list itself -- HI-01 (phase 4
+            # review) found `list_macros()` with none, which left which
+            # row won a collision undefined; the same defect class,
+            # closed on the way in here rather than found in review.
+            query = select(WorkflowRunRow).order_by(
+                WorkflowRunRow.created_at.desc(), WorkflowRunRow.id.desc()
+            )
+            if statuses:
+                query = query.where(WorkflowRunRow.status.in_(statuses))
+            run_rows = (await session.execute(query)).scalars().all()
+            if not run_rows:
+                return []
+            run_ids = [r.id for r in run_rows]
+            # Explicit ORDER BY on each run's own steps too -- position
+            # order is what makes "the ordered plan" mean anything.
+            step_rows = (
+                await session.execute(
+                    select(WorkflowStepRow)
+                    .where(WorkflowStepRow.run_id.in_(run_ids))
+                    .order_by(WorkflowStepRow.run_id, WorkflowStepRow.position)
+                )
+            ).scalars().all()
+            steps_by_run: dict[int, list[WorkflowStepRow]] = {}
+            for step_row in step_rows:
+                steps_by_run.setdefault(step_row.run_id, []).append(step_row)
+            return [
+                _workflow_run_from_rows(run_row, steps_by_run.get(run_row.id, []))
+                for run_row in run_rows
+            ]
+
+    async def get_run(self, run_id: int) -> "WorkflowRun | None":
+        async with self._sessionmaker() as session:
+            run_row = await session.get(WorkflowRunRow, run_id)
+            if run_row is None:
+                return None
+            step_rows = (
+                await session.execute(
+                    select(WorkflowStepRow)
+                    .where(WorkflowStepRow.run_id == run_id)
+                    .order_by(WorkflowStepRow.position)
+                )
+            ).scalars().all()
+            return _workflow_run_from_rows(run_row, step_rows)
+
+    async def cancel_run(
+        self, run_id: int, *, now: datetime, cancelled_by_user_id: "int | None"
+    ) -> bool:
+        """Moves `run_id` to `cancelled` and every still-`pending` step of
+        its own to `cancelled`, in one transaction (D-12: never a
+        delete). `False`, changing nothing, when `run_id` does not exist
+        or is already terminal.
+
+        The per-step move is one atomic `UPDATE ... WHERE status =
+        'pending'` (`claim_invite`'s own idiom above, WR-03) rather than a
+        read of each step row followed by a separate mutate-and-commit: a
+        step the poller claims and completes inside its own transaction
+        is, by the time any other transaction can see it, either still
+        genuinely `pending` (not yet claimed -- this UPDATE's own WHERE
+        clause still matches it at execution time) or already committed
+        terminal (excluded by the WHERE clause) -- there is no committed
+        intermediate state a read-then-write pair could catch and
+        overwrite, but a read-then-write *would* have a window between
+        its own read and its own write where a step claimed in between
+        could be silently clobbered back to `cancelled`. The atomic
+        UPDATE has no such window.
+        """
+        naive_now = _to_naive_utc(now)
+        async with self._sessionmaker() as session:
+            run_row = await session.get(WorkflowRunRow, run_id)
+            if run_row is None or run_row.status in _WORKFLOW_TERMINAL_RUN_STATUSES:
+                return False
+            run_row.status = "cancelled"
+            run_row.updated_at = naive_now
+            await session.execute(
+                update(WorkflowStepRow)
+                .where(WorkflowStepRow.run_id == run_id, WorkflowStepRow.status == "pending")
+                .values(
+                    status="cancelled",
+                    result_detail={"cancelled_by_user_id": cancelled_by_user_id},
+                )
+            )
+            await session.commit()
+            return True
+
+    async def _append_or_replace(
+        self,
+        run_id: int,
+        specs: "Sequence[WorkflowStepSpec]",
+        *,
+        now: datetime,
+        replace: bool,
+    ) -> WorkflowRun:
+        """Shared body for `append_steps`/`replace_steps`: the row lock,
+        the status re-read under it, and the status refusal are identical
+        between the two -- only whether the existing steps are kept
+        (append) or deleted first (replace), and which instant the new
+        steps' `due_at`s are computed from, differ."""
+        async with self._sessionmaker() as session:
+            # The guard is the point of this method (Task 3's own
+            # instruction): SELECT ... FOR UPDATE on the run row first,
+            # the status re-read under that lock, and only then does a
+            # single row get inserted -- all in one transaction. A status
+            # read followed by an unguarded insert is the same
+            # check-then-act shape WR-03 (accounts/invites) and HI-01
+            # (macro phrases) both were; the poller can move a run from
+            # `pending` to `firing` at any instant.
+            run_row = (
+                await session.execute(
+                    select(WorkflowRunRow).where(WorkflowRunRow.id == run_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if run_row is None:
+                raise WorkflowRunNotFoundError(run_id)
+            if run_row.status != "pending":
+                raise WorkflowRunNotAppendableError(run_id, run_row.status)
+
+            existing_step_rows = (
+                await session.execute(
+                    select(WorkflowStepRow)
+                    .where(WorkflowStepRow.run_id == run_id)
+                    .order_by(WorkflowStepRow.position)
+                )
+            ).scalars().all()
+
+            if replace:
+                # Recompute every due_at from the run's own schedule
+                # start -- its existing first step's own due_at --
+                # preserved across an edit that only changes the step
+                # list, never from `now`.
+                base_time = (
+                    _to_aware_utc(existing_step_rows[0].due_at)
+                    if existing_step_rows
+                    else now
+                )
+                await session.execute(
+                    delete(WorkflowStepRow).where(WorkflowStepRow.run_id == run_id)
+                )
+                start_position = 0
+                kept_step_rows: list[WorkflowStepRow] = []
+            else:
+                # An appended step's due_at folds forward from the run's
+                # own last step (PA-D1), never from `now` -- it lands
+                # after what is already scheduled.
+                existing_steps = [_workflow_step_from_row(r) for r in existing_step_rows]
+                base_time = next_append_due_at(existing_steps, now)
+                start_position = (
+                    existing_step_rows[-1].position + 1 if existing_step_rows else 0
+                )
+                kept_step_rows = list(existing_step_rows)
+
+            due_ats = assign_step_due_ats(specs, base_time)
+            new_rows: list[WorkflowStepRow] = []
+            for offset, (spec, due_at) in enumerate(zip(specs, due_ats)):
+                row = WorkflowStepRow(
+                    run_id=run_id,
+                    position=start_position + offset,
+                    kind=spec.kind,
+                    arguments=spec.arguments,
+                    due_at=_to_naive_utc(due_at),
+                    status="pending",
+                    attempts=0,
+                    result_detail=None,
+                    fired_at=None,
+                )
+                session.add(row)
+                new_rows.append(row)
+            run_row.updated_at = _to_naive_utc(now)
+
+            await session.commit()
+            await session.refresh(run_row)
+            for row in new_rows:
+                await session.refresh(row)
+            return _workflow_run_from_rows(run_row, kept_step_rows + new_rows)
+
+    async def append_steps(
+        self, run_id: int, specs: "Sequence[WorkflowStepSpec]", *, now: datetime
+    ) -> WorkflowRun:
+        return await self._append_or_replace(run_id, specs, now=now, replace=False)
+
+    async def replace_steps(
+        self, run_id: int, specs: "Sequence[WorkflowStepSpec]", *, now: datetime
+    ) -> WorkflowRun:
+        return await self._append_or_replace(run_id, specs, now=now, replace=True)
