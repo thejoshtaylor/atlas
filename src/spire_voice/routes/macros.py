@@ -57,16 +57,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from spire_mcp.safety import Denied, Policy, allow_call, allow_read
+from spire_mcp.safety import Policy
 from spire_voice import config as _config_module
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
-from spire_voice.db.repository import Macro, MacroAction, MacroRepository
+from spire_voice.db.repository import Macro, MacroRepository
 from spire_voice.providers.tts_cache import precache_all
+from spire_voice.routes.conflict import (
+    ConflictAnnotation,
+    annotate_conflict,
+    known_entity_ids as _known_entity_ids,
+    load_policy_or_none as _load_policy_or_none,
+)
 from spire_voice.turn.macros import normalize
 
 # The exact wording UI-SPEC's "Error state -- reply not synthesized" row
@@ -78,8 +84,6 @@ _REPLY_SYNTHESIS_DEGRADED_MESSAGE = (
 )
 
 router = APIRouter(tags=["macros"])
-
-ConflictAnnotation = Literal["ok", "denied", "not_found", "unknown"]
 
 
 def _macro_not_found_error(macro_id: int) -> HTTPException:
@@ -258,110 +262,6 @@ async def _check_no_collision(
         raise _duplicate_phrase_error(str(exc)) from exc
 
 
-def _tool_result_json(result: object) -> object:
-    """Best-effort extraction of a tool result's JSON payload -- the exact
-    logic `routes/policy.py::_tool_result_json` already applies,
-    duplicated locally for the same reason that module states: `app.py`
-    imports `spire_voice.routes` (this module, transitively), so an
-    import the other way would cycle."""
-    structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None)
-    if structured is not None:
-        return structured
-    content = getattr(result, "content", None) or []
-    if content:
-        text = getattr(content[0], "text", None)
-        if text:
-            try:
-                import json
-
-                return json.loads(text)
-            except Exception:  # noqa: BLE001 -- malformed text is "no payload," not a crash
-                return None
-    return None
-
-
-async def _known_entity_ids(request: Request) -> frozenset[str] | None:
-    """A best-effort snapshot of entity ids Home Assistant currently
-    reports -- the same kind of read `routes/policy.py::_known_entity_ids`
-    already performs for its own "Not found in Home Assistant" badge,
-    duplicated locally for the same import-cycle reason
-    `_tool_result_json` above states. `None` means "could not check,"
-    never "empty": `_annotate_action_conflict` below treats `None` as
-    "annotate every entity-targeting action unknown," per this module's
-    own rule that a failed check must never render as no conflict."""
-    tool_host = getattr(request.app.state, "tool_host", None)
-    if tool_host is None:
-        return None
-    try:
-        result = await tool_host.call_tool("ha_list_entities", {})
-    except Exception:  # noqa: BLE001 -- any failure here means "unknown," not a broken load
-        return None
-    payload = _tool_result_json(result)
-    if not isinstance(payload, list):
-        return None
-    return frozenset(
-        entity["entity_id"] for entity in payload if isinstance(entity, dict) and "entity_id" in entity
-    )
-
-
-async def _load_policy_or_none(request: Request) -> Policy | None:
-    """A best-effort load of the running policy, used only for the
-    read-only conflict annotation below. `None` means "could not check,"
-    never "no policy" -- a transient failure here degrades every entity-
-    targeting action's annotation to `unknown` rather than silently
-    reporting `ok`."""
-    policy_repo = getattr(request.app.state, "policy_repo", None)
-    if policy_repo is None:
-        return None
-    try:
-        return await policy_repo.load_policy()
-    except Exception:  # noqa: BLE001 -- any failure here means "unknown," matching _known_entity_ids
-        return None
-
-
-def _action_target(action: MacroAction) -> tuple[str, str, str] | None:
-    """`(domain, service, entity_id)` if `action.arguments` carries the
-    shape `ha_call_service` needs to target one entity, else `None` --
-    an action with no single-entity target (a non-HA tool, or one that
-    targets an area/device/label this read-only check does not expand)
-    has nothing for the conflict check to run against."""
-    args = action.arguments if isinstance(action.arguments, dict) else {}
-    domain = args.get("domain")
-    service = args.get("service")
-    entity_id = args.get("entity_id")
-    if domain and service and entity_id:
-        return domain, service, entity_id
-    return None
-
-
-def _annotate_action_conflict(
-    action: MacroAction, policy: Policy | None, known_entity_ids: frozenset[str] | None
-) -> ConflictAnnotation:
-    """Read-only: calls `allow_read`/`allow_call` exactly as the fire path
-    does, but never performs the service call the action names. See the
-    module docstring for why this must stay the one check, not a second,
-    editor-specific one."""
-    target = _action_target(action)
-    if target is None:
-        return "ok"
-    domain, service, entity_id = target
-    if policy is None or known_entity_ids is None:
-        return "unknown"
-    try:
-        entity_id = allow_read(entity_id)
-    except Denied:
-        # A malformed id cannot resolve against a live catalog either --
-        # treat it the same as absent, not as a third shape of failure.
-        return "not_found"
-    if entity_id not in known_entity_ids:
-        return "not_found"
-    try:
-        allow_call(policy, domain, service, entity_id)
-    except Denied:
-        return "denied"
-    return "ok"
-
-
 def _to_macro_response(
     macro: Macro,
     policy: Policy | None,
@@ -382,7 +282,7 @@ def _to_macro_response(
                 position=action.position,
                 tool=action.tool,
                 arguments=action.arguments,
-                conflict=_annotate_action_conflict(action, policy, known_entity_ids),
+                conflict=annotate_conflict(action.arguments, policy, known_entity_ids),
             )
             for action in macro.actions
         ],
