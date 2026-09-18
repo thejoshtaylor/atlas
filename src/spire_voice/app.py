@@ -17,6 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
@@ -83,6 +84,38 @@ MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
 # since `web/` lives at the repo root beside `src/`, not under it.
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 
+# D-01 (phase 4): the zone `_state_message` reads the current time and date
+# against. `lifespan` sets this from `config.server.timezone`; `None` --
+# the default, and every module-load before `lifespan` has run a single
+# time -- means the process's own local zone, resolved fresh on every call
+# by `_current_moment()` below rather than baked in once at import time.
+_resolved_timezone: "ZoneInfo | None" = None
+
+
+def _current_moment() -> datetime:
+    """The instant `_state_message` describes, in `_resolved_timezone`.
+
+    `datetime.now()` with no argument returns a naive local-time value;
+    `.astimezone(tz)` treats a naive `self` as already being in the
+    system's own zone and converts it to an aware one in `tz` -- and when
+    `tz` is `None`, "convert to `tz`" means "attach the system's own zone",
+    per `datetime.astimezone`'s own documented behavior. That is exactly
+    why this one call handles both cases without a branch: `_resolved_timezone`
+    unset resolves to the process zone, and a configured `ZoneInfo`
+    resolves to that zone, through the same expression.
+    """
+    return datetime.now().astimezone(_resolved_timezone)
+
+
+def _resolved_timezone_name() -> str:
+    """The zone name `_state_message` speaks and `lifespan` logs at
+    startup -- the configured IANA key, or the system's own abbreviated
+    name (e.g. "UTC", "PST") when no `server.timezone` was set.
+    """
+    if _resolved_timezone is not None:
+        return str(_resolved_timezone)
+    return _current_moment().tzname() or "the local zone"
+
 
 def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
     """Byte-identical across every turn -- the cacheable prefix.
@@ -106,11 +139,24 @@ def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
 def _state_message(states: dict[str, str]) -> str:
     """Rebuilt every turn -- deliberately not part of the cached prefix.
 
-    An empty mapping still renders the header with no entity lines: that is
-    a message the model can read as "nothing is known," which is a
-    different claim than no message at all reaching it.
+    Carries the current local date, day of the week, time to the minute,
+    and resolved timezone (D-01, CMD-03) ahead of the entity states, read
+    fresh through `_current_moment()`/`_resolved_timezone_name()` on every
+    call -- two calls a minute apart describe two different minutes. This
+    is what lets a spoken time or date question be answered with no tool
+    call of its own: the answer is already in context before the model
+    speaks, and a `get_time` tool would fail CMD-03 by definition.
+
+    An empty `states` mapping still renders the header with no entity
+    lines: that is a message the model can read as "nothing is known,"
+    which is a different claim than no message at all reaching it.
     """
-    lines = ["Current state:"]
+    now = _current_moment()
+    lines = [
+        f"Current date: {now:%A, %B %d, %Y}",
+        f"Current time: {now:%H:%M} {_resolved_timezone_name()}",
+        "Current state:",
+    ]
     for entity_id, state in states.items():
         lines.append(f"- {entity_id}: {state}")
     return "\n".join(lines)
@@ -379,6 +425,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     config = Config.from_config(raw_config, reject_legacy_safety_key=False)
     app.state.config = config
+
+    # D-01 (phase 4): resolve the zone `_state_message` reads the current
+    # time and date against, and log which one won, by name -- an
+    # unlogged, implicit container zone is how a house ends up told the
+    # wrong time with nothing to point at. `ServerConfig.from_config`
+    # already validated a configured name against `zoneinfo`, so this
+    # `ZoneInfo(...)` call cannot raise here.
+    global _resolved_timezone
+    if config.server.timezone:
+        _resolved_timezone = ZoneInfo(config.server.timezone)
+        logger.info("resolved timezone: %s (from server.timezone)", config.server.timezone)
+    else:
+        _resolved_timezone = None
+        logger.info(
+            "resolved timezone: %s (server.timezone not set; using the process's own zone)",
+            _resolved_timezone_name(),
+        )
 
     db_engine = build_engine(config.database)
     app.state.db_engine = db_engine

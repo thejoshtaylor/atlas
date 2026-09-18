@@ -47,6 +47,15 @@ server:
   # admin surface exposes this same key once the webapp exists to hold it.
   transport: websocket
 
+  # Phase 4 (D-01, CMD-03): the zone the assistant reads the current time
+  # and date from when answering a spoken time or date question. Unset (the
+  # default, and what this example ships) means the process's own local
+  # zone -- resolved at startup and logged by name, never guessed silently.
+  # Set to an IANA zoneinfo name (e.g. "America/Los_Angeles") to pin one
+  # explicitly regardless of the container's own zone; an unrecognized name
+  # stops startup, naming this key.
+  # timezone: "America/Los_Angeles"
+
 database:
   # Phase 3 (D-01): the database is authoritative for everything an operator
   # edits -- the safety policy, provider credentials, accounts and invites.

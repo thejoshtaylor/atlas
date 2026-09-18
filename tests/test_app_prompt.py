@@ -12,8 +12,12 @@ Every entity id below comes from `tests/conftest.py`'s `_FAKE_STATES`, per
 
 from __future__ import annotations
 
+from datetime import datetime as _real_datetime
+from zoneinfo import ZoneInfo
+
 import conftest
 
+import spire_voice.app as app_module
 from spire_voice.app import _catalog_prompt, _state_message
 
 
@@ -100,3 +104,76 @@ def test_state_message_on_empty_mapping_is_not_an_empty_string():
 
     assert message != ""
     assert "current state" in message.lower()
+
+
+def test_catalog_prompt_carries_no_date_or_time_content():
+    """D-01 (phase 4) adds the current date/weekday/time/timezone to
+    `_state_message` only -- a volatile value leaking into
+    `_catalog_prompt` would invalidate `brain.cache_system_prompt`'s
+    cached prefix on every turn (see that function's own docstring)."""
+    prompt = _catalog_prompt(_entities_from_fake_states())
+
+    assert "Current time" not in prompt
+    assert "Current date" not in prompt
+
+
+class _FixedNowDatetime:
+    """A stand-in for the `datetime` class `app.py` imports -- only `.now`
+    is overridden here, returning a scripted queue of fixed instants (one
+    per call) rather than the real clock. Proves `_state_message` reads a
+    fresh instant on every call instead of caching its first one; every
+    other `datetime` behavior (`strftime`, `.astimezone`, ...) still runs
+    on the real `datetime.datetime` instances this queue hands back.
+    """
+
+    def __init__(self, instants: list) -> None:
+        self._instants = list(instants)
+
+    def now(self, tz=None):
+        return self._instants.pop(0)
+
+
+def test_state_message_carries_date_weekday_time_and_resolved_timezone(monkeypatch):
+    zone = ZoneInfo("America/Los_Angeles")
+    # 2026-09-18 is a Friday.
+    fixed = _real_datetime(2026, 9, 18, 14, 30, tzinfo=zone)
+    monkeypatch.setattr(app_module, "datetime", _FixedNowDatetime([fixed]))
+    monkeypatch.setattr(app_module, "_resolved_timezone", zone)
+
+    message = _state_message({})
+
+    assert "Friday" in message
+    assert "September 18, 2026" in message
+    assert "14:30" in message
+    assert "America/Los_Angeles" in message
+
+
+def test_state_message_is_rebuilt_on_every_call_not_cached(monkeypatch):
+    """Two calls a minute apart describe two different minutes -- this is
+    what lets a spoken time question be answered correctly on any turn,
+    not just the first one after the process started."""
+    zone = ZoneInfo("America/Los_Angeles")
+    first_instant = _real_datetime(2026, 9, 18, 9, 30, tzinfo=zone)
+    second_instant = _real_datetime(2026, 9, 18, 9, 31, tzinfo=zone)
+    monkeypatch.setattr(app_module, "datetime", _FixedNowDatetime([first_instant, second_instant]))
+    monkeypatch.setattr(app_module, "_resolved_timezone", zone)
+
+    first = _state_message({})
+    second = _state_message({})
+
+    assert first != second
+    assert "09:30" in first
+    assert "09:31" in second
+
+
+def test_state_message_falls_back_to_the_process_zone_when_unconfigured(monkeypatch):
+    """`_resolved_timezone` unset (`None`, the default before `lifespan`
+    has run, and the value an operator who wrote no `server.timezone` key
+    keeps) still produces a well-formed message -- the process's own local
+    zone, never a raise."""
+    monkeypatch.setattr(app_module, "_resolved_timezone", None)
+
+    message = _state_message({})
+
+    assert "Current date:" in message
+    assert "Current time:" in message
