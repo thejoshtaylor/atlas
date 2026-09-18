@@ -23,6 +23,7 @@ directly can see it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -35,12 +36,35 @@ from mcp.types import Tool
 
 
 class McpToolHost:
-    """Wraps one MCP stdio child process for its whole lifetime."""
+    """Wraps one MCP stdio child process for its whole lifetime -- and,
+    since Phase 3, can replace that child with a fresh one carrying a new
+    policy (`respawn`).
+
+    One `asyncio.Lock` (`_lock`) guards both `respawn()` and `call_tool()`,
+    held for the duration of each. That serializes every tool call behind
+    one lock, which is acceptable here for two reasons: there is exactly one
+    child this host ever owns, and `turn/controller.py`'s own tool rounds
+    are already sequential -- nothing in this codebase calls `call_tool`
+    concurrently with itself today. What the lock buys is narrower and more
+    important: it keeps a tool call from landing on a session that
+    `respawn()` is in the middle of tearing down. No second liveness flag
+    is layered on top of it -- `self._stack`/`self.session` stay the single
+    source of truth for whether a child is running, the same discipline
+    `FfmpegSupervisor` already follows with its own subprocess.
+    """
 
     def __init__(self) -> None:
         self._stack = AsyncExitStack()
         self.session: ClientSession | None = None
         self.tools: list[Tool] = []
+        self._lock = asyncio.Lock()
+        # The three spawn arguments `respawn()` needs to repeat -- stored
+        # only after a successful `start()`, so a `respawn()` called before
+        # any `start()` fails the same way `call_tool()` does rather than
+        # spawning a child with `None`s baked into its environment.
+        self._ha_url: str | None = None
+        self._ha_token: str | None = None
+        self._mcp_root: str | os.PathLike[str] | None = None
 
     async def start(
         self,
@@ -64,6 +88,38 @@ class McpToolHost:
         is why the child refuses to start on a malformed block rather than
         quietly falling back to defaults.
         """
+        await self._spawn(ha_url, ha_token, mcp_root, safety_block)
+        self._ha_url = ha_url
+        self._ha_token = ha_token
+        self._mcp_root = mcp_root
+
+    async def respawn(self, safety_block: dict | None) -> None:
+        """Replace the running child with a fresh one carrying `safety_block`.
+
+        A policy change reaches the enforcing process this way -- by
+        replacing it -- and never by mutating a running child's policy in
+        place; there is no in-place update path here to get wrong. Repeats
+        the same `ha_url`/`ha_token`/`mcp_root` the original `start()` call
+        used, so only the policy differs between the old child and the new
+        one.
+        """
+        async with self._lock:
+            if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
+                raise RuntimeError("McpToolHost.respawn called before start()")
+            await self._stack.aclose()
+            self._stack = AsyncExitStack()
+            await self._spawn(self._ha_url, self._ha_token, self._mcp_root, safety_block)
+
+    async def _spawn(
+        self,
+        ha_url: str,
+        ha_token: str,
+        mcp_root: str | os.PathLike[str],
+        safety_block: dict | None,
+    ) -> None:
+        """The literal-env, real-subprocess spawn both `start()` and
+        `respawn()` perform -- factored out so there is exactly one place
+        that builds the child's environment, not two that could drift apart."""
         env = {"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)}
         if safety_block is not None:
             env["SPIRE_SAFETY"] = json.dumps(safety_block)
@@ -89,10 +145,14 @@ class McpToolHost:
         `spire_mcp.safety.Denied.__init__`). The turn controller reads
         `is_error` and `content[0].text` straight off this return value, so
         the reason crosses this boundary unchanged, not paraphrased.
+
+        Guarded by the same `_lock` `respawn()` holds, so a call cannot land
+        on a session mid-teardown.
         """
-        if self.session is None:
-            raise RuntimeError("McpToolHost.call_tool called before start()")
-        return await self.session.call_tool(name, arguments)
+        async with self._lock:
+            if self.session is None:
+                raise RuntimeError("McpToolHost.call_tool called before start()")
+            return await self.session.call_tool(name, arguments)
 
     async def aclose(self) -> None:
         await self._stack.aclose()

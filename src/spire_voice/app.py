@@ -23,11 +23,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
 from spire_voice.audio.ring import PrerollBuffer
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import Config, ConfigError, WakeConfig, load_config
+from spire_voice.db.engine import build_engine, run_migrations
+from spire_voice.db.postgres import PostgresPolicyRepository
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
+from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
@@ -160,6 +165,22 @@ def _build_ffmpeg_supervisor(config: Config, http_client: httpx.AsyncClient) -> 
     return FfmpegSupervisor(config.speaker, http_client=http_client)
 
 
+def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
+    """Build every repository this process reads and writes through, keyed
+    by the `app.state` attribute name each belongs under.
+
+    A separate, monkeypatchable function -- the same shape
+    `_build_wake_detector`/`_build_ffmpeg_supervisor` already use --
+    specifically so `tests/test_startup_smoke.py` can substitute a dict of
+    fakes (`FakePolicyRepository` from `conftest.py`) without a reachable
+    Postgres. Returns a dict rather than a single object because later
+    plans in this phase (accounts, invites, credentials) add more
+    repositories here without this factory's call site changing shape.
+    """
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    return {"policy_repo": PostgresPolicyRepository(sessionmaker)}
+
+
 async def _open_speaker_writer(writer: FifoWriter) -> None:
     """Open `writer` in the background, never inline in `lifespan`.
 
@@ -220,6 +241,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = load_config(CONFIG_PATH)
     app.state.config = config
 
+    # Migrations run first, before any other resource is built, and awaited
+    # in sequence -- never scheduled as a detached task, which is the exact
+    # shape 03-RESEARCH.md Pitfall 1 names as the way this fails silently
+    # (a migration that never actually ran, with no error). A failure here
+    # propagates uncaught and stops the process, the same refusal-beats-
+    # half-configured posture the barge-in calibration check below already
+    # established for this file (D-02, DEP-04).
+    if config.database.run_migrations_at_startup:
+        await asyncio.to_thread(run_migrations, config.database.migration_url)
+
+    db_engine = build_engine(config.database)
+    app.state.db_engine = db_engine
+    repositories = _build_repositories(config, db_engine)
+    for _repo_name, _repo in repositories.items():
+        setattr(app.state, _repo_name, _repo)
+    policy_repo = repositories["policy_repo"]
+
     app.state.stt = XaiStt(config.stt)
     tier_brains = brain_race.build_tiers(config.brain)
     app.state.tier_brains = tier_brains
@@ -236,14 +274,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     tool_host = McpToolHost()
     ha_config = config.mcp_servers.get("ha")
     ha_env = ha_config.env if ha_config else {}
+    # The database is the policy's source of truth now (SAFE-05, D-11):
+    # the block handed to the child is derived from the repository, not
+    # from a `Config` field -- `lifespan` never constructs a `Policy`
+    # object and serializes that; it builds the same JSON-shaped dict
+    # `Policy.from_config` already expects, one parser on both sides.
+    safety_block = safety_block_from_policy(await policy_repo.load_policy())
     await tool_host.start(
         ha_url=ha_env.get("HA_URL", ""),
         ha_token=ha_env.get("HA_TOKEN", ""),
         mcp_root=MCP_ROOT,
-        safety_block=config.raw_safety,
+        safety_block=safety_block,
     )
     app.state.tool_host = tool_host
     app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools)
+    # Kept on app.state so plan 03-07's write routes can compare a would-be
+    # new block against the one the running child was actually spawned
+    # with, before deciding whether a respawn is needed.
+    app.state.safety_block = safety_block
 
     entities_result = await tool_host.call_tool("ha_list_entities", {})
     entities = _tool_result_json(entities_result)
@@ -415,6 +463,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()
+    await db_engine.dispose()
 
 
 app = FastAPI(lifespan=lifespan)
