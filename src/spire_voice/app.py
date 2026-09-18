@@ -1178,6 +1178,20 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     # `_current_macros`'s own docstring for why this call site reads the
     # repository directly rather than trusting an app-state snapshot.
     macros = await _current_macros(app)
+    # IN-02 (code review): no `speech_lock=` here, unlike
+    # `_make_run_turn_for_source`'s own `speech_lock=app.state.
+    # speaker_lock` above. Safe today only because this turn speaks
+    # through `transport` (`WebrtcTransport`'s own audio sink), never
+    # through `app.state.camera_source` -- the one physical speaker
+    # `app.state.speaker_lock` actually protects, and the one thing the
+    # scheduler's own `_scheduled_speak` closure ever writes to. There is
+    # nothing here for a scheduled step's utterance to interleave with.
+    # This stops being true the moment a future change routes
+    # browser-sourced audio through that same physical speaker (or
+    # reuses `app.state.camera_source` as a fallback for this transport)
+    # -- if that happens, thread `speech_lock=app.state.speaker_lock`
+    # through here too, the same way the wake-word/camera path already
+    # does.
     task = asyncio.create_task(
         _run_webrtc_turn(
             transport,
@@ -1247,6 +1261,12 @@ async def turn_ws(websocket: WebSocket) -> None:
     # `_current_macros`'s own docstring for why this call site reads the
     # repository directly rather than trusting an app-state snapshot.
     macros = await _current_macros(websocket.app)
+    # IN-02 (code review): no `speech_lock=` here, for the identical
+    # reason `webrtc_offer` above carries the same omission -- this turn
+    # speaks through `WebSocketAudioSource`, never through `app.state.
+    # camera_source`, so there is nothing for a scheduled step's own
+    # utterance (guarded by `app.state.speaker_lock`) to interleave with.
+    # See that route's own comment for what would make this unsafe.
     await run_turn(
         source,
         websocket.app.state.stt,
