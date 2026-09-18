@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 const NAV_ITEMS = [
   { to: "/", label: "Home", minimumRole: "viewer" },
   { to: "/policy", label: "Safety policy", minimumRole: "operator" },
+  { to: "/macros", label: "Macros", minimumRole: "operator" },
   { to: "/accounts", label: "Accounts", minimumRole: "admin" },
   { to: "/settings", label: "Settings", minimumRole: "admin" },
   // The developer microphone page (plan 03-10, D-19) -- a genuine nav
