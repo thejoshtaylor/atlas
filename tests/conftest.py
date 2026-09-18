@@ -335,11 +335,20 @@ class FakeHomeAssistant:
             _, _, _, domain, service = path.split("/", 4)
             body = request.read()
             payload = json.loads(body) if body else {}
-            entity_id = payload.get("entity_id")
-            state = _FAKE_STATES.get(entity_id) if entity_id else None
-            if state is None:
-                return httpx.Response(200, json=[])
-            return httpx.Response(200, json=[state])
+            raw_entity_id = payload.get("entity_id")
+            # `handle_call_service` posts the whole checked entity id list,
+            # not a single id (plan 03-04: an expanded area target can
+            # carry several) -- accept both shapes so a single-entity call
+            # and an expanded, multi-entity call both get a real reply
+            # rather than a `dict.get` on an unhashable list.
+            if isinstance(raw_entity_id, list):
+                requested_ids = raw_entity_id
+            elif raw_entity_id:
+                requested_ids = [raw_entity_id]
+            else:
+                requested_ids = []
+            states = [_FAKE_STATES[e] for e in requested_ids if e in _FAKE_STATES]
+            return httpx.Response(200, json=states)
 
         return httpx.Response(404, json={"message": "not found"})
 
