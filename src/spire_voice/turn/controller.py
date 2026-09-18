@@ -84,6 +84,20 @@ _EMPTY_REPLY = "sorry, i don't have anything to say to that"
 # refusal from a crash will stop trusting the refusals.
 _DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to tell you about it"
 
+# The fixed phrase `_compose_mixed_outcome_reply` speaks for one action that
+# succeeded, in a batch where at least one other action did not (CMD-07,
+# D-14). Never a restatement of what the model asked for -- the point is
+# only to mark the action as done, the same way a successful action's tool
+# result carries no special wording either.
+_ACTION_SUCCEEDED_CLAUSE = "succeeded"
+# Spoken for an action whose `tool_host.call_tool` awaitable raised instead
+# of returning a result -- the call itself never reached a verdict, refusal
+# or otherwise. Deliberately a different fixed phrase from a boundary
+# refusal (`_result_text`'s reason text): "it never even ran" and "it ran
+# and was refused" are different facts about the house, and an operator
+# hearing this reply must be able to tell them apart.
+_ACTION_DID_NOT_COMPLETE_CLAUSE = "the call itself did not complete"
+
 # How often the silence-timeout guard rechecks its deadline while waiting on
 # an STT event that may never arrive. Real events short-circuit this --
 # `asyncio.wait` returns the instant the event lands, so this interval only
@@ -586,6 +600,60 @@ async def _drain_to_final_transcript(
         next_event_task = asyncio.ensure_future(stream.__anext__())
 
 
+def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
+    """One clause per action, in `reply.tool_calls` order, for a round where
+    at least one result is error-shaped or a raised exception (CMD-07, D-14).
+
+    `pairs` is the ordered `(tool_call, result)` list for one round -- exactly
+    `zip(reply.tool_calls, results)`, so clause order is `reply.tool_calls`
+    order by construction, never completion order (D-05); `asyncio.gather`
+    already guarantees `results[i]` answers `reply.tool_calls[i]`.
+
+    Composed here, in code, and never through a second `brain.chat` round:
+    a second inference pass over a mixed-outcome batch could paraphrase a
+    refusal reason, which would break the verbatim-refusal invariant
+    `test_denied_reason_reaches_the_reply_verbatim` already guards for the
+    single-action path (this module's own docstring, D-14). A failed
+    action's clause carries `_result_text(result)` exactly as the boundary
+    wrote it -- no prefix, no suffix, no rewording, no truncation of the
+    reason text itself, the same rule `fire_macro`'s own docstring states for
+    the macro path: a refusal never passes through a model, so there is
+    nothing to summarise and nothing to shorten against. `_DENIED_FALLBACK_REPLY`
+    covers only the case where the reason text itself is empty. This is what
+    keeps a single-action batch's composed sentence byte-identical to the
+    single-action path's own reply: one call, one error-shaped result,
+    one clause -- exactly the boundary's own reason text, nothing joined
+    around it.
+
+    A successful action's clause is the fixed `_ACTION_SUCCEEDED_CLAUSE`
+    phrase, carrying no name either -- attached to its action by its
+    position in the sentence, the same "named by written order" doctrine
+    `fire_macro`'s own docstring already uses ("the reason names the one
+    written first"), not by a literal label repeated on every clause.
+
+    An entry the gather returned as a raised exception is the one case named
+    explicitly by this task: the call never reached a verdict at all, so its
+    clause names the action's own tool and carries `_ACTION_DID_NOT_COMPLETE_CLAUSE`
+    instead of a reason -- deliberately worded differently from a boundary
+    refusal, since "it never even ran" and "it ran and was refused" are
+    different facts about the house. Logged at `logger.exception` grade
+    (full traceback) so a raised tool call is diagnosable from the log even
+    though the spoken reply, by design, says only that it did not complete.
+    """
+    clauses: list[str] = []
+    for tool_call, result in pairs:
+        if isinstance(result, BaseException):
+            logger.exception(
+                "tool call %r raised instead of returning a result", tool_call.name, exc_info=result
+            )
+            clauses.append(f"{tool_call.name}: {_ACTION_DID_NOT_COMPLETE_CLAUSE}")
+        elif _is_error(result):
+            clauses.append(_result_text(result) or _DENIED_FALLBACK_REPLY)
+        else:
+            clauses.append(_ACTION_SUCCEEDED_CLAUSE)
+    return "; ".join(clauses)
+
+
 async def _run_tool_rounds(
     brain: _BrainProvider,
     tool_host: _ToolHost,
@@ -602,12 +670,17 @@ async def _run_tool_rounds(
     own doctrine) -- the turn ends by saying so, never with a success
     confirmation, per CMD-01's transparency prohibition.
 
-    `commitment`, when given, is set the instant a call to `tool_host.call_tool`
-    returns -- whichever way it resolved (CR-01). A stdio round trip to the
-    MCP child cannot be un-sent once dispatched, so from that point on
-    `race_tiers` must not let a triage tier's confident reply end the race
-    in this tier's place; only this tier's own settled outcome may describe
-    what actually happened.
+    `commitment`, when given, is set the instant one round's dispatch begins --
+    before `asyncio.gather` is awaited, not after any one call returns (CR-01,
+    widened by Task 1 of plan 04-01). A stdio round trip to the MCP child
+    cannot be un-sent once dispatched, and with three or more calls genuinely
+    in flight at once, waiting for the first result to land would leave a
+    window in which a racing triage tier's confident reply could still end
+    the race while uncancellable service calls are running -- exactly the
+    hazard CR-01 closed for the single-call case. From the moment dispatch
+    begins, `race_tiers` must not let a triage tier's confident reply end the
+    race in this tier's place; only this tier's own settled outcome may
+    describe what actually happened.
     """
     for _round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
@@ -640,33 +713,45 @@ async def _run_tool_rounds(
             }
         )
 
-        for i, tc in enumerate(reply.tool_calls):
-            result = await tool_host.call_tool(tc.name, tc.arguments)
-            if commitment is not None:
-                commitment.committed = True
-            content_text = _result_text(result)
-            if _is_error(result):
-                # An error-shaped result short-circuits straight to speech --
-                # no second brain call touches it. For a refusal this is the
-                # boundary's own doctrine: `spire_mcp.safety.Denied.reason`
-                # crosses the MCP boundary as `content_text` unchanged (see
-                # `mcp_client.py`'s module docstring), so `content_text` here
-                # IS `Denied.reason`, verbatim, with nothing in between to
-                # reword it. This branch is deliberately the only place a
-                # tool result can end a turn without another round -- it
-                # covers both a refusal and an ordinary tool-level failure,
-                # and neither one reaches the caller as a confirmation.
-                # No length check or truncation applies: a refusal never
-                # passes through a model, so `brain.max_tokens` has nothing
-                # to say about it. `_DENIED_FALLBACK_REPLY` covers only the
-                # case where `content_text` itself is empty, so a refusal is
-                # never indistinguishable from a dropped turn.
-                return content_text or _DENIED_FALLBACK_REPLY
+        # CMD-06: every call in this round is dispatched together and run to
+        # completion -- `asyncio.gather(..., return_exceptions=True)`, never
+        # `asyncio.TaskGroup`, whose cancel-every-sibling-on-first-exception
+        # semantics would abort actions two and three the instant action one
+        # raised, which is the exact behaviour this task removes (the same
+        # reasoning `turn/brain_race.py`'s own module docstring already
+        # records for its own choice not to use a `TaskGroup`). `commitment`
+        # is set the instant dispatch begins, above, not after a result
+        # returns -- see this function's own docstring for why. `gather`
+        # always returns results positionally aligned with the awaitables it
+        # was given, so `results[i]` is `reply.tool_calls[i]`'s own result
+        # regardless of which call happens to finish first (D-05) -- there is
+        # no separate correlation step to get wrong.
+        if commitment is not None:
+            commitment.committed = True
+        results = await asyncio.gather(
+            *(tool_host.call_tool(tc.name, tc.arguments) for tc in reply.tool_calls),
+            return_exceptions=True,
+        )
+
+        # Collect every result before deciding anything (D-06): a batch
+        # containing any error-shaped or raised entry is composed in code,
+        # below, and returned directly -- never through a second `brain.chat`
+        # round (D-14). A batch where every call succeeded falls through to
+        # the loop-to-the-next-round behaviour, byte-identical to before this
+        # plan.
+        if any(isinstance(result, BaseException) or _is_error(result) for result in results):
+            return _compose_mixed_outcome_reply(list(zip(reply.tool_calls, results)))
+
+        # Every call in this round succeeded: byte-identical to the
+        # pre-concurrency behaviour -- one `role: tool` message per call, in
+        # `reply.tool_calls` index order, and the loop continues to the next
+        # round where the next `brain.chat` call composes the confirmation.
+        for i, result in enumerate(results):
             # A non-2xx Home Assistant response (see `handle_call_service`)
             # is not a refusal -- it comes back as an ordinary, non-error
             # result whose content names the failure, so the next brain call
             # reports it rather than confirming success.
-            messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content_text})
+            messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": _result_text(result)})
 
     logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
     timings.turn_outcome = "round_cap"

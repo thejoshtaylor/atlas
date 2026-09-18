@@ -12,9 +12,12 @@ test builds one for real, the way the installed SDK does, so this class of
 attribute-name drift fails loudly again if it ever recurs.
 """
 
+import asyncio
 import inspect
 import os
+from types import SimpleNamespace
 
+import pytest
 from mcp.types import Tool
 
 from spire_voice.mcp_client import mcp_tools_to_openai_tools
@@ -162,20 +165,21 @@ async def test_respawned_child_environment_holds_exactly_four_keys_and_no_databa
     """SAFE-09/T-03-08: the environment dict the host builds for the
     respawned child, asserted against the dict itself -- not against source
     text -- must hold exactly `HA_URL`, `HA_TOKEN`, `PYTHONPATH`, and
-    `SPIRE_SAFETY`, and no value may contain a database connection scheme."""
+    `SPIRE_SAFETY`, and no value may contain a database connection scheme.
+
+    `_spawn` now takes `(child_module, env)` directly (Task 3, plan 04-01):
+    the environment is built by `start()`/`respawn()` before `_spawn` is
+    ever called, so intercepting `_spawn` itself is a simpler capture point
+    than reimplementing the build logic here.
+    """
     from spire_voice.mcp_client import McpToolHost
 
     captured_envs: list[dict] = []
     real_spawn = McpToolHost._spawn
 
-    async def _capturing_spawn(self, ha_url, ha_token, mcp_root, safety_block):
-        env = {"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)}
-        if safety_block is not None:
-            import json as _json
-
-            env["SPIRE_SAFETY"] = _json.dumps(safety_block)
-        captured_envs.append(env)
-        await real_spawn(self, ha_url, ha_token, mcp_root, safety_block)
+    async def _capturing_spawn(self, child_module, env):
+        captured_envs.append(dict(env))
+        await real_spawn(self, child_module, env)
 
     host = McpToolHost()
     try:
@@ -198,3 +202,198 @@ async def test_respawned_child_environment_holds_exactly_four_keys_and_no_databa
         assert "postgresql" not in value.lower(), (
             f"a value in the respawned child's environment names a database scheme: {value!r}"
         )
+
+
+# --- Task 3, plan 04-01: readers-writer coordination -- concurrent
+# `call_tool` calls genuinely overlap, and `respawn()` waits for them to
+# drain rather than tearing the session out from under one in flight ------
+
+
+class _BlockingSession:
+    """A fake `ClientSession` whose `call_tool` blocks on a per-`call_id`
+    `asyncio.Event` until the test releases it. Records every `call_id` the
+    instant it arrives, before blocking -- proving two callers both reached
+    the session before either was released (genuine overlap), not two calls
+    that happened to return at about the same wall-clock moment.
+    """
+
+    def __init__(self) -> None:
+        self.arrived: list[str] = []
+        self._gates: dict[str, asyncio.Event] = {}
+
+    async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+        call_id = arguments["call_id"]
+        self.arrived.append(call_id)
+        gate = self._gates.setdefault(call_id, asyncio.Event())
+        await gate.wait()
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text=call_id)])
+
+    def release(self, call_id: str) -> None:
+        self._gates.setdefault(call_id, asyncio.Event()).set()
+
+
+def _host_with_fake_session(session: _BlockingSession):
+    """A `McpToolHost` wired directly to a fake session -- bypassing
+    `start()`/`_spawn` entirely, since these tests exercise `call_tool`'s
+    and `respawn()`'s own coordination logic, not a real subprocess. The
+    spawn attributes are still set, the same way a real `start()` would set
+    them, so `respawn()`'s own `None`-guard does not fire."""
+    from spire_voice.mcp_client import McpToolHost
+
+    host = McpToolHost()
+    host.session = session
+    host._ha_url = "http://ha.invalid:8123"
+    host._ha_token = "test-key"
+    host._mcp_root = _MCP_ROOT
+    host._child_module = "spire_mcp.ha"
+    return host
+
+
+async def test_two_call_tool_calls_genuinely_overlap_at_the_session():
+    """Both callers reach the fake session before either is released -- not
+    two calls that happened to return at about the same moment (RESEARCH.md
+    Pitfall 3's own warning sign)."""
+    session = _BlockingSession()
+    host = _host_with_fake_session(session)
+
+    task_a = asyncio.create_task(host.call_tool("ha_call_service", {"call_id": "a"}))
+    task_b = asyncio.create_task(host.call_tool("ha_call_service", {"call_id": "b"}))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert sorted(session.arrived) == ["a", "b"], (
+        "both calls must have reached the fake session before either is released"
+    )
+
+    session.release("a")
+    session.release("b")
+    result_a = await task_a
+    result_b = await task_b
+    assert result_a.content[0].text == "a"
+    assert result_b.content[0].text == "b"
+
+
+async def test_respawn_started_while_a_call_is_in_flight_waits_for_it_before_tearing_down():
+    """The property the old single lock actually bought -- a call never
+    lands on a session `respawn()` is mid-teardown on -- must survive
+    concurrent dispatch: `respawn()` must not spawn the replacement until
+    the in-flight call has returned, and that call's own result must still
+    arrive intact."""
+    from spire_voice.mcp_client import McpToolHost
+
+    old_session = _BlockingSession()
+    host = _host_with_fake_session(old_session)
+    new_session = _BlockingSession()
+    spawn_calls: list[tuple[str, dict]] = []
+    real_spawn = McpToolHost._spawn
+
+    async def _fake_spawn(self, child_module, env):
+        spawn_calls.append((child_module, dict(env)))
+        self.session = new_session
+
+    McpToolHost._spawn = _fake_spawn
+    try:
+        call_task = asyncio.create_task(host.call_tool("ha_call_service", {"call_id": "in_flight"}))
+        await asyncio.sleep(0)
+        assert old_session.arrived == ["in_flight"]
+
+        respawn_task = asyncio.create_task(host.respawn({"mode": "allow_all_except_denylist"}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        # The respawn must still be waiting on the in-flight call to drain,
+        # not racing ahead to spawn the replacement.
+        assert not respawn_task.done()
+        assert spawn_calls == []
+
+        old_session.release("in_flight")
+        result = await call_task
+        assert result.content[0].text == "in_flight"
+
+        await respawn_task
+        assert len(spawn_calls) == 1
+        assert host.session is new_session
+    finally:
+        McpToolHost._spawn = real_spawn
+        await host.aclose()
+
+
+async def test_a_call_cancelled_mid_flight_does_not_wedge_a_later_respawn():
+    """A `call_tool` cancelled while awaiting the session must still
+    decrement `_in_flight` in its `finally` -- otherwise one cancelled
+    reader wedges every future `respawn()` forever, waiting on a count that
+    can never reach zero again."""
+    from spire_voice.mcp_client import McpToolHost
+
+    session = _BlockingSession()
+    host = _host_with_fake_session(session)
+    new_session = _BlockingSession()
+    spawn_calls: list[tuple[str, dict]] = []
+    real_spawn = McpToolHost._spawn
+
+    async def _fake_spawn(self, child_module, env):
+        spawn_calls.append((child_module, dict(env)))
+        self.session = new_session
+
+    McpToolHost._spawn = _fake_spawn
+    try:
+        call_task = asyncio.create_task(host.call_tool("ha_call_service", {"call_id": "cancel_me"}))
+        await asyncio.sleep(0)
+        assert session.arrived == ["cancel_me"]
+        assert host._in_flight == 1
+
+        call_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call_task
+        assert host._in_flight == 0, "a cancelled reader must still deregister in its finally"
+
+        # A respawn started AFTER the cancellation must proceed -- it must
+        # not wait forever on an in-flight count the cancelled call left
+        # stuck above zero.
+        await asyncio.wait_for(host.respawn({"mode": "allow_all_except_denylist"}), timeout=1.0)
+        assert len(spawn_calls) == 1
+        assert host.session is new_session
+    finally:
+        McpToolHost._spawn = real_spawn
+        await host.aclose()
+
+
+async def test_start_with_an_explicit_module_and_env_produces_exactly_that_environment():
+    """D-13: a second `McpToolHost` instance (the weather server) owns a
+    different child by parameter, not by subclass -- an explicit `env=`
+    given to `start()` produces exactly that mapping, with no Home
+    Assistant keys merged in from anywhere (SAFE-09). Does not actually
+    launch a subprocess for the given `child_module` -- `spire_mcp.weather`
+    is plan 04-02's own module, built in a parallel worktree, and this test
+    only needs to prove what `start()` decided to spawn, not that the
+    module exists in this checkout.
+    """
+    from spire_voice.mcp_client import McpToolHost
+
+    captured: list[tuple[str, dict]] = []
+    real_spawn = McpToolHost._spawn
+
+    async def _capturing_spawn(self, child_module, env):
+        captured.append((child_module, dict(env)))
+
+    host = McpToolHost()
+    try:
+        McpToolHost._spawn = _capturing_spawn
+        await host.start(
+            ha_url="unused",
+            ha_token="unused",
+            mcp_root=_MCP_ROOT,
+            child_module="spire_mcp.weather",
+            env={"PYTHONPATH": _MCP_ROOT},
+        )
+    finally:
+        McpToolHost._spawn = real_spawn
+        await host.aclose()
+
+    assert len(captured) == 1
+    child_module, env = captured[0]
+    assert child_module == "spire_mcp.weather"
+    assert env == {"PYTHONPATH": _MCP_ROOT}
+    assert "HA_URL" not in env
+    assert "HA_TOKEN" not in env
+    assert "SPIRE_SAFETY" not in env
