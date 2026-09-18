@@ -100,6 +100,21 @@ class TierReply(BaseModel):
     filler: FillerPhrase = Field(
         description="What to say while a higher tier works, when `confident` is false."
     )
+    needs_clarification: bool = Field(
+        default=False,
+        description=(
+            "True when a spoken name matches more than one entity in the catalog you were "
+            "given, and the operator must be asked which one was meant. A third outcome, "
+            "exclusive of `confident` and `needs_tool` -- never guess between candidates, ask."
+        ),
+    )
+    candidates: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "The candidate entity ids to name back to the operator when `needs_clarification` "
+            "is true -- every entity the spoken name could plausibly mean, at least two."
+        ),
+    )
 
     @model_validator(mode="after")
     def _confident_reply_must_have_an_answer(self) -> "TierReply":
@@ -128,5 +143,26 @@ class TierReply(BaseModel):
                 "a TierReply cannot be both confident and needs_tool -- confident means no "
                 "tool call is needed, needs_tool means one is required; a reply can claim at "
                 "most one of the two"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _needs_clarification_is_a_third_exclusive_outcome(self) -> "TierReply":
+        # D-07: asking which entity was meant must be unrepresentable
+        # alongside an answer or a tool call -- the same "impossible by
+        # construction" treatment this file already gives
+        # confident/needs_tool. A reply that both asks and acts is not a
+        # safer middle ground, it is the exact failure this mechanism
+        # exists to close off.
+        if self.needs_clarification and (self.confident or self.needs_tool):
+            raise ValueError(
+                "a TierReply cannot combine needs_clarification with confident or needs_tool -- "
+                "asking which entity was meant is a third, exclusive outcome, not an addition "
+                "to an answer or a tool call"
+            )
+        if self.needs_clarification and len(self.candidates) < 2:
+            raise ValueError(
+                "needs_clarification must carry at least two candidate entity ids -- a single "
+                "candidate is a guess wearing a question's clothes, not real ambiguity"
             )
         return self
