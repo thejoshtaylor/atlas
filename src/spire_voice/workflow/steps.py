@@ -42,8 +42,8 @@ class _ToolHost(Protocol):
     """The same structural shape `turn/controller.py`'s own `_ToolHost`
     Protocol expects -- `McpToolHostLookup` and every `McpToolHost`
     satisfy it already, so this executor calls the identical tool host the
-    live turn path calls, with no workflow-local copy of `allow_call`
-    (D-13)."""
+    live turn path calls, with no workflow-local copy of the safety
+    boundary's own enforcement function (D-13)."""
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any: ...
 
@@ -115,17 +115,50 @@ def _transition_refusal(arguments: dict[str, Any]) -> str | None:
     return None
 
 
+_HA_CALL_SERVICE_TOOL = "ha_call_service"
+
+
+def _is_policy_refusal(tool_name: str, text: str) -> bool:
+    """Distinguishes a deliberate `Denied` refusal from any other
+    MCP-level tool failure, using the one signal the installed MCP SDK's
+    own tool runner actually gives (`mcp/server/mcpserver/tools/base.py`
+    in the installed `mcp` package, `Tool.run`, read this session): a
+    `ToolError` -- what `mcp/spire_mcp/ha.py::ha_call_service` re-raises
+    a caught `Denied` as -- is wrapped as `f"Error executing tool
+    {name}: {exc}"`; an unanticipated crash (a network failure, a DNS
+    lookup that never resolves) is wrapped as exactly `f"Error executing
+    tool {name}"`, with the exception's own text deliberately dropped
+    ("the exception's own text stays on the server", that file's own
+    comment) rather than appended. `ha_call_service`'s own docstring
+    says a `ToolError`'s message "is exactly what reaches
+    `CallToolResult.content`" -- true of the reason itself, not of the
+    prefix the SDK wraps every tool error in regardless of cause; this
+    function is what makes the two cases distinguishable despite that
+    shared prefix.
+
+    Coupled, deliberately and by necessity, to that exact wrapping
+    format: `ClientSession.call_tool` never raises for a tool-level
+    failure (`mcp_client.py::McpToolHost.call_tool`'s own docstring), so
+    there is no second, structured signal available at this boundary to
+    tell "the safety boundary refused this" from "the call could not be
+    completed for an unrelated reason" -- and conflating the two would
+    tell an operator a network hiccup was a policy denial (T-05-16's own
+    concern, in the opposite direction: a false "denied" is exactly as
+    misleading as a silently skipped one)."""
+    return text != f"Error executing tool {tool_name}"
+
+
 async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> StepOutcome:
     """Calls `ha_call_service` through `tool_host` -- the same tool the
     live turn path calls, via the same `McpToolHostLookup` (D-13). An
-    error-shaped result (a `Denied` refusal, raised as `ToolError` by
-    `mcp/spire_mcp/ha.py::ha_call_service` and caught by the MCP
-    framework into `CallToolResult.is_error`) is the refusal channel --
-    its text is the boundary's own words, carried into `detail`/`speech`
-    verbatim, never reworded (D-14). A raised exception -- the call itself
-    never reached a verdict -- is `failed` with `retry=False` for this
-    kind: a service call whose outcome is unknown must not be repeated
-    (PA-D3, T-05-01).
+    error-shaped result whose text carries more than the SDK's own
+    generic crash wrapper (`_is_policy_refusal`) is a `Denied` refusal --
+    the boundary's own words, carried into `detail`/`speech` verbatim,
+    never reworded (D-14). An error-shaped result carrying only the
+    generic wrapper, or a raised exception -- the call itself never
+    reached a verdict either way -- is `failed` with `retry=False` for
+    this kind: a service call whose outcome is unknown must not be
+    repeated (PA-D3, T-05-01).
 
     `_transition_refusal` runs first, before `tool_host.call_tool` is ever
     awaited: a step that will only ever be refused at the far end of a
@@ -137,16 +170,18 @@ async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> 
             status="denied", detail={"reason": refusal}, speech=refusal, retry=False
         )
     try:
-        result = await tool_host.call_tool("ha_call_service", dict(step.arguments))
+        result = await tool_host.call_tool(_HA_CALL_SERVICE_TOOL, dict(step.arguments))
     except Exception as exc:
         return StepOutcome(
             status="failed", detail={"error": str(exc)}, speech=None, retry=False
         )
     if _is_error(result):
         text = _result_text(result)
-        return StepOutcome(
-            status="denied", detail={"reason": text}, speech=text or None, retry=False
-        )
+        if _is_policy_refusal(_HA_CALL_SERVICE_TOOL, text):
+            return StepOutcome(
+                status="denied", detail={"reason": text}, speech=text or None, retry=False
+            )
+        return StepOutcome(status="failed", detail={"error": text}, speech=None, retry=False)
     return StepOutcome(
         status="completed",
         detail={"result": _tool_result_payload(result)},

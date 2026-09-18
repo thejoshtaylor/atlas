@@ -9,7 +9,6 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
-import functools
 import json
 import logging
 import os
@@ -889,16 +888,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
     # exists so its own executor calls through the identical lookup the
     # live turn path calls -- never a workflow-local copy of `allow_call`
-    # (D-13). `functools.partial` binds `execute_step`'s own `tool_host`/
-    # `config`/`speak` parameters once, here; `WorkflowScheduler` itself
-    # only ever calls the result as `executor(step, now)`.
-    workflow_executor = functools.partial(
-        execute_step,
-        tool_host=app.state.tool_host_lookup,
-        config=config.workflow,
-        speak=_scheduled_speak,
-    )
-    workflow_scheduler = WorkflowScheduler(workflow_repo, workflow_executor, config.workflow)
+    # (D-13). A closure, not `functools.partial`: `WorkflowScheduler`
+    # calls `executor(step, now)` positionally, and `execute_step`'s own
+    # signature is `(step, tool_host, config, now, *, speak=None)` --
+    # `tool_host`/`config` sit between `step` and `now` positionally, so a
+    # `functools.partial` with `tool_host=`/`config=` pre-bound as
+    # keywords collides with `now` landing in `tool_host`'s positional
+    # slot the moment a step actually fires (`TypeError: execute_step()
+    # got multiple values for argument 'tool_host'` -- caught by plan
+    # 05-03's own SAFE-08 test, the first test in this codebase to poll a
+    # step through the real `lifespan` wiring rather than a hand-built
+    # executor). `tests/test_workflow_tracer.py`'s own `lambda step, now:
+    # execute_step(step, ..., now)` shape is the one this closure follows.
+    async def _workflow_executor(step: Any, now: datetime) -> Any:
+        return await execute_step(
+            step, app.state.tool_host_lookup, config.workflow, now, speak=_scheduled_speak
+        )
+
+    workflow_scheduler = WorkflowScheduler(workflow_repo, _workflow_executor, config.workflow)
     workflow_scheduler.start()
     app.state.workflow_scheduler = workflow_scheduler
 
