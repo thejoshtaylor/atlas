@@ -23,6 +23,8 @@ from spire_mcp.safety import Policy
 from spire_voice.db.repository import (
     Credential,
     Invite,
+    Macro,
+    MacroAction,
     PolicyRule,
     RefreshToken,
     Setting,
@@ -460,6 +462,121 @@ def fake_policy_repository():
     """Factory: `fake_policy_repository(mode=..., deny_entities=[...])`
     builds a scripted `FakePolicyRepository`."""
     return FakePolicyRepository
+
+
+class FakeMacroRepository:
+    """An in-memory `MacroRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, the direct sibling of `FakePolicyRepository`
+    above.
+
+    Constructed with a starting list of macros (each a `(phrase, aliases,
+    reply, actions)` tuple, `actions` itself a sequence of `(tool,
+    arguments)` pairs), mirroring `create_macro`'s own keyword shape so a
+    test can build one from the same literal shape it would hand to the
+    real repository. `create_macro`/`update_macro` assign ids and
+    positions the same way `PostgresMacroRepository` does (an
+    incrementing counter, written order), so a test asserting on either
+    exercises the same contract regardless of which repository backs it.
+    """
+
+    def __init__(
+        self,
+        macros: Sequence[
+            tuple[str, Sequence[str], str, Sequence[tuple[str, dict]]]
+        ] = (),
+    ) -> None:
+        self._next_macro_id = 1
+        self._next_action_id = 1
+        self.macros: dict[int, Macro] = {}
+        for phrase, aliases, reply, actions in macros:
+            macro = self._build_macro(phrase, aliases, reply, actions)
+            self.macros[macro.id] = macro
+
+    def _build_macro(
+        self,
+        phrase: str,
+        aliases: Sequence[str],
+        reply: str,
+        actions: Sequence[tuple[str, dict]],
+        *,
+        macro_id: int | None = None,
+        created_at: datetime | None = None,
+        created_by_user_id: int | None = None,
+    ) -> Macro:
+        now = datetime.now(timezone.utc)
+        if macro_id is None:
+            macro_id = self._next_macro_id
+            self._next_macro_id += 1
+        built_actions = []
+        for position, (tool, arguments) in enumerate(actions):
+            built_actions.append(
+                MacroAction(id=self._next_action_id, position=position, tool=tool, arguments=arguments)
+            )
+            self._next_action_id += 1
+        return Macro(
+            id=macro_id,
+            phrase=phrase,
+            aliases=tuple(aliases),
+            reply=reply,
+            actions=tuple(built_actions),
+            created_at=created_at or now,
+            updated_at=now,
+            created_by_user_id=created_by_user_id,
+        )
+
+    async def list_macros(self) -> list[Macro]:
+        return list(self.macros.values())
+
+    async def get_macro(self, macro_id: int) -> Macro | None:
+        return self.macros.get(macro_id)
+
+    async def create_macro(
+        self,
+        *,
+        phrase: str,
+        aliases: Sequence[str],
+        reply: str,
+        actions: Sequence[tuple[str, dict]],
+        created_by_user_id: int | None,
+    ) -> Macro:
+        macro = self._build_macro(
+            phrase, aliases, reply, actions, created_by_user_id=created_by_user_id
+        )
+        self.macros[macro.id] = macro
+        return macro
+
+    async def update_macro(
+        self,
+        macro_id: int,
+        *,
+        phrase: str,
+        aliases: Sequence[str],
+        reply: str,
+        actions: Sequence[tuple[str, dict]],
+    ) -> Macro:
+        existing = self.macros[macro_id]
+        updated = self._build_macro(
+            phrase,
+            aliases,
+            reply,
+            actions,
+            macro_id=macro_id,
+            created_at=existing.created_at,
+            created_by_user_id=existing.created_by_user_id,
+        )
+        self.macros[macro_id] = updated
+        return updated
+
+    async def delete_macro(self, macro_id: int) -> None:
+        self.macros.pop(macro_id, None)
+
+
+@pytest.fixture
+def fake_macro_repository():
+    """Factory: `fake_macro_repository(macros=[...])` builds a scripted
+    `FakeMacroRepository`."""
+    return FakeMacroRepository
 
 
 class FakeAccountRepository:

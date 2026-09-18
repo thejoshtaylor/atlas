@@ -263,36 +263,62 @@ def test_normalize_compares_by_code_point_through_nfkc():
 
 
 def test_macro_collision_on_phrase_raises_naming_both():
-    from spire_voice.config import Config, ConfigError
+    """Plan 04-05: macros no longer live on `Config` (D-09), so this check
+    is exercised directly against `_check_macros_do_not_collide` -- the
+    same function `alembic/versions/0005_macro_tables.py`'s seed step and
+    plan 04-06's write routes both call, now that `Config.from_config` no
+    longer parses `macros:` at all."""
+    from spire_voice.config import ConfigError, MacroConfig, _check_macros_do_not_collide
 
-    raw = _minimal_raw_config()
-    raw["macros"] = [
-        {"phrase": "Good Night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
-        {"phrase": "good   night!", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
-    ]
+    macros = (
+        MacroConfig.from_config(
+            {"phrase": "Good Night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]}
+        ),
+        MacroConfig.from_config(
+            {"phrase": "good   night!", "reply": "ok", "actions": [{"tool": "ha_call_service"}]}
+        ),
+    )
     with pytest.raises(ConfigError) as exc:
-        Config.from_config(raw)
+        _check_macros_do_not_collide(macros)
     assert "Good Night" in str(exc.value)
     assert "good   night!" in str(exc.value)
 
 
 def test_macro_alias_colliding_with_another_macros_phrase_raises_naming_both():
+    from spire_voice.config import ConfigError, MacroConfig, _check_macros_do_not_collide
+
+    macros = (
+        MacroConfig.from_config(
+            {"phrase": "good night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]}
+        ),
+        MacroConfig.from_config(
+            {
+                "phrase": "movie time",
+                "aliases": ["Good Night"],
+                "reply": "ok",
+                "actions": [{"tool": "ha_call_service"}],
+            }
+        ),
+    )
+    with pytest.raises(ConfigError) as exc:
+        _check_macros_do_not_collide(macros)
+    assert "good night" in str(exc.value)
+    assert "movie time" in str(exc.value)
+
+
+def test_macros_key_still_present_is_a_startup_error_naming_it():
+    """D-09: macros used to carry now live in the database, seeded by the
+    migration -- a config file still carrying the key raises `ConfigError`
+    naming it, the same way `safety:` already does (D-11)."""
     from spire_voice.config import Config, ConfigError
 
     raw = _minimal_raw_config()
     raw["macros"] = [
         {"phrase": "good night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]},
-        {
-            "phrase": "movie time",
-            "aliases": ["Good Night"],
-            "reply": "ok",
-            "actions": [{"tool": "ha_call_service"}],
-        },
     ]
     with pytest.raises(ConfigError) as exc:
         Config.from_config(raw)
-    assert "good night" in str(exc.value)
-    assert "movie time" in str(exc.value)
+    assert "macros" in str(exc.value)
 
 
 def test_macro_alias_matching_its_own_phrase_loads_cleanly_as_one_key():
@@ -414,8 +440,13 @@ def test_example_config_loads_end_to_end(monkeypatch):
 
     assert len(config.brain.models) == 3
     assert config.brain.top_tier.model == "grok-4.6"
-    assert len(config.macros) == 2
-    assert config.macros[0].normalized_keys == {"good night", "goodnight", "night night"}
+    # Plan 04-05 (D-09): macros: is retired from this file -- Config no
+    # longer carries a macros field at all, the same way it carries no
+    # safety field (D-11). This is the load-bearing half of the assertion
+    # `grep -v '^#' config/config.example.yaml | grep -c '^macros:'`
+    # reports 0 already covers structurally; this proves the loader itself
+    # agrees by not raising on the shipped file.
+    assert not hasattr(config, "macros")
     assert config.tts.cache_dir == "/data/tts-cache"
     assert config.tts.precache == (
         "ok",

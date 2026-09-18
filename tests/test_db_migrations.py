@@ -81,6 +81,9 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            "macro_actions",
+            "macro_aliases",
+            "macros",
             "settings",
             "setup_steps",
             "setup_state",
@@ -122,10 +125,31 @@ async def _fetch_rows(async_url: str) -> tuple[list, list]:
     return policy_rows, rule_rows
 
 
+async def _fetch_macro_rows(async_url: str) -> list:
+    """Every `macros` row -- id and phrase only, matching `_fetch_rows`'
+    own "just enough to prove seeded vs. not" shape. Plan 04-05's sibling
+    of `_fetch_rows` above, kept separate rather than folded in: the two
+    migrations seed from two independent legacy keys, and a reader should
+    be able to check one without reading the other's shape."""
+    engine = create_async_engine(async_url)
+    async with engine.connect() as conn:
+        macro_rows = (
+            await conn.execute(text("SELECT id, phrase FROM macros ORDER BY id"))
+        ).fetchall()
+    await engine.dispose()
+    return macro_rows
+
+
 @skip_without_postgres
 async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     """Running every migration twice against the same database, from empty,
-    must succeed both times with no duplicated row and no error."""
+    must succeed both times with no duplicated row and no error.
+
+    `config/config.example.yaml` carries no `macros:` block (D-09: the key
+    is retired), so migration `0005`'s own seed step seeds nothing against
+    it -- this test's macro assertion proves the "absent key" case, the
+    same way its policy assertion already proves `safety:`'s "absent key"
+    case."""
     await _reset_schema(_TEST_DB_URL)
     monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
@@ -144,6 +168,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     first_policy, first_rules = await _fetch_rows(_TEST_DB_URL)
     assert first_policy == [(1, "allow_all_except_denylist")]
     assert first_rules == []
+    assert await _fetch_macro_rows(_TEST_DB_URL) == []
 
     # Idempotent: Alembic's own applied-revision bookkeeping means a second
     # upgrade to the same head is a no-op, not a second seed.
@@ -151,6 +176,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     second_policy, second_rules = await _fetch_rows(_TEST_DB_URL)
     assert second_policy == first_policy
     assert second_rules == first_rules
+    assert await _fetch_macro_rows(_TEST_DB_URL) == []
 
 
 @skip_without_postgres
@@ -215,3 +241,102 @@ async def test_seeded_policy_matches_the_config_block_it_came_from(tmp_path: Pat
     # what the block named, not a superset or a subset of it.
     total_seeded = sum(1 for value in safety_block.values() if isinstance(value, list) for _ in value)
     assert len(rule_rows) == total_seeded
+
+
+@skip_without_postgres
+async def test_seeded_macros_match_the_config_block_they_came_from(tmp_path: Path, monkeypatch):
+    """Migration `0005`'s seed step must carry an equivalent-shaped
+    `macros:` block into the database -- row-for-row equality with the
+    block it seeded from, not merely a non-zero row count, the same
+    discipline `test_seeded_policy_matches_the_config_block_it_came_from`
+    above already applies to `safety:` (D-09)."""
+    await _reset_schema(_TEST_DB_URL)
+
+    macros_block = [
+        {
+            "phrase": "example db migration macro",
+            "aliases": ["example db migration alias"],
+            "reply": "okay",
+            "actions": [
+                {
+                    "tool": "ha_call_service",
+                    "arguments": {
+                        "domain": "switch",
+                        "service": "turn_off",
+                        "entity_id": "switch.example_migration_seed_fan",
+                    },
+                },
+                {
+                    "tool": "ha_call_service",
+                    "arguments": {
+                        "domain": "light",
+                        "service": "turn_off",
+                        "entity_id": "light.example_migration_seed_lamp",
+                    },
+                },
+            ],
+        },
+    ]
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-key"},
+                },
+            },
+        },
+        "database": {"url": _TEST_DB_URL},
+        "macros": macros_block,
+    }
+    config_path = tmp_path / "macro-seed-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    _run_upgrade_head()
+
+    async def _fetch_seeded_macro() -> tuple[tuple, list, list]:
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                macro_row = (
+                    await conn.execute(text("SELECT id, phrase, reply FROM macros"))
+                ).one()
+                action_rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT tool, arguments FROM macro_actions "
+                            "WHERE macro_id = :macro_id ORDER BY position"
+                        ),
+                        {"macro_id": macro_row.id},
+                    )
+                ).fetchall()
+                alias_rows = (
+                    await conn.execute(
+                        text("SELECT alias FROM macro_aliases WHERE macro_id = :macro_id"),
+                        {"macro_id": macro_row.id},
+                    )
+                ).fetchall()
+                return macro_row, list(action_rows), list(alias_rows)
+        finally:
+            await engine.dispose()
+
+    macro_row, action_rows, alias_rows = await _fetch_seeded_macro()
+
+    expected = macros_block[0]
+    assert macro_row.phrase == expected["phrase"]
+    assert macro_row.reply == expected["reply"]
+    assert {r.alias for r in alias_rows} == set(expected["aliases"])
+    assert [
+        {"tool": r.tool, "arguments": r.arguments} for r in action_rows
+    ] == expected["actions"]

@@ -1071,9 +1071,16 @@ class MacroConfig:
     A zero-action macro would make its precached `reply` an unconditional
     lie -- there is nothing that could have succeeded -- so `from_config`
     refuses one. `normalized_keys` is the deduplicated set of `normalize()`
-    applied to `phrase` and every alias; `Config.from_config` walks it across
-    the whole macro list to find a cross-macro collision, because that check
-    spans more than one macro and cannot live on a single `MacroConfig`.
+    applied to `phrase` and every alias; `_check_macros_do_not_collide`
+    walks it across the whole macro list to find a cross-macro collision,
+    because that check spans more than one macro and cannot live on a
+    single `MacroConfig`.
+
+    Plan 04-05 (D-09): macros now live in the database, not in `Config` --
+    this class's own job is unchanged (parsing one raw `macros:` entry),
+    but its caller changed. `alembic/versions/0005_macro_tables.py`'s seed
+    step is the one place this still runs against the configuration file
+    directly; `Config.from_config` no longer calls it at all.
     """
 
     phrase: str = ""
@@ -1135,20 +1142,28 @@ class Config:
     raises `ConfigError` naming it, below -- `Config` carries no field for
     the parsed policy or the raw block anymore.
 
+    Plan 04-05 retires `macros:` the same way (D-09, D-16): macros now live
+    in the database, seeded by `alembic/versions/0005_macro_tables.py` and
+    read back by a `MacroRepository`, not by `Config`. `Config` carries no
+    field for the parsed macro list or the raw block either, for the same
+    reason `safety:` does not -- a turn reads the live database, not a
+    startup snapshot this class would otherwise hold stale (D-12).
+
     That rejection cannot be unconditional at the point this classmethod
     runs, though: `from_config` has no database connection, so it cannot
     itself tell "the seed migration has already carried this block forward"
     apart from "the seed migration has never run and this boot is the one
-    that must run it." `reject_legacy_safety_key` exists for that reason --
-    `load_config`'s default (`True`) preserves this classmethod's original,
-    unconditional behaviour for every caller that has no database state to
-    consult (the CLI scripts under `scripts/`, this module's own test
-    suite). `app.py`'s `lifespan` is the one caller that does have that
-    state: it passes `False`, builds a `Config` regardless of whether the
-    key is present, and decides whether to raise itself -- against real
-    Alembic revision history, after migrations have had their one chance to
-    seed -- using `SAFETY_KEY_REJECTED_ERROR` below so the message an
-    operator sees is identical either way.
+    that must run it." `reject_legacy_safety_key`/`reject_legacy_macros_key`
+    exist for that reason -- `load_config`'s defaults (`True` for both)
+    preserve this classmethod's original, unconditional behaviour for every
+    caller that has no database state to consult (the CLI scripts under
+    `scripts/`, this module's own test suite). `app.py`'s `lifespan` is the
+    one caller that does have that state: it passes `False` for whichever
+    key is present, builds a `Config` regardless, and decides whether to
+    raise itself -- against real Alembic revision history, after migrations
+    have had their one chance to seed -- using `SAFETY_KEY_REJECTED_ERROR`/
+    `MACROS_KEY_REJECTED_ERROR` below so the message an operator sees is
+    identical either way, for either key.
     """
 
     server: ServerConfig
@@ -1165,19 +1180,21 @@ class Config:
     mcp_servers: dict[str, McpServerConfig]
     database: DatabaseConfig
     security: SecurityConfig
-    # A tuple, not a dict: `macros:` is a list in the config file and there is
-    # no natural name key the way `mcp.servers` has one.
-    macros: tuple[MacroConfig, ...] = ()
 
     @classmethod
-    def from_config(cls, raw: dict | None, *, reject_legacy_safety_key: bool = True) -> "Config":
+    def from_config(
+        cls,
+        raw: dict | None,
+        *,
+        reject_legacy_safety_key: bool = True,
+        reject_legacy_macros_key: bool = True,
+    ) -> "Config":
         raw = raw or {}
         if "safety" in raw and reject_legacy_safety_key:
             raise ConfigError(SAFETY_KEY_REJECTED_ERROR)
+        if "macros" in raw and reject_legacy_macros_key:
+            raise ConfigError(MACROS_KEY_REJECTED_ERROR)
         mcp_servers_raw = raw.get("mcp", {}).get("servers", {}) or {}
-        macros_raw = raw.get("macros", ()) or ()
-        macros = tuple(MacroConfig.from_config(m) for m in macros_raw)
-        _check_macros_do_not_collide(macros)
         return cls(
             server=ServerConfig.from_config(raw.get("server")),
             stt=SttConfig.from_config(raw.get("stt")),
@@ -1196,11 +1213,10 @@ class Config:
             },
             database=DatabaseConfig.from_config(raw.get("database")),
             security=SecurityConfig.from_config(raw.get("security")),
-            macros=macros,
         )
 
 
-def _check_macros_do_not_collide(macros: tuple[MacroConfig, ...]) -> None:
+def _check_macros_do_not_collide(macros: "Sequence[MacroConfig]") -> None:
     """Raise `ConfigError` on the first pair of macros whose normalized keys
     collide, naming both by their written (un-normalized) phrases.
 
@@ -1208,6 +1224,18 @@ def _check_macros_do_not_collide(macros: tuple[MacroConfig, ...]) -> None:
     whole macro list -- a single macro has no way to know about another one.
     Naming both macros is what makes the error actionable: an error naming
     only the second one sends the operator to the wrong line.
+
+    Plan 04-05: macros now live in the database (D-09), so this function's
+    two callers are `alembic/versions/0005_macro_tables.py`'s seed step
+    (against the file-parsed set, before a single row is inserted) and
+    plan 04-06's write routes (against the database's current macro list
+    plus a candidate, before a create or update commits) -- never
+    `Config.from_config` anymore, which no longer parses `macros:` at all.
+    Only `.phrase` and `.normalized_keys` are read here, so a
+    `Sequence[spire_voice.db.repository.Macro]` -- that class's own
+    `normalized_keys` property computes the identical thing over a
+    database row -- satisfies this function's contract exactly as well as
+    a `Sequence[MacroConfig]` does, with no change to this function.
     """
     seen: dict[str, MacroConfig] = {}
     for macro in macros:
@@ -1239,6 +1267,22 @@ SAFETY_KEY_REJECTED_ERROR = (
     "and edit the denylist/allowlist in the webapp from then on."
 )
 
+# Plan 04-05's own generalization of the constant above (D-16): the same
+# "lift the wording to module level so both call sites raise identical
+# words" reasoning, applied to the second legacy key `app.py`'s two-stage
+# boot now handles through the same sequence.
+MACROS_KEY_REJECTED_ERROR = (
+    "macros: no longer exists in the configuration file -- macros now live "
+    "in the database, seeded from this same file by the migration "
+    "(alembic/versions/0005_macro_tables.py) the first time this deployment "
+    "started under Phase 4. If this is that first boot, do not remove the "
+    "block until the migration has run once against a reachable database -- "
+    "it is what carries your macros forward. Once it has run (check the "
+    "macros/macro_actions/macro_aliases tables, or the webapp's macro "
+    "editor, for your seeded entries), delete the macros: block from this "
+    "file and edit macros in the webapp from then on."
+)
+
 
 def load_raw_config(path: str | os.PathLike) -> dict:
     """Read `path` and expand its environment placeholders, returning the
@@ -1261,10 +1305,11 @@ def load_raw_config(path: str | os.PathLike) -> dict:
 def load_config(path: str | os.PathLike) -> Config:
     """Read `path`, expand its environment placeholders, and build a `Config`.
 
-    Rejects a lingering `safety:` key unconditionally (`reject_legacy_safety_key`
-    defaults `True` on `Config.from_config`) -- every caller of this function
-    has no database state to consult, so this is the same unconditional
-    check this module has always run. `app.py`'s `lifespan` does not call
-    this function for that reason; see `Config.from_config`'s docstring.
+    Rejects a lingering `safety:` or `macros:` key unconditionally
+    (`reject_legacy_safety_key`/`reject_legacy_macros_key` both default
+    `True` on `Config.from_config`) -- every caller of this function has no
+    database state to consult, so this is the same unconditional check
+    this module has always run. `app.py`'s `lifespan` does not call this
+    function for that reason; see `Config.from_config`'s docstring.
     """
     return Config.from_config(load_raw_config(path))
