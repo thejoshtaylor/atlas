@@ -208,6 +208,11 @@ def test_switching_mode_writes_an_audit_row_naming_who_and_when(
     response = client.put("/api/policy/mode", json={"mode": "allowlist_only"})
     assert response.status_code == 200, response.text
     assert response.json()["mode"] == "allowlist_only"
+    assert response.json()["applies_live"] is True, (
+        "the policy surface must report itself live -- a write always respawns "
+        "the enforcing child before this route returns (Task 3, D-03), unlike "
+        "a provider credential's own applies_live: false"
+    )
 
     assert len(policy_repo.audit_log) == 1, (
         f"expected exactly one audit row, found {len(policy_repo.audit_log)}: "
