@@ -269,6 +269,34 @@ async def test_forecast_handler_returns_bounded_days_and_refuses_an_out_of_range
             await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=17)
 
 
+async def test_the_decorated_forecast_tool_refuses_an_out_of_range_count_as_a_tool_error():
+    """LOW-01 fix (phase 4 code review): `handle_weather_forecast` raising
+    a bare `ValueError` (proven above) is only half the property -- the
+    decorated tool `weather_forecast` must translate it into `ToolError`,
+    the same "boundary's own words, nothing reworded" doctrine every other
+    refusal in this module already follows
+    (`weather_current`'s own `except (UpstreamUnreachableError,
+    UpstreamMalformedError)` clause). Before this fix, `ValueError` was not
+    named in `weather_forecast`'s own `except` clause, so it propagated
+    uncaught through the MCP SDK's generic error path instead -- still
+    surfaced as an error, but in a different voice than every other
+    refusal in this turn."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    from spire_mcp import weather
+
+    recorder = _RecordingTransport(_FORECAST_BODY)
+    async with _client_for(recorder) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = _FAKE_LATITUDE
+        weather._longitude = _FAKE_LONGITUDE
+        try:
+            with pytest.raises(ToolError) as excinfo:
+                await weather.weather_forecast(days=17)
+            assert "16" in str(excinfo.value), "the refused count's own bound must reach the caller"
+        finally:
+            weather._open_meteo_client = None
+
+
 async def test_handlers_take_their_client_as_a_parameter_and_propagate_upstream_errors():
     from spire_mcp.weather import handle_weather_current
 

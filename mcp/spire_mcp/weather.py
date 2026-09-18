@@ -120,7 +120,16 @@ async def weather_forecast(days: int = _DEFAULT_FORECAST_DAYS) -> dict[str, Any]
     assert _open_meteo_client is not None, "weather_forecast invoked before startup"
     try:
         return await handle_weather_forecast(_open_meteo_client, _latitude, _longitude, days)
-    except (UpstreamUnreachableError, UpstreamMalformedError) as exc:
+    except (UpstreamUnreachableError, UpstreamMalformedError, ValueError) as exc:
+        # LOW-01 fix (phase 4 code review): `handle_weather_forecast` raises
+        # a bare `ValueError` for a day count outside 1-16 -- previously not
+        # named in this `except` clause, so it propagated as a raw,
+        # uncaught exception through the MCP SDK's own generic error path
+        # instead of this module's "boundary's own words, nothing reworded"
+        # doctrine, the same swallowing Phase 3's CR-01 fix addressed for
+        # `Denied`. `str(exc)` on a `ValueError` is exactly the message
+        # `handle_weather_forecast` raised, so this crosses the boundary in
+        # the same voice as every other refusal in this module.
         raise ToolError(str(exc)) from exc
 
 
