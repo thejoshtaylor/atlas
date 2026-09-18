@@ -101,6 +101,18 @@ class McpToolHost:
         self._writer_waiting = False
         self._readers_admitted = asyncio.Event()
         self._readers_admitted.set()
+        # Writer-vs-writer exclusion (CR-01, phase 4 code review): the
+        # readers-writer state above protects readers from a writer, but
+        # nothing in it stops a SECOND concurrent `respawn()` from entering
+        # the same drain-teardown-spawn sequence in parallel with the
+        # first -- both would read `self._stack` before either reassigns
+        # it, so one respawn's fresh stack (and the child it just spawned)
+        # can be silently overwritten by the other's, leaking a still-
+        # running child enforcing a stale policy. This lock restores
+        # exactly the full writer-vs-writer serialization the single
+        # `asyncio.Lock` this class held through Phase 3 gave for free,
+        # without touching the reader-side coordination above.
+        self._respawn_lock = asyncio.Lock()
         # The spawn arguments `respawn()` needs to repeat -- stored only
         # after a successful `start()`, so a `respawn()` called before any
         # `start()` fails the same way `call_tool()` does rather than
@@ -188,36 +200,45 @@ class McpToolHost:
         close the old stack and spawn the replacement, preserving the
         property the old single lock actually bought: a call never lands on
         a session mid-teardown.
+
+        Writer-vs-writer exclusion (CR-01, phase 4 code review): the whole
+        body below runs under `self._respawn_lock`, so a second concurrent
+        `respawn()` call queues behind the first one's entire drain-
+        teardown-spawn sequence rather than racing it -- neither
+        `self._stack` nor `self.session` is ever read or reassigned by two
+        writers at once, and no child gets silently orphaned by a losing
+        writer's fresh `AsyncExitStack()` overwriting a winning writer's.
         """
         if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
             raise RuntimeError("McpToolHost.respawn called before start()")
-        resolved_env = (
-            dict(self._env_override)
-            if self._env_override is not None
-            else _default_ha_env(self._ha_url, self._ha_token, self._mcp_root, safety_block)
-        )
-        # Both statements below run synchronously, with no `await` between
-        # them -- no reader can observe one without the other (this class's
-        # own docstring). From this instant, `call_tool`'s own gate rejects
-        # every new caller until this method sets `_readers_admitted` again
-        # on its way out.
-        self._writer_waiting = True
-        self._readers_admitted.clear()
-        # Drain: every already-in-flight `call_tool()` decrements
-        # `_in_flight` in its own `finally`, synchronously, so this will
-        # observe zero as soon as the last one runs. `asyncio.sleep(0)`
-        # yields to the event loop without imposing any minimum delay --
-        # this notices the drain on the very next loop iteration in which
-        # one was possible, not on a polling timer.
-        while self._in_flight > 0:
-            await asyncio.sleep(0)
-        try:
-            await self._stack.aclose()
-            self._stack = AsyncExitStack()
-            await self._spawn(self._child_module, resolved_env)
-        finally:
-            self._writer_waiting = False
-            self._readers_admitted.set()
+        async with self._respawn_lock:
+            resolved_env = (
+                dict(self._env_override)
+                if self._env_override is not None
+                else _default_ha_env(self._ha_url, self._ha_token, self._mcp_root, safety_block)
+            )
+            # Both statements below run synchronously, with no `await`
+            # between them -- no reader can observe one without the other
+            # (this class's own docstring). From this instant, `call_tool`'s
+            # own gate rejects every new caller until this method sets
+            # `_readers_admitted` again on its way out.
+            self._writer_waiting = True
+            self._readers_admitted.clear()
+            # Drain: every already-in-flight `call_tool()` decrements
+            # `_in_flight` in its own `finally`, synchronously, so this will
+            # observe zero as soon as the last one runs. `asyncio.sleep(0)`
+            # yields to the event loop without imposing any minimum delay --
+            # this notices the drain on the very next loop iteration in which
+            # one was possible, not on a polling timer.
+            while self._in_flight > 0:
+                await asyncio.sleep(0)
+            try:
+                await self._stack.aclose()
+                self._stack = AsyncExitStack()
+                await self._spawn(self._child_module, resolved_env)
+            finally:
+                self._writer_waiting = False
+                self._readers_admitted.set()
 
     async def _spawn(self, child_module: str, env: Mapping[str, str]) -> None:
         """The real-subprocess spawn both `start()` and `respawn()` perform --

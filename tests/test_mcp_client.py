@@ -358,6 +358,81 @@ async def test_a_call_cancelled_mid_flight_does_not_wedge_a_later_respawn():
         await host.aclose()
 
 
+async def test_two_concurrent_respawn_calls_serialize_instead_of_racing():
+    """CR-01 (phase 4 code review): the readers-writer rewrite (Task 3, plan
+    04-01) protects readers from a writer, but nothing in it stopped a
+    SECOND concurrent `respawn()` from entering the same
+    drain-teardown-spawn sequence in parallel with the first -- both would
+    read `self._stack` before either reassigned it, so one respawn's fresh
+    stack (and the child it just spawned) could be silently overwritten by
+    the other's, leaking a still-running child enforcing a stale policy.
+
+    This proves the fix with two real, concurrent `respawn()` calls raced
+    via `asyncio.create_task` (not sequential awaits): the second must not
+    enter `_spawn` while the first is still inside its own body, `_spawn`
+    must be called exactly twice, in order, and `self.session` must end up
+    on whichever spawn actually ran last (B's), not a reference clobbered
+    by a race.
+    """
+    from spire_voice.mcp_client import McpToolHost
+
+    old_session = _BlockingSession()
+    host = _host_with_fake_session(old_session)
+    spawn_envs: list[dict] = []
+    first_spawn_entered = asyncio.Event()
+    release_first_spawn = asyncio.Event()
+    real_spawn = McpToolHost._spawn
+
+    async def _fake_spawn(self, child_module, env):
+        spawn_envs.append(dict(env))
+        if len(spawn_envs) == 1:
+            # Hold the first respawn inside `_spawn` -- the exact window
+            # CR-01's interleaving needed a second writer to race through --
+            # so the test can prove a second `respawn()` call queues behind
+            # this one rather than entering `_spawn` concurrently.
+            first_spawn_entered.set()
+            await release_first_spawn.wait()
+        self.session = SimpleNamespace(spawned_for=dict(env))
+
+    McpToolHost._spawn = _fake_spawn
+    try:
+        respawn_a = asyncio.create_task(
+            host.respawn({"mode": "allow_all_except_denylist", "deny_entities": ["switch.example_a"]})
+        )
+        await first_spawn_entered.wait()
+
+        respawn_b = asyncio.create_task(
+            host.respawn({"mode": "allow_all_except_denylist", "deny_entities": ["switch.example_b"]})
+        )
+        # Give B every chance to race ahead if the lock did not hold: two
+        # bare yields is enough for B to clear the readers-admitted event,
+        # observe zero in-flight readers, and reach `_stack.aclose()`/`_spawn`
+        # if nothing serializes it behind A.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert len(spawn_envs) == 1, (
+            "a second respawn() must not enter _spawn while the first is still inside its own body"
+        )
+        assert not respawn_b.done()
+
+        release_first_spawn.set()
+        await respawn_a
+        await respawn_b
+
+        assert len(spawn_envs) == 2, "each respawn() must reach _spawn exactly once, never zero, never racing in"
+        assert "switch.example_a" in spawn_envs[0]["SPIRE_SAFETY"], "A must have spawned first"
+        assert "switch.example_b" in spawn_envs[1]["SPIRE_SAFETY"], "B must have spawned second, not raced in early"
+        # B ran strictly after A finished (the lock, not the event loop's
+        # scheduling order, is what guarantees this) -- so the session B's
+        # own _spawn call set must be the one still installed, not
+        # overwritten by a stray reassignment from A.
+        assert host.session.spawned_for == spawn_envs[1]
+    finally:
+        McpToolHost._spawn = real_spawn
+        await host.aclose()
+
+
 async def test_start_with_an_explicit_module_and_env_produces_exactly_that_environment():
     """D-13: a second `McpToolHost` instance (the weather server) owns a
     different child by parameter, not by subclass -- an explicit `env=`
