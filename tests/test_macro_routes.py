@@ -458,6 +458,98 @@ def test_creating_a_macro_with_no_actions_is_refused(
     assert not macro_repo.macros
 
 
+def test_creating_a_macro_with_a_blank_phrase_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    """MED-01 fix (phase 4 code review): `MacroConfig.from_config` (the
+    file parser) has always refused a blank `phrase` -- this route did
+    not, so an operator could save a macro `normalize("")` matches no
+    transcript against, silently dead with no error at save time."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={"phrase": "", "aliases": [], "reply": "ok", "actions": [_action_json()]},
+    )
+    assert response.status_code == 400
+    assert "phrase" in response.json()["detail"]
+    assert not macro_repo.macros
+
+
+def test_creating_a_macro_with_a_blank_reply_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    """MED-01 fix (phase 4 code review): the file parser's identical
+    refusal for a blank `reply` -- a blank reply is handed to
+    `precache_all` on save, attempting to synthesize zero-length speech."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={"phrase": "blank reply", "aliases": [], "reply": "", "actions": [_action_json()]},
+    )
+    assert response.status_code == 400
+    assert "reply" in response.json()["detail"]
+    assert not macro_repo.macros
+
+
+def test_updating_a_macro_with_a_blank_phrase_or_reply_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    """MED-01 fix: the same two checks apply to `update_macro`, not only
+    `create_macro` -- an operator clearing the Phrase or Reply field while
+    editing an existing macro must be refused the same way."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+    [macro_id] = list(macro_repo.macros.keys())
+
+    blank_phrase = client.put(
+        f"/api/macros/{macro_id}",
+        json={"phrase": "", "aliases": [], "reply": "ok", "actions": [_action_json()]},
+    )
+    assert blank_phrase.status_code == 400
+    assert "phrase" in blank_phrase.json()["detail"]
+
+    blank_reply = client.put(
+        f"/api/macros/{macro_id}",
+        json={"phrase": "good night", "aliases": [], "reply": "", "actions": [_action_json()]},
+    )
+    assert blank_reply.status_code == 400
+    assert "reply" in blank_reply.json()["detail"]
+
+    # Neither refused write must have touched the stored macro.
+    assert macro_repo.macros[macro_id].phrase == "good night"
+
+
 def test_creating_a_macro_whose_phrase_collides_with_an_existing_one_is_refused_naming_both(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):

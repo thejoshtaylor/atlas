@@ -115,6 +115,27 @@ def _duplicate_phrase_error(message: str) -> HTTPException:
     return HTTPException(status_code=400, detail=message)
 
 
+def _blank_phrase_error() -> HTTPException:
+    """MED-01 fix (phase 4 code review): the exact wording
+    `MacroConfig.from_config` already raises for a missing `phrase`
+    (`ConfigError("a macro is missing its 'phrase'")`) -- reproduced here
+    because `normalize("")` yields `""`, and `turn/macros.py::match()`
+    explicitly refuses to match any transcript against that key, so a
+    macro saved with a blank phrase can never fire by voice again, with
+    no error at save time to say so."""
+    return HTTPException(status_code=400, detail="a macro is missing its 'phrase'")
+
+
+def _blank_reply_error(phrase: str) -> HTTPException:
+    """MED-01 fix (phase 4 code review): the exact wording
+    `MacroConfig.from_config` already raises for a missing `reply`
+    (`ConfigError(f"macro {phrase!r} is missing its 'reply'")`) --
+    reproduced here because a blank reply is handed to `precache_all` on
+    save, attempting to synthesize zero-length speech through whichever
+    TTS provider is configured."""
+    return HTTPException(status_code=400, detail=f"macro {phrase!r} is missing its 'reply'")
+
+
 class MacroActionResponse(BaseModel):
     id: int
     position: int
@@ -182,7 +203,19 @@ class _CandidateMacro:
         return frozenset(normalize(k) for k in (self.phrase, *self.aliases))
 
 
-def _validate_actions(phrase: str, actions: Sequence[MacroActionInput]) -> None:
+def _validate_actions(phrase: str, reply: str, actions: Sequence[MacroActionInput]) -> None:
+    """MED-01 fix (phase 4 code review): this module's own docstring
+    states "every refusal the file-parsed `MacroConfig`/`MacroActionConfig`
+    would make on a malformed macro, this module makes too" -- until this
+    fix, that was true only of the action-list checks below, not of
+    `MacroConfig.from_config`'s blank-phrase/blank-reply checks. Same
+    order the file parser checks in (phrase, then reply, then actions),
+    same wording, so an operator sees the identical message regardless of
+    which path caught the same mistake."""
+    if not phrase:
+        raise _blank_phrase_error()
+    if not reply:
+        raise _blank_reply_error(phrase)
     if not actions:
         raise _zero_actions_error(phrase)
     for index, action in enumerate(actions):
@@ -454,7 +487,7 @@ async def create_macro(
     request: Request,
     user: CurrentUser = Depends(require_role(Role.OPERATOR)),
 ) -> MacroResponse:
-    _validate_actions(payload.phrase, payload.actions)
+    _validate_actions(payload.phrase, payload.reply, payload.actions)
     macro_repo: MacroRepository = request.app.state.macro_repo
     await _check_no_collision(macro_repo, payload.phrase, payload.aliases)
 
@@ -493,7 +526,7 @@ async def update_macro(
     if existing is None:
         raise _macro_not_found_error(macro_id)
 
-    _validate_actions(payload.phrase, payload.actions)
+    _validate_actions(payload.phrase, payload.reply, payload.actions)
     await _check_no_collision(macro_repo, payload.phrase, payload.aliases, exclude_macro_id=macro_id)
 
     # Ordering is sent, not inferred: the whole action list is replaced in

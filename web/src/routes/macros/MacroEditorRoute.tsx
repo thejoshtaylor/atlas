@@ -37,10 +37,14 @@ import {
 } from "@/stores/macroDraftStore"
 import {
   actionConflictDisplay,
+  BLANK_PHRASE_SAVE_BLOCKED_REASON,
+  BLANK_REPLY_SAVE_BLOCKED_REASON,
   deriveMacroEditorState,
   deriveReplyPrecacheState,
   DUPLICATE_PHRASE_MESSAGE,
   isDuplicatePhrase,
+  saveBlockedByBlankPhrase,
+  saveBlockedByBlankReply,
 } from "./deriveMacroEditorState"
 
 // MACRO-03, D-11, D-12, T-04-37: every rule this screen enforces (zero
@@ -114,8 +118,13 @@ export function MacroEditorRoute() {
 
   const duplicate = macrosListQuery.data ? isDuplicatePhrase(phrase, macrosListQuery.data, macroId) : false
   const zeroActionsReason = saveBlockedByEmptyActions(actions)
+  // MED-01 fix (phase 4 code review): mirrors `_validate_actions`'s own
+  // blank-phrase/blank-reply refusal client-side, so an operator sees the
+  // problem before submitting rather than only after a failed save.
+  const blankPhrase = saveBlockedByBlankPhrase(phrase)
+  const blankReply = saveBlockedByBlankReply(reply)
   const recordLoading = screen.kind !== "ready"
-  const saveDisabled = recordLoading || actions.length === 0 || duplicate
+  const saveDisabled = recordLoading || actions.length === 0 || duplicate || blankPhrase || blankReply
 
   const canAddAction = newDomain.trim() !== "" && newService.trim() !== "" && newEntityId.trim() !== ""
 
@@ -191,7 +200,8 @@ export function MacroEditorRoute() {
         <>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="macro-phrase">Phrase</Label>
-            <Input id="macro-phrase" value={phrase} onChange={(event) => setPhrase(event.target.value)} />
+            <Input id="macro-phrase" required value={phrase} onChange={(event) => setPhrase(event.target.value)} />
+            {blankPhrase ? <p className="text-body text-destructive">{BLANK_PHRASE_SAVE_BLOCKED_REASON}</p> : null}
             {duplicate ? <p className="text-body text-destructive">{DUPLICATE_PHRASE_MESSAGE}</p> : null}
           </div>
 
@@ -314,7 +324,14 @@ export function MacroEditorRoute() {
               <Label htmlFor="macro-reply">Reply</Label>
               {precache === "cached" ? <Badge variant="secondary">Reply cached · ready</Badge> : null}
             </div>
-            <Input id="macro-reply" className="scroll-field" value={reply} onChange={(event) => setReply(event.target.value)} />
+            <Input
+              id="macro-reply"
+              required
+              className="scroll-field"
+              value={reply}
+              onChange={(event) => setReply(event.target.value)}
+            />
+            {blankReply ? <p className="text-body text-destructive">{BLANK_REPLY_SAVE_BLOCKED_REASON}</p> : null}
             {precache === "failed" ? (
               <div className="flex flex-col gap-2">
                 <p className="text-body text-destructive">{synthesisFailedMessage}</p>

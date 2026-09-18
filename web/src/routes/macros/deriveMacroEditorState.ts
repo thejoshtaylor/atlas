@@ -89,6 +89,31 @@ export function isDuplicatePhrase(phrase: string, macros: Macro[], excludingMacr
 /** UI-SPEC's exact "Error state -- duplicate phrase on save" copy. */
 export const DUPLICATE_PHRASE_MESSAGE = "This phrase is already used by another macro."
 
+// MED-01 fix (phase 4 code review): `MacroConfig.from_config` (the file
+// parser) has always refused a blank phrase or blank reply
+// (`_validate_actions`, `routes/macros.py`, mirrors that check on the
+// route since this same fix). Neither `Input` below had a client-side
+// guard before this fix, so an operator clearing the Phrase field while
+// editing, or leaving Reply empty, could hit Save before ever learning
+// the macro would be permanently dead (a blank phrase normalizes to a
+// key `turn/macros.py::match()` never matches a transcript against) or
+// would fail to precache (a blank reply handed to the TTS provider).
+export const BLANK_PHRASE_SAVE_BLOCKED_REASON = "Add a phrase before saving."
+export const BLANK_REPLY_SAVE_BLOCKED_REASON = "Add a reply before saving."
+
+/** `.trim()`, not a bare emptiness check -- a phrase of only whitespace
+ * normalizes to the same empty key `normalize("")` does server-side, so
+ * treating it as non-blank here would let it slip past this guard only
+ * to be caught later by the same route this guard exists to get ahead
+ * of. */
+export function saveBlockedByBlankPhrase(phrase: string): boolean {
+  return phrase.trim() === ""
+}
+
+export function saveBlockedByBlankReply(reply: string): boolean {
+  return reply.trim() === ""
+}
+
 export type ReplyPrecacheState = "cached" | "absent" | "failed"
 
 /**
