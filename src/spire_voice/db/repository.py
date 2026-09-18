@@ -575,6 +575,10 @@ class WorkflowStep:
     attempts: int
     result_detail: dict | None
     fired_at: datetime | None
+    # Migration 0007 (CR-01 fix): `None` for a step never claimed under
+    # the two-phase design, or a fake-repository step (no in-memory
+    # equivalent of a durable, crash-recoverable claim exists to report).
+    claimed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -622,6 +626,18 @@ def push_out_due_at(due_at: datetime, seconds: float) -> datetime:
     importing `timedelta` itself, so both of this file's small absolute-
     instant-arithmetic helpers live in one place."""
     return due_at + timedelta(seconds=seconds)
+
+
+def stale_claim_cutoff(now: datetime, claim_recovery_after_s: float) -> datetime:
+    """The instant a `claimed` step's own `claimed_at` must be at or
+    before to be eligible for CR-01's recovery-claim query (`db/postgres.
+    py`'s `PostgresWorkflowRepository._lock_stale_claimed_row`): `now`
+    minus `WorkflowConfig.claim_recovery_after_s`. Lives here, not inline
+    in `db/postgres.py`, for the identical reason `push_out_due_at` above
+    does -- arithmetic on an already-absolute instant, kept out of the one
+    module whose own acceptance criterion forbids it from importing
+    `timedelta` itself."""
+    return now - timedelta(seconds=claim_recovery_after_s)
 
 
 def next_append_due_at(steps: "Sequence[WorkflowStep]", now: datetime) -> datetime:
@@ -734,15 +750,30 @@ class WorkflowRepository(Protocol):
     ) -> bool:
         """Claim the single oldest due, claimable step across every run
         with `SELECT ... FOR UPDATE SKIP LOCKED`, call `executor` against
-        it, and write its outcome -- all inside the one transaction that
-        claimed it (D-02): the claim and the terminal write share no
-        intervening commit, which is what makes a crash mid-step
-        recoverable rather than ambiguous. A step is claimable only when
-        no earlier-position sibling in its own run is still `pending`
-        (steps run in written order, FLOW-01) and its own run's status is
-        `pending` or `firing` (a cancelled or terminal run has no
-        claimable steps, D-11/D-12). Returns `True` when a step was
-        claimed (whatever its outcome), `False` when nothing was due."""
+        it, and write its outcome -- in two transactions, not one (CR-01's
+        code-review fix, superseding D-02's original one-transaction
+        design): the first locks the row, marks it `claimed` with a fresh
+        `claimed_at`, and commits, releasing the row lock *before*
+        `executor` is ever awaited; the second, opened only after
+        `executor` returns, re-locks the same row by id and writes its
+        terminal (or retried) state. A step is claimable only when no
+        earlier-position sibling in its own run is still `pending` *or*
+        `claimed` (steps run in written order, FLOW-01) and its own run's
+        status is `pending` or `firing` (a cancelled or terminal run has
+        no claimable steps, D-11/D-12).
+
+        A step found `claimed` with a `claimed_at` older than
+        `WorkflowConfig.claim_recovery_after_s` is a step a prior caller
+        was interrupted before writing a terminal outcome for -- claimed
+        again (its own `claimed_at` renewed, the same lease-renewal
+        discipline a fresh claim's own commit already establishes) and
+        handed to `executor` with `recovered=True` signalled on the step
+        object itself (`getattr(step, "recovered", False)`), so
+        `workflow.steps.execute_step` can refuse to repeat a
+        `call_service` step whose first attempt's outcome is now unknown
+        (T-05-01) while still safely re-running `wait`/`speak`. Returns
+        `True` when a step was claimed (whatever its outcome), `False`
+        when nothing was due or stale."""
         ...
 
     async def list_runs(self, *, statuses: Sequence[str] | None = None) -> Sequence[WorkflowRun]:

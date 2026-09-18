@@ -1143,6 +1143,20 @@ class WorkflowConfig:
     a permanently failing step reaches a terminal state instead of
     retrying forever; `retry_backoff_s` is how far a retried step's
     `due_at` is pushed out each time.
+
+    `claim_recovery_after_s` (CR-01's code-review fix) is how long a step
+    may sit `claimed` -- a poller has locked it and committed to firing it,
+    but has not yet written a terminal outcome -- before a later poll
+    treats it as orphaned by a crash rather than merely still in flight,
+    and reclaims it for recovery. Set well above the slowest realistic
+    `call_service` HTTP round trip to Home Assistant: too short and a
+    genuinely still-running step can be reclaimed out from under itself
+    (T-05-01's own double-execution risk, reintroduced by an over-eager
+    recovery window); too long and a real crash sits unrecovered for
+    longer than it needs to. The default (three minutes) is chosen to
+    comfortably clear any plausible single HTTP call on a CPU-only host
+    with real network I/O to a local Home Assistant instance, while still
+    recovering within one operator-visible restart cycle.
     """
 
     poll_interval_s: float = 5.0
@@ -1150,6 +1164,7 @@ class WorkflowConfig:
     late_threshold_s: float = 60.0
     max_attempts: int = 3
     retry_backoff_s: float = 30.0
+    claim_recovery_after_s: float = 180.0
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "WorkflowConfig":
@@ -1188,12 +1203,24 @@ class WorkflowConfig:
             raise ConfigError(
                 f"workflow.retry_backoff_s must be a positive number, got {retry_backoff_s!r}"
             )
+        claim_recovery_after_s = raw.get("claim_recovery_after_s", cls.claim_recovery_after_s)
+        if (
+            isinstance(claim_recovery_after_s, bool)
+            or not isinstance(claim_recovery_after_s, (int, float))
+            or claim_recovery_after_s <= 0
+        ):
+            raise ConfigError(
+                f"workflow.claim_recovery_after_s must be a positive number, got "
+                f"{claim_recovery_after_s!r} -- this bounds how long a claimed step may sit "
+                "unresolved before a later poll treats it as orphaned by a crash (CR-01)"
+            )
         return cls(
             poll_interval_s=poll_interval_s,
             max_steps_per_poll=max_steps_per_poll,
             late_threshold_s=late_threshold_s,
             max_attempts=max_attempts,
             retry_backoff_s=retry_backoff_s,
+            claim_recovery_after_s=claim_recovery_after_s,
         )
 
 

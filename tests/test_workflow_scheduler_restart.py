@@ -200,6 +200,149 @@ async def test_a_second_scheduler_instance_fires_a_step_it_did_not_create(monkey
 
 @pytest.mark.integration
 @skip_without_postgres
+async def test_a_crash_between_the_side_effect_and_the_terminal_write_does_not_repeat_the_call(
+    monkeypatch,
+):
+    """CR-01 (code review): the process is killed after a `call_service`
+    step's real Home Assistant call has already succeeded but before the
+    write recording that reaches Postgres -- simulated here by an
+    executor that records the call, then raises, so `claim_and_execute_
+    next_due_step`'s own second transaction (`_write_step_outcome`) never
+    runs, exactly the gap between the side effect and the terminal write
+    this fix closes.
+
+    Before CR-01, this row would roll all the way back to `pending`,
+    `attempts` still `0` -- indistinguishable from a step never attempted
+    -- and the very next poll would call `ha_call_service` a second time.
+    This test proves that no longer happens: the row is left `claimed`
+    (a durable, distinguishable fact) immediately after the crash; an
+    early re-poll (well inside `claim_recovery_after_s`) claims and calls
+    nothing, because the row might still be genuinely in flight; only a
+    poll taken after `claim_recovery_after_s` has elapsed recovers it --
+    into a `failed` step whose `result_detail` honestly records the
+    outcome as unknown, never a second `ha_call_service` call."""
+    _set_migration_env(monkeypatch)
+    await _reset_schema(_TEST_DB_URL)
+    await asyncio.to_thread(_run_upgrade_head, _TEST_DB_URL)
+
+    engine = create_async_engine(_TEST_DB_URL)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    config = WorkflowConfig(claim_recovery_after_s=30.0)
+    repo = PostgresWorkflowRepository(
+        sessionmaker, claim_recovery_after_s=config.claim_recovery_after_s
+    )
+
+    due_at = datetime(2027, 4, 1, 9, 0, tzinfo=timezone.utc)
+    run = await repo.create_run(
+        origin="voice",
+        summary="crash-recovery example step",
+        steps=[
+            WorkflowStepSpec(
+                kind="call_service",
+                arguments={
+                    "domain": "switch",
+                    "service": "turn_off",
+                    "entity_id": "switch.example_crash_recovery",
+                },
+            )
+        ],
+        base_time=due_at,
+        created_by_user_id=None,
+    )
+
+    recording_host = _RecordingToolHost()
+
+    class _CrashAfterTheCall(Exception):
+        """Stands in for the process dying -- raised only after the real
+        side effect (`recording_host.call_tool`) has already run."""
+
+    async def _executor_that_crashes_after_the_real_call(step: Any) -> None:
+        assert getattr(step, "recovered", False) is False
+        await recording_host.call_tool("ha_call_service", dict(step.arguments))
+        raise _CrashAfterTheCall()
+
+    with pytest.raises(_CrashAfterTheCall):
+        await repo.claim_and_execute_next_due_step(
+            _executor_that_crashes_after_the_real_call, due_at
+        )
+
+    # The side effect really did reach "Home Assistant" exactly once.
+    assert len(recording_host.calls) == 1
+
+    check_engine = create_async_engine(_TEST_DB_URL)
+    async with check_engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, attempts, claimed_at, fired_at FROM workflow_steps "
+                    "WHERE run_id = :run_id"
+                ),
+                {"run_id": run.id},
+            )
+        ).one()
+    await check_engine.dispose()
+    # Not rolled back to "never attempted" -- durably `claimed`, with
+    # `attempts` still 0 (transaction one never touches `attempts`) and no
+    # `fired_at` (transaction two, the one that would have set it, never
+    # ran).
+    assert row.status == "claimed"
+    assert row.attempts == 0
+    assert row.claimed_at is not None
+    assert row.fired_at is None
+
+    async def _executor_that_would_repeat_the_call(step: Any) -> None:
+        await recording_host.call_tool("ha_call_service", dict(step.arguments))
+
+    # An early re-poll, well inside claim_recovery_after_s: the row might
+    # still be genuinely in flight, so nothing is claimed and the call is
+    # not repeated.
+    soon_after = due_at + timedelta(seconds=1)
+    claimed_early = await repo.claim_and_execute_next_due_step(
+        _executor_that_would_repeat_the_call, soon_after
+    )
+    assert claimed_early is False
+    assert len(recording_host.calls) == 1
+
+    # Past claim_recovery_after_s: the same crashed step is recovered --
+    # and for call_service, that means execute_step itself (not this
+    # test's own stand-in executor) refuses to repeat the call.
+    past_recovery = due_at + timedelta(seconds=config.claim_recovery_after_s + 1)
+    claimed_recovered = await repo.claim_and_execute_next_due_step(
+        lambda step: execute_step(step, recording_host, config, past_recovery),
+        past_recovery,
+    )
+    assert claimed_recovered is True
+    # ha_call_service was never called a second time.
+    assert len(recording_host.calls) == 1
+
+    check_engine = create_async_engine(_TEST_DB_URL)
+    async with check_engine.connect() as conn:
+        step_row = (
+            await conn.execute(
+                text(
+                    "SELECT status, attempts, result_detail FROM workflow_steps "
+                    "WHERE run_id = :run_id"
+                ),
+                {"run_id": run.id},
+            )
+        ).one()
+        run_row = (
+            await conn.execute(
+                text("SELECT status FROM workflow_runs WHERE id = :run_id"),
+                {"run_id": run.id},
+            )
+        ).one()
+    await check_engine.dispose()
+    assert step_row.status == "failed"
+    assert step_row.attempts == 1
+    assert step_row.result_detail["recovered"] is True
+    assert run_row.status == "failed"
+
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@skip_without_postgres
 async def test_an_overdue_step_fires_late_rather_than_being_dropped(monkeypatch):
     """D-04: a step whose `due_at` passed while nothing was polling is
     claimed on the next poll and runs, late, rather than being discarded --

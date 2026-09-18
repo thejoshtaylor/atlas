@@ -55,6 +55,7 @@ from spire_voice.db.repository import (
     assign_step_due_ats,
     next_append_due_at,
     push_out_due_at,
+    stale_claim_cutoff,
 )
 from spire_voice.turn.macros import normalize as _normalize_macro_key
 
@@ -1006,6 +1007,62 @@ def _workflow_step_from_row(row: WorkflowStepRow) -> WorkflowStep:
         attempts=row.attempts,
         result_detail=row.result_detail,
         fired_at=_to_aware_utc(row.fired_at),
+        claimed_at=_to_aware_utc(row.claimed_at),
+    )
+
+
+@dataclass(frozen=True)
+class _ClaimedStepSnapshot:
+    """A plain, detached snapshot of a claimed `WorkflowStepRow`'s columns
+    -- everything `workflow.steps.execute_step` reads -- taken before the
+    claim's own transaction commits (CR-01 fix). The executor now runs
+    *after* that commit releases the row lock and closes the session that
+    read it; handing the live ORM row across that boundary instead would
+    mean `execute_step` touching an expired, detached instance the moment
+    it reads an attribute SQLAlchemy's own `expire_on_commit` default
+    invalidated. `recovered` has no `workflow_steps` column behind it:
+    `True` only when this step was reclaimed from a stale `claimed` row a
+    prior attempt never reached a terminal write for, never for a fresh
+    claim off `pending` -- `workflow.steps.execute_step` reads it via
+    `getattr(step, "recovered", False)` (never a required constructor
+    argument threaded through every other caller of `execute_step`/
+    `WorkflowScheduler`, most of which have no crash-recovery concept to
+    express) to refuse repeating a `call_service` step whose first
+    attempt's outcome is now unknown, while still safely re-running
+    `wait`/`speak`."""
+
+    id: int
+    run_id: int
+    position: int
+    kind: str
+    arguments: dict
+    due_at: datetime
+    status: str
+    attempts: int
+    result_detail: dict | None
+    fired_at: datetime | None
+    recovered: bool = False
+
+
+def _claimed_step_snapshot(row: WorkflowStepRow, *, recovered: bool) -> _ClaimedStepSnapshot:
+    # Deliberately naive UTC (`row.due_at`/`row.fired_at` as stored, not
+    # `_to_aware_utc`'d) -- `workflow.steps.execute_step` and its own
+    # `_late_by_seconds` are written against `WorkflowStepRow`'s own naive
+    # convention, and this snapshot exists to stand in for that row across
+    # the executor boundary, not to become a second public, always-aware
+    # read shape the way `WorkflowStep` (`db/repository.py`) is.
+    return _ClaimedStepSnapshot(
+        id=row.id,
+        run_id=row.run_id,
+        position=row.position,
+        kind=row.kind,
+        arguments=row.arguments,
+        due_at=row.due_at,
+        status=row.status,
+        attempts=row.attempts,
+        result_detail=row.result_detail,
+        fired_at=row.fired_at,
+        recovered=recovered,
     )
 
 
@@ -1053,6 +1110,7 @@ class PostgresWorkflowRepository:
         *,
         max_attempts: int = 3,
         retry_backoff_s: float = 30.0,
+        claim_recovery_after_s: float = 180.0,
     ) -> None:
         self._sessionmaker = sessionmaker
         # Bounds retry (PA-D3): a step whose outcome keeps asking for a
@@ -1060,6 +1118,9 @@ class PostgresWorkflowRepository:
         # run is left `failed` rather than retrying forever.
         self._max_attempts = max_attempts
         self._retry_backoff_s = retry_backoff_s
+        # CR-01 fix: how long a step may sit `claimed` before a later poll
+        # treats it as orphaned by a crash rather than still in flight.
+        self._claim_recovery_after_s = claim_recovery_after_s
 
     async def create_run(
         self,
@@ -1112,81 +1173,177 @@ class PostgresWorkflowRepository:
 
     async def claim_and_execute_next_due_step(
         self,
-        executor: "Callable[[WorkflowStepRow], Awaitable[Any]]",
+        executor: "Callable[[Any], Awaitable[Any]]",
         now: datetime,
     ) -> bool:
         """Returns `True` if a step was claimed (whatever its outcome),
-        `False` if no step was due. One `async with self._sessionmaker()
-        as session:` block, one transaction, no commit between the claim
-        and the terminal write -- the claim and the completion share a
-        transaction, which is what makes a crash mid-step recoverable
-        rather than ambiguous (D-02)."""
+        `False` if nothing was due or stale. Two transactions, not one
+        (CR-01's code-review fix, superseding D-02's original single-
+        transaction design): `_claim_step_for_execution` locks a row,
+        marks it `claimed`, and commits -- releasing the lock *before*
+        `executor` (for `call_service`, a real HTTP call to Home
+        Assistant) is ever awaited -- and `_write_step_outcome`, called
+        only after `executor` returns, re-locks the same row by id and
+        writes its terminal (or retried) state in a transaction of its
+        own. No transaction is open for the whole of `executor`'s own
+        await: a process killed there now leaves the row `claimed` (a
+        durable, distinguishable fact, `claimed_at` recorded) rather than
+        rolling back to `pending` and looking exactly like a step never
+        attempted -- see `_lock_stale_claimed_row` for how a later poll
+        recovers it."""
         naive_now = _to_naive_utc(now)
-        async with self._sessionmaker() as session:
-            # A step whose earlier-position sibling in the same run is
-            # still `pending` is not claimable -- this is what keeps two
-            # steps of one run that fall due at the same instant running
-            # in written order, and it holds under concurrency with no
-            # extra coordination: an earlier step currently held by
-            # another worker's uncommitted transaction is still `pending`
-            # from this query's point of view until that transaction
-            # commits.
-            earlier_sibling = aliased(WorkflowStepRow)
-            has_earlier_pending_sibling = (
-                select(earlier_sibling.id)
-                .where(
-                    earlier_sibling.run_id == WorkflowStepRow.run_id,
-                    earlier_sibling.position < WorkflowStepRow.position,
-                    earlier_sibling.status == "pending",
-                )
-                .exists()
-            )
-            # A cancelled or already-terminal run has no claimable steps
-            # -- this is what makes cancellation (a plan 05-02 write)
-            # stop every step that has not already been claimed, with no
-            # separate mechanism this method needs to coordinate with.
-            run_is_claimable = (
-                select(WorkflowRunRow.id)
-                .where(
-                    WorkflowRunRow.id == WorkflowStepRow.run_id,
-                    WorkflowRunRow.status.in_(_WORKFLOW_CLAIMABLE_RUN_STATUSES),
-                )
-                .exists()
-            )
-            stmt = (
-                select(WorkflowStepRow)
-                .where(
-                    WorkflowStepRow.status == "pending",
-                    WorkflowStepRow.due_at <= naive_now,
-                    ~has_earlier_pending_sibling,
-                    run_is_claimable,
-                )
-                .order_by(
-                    WorkflowStepRow.due_at, WorkflowStepRow.run_id, WorkflowStepRow.position
-                )
-                .with_for_update(skip_locked=True, of=WorkflowStepRow)
-                .limit(1)
-            )
-            row = (await session.execute(stmt)).scalars().first()
-            if row is None:
-                return False
 
+        claimed = await self._claim_step_for_execution(naive_now)
+        if claimed is None:
+            return False
+
+        # The executor is a caller of the same tool host the live turn
+        # path calls; it never reimplements `allow_call` (D-13). Runs
+        # with no open transaction and no row lock held (CR-01) -- the
+        # step snapshot handed to it is a detached, immutable value, not
+        # a live ORM row this session could still mutate underneath it.
+        outcome = await executor(claimed)
+
+        await self._write_step_outcome(claimed, outcome, naive_now)
+        return True
+
+    async def _lock_stale_claimed_row(
+        self, session: AsyncSession, naive_now: datetime
+    ) -> "WorkflowStepRow | None":
+        """A step `claimed` long enough ago (`stale_claim_cutoff`) that
+        the caller who claimed it almost certainly never reached
+        `_write_step_outcome` -- a crash, not a slow `executor` still
+        genuinely in flight, provided `WorkflowConfig.claim_recovery_
+        after_s` is set well above the slowest realistic `call_service`
+        round trip (that class's own docstring). `SKIP LOCKED` so a
+        second, concurrent poller's identical query skips a row this one
+        already holds rather than blocking on it -- the same primitive
+        the fresh-claim query below uses, for the same reason."""
+        cutoff = stale_claim_cutoff(naive_now, self._claim_recovery_after_s)
+        stmt = (
+            select(WorkflowStepRow)
+            .where(WorkflowStepRow.status == "claimed", WorkflowStepRow.claimed_at <= cutoff)
+            .order_by(WorkflowStepRow.claimed_at, WorkflowStepRow.id)
+            .with_for_update(skip_locked=True, of=WorkflowStepRow)
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalars().first()
+
+    async def _lock_next_pending_row(
+        self, session: AsyncSession, naive_now: datetime
+    ) -> "WorkflowStepRow | None":
+        """The fresh-claim query D-02 originally described, unchanged in
+        substance except that an earlier-position sibling still `claimed`
+        (not only `pending`) also blocks a later sibling from being
+        claimed out of order -- without this, a step's own crash-recovery
+        window would be a window where FLOW-01's ordering guarantee could
+        be broken by a later step racing ahead of an earlier one still
+        mid-flight."""
+        earlier_sibling = aliased(WorkflowStepRow)
+        has_earlier_unresolved_sibling = (
+            select(earlier_sibling.id)
+            .where(
+                earlier_sibling.run_id == WorkflowStepRow.run_id,
+                earlier_sibling.position < WorkflowStepRow.position,
+                earlier_sibling.status.in_(("pending", "claimed")),
+            )
+            .exists()
+        )
+        # A cancelled or already-terminal run has no claimable steps --
+        # this is what makes cancellation (a plan 05-02 write) stop every
+        # step that has not already been claimed, with no separate
+        # mechanism this method needs to coordinate with.
+        run_is_claimable = (
+            select(WorkflowRunRow.id)
+            .where(
+                WorkflowRunRow.id == WorkflowStepRow.run_id,
+                WorkflowRunRow.status.in_(_WORKFLOW_CLAIMABLE_RUN_STATUSES),
+            )
+            .exists()
+        )
+        stmt = (
+            select(WorkflowStepRow)
+            .where(
+                WorkflowStepRow.status == "pending",
+                WorkflowStepRow.due_at <= naive_now,
+                ~has_earlier_unresolved_sibling,
+                run_is_claimable,
+            )
+            .order_by(WorkflowStepRow.due_at, WorkflowStepRow.run_id, WorkflowStepRow.position)
+            .with_for_update(skip_locked=True, of=WorkflowStepRow)
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalars().first()
+
+    async def _claim_step_for_execution(
+        self, naive_now: datetime
+    ) -> "_ClaimedStepSnapshot | None":
+        """Phase one of the two-phase claim (CR-01 fix): a stale `claimed`
+        row (recovery) takes priority over a fresh `pending` one, so a
+        run blocked behind a crash-orphaned step is unblocked before a
+        later run's own due step is claimed. Either way, this method's
+        own transaction commits before returning -- the row lock is gone
+        by the time the caller ever awaits `executor`."""
+        async with self._sessionmaker() as session:
+            stale_row = await self._lock_stale_claimed_row(session, naive_now)
+            if stale_row is not None:
+                # Lease renewal: bumping `claimed_at` here is what stops a
+                # second poller's own recovery query from reclaiming this
+                # same row again while *this* recovery attempt's own
+                # `executor` call is still running (it, too, runs with no
+                # lock held) -- the identical mechanism a fresh claim's
+                # own commit already establishes, applied a second time.
+                stale_row.claimed_at = naive_now
+                snapshot = _claimed_step_snapshot(stale_row, recovered=True)
+                await session.commit()
+                return snapshot
+
+            row = await self._lock_next_pending_row(session, naive_now)
+            if row is None:
+                return None
             run_row = await session.get(WorkflowRunRow, row.run_id)
             if run_row.status == "pending":
                 run_row.status = "firing"
+                run_row.updated_at = naive_now
+            row.status = "claimed"
+            row.claimed_at = naive_now
+            snapshot = _claimed_step_snapshot(row, recovered=False)
+            await session.commit()
+            return snapshot
 
-            # The work happens with the claimed row's own lock still
-            # held -- deliberate, not an oversight (D-02's own
-            # consequence; RESEARCH.md Pitfall 3). The executor is a
-            # caller of the same tool host the live turn path calls; it
-            # never reimplements `allow_call` (D-13).
-            outcome = await executor(row)
+    async def _write_step_outcome(
+        self, claimed: "_ClaimedStepSnapshot", outcome: Any, naive_now: datetime
+    ) -> None:
+        """Phase two of the two-phase claim (CR-01 fix): re-locks the same
+        row by id, in a transaction opened only after `executor`'s own
+        side effect has already returned, and writes the terminal (or
+        retried) state. If the row is no longer `claimed` by the time
+        this runs, a concurrent recovery attempt already decided this
+        same step was stale and wrote its own terminal outcome first
+        (only possible if `executor` ran longer than `WorkflowConfig.
+        claim_recovery_after_s`, that class's own docstring) -- this
+        method leaves that write alone rather than overwriting an
+        already-terminal row with a second, later-arriving outcome: a
+        step is written to exactly once, never twice, even when this is
+        the rarer of the two writers to reach it."""
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(WorkflowStepRow)
+                    .where(WorkflowStepRow.id == claimed.id)
+                    .with_for_update(of=WorkflowStepRow)
+                )
+            ).scalars().first()
+            if row is None or row.status != "claimed":
+                return
+            run_row = await session.get(WorkflowRunRow, row.run_id)
 
             row.attempts += 1
             row.result_detail = outcome.detail
             if outcome.retry and row.attempts < self._max_attempts:
                 row.status = "pending"
-                row.due_at = _to_naive_utc(push_out_due_at(now, self._retry_backoff_s))
+                row.due_at = _to_naive_utc(push_out_due_at(naive_now, self._retry_backoff_s))
+                row.claimed_at = None
             else:
                 # Either a terminal outcome, or a retry that has exhausted
                 # `max_attempts` -- the latter is left `failed` rather than
@@ -1196,18 +1353,23 @@ class PostgresWorkflowRepository:
                 row.fired_at = naive_now
 
             # A run reaches a terminal state once no step of its own
-            # remains `pending`: `completed` when every step completed,
-            # `failed` otherwise (PA-D2) -- a denied or failed step never
+            # remains `pending` or `claimed` (PA-D2, extended: a step
+            # still in flight elsewhere is exactly as "not yet resolved"
+            # as one still `pending`) -- `completed` when every step
+            # completed, `failed` otherwise. A denied or failed step never
             # stops the rest of its run from still being attempted at its
             # own due time.
-            remaining_pending = (
+            remaining_unresolved = (
                 await session.execute(
                     select(func.count())
                     .select_from(WorkflowStepRow)
-                    .where(WorkflowStepRow.run_id == run_row.id, WorkflowStepRow.status == "pending")
+                    .where(
+                        WorkflowStepRow.run_id == run_row.id,
+                        WorkflowStepRow.status.in_(("pending", "claimed")),
+                    )
                 )
             ).scalar_one()
-            if remaining_pending == 0:
+            if remaining_unresolved == 0:
                 incomplete_count = (
                     await session.execute(
                         select(func.count())
@@ -1222,7 +1384,6 @@ class PostgresWorkflowRepository:
             run_row.updated_at = naive_now
 
             await session.commit()  # releases the row lock
-            return True
 
     async def list_runs(self, *, statuses: "Sequence[str] | None" = None) -> "list[WorkflowRun]":
         async with self._sessionmaker() as session:

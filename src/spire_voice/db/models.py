@@ -364,13 +364,25 @@ class WorkflowStepRow(Base):
     database-boundary convention -- see `db/postgres.py`'s
     `_to_naive_utc`/`_to_aware_utc`): a step that came due while the
     process was down is still claimable on the next poll, never silently
-    dropped. `status` is one of `pending`, `completed`, `denied`,
-    `failed`, `cancelled`. `attempts` bounds the retry policy
+    dropped. `status` is one of `pending`, `claimed`, `completed`,
+    `denied`, `failed`, `cancelled`. `attempts` bounds the retry policy
     (`spire_voice.config.WorkflowConfig.max_attempts`); `result_detail`
     carries what happened, including a fire-time refusal's reason
     verbatim (D-14); `fired_at` is when the step actually ran, so
     lateness is `fired_at - due_at`, a fact rather than an inference
     (D-04).
+
+    `claimed` (migration 0007, CR-01's code-review fix) is a step whose
+    row a poller has locked and committed to firing, but whose side
+    effect has not yet reached a terminal write -- durable, unlike a mere
+    in-memory "I am working on this" flag, so a process killed between
+    the side effect and the terminal write leaves a fact (`claimed`, with
+    `claimed_at` set) rather than rolling back to `pending` and looking
+    exactly like a step nobody ever attempted. See
+    `db/postgres.py::PostgresWorkflowRepository.claim_and_execute_next_due_step`
+    for the two transactions this status boundary separates, and
+    `claimed_at` below for how a later poll tells a merely-in-flight
+    `claimed` step apart from one a crash orphaned.
     """
 
     __tablename__ = "workflow_steps"
@@ -387,6 +399,11 @@ class WorkflowStepRow(Base):
     attempts: Mapped[int] = mapped_column(nullable=False, default=0)
     result_detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     fired_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Migration 0007 (CR-01 fix): when this row was last moved to
+    # `claimed`, or `None` for a row never claimed under the two-phase
+    # design (every row that existed before 0007 ran). Naive UTC, the
+    # same convention `due_at`/`fired_at` already use.
+    claimed_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
 class ProviderCredentialRow(Base):

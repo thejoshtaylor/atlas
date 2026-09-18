@@ -148,6 +148,37 @@ def _is_policy_refusal(tool_name: str, text: str) -> bool:
     return text != f"Error executing tool {tool_name}"
 
 
+_UNKNOWN_OUTCOME_SPEECH = (
+    "I lost track of whether the last step here actually reached the house, "
+    "so I've marked it failed instead of trying it again."
+)
+
+
+def _recovered_call_service_outcome() -> StepOutcome:
+    """CR-01's code-review fix: a `call_service` step reclaimed from a
+    stale `claimed` row (`db/postgres.py`'s recovery-claim query) is never
+    handed to `tool_host.call_tool` a second time -- the whole point of
+    this outcome is that the prior attempt's own result is unknown, not
+    that it failed, and repeating the call is exactly the double-
+    execution T-05-01 exists to name (this project's own prior incident:
+    a single gesture cutting power to Home Assistant, Frigate, and the
+    recognizer together). `failed`, `retry=False`, and a `result_detail`/
+    `speech` that say plainly that the outcome is unknown rather than
+    reporting a false failure or a false success."""
+    return StepOutcome(
+        status="failed",
+        detail={
+            "reason": (
+                "recovered after an interrupted attempt; whether this call reached "
+                "Home Assistant is unknown, so it was not repeated"
+            ),
+            "recovered": True,
+        },
+        speech=_UNKNOWN_OUTCOME_SPEECH,
+        retry=False,
+    )
+
+
 async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> StepOutcome:
     """Calls `ha_call_service` through `tool_host` -- the same tool the
     live turn path calls, via the same `McpToolHostLookup` (D-13). An
@@ -291,9 +322,28 @@ async def execute_step(
     only cares about the kind's own outcome) skips both without raising,
     except that a claimed `speak`-kind step with no `speak` callable at
     all is a wiring bug, not a quiet no-op -- see `_execute_speak`.
+
+    `step.recovered` (`getattr(step, "recovered", False)`, CR-01's
+    code-review fix) is `True` only when `db/postgres.py` reclaimed this
+    step from a stale `claimed` row a prior attempt never reached a
+    terminal write for -- read via `getattr` rather than a required
+    parameter of this function precisely so every other caller of
+    `execute_step` (most of them tests with no crash-recovery concept to
+    express) needs no change: a `WorkflowStepRow` built directly, or a
+    `FakeWorkflowRepository`'s own step view, simply has no such
+    attribute and is treated as a fresh, non-recovered claim. A
+    recovered `call_service` step never repeats its own `tool_host.
+    call_tool` -- see `_recovered_call_service_outcome`. `wait` and
+    `speak` are unaffected: re-running either is safe (T-05-01 only ever
+    named `call_service`'s own repetition as the double-execution risk).
     """
+    recovered = getattr(step, "recovered", False)
     if step.kind == "call_service":
-        outcome = await _execute_call_service(step, tool_host)
+        outcome = (
+            _recovered_call_service_outcome()
+            if recovered
+            else await _execute_call_service(step, tool_host)
+        )
     elif step.kind == "wait":
         outcome = await _execute_wait()
     elif step.kind == "speak":

@@ -345,6 +345,7 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
             sessionmaker,
             max_attempts=config.workflow.max_attempts,
             retry_backoff_s=config.workflow.retry_backoff_s,
+            claim_recovery_after_s=config.workflow.claim_recovery_after_s,
         ),
     }
 
