@@ -421,6 +421,11 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
         # in plan 03-07.
         "setup_repo": conftest.FakeSetupRepository(),
         "settings_repo": conftest.FakeSettingsRepository(),
+        # Plan 04-05: `lifespan` now also reads macros from a repository
+        # (`macro_repo`) rather than from `config.macros` -- omitting it
+        # here would `KeyError` on every boot this fake drives, the same
+        # reasoning `credential_repo`/`settings_repo` were added for above.
+        "macro_repo": conftest.FakeMacroRepository(),
     }
 
 
@@ -945,6 +950,7 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
             "credential_repo": conftest.FakeCredentialRepository(),
             "setup_repo": conftest.FakeSetupRepository(),
             "settings_repo": conftest.FakeSettingsRepository(),
+            "macro_repo": conftest.FakeMacroRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
