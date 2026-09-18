@@ -324,13 +324,7 @@ export function MacroEditorRoute() {
               <Label htmlFor="macro-reply">Reply</Label>
               {precache === "cached" ? <Badge variant="secondary">Reply cached · ready</Badge> : null}
             </div>
-            <Input
-              id="macro-reply"
-              required
-              className="scroll-field"
-              value={reply}
-              onChange={(event) => setReply(event.target.value)}
-            />
+            <Input id="macro-reply" className="scroll-field" required value={reply} onChange={(event) => setReply(event.target.value)} />
             {blankReply ? <p className="text-body text-destructive">{BLANK_REPLY_SAVE_BLOCKED_REASON}</p> : null}
             {precache === "failed" ? (
               <div className="flex flex-col gap-2">
