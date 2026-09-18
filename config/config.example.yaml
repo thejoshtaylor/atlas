@@ -21,6 +21,51 @@ server:
   # admin surface exposes this same key once the webapp exists to hold it.
   transport: websocket
 
+database:
+  # Phase 3 (D-01): the database is authoritative for everything an operator
+  # edits -- the safety policy, provider credentials, accounts and invites.
+  # This section is the bootstrap seam: where the database is, before any of
+  # that can be read. The runtime, asynchronous connection string --
+  # postgresql+asyncpg://... -- built once in app.py's lifespan and reused
+  # for the life of the process, never per-request (D-02).
+  url: "${DATABASE_URL}"
+
+  # Alembic's own connection is derived from url above by driver swap
+  # (+asyncpg -> +psycopg), so the two strings cannot drift apart across a
+  # deployment. Uncomment and set only if migrations must run through a
+  # different user or host than the runtime connection uses.
+  # migration_url: "postgresql+psycopg://..."
+
+  # Run pending migrations at every startup, before the application serves
+  # a single request (D-02, DEP-04: "an upgrade keeps existing data"). This
+  # is the same "refusal beats starting half-configured" instinct app.py's
+  # calibration gate already applies, extended to the schema itself.
+  run_migrations_at_startup: true
+
+security:
+  # Phase 3 (D-05): an HttpOnly, SameSite=Lax cookie holding a short-lived
+  # JWT, plus a longer-lived opaque refresh token stored server-side in
+  # Postgres. The signing/encryption key itself is never written here --
+  # it comes from the environment (SPIRE_SECRET_KEY below), read only at
+  # the point of use, and a missing key is a startup error naming the
+  # variable, never a silently generated one (PROV-04).
+  secret_key_env: "SPIRE_SECRET_KEY"
+
+  # 15 minutes. Live: a stolen access token this short-lived limits its own
+  # blast radius without forcing a re-login every few minutes.
+  access_token_ttl_s: 900
+
+  # 14 days. Needs a restart of the session (a fresh login) once it expires;
+  # rotated on each use in between.
+  refresh_token_ttl_s: 1209600
+
+  cookie_name: "spire_session"
+
+  # true in any real deployment served over HTTPS. false here because the
+  # example config targets a plain-HTTP dev harness (Phase 1's own posture);
+  # a stranger following the deployment docs sets this true alongside TLS.
+  cookie_secure: false
+
 camera:
   # The audio source. Read straight from the camera over RTSP rather than from
   # go2rtc: go2rtc republishes video fine, but consuming the microphone from its

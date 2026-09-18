@@ -121,6 +121,13 @@ def _write_fake_config(tmp_path: Path, *, extra: dict | None = None) -> Path:
             },
         },
         "safety": {},
+        # Plan 03-01: database.url has no default (D-01/D-02) -- a real
+        # boot never reaches this far without one, and this smoke test's
+        # `lifespan` run is no exception. Never actually connected here:
+        # nothing in `lifespan` opens the engine yet, so a syntactically
+        # valid, unreachable connection string is all `Config.from_config`
+        # needs to build without raising.
+        "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
     }
     raw.update(extra or {})
     path = tmp_path / "smoke-config.yaml"

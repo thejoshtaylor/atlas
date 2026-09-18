@@ -486,6 +486,138 @@ class CalibrationConfig:
         )
 
 
+_ASYNC_DB_SCHEME = "postgresql+asyncpg://"
+_SYNC_DB_SCHEME = "postgresql+psycopg://"
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    """The `database:` block: where Postgres is, for both the runtime async
+    engine and Alembic's separate synchronous migration connection (D-02).
+
+    `url` is the runtime, asynchronous connection string --
+    `postgresql+asyncpg://...` -- built once in `app.py`'s `lifespan` and
+    reused for the life of the process, never per-request (D-02).
+    `migration_url` derives from it by driver swap: the same host,
+    credentials, and database name, with `+asyncpg` replaced by `+psycopg`.
+    Deriving by default is what keeps the two connection strings from
+    drifting apart across a deployment -- an operator who edits one and
+    forgets the other is exactly the mistake this derivation prevents by
+    construction. `migration_url_override` exists because an operator may
+    route migrations through a different user or host than the runtime
+    connection uses; when set, it wins outright rather than being merged
+    with the derived value.
+    """
+
+    url: str = ""
+    run_migrations_at_startup: bool = True
+    migration_url_override: str | None = None
+
+    @property
+    def migration_url(self) -> str:
+        """The synchronous `psycopg` connection string Alembic uses.
+
+        Returns `migration_url_override` unchanged when the operator set
+        one; otherwise derives it from `url` by swapping the driver only --
+        host, credentials, and database name are untouched.
+        """
+        if self.migration_url_override:
+            return self.migration_url_override
+        return _SYNC_DB_SCHEME + self.url[len(_ASYNC_DB_SCHEME) :]
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "DatabaseConfig":
+        raw = raw or {}
+        url = raw.get("url", "")
+        if not url:
+            raise ConfigError(
+                "database.url is missing -- set it to a "
+                f"{_ASYNC_DB_SCHEME!r} connection string (see config.example.yaml)"
+            )
+        if not url.startswith(_ASYNC_DB_SCHEME):
+            raise ConfigError(
+                f"database.url must start with {_ASYNC_DB_SCHEME!r}, got {url!r} -- "
+                "a synchronous URL handed to create_async_engine fails deep "
+                "inside SQLAlchemy with a message that does not name this key"
+            )
+        return cls(
+            url=url,
+            run_migrations_at_startup=raw.get(
+                "run_migrations_at_startup", cls.run_migrations_at_startup
+            ),
+            migration_url_override=raw.get("migration_url") or None,
+        )
+
+
+@dataclass(frozen=True)
+class SecurityConfig:
+    """The `security:` block: cookie shape and token lifetimes for D-05's
+    auth scheme (an HttpOnly, `SameSite=Lax` cookie holding a short-lived
+    JWT, plus a longer-lived opaque refresh token stored server-side).
+
+    Carries no secret. `read_secret_key` below reads the actual key from the
+    environment at the point of use rather than storing it on this frozen
+    dataclass -- see that function's docstring for why.
+    """
+
+    secret_key_env: str = "SPIRE_SECRET_KEY"
+    access_token_ttl_s: int = 900
+    refresh_token_ttl_s: int = 1209600
+    cookie_name: str = "spire_session"
+    cookie_secure: bool = False
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "SecurityConfig":
+        raw = raw or {}
+        access_token_ttl_s = raw.get("access_token_ttl_s", cls.access_token_ttl_s)
+        if access_token_ttl_s <= 0:
+            raise ConfigError(
+                f"security.access_token_ttl_s must be positive, got {access_token_ttl_s!r}"
+            )
+        refresh_token_ttl_s = raw.get("refresh_token_ttl_s", cls.refresh_token_ttl_s)
+        if refresh_token_ttl_s <= 0:
+            raise ConfigError(
+                f"security.refresh_token_ttl_s must be positive, got {refresh_token_ttl_s!r}"
+            )
+        if access_token_ttl_s >= refresh_token_ttl_s:
+            raise ConfigError(
+                f"security.access_token_ttl_s ({access_token_ttl_s!r}) must be shorter "
+                f"than security.refresh_token_ttl_s ({refresh_token_ttl_s!r}) -- an "
+                "access token outliving its refresh token is a configuration nobody means"
+            )
+        return cls(
+            secret_key_env=raw.get("secret_key_env", cls.secret_key_env),
+            access_token_ttl_s=access_token_ttl_s,
+            refresh_token_ttl_s=refresh_token_ttl_s,
+            cookie_name=raw.get("cookie_name", cls.cookie_name),
+            cookie_secure=raw.get("cookie_secure", cls.cookie_secure),
+        )
+
+
+def read_secret_key(security: SecurityConfig) -> str:
+    """Read the credential-encryption/JWT-signing key from the environment,
+    by the name `security.secret_key_env` gives.
+
+    Reading it through a function rather than storing it on `SecurityConfig`
+    is deliberate: `Config` is logged and repr'd in places this module does
+    not control (an uncaught exception's traceback, a debug log line), and a
+    secret that never lands on a frozen dataclass field cannot leak that
+    way. Raises `ConfigError` naming the variable when it is absent or
+    blank, never generating an ephemeral key -- an encryption key that
+    changes on every restart would make every previously-encrypted
+    credential permanently unreadable (PROV-04).
+    """
+    value = os.environ.get(security.secret_key_env, "")
+    if not value:
+        raise ConfigError(
+            f"{security.secret_key_env} is not set -- generate one with "
+            '`.venv/bin/python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"` and set it in the '
+            "environment before startup"
+        )
+    return value
+
+
 def _validate_and_normalize_override(cls: type, raw_override: dict, label: str) -> dict:
     """Validate `raw_override`'s keys against `cls`'s own fields, coercing a
     list into a tuple for any field whose global default is a tuple, and
@@ -987,6 +1119,8 @@ class Config:
     calibration: CalibrationConfig
     mcp_servers: dict[str, McpServerConfig]
     policy: Policy
+    database: DatabaseConfig
+    security: SecurityConfig
     # A tuple, not a dict: `macros:` is a list in the config file and there is
     # no natural name key the way `mcp.servers` has one.
     macros: tuple[MacroConfig, ...] = ()
@@ -1021,6 +1155,8 @@ class Config:
                 for name, server_raw in mcp_servers_raw.items()
             },
             policy=Policy.from_config(raw.get("safety")),
+            database=DatabaseConfig.from_config(raw.get("database")),
+            security=SecurityConfig.from_config(raw.get("security")),
             macros=macros,
             raw_safety=raw.get("safety"),
         )

@@ -33,6 +33,25 @@ dependencies = [
     # the resolved version, recorded the way 01.1-01-SUMMARY.md recorded
     # jiter's cross-package pin conflict.
     "numpy",
+    # Human-approved 2026-09-17 after RESEARCH.md's Package Legitimacy Audit
+    # returned [SUS] for most of these seven (unknown-downloads/too-new/
+    # no-repository metadata gaps, not a content red flag) -- operator
+    # confirmed each PyPI project page and its source repository before this
+    # install ran (03-01-PLAN.md Task 1, gate="blocking-human", never
+    # auto-approved). Versions re-verified against `pip index versions` this
+    # session (2026-09-17); all seven matched RESEARCH.md exactly, no drift.
+    # PyJWT and cryptography were already present transitively (via mcp) and
+    # are promoted to direct pins here so the PyJWT>=2.13 floor -- five
+    # advisories including CVE-2026-48526, where a public JWK could be
+    # accepted as an HMAC secret -- is enforced by this file rather than held
+    # accidentally by whatever the mcp SDK happens to require.
+    "sqlalchemy>=2.0,<2.1",
+    "asyncpg>=0.31,<0.32",
+    "psycopg[binary]>=3.3,<4",
+    "alembic>=1.20,<2",
+    "PyJWT>=2.13,<3",
+    "pwdlib[argon2]>=0.3,<0.4",
+    "cryptography>=50,<51",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +64,6 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src", "mcp"]
+markers = [
+    "integration: needs a reachable Postgres",
+]

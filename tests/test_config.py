@@ -59,6 +59,7 @@ def _minimal_raw_config() -> dict:
             },
         },
         "safety": {},
+        "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
     }
 
 
@@ -370,6 +371,12 @@ def test_example_config_loads_end_to_end(monkeypatch):
         "HA_TOKEN",
     ):
         monkeypatch.setenv(name, "test-value")
+    # database.url must be a valid postgresql+asyncpg:// string --
+    # DatabaseConfig.from_config validates the scheme eagerly, unlike the
+    # plain passthrough values above.
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    )
 
     config = load_config("config/config.example.yaml")
 
@@ -413,6 +420,17 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # drifting apart on this specific key is the failure this line prevents.
     assert config.calibration.dir == "/data/calibration"
     assert config.calibration.route_enabled is False
+
+    # Plan 03-01's gap closure: the bootstrap seam (D-01) loads, and its
+    # derived migration URL swaps the driver without touching host,
+    # credentials, or database name.
+    assert config.database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    assert config.database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+    assert config.database.run_migrations_at_startup is True
+    assert config.security.secret_key_env == "SPIRE_SECRET_KEY"
+    assert config.security.access_token_ttl_s == 900
+    assert config.security.refresh_token_ttl_s == 1209600
+    assert config.security.cookie_secure is False
 
 
 # --- Task 3: one rejection test per Phase 2 configuration path ---
@@ -666,3 +684,92 @@ def test_barge_in_config_correlation_enabled_survives_a_per_source_override_roun
     resolved = config.resolve("camera")
     assert resolved.enabled is False
     assert resolved.correlation_enabled is True
+
+
+# --- Plan 03-01: DatabaseConfig, SecurityConfig, read_secret_key (D-01, D-02, D-07) ---
+
+
+def test_database_config_derives_migration_url_from_the_runtime_url():
+    from spire_voice.config import DatabaseConfig
+
+    database = DatabaseConfig.from_config(
+        {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"}
+    )
+    assert database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    assert database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+    assert database.run_migrations_at_startup is True
+
+
+def test_database_config_rejects_a_synchronous_scheme():
+    from spire_voice.config import ConfigError, DatabaseConfig
+
+    with pytest.raises(ConfigError) as exc:
+        DatabaseConfig.from_config(
+            {"url": "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"}
+        )
+    assert "database.url" in str(exc.value)
+
+
+def test_database_config_rejects_a_missing_url():
+    from spire_voice.config import ConfigError, DatabaseConfig
+
+    with pytest.raises(ConfigError) as exc:
+        DatabaseConfig.from_config({})
+    assert "database.url" in str(exc.value)
+
+
+def test_database_config_explicit_migration_url_overrides_the_derived_one():
+    from spire_voice.config import DatabaseConfig
+
+    database = DatabaseConfig.from_config(
+        {
+            "url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire",
+            "migration_url": "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/spire",
+        }
+    )
+    assert database.migration_url == (
+        "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/spire"
+    )
+
+
+def test_read_secret_key_raises_a_named_config_error_when_absent(monkeypatch):
+    from spire_voice.config import ConfigError, SecurityConfig, read_secret_key
+
+    monkeypatch.delenv("SPIRE_SECRET_KEY", raising=False)
+    security = SecurityConfig.from_config(None)
+    with pytest.raises(ConfigError) as exc:
+        read_secret_key(security)
+    assert "SPIRE_SECRET_KEY" in str(exc.value)
+
+
+def test_read_secret_key_returns_the_environment_value_when_present(monkeypatch):
+    from spire_voice.config import SecurityConfig, read_secret_key
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-value")
+    security = SecurityConfig.from_config(None)
+    assert read_secret_key(security) == "test-value"
+
+
+def test_security_config_rejects_an_access_lifetime_that_does_not_outlive_a_shorter_refresh():
+    from spire_voice.config import ConfigError, SecurityConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SecurityConfig.from_config({"access_token_ttl_s": 1000, "refresh_token_ttl_s": 900})
+    assert "access_token_ttl_s" in str(exc.value)
+    assert "refresh_token_ttl_s" in str(exc.value)
+
+    # Equal is also rejected -- an access token that never actually outlives
+    # its own refresh token is the same nobody-means-this configuration.
+    with pytest.raises(ConfigError):
+        SecurityConfig.from_config({"access_token_ttl_s": 900, "refresh_token_ttl_s": 900})
+
+
+def test_security_config_defaults():
+    from spire_voice.config import SecurityConfig
+
+    security = SecurityConfig.from_config(None)
+    assert security.secret_key_env == "SPIRE_SECRET_KEY"
+    assert security.access_token_ttl_s == 900
+    assert security.refresh_token_ttl_s == 1209600
+    assert security.cookie_name == "spire_session"
+    assert security.cookie_secure is False

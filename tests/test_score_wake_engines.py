@@ -384,6 +384,13 @@ _CONFIG_ENV_VARS = ("XAI_API_KEY", "TAPO_USER", "TAPO_PASSWORD", "SPEAKER_ENSURE
 def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _CONFIG_ENV_VARS:
         monkeypatch.setenv(name, "test-value")
+    # Plan 03-01: database.url must be a valid postgresql+asyncpg:// string
+    # -- DatabaseConfig.from_config validates the scheme eagerly, unlike the
+    # plain passthrough values above, so it cannot share the "test-value"
+    # placeholder the other six use.
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    )
 
 
 def _engine_report(
