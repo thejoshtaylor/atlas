@@ -474,7 +474,19 @@ async def cancel_workflow(
         # "already terminal" in its own return value (both are `False`) --
         # the `existing is None` check above already ruled out "no such
         # run," so a `False` reaching here can only mean "already terminal."
-        raise _workflow_already_terminal_error(run_id, existing.status)
+        #
+        # WR-02 (code review): the status named in the 409 body is read
+        # again here, not taken from `existing` above -- `existing` was
+        # read before `cancel_run` ran, unlocked and uncoordinated with
+        # the poller, so the run's real status can have moved on again
+        # (e.g. from `firing` to `completed`) in the window between that
+        # read and this one. `cancel_run` itself is unaffected by this
+        # fix -- its own atomic `UPDATE ... WHERE status = 'pending'` was
+        # already correct; only this error message's own snapshot was
+        # stale.
+        current = await workflow_repo.get_run(run_id)
+        status = current.status if current is not None else existing.status
+        raise _workflow_already_terminal_error(run_id, status)
 
     updated = await workflow_repo.get_run(run_id)
     assert updated is not None  # cancel_run just returned True for this id

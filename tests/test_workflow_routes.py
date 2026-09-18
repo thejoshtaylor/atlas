@@ -810,6 +810,55 @@ async def test_cancelling_an_unknown_run_and_cancelling_it_twice_answer_differen
     assert second.status_code != not_found.status_code
 
 
+async def test_cancelling_a_run_that_moved_on_between_the_pre_read_and_the_cancel_names_the_current_status(
+    monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    """WR-02 (code review): the 409 body must name the run's status at the
+    moment the response is composed, not a snapshot read before
+    `cancel_run` ran. Simulated here by a `cancel_run` stand-in that moves
+    the run to a *different* terminal status than the one `existing`
+    (read before this call) saw -- exactly what a concurrent poller
+    finishing the run between those two reads would do."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+
+    base_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    run = await workflow_repo.create_run(
+        origin="webapp",
+        summary="races the poller",
+        steps=[WorkflowStepSpec(kind="wait", arguments={"duration_s": 5})],
+        base_time=base_time,
+        created_by_user_id=1,
+    )
+    # The pre-read `cancel_workflow` does before ever calling `cancel_run`
+    # will see this run as "firing".
+    workflow_repo._runs[run.id]["status"] = "firing"  # type: ignore[attr-defined]
+
+    async def _cancel_run_that_races_a_concurrent_poller(run_id, *, now, cancelled_by_user_id):
+        # By the time this (stand-in for `cancel_run`'s own atomic check)
+        # runs, a concurrent poller has already moved the run all the way
+        # to "completed" -- a status `existing` (read earlier, above)
+        # never saw.
+        workflow_repo._runs[run_id]["status"] = "completed"  # type: ignore[attr-defined]
+        return False
+
+    workflow_repo.cancel_run = _cancel_run_that_races_a_concurrent_poller
+
+    operator = await _create_user(account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(security, account_repo, workflow_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(f"/api/workflows/{run.id}/cancel")
+
+    assert response.status_code == 409
+    assert "completed" in response.json()["detail"]
+    assert "firing" not in response.json()["detail"]
+
+
 # --- Task 3: a speak step's words, prepared while someone is still there --
 
 
