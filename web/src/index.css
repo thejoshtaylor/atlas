@@ -1,0 +1,128 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* ---------------------------------------------------------------------
+ * Design tokens -- 03-UI-SPEC.md's Design System, Spacing Scale,
+ * Typography, and Color sections translated into the theme, not left as
+ * prose a later screen re-reads.
+ *
+ * shadcn's structural variable names (--background, --primary, --border,
+ * --radius, ...) are kept -- every generated component in
+ * src/components/ui/ references them by name -- but their VALUES below
+ * are 03-UI-SPEC.md's exact roles, not shadcn's generic neutral palette:
+ *   - Dominant  (60%) -> --background
+ *   - Secondary (30%) -> --secondary / --card / --muted
+ *   - Accent    (10%) -> --primary and --ring (primary CTAs, the active
+ *     nav item, the focused input ring/border, links -- and nothing
+ *     else; shadcn's own --accent token, used only for hover-state
+ *     backgrounds inside components, stays neutral so this reservation
+ *     holds)
+ *   - Destructive      -> --destructive
+ *   - Denied-state badge (the deliberately-distinct 5th role) has no
+ *     shadcn equivalent and gets its own --denied-bg/--denied-fg pair.
+ * ------------------------------------------------------------------- */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-denied-bg: var(--denied-bg);
+  --color-denied-fg: var(--denied-fg);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* Typography -- exactly 4 sizes, exactly 2 weights (400, 600). */
+  --font-size-label: 0.875rem; /* 14px */
+  --font-size-label--line-height: 1.5;
+  --font-size-body: 1rem; /* 16px */
+  --font-size-body--line-height: 1.5;
+  --font-size-heading: 1.25rem; /* 20px */
+  --font-size-heading--line-height: 1.2;
+  --font-size-display: 1.75rem; /* 28px */
+  --font-size-display--line-height: 1.2;
+}
+
+:root {
+  /* Dominant (60%): page background, wizard canvas. */
+  --background: #ffffff;
+  --foreground: oklch(0.145 0 0);
+
+  /* Secondary (30%): cards, top nav/sidebar, every card-list row. */
+  --card: #f1f5f9;
+  --card-foreground: oklch(0.145 0 0);
+  --secondary: #f1f5f9;
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: #f1f5f9;
+  --muted-foreground: oklch(0.556 0 0);
+
+  --popover: #ffffff;
+  --popover-foreground: oklch(0.145 0 0);
+
+  /* Accent (10%): primary CTAs, the active nav item, the focused input
+   * ring/border, and links. Nothing else uses this color. */
+  --primary: #4f46e5;
+  --primary-foreground: #ffffff;
+  --ring: #4f46e5;
+
+  /* shadcn's own --accent token: hover-state backgrounds inside
+   * components only (ghost button hover, menu item hover, ...) -- kept
+   * neutral so it is never confused with 03-UI-SPEC.md's "Accent" role
+   * above. */
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+
+  /* Destructive: the three confirm-button cases 03-UI-SPEC.md's Color
+   * section names -- never a merely "undo-able" action. */
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+
+  /* Denied-state badge (5th, custom): deliberately distinct from
+   * Destructive red -- a normal, legible, safe state, not a warning. */
+  --denied-bg: #fef3c7;
+  --denied-fg: #92400e;
+
+  /* Exceptions: 03-UI-SPEC.md's Spacing Scale exception paragraph --
+   * every button, icon-only control, and denylist/allowlist row action
+   * gets a 44px minimum touch target even where the visual element is
+   * smaller (WEB-08, verified at 375px). */
+  --radius: 0.5rem;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font: var(--font-size-body) / var(--font-size-body--line-height) system-ui,
+    "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+}
+
+/* The 44px minimum touch target as a reusable class (03-UI-SPEC.md's
+ * Spacing Scale exception) -- every interactive control that isn't
+ * already sized via the Button primitive's own size variants composes
+ * this rather than reimplementing it per screen. 2.75rem = 44px. */
+@utility touch-target {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
