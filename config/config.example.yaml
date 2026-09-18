@@ -23,6 +23,17 @@
 # write (unlike the safety policy, where the same write respawns the
 # enforcing child). See spire_voice/crypto/credentials.py for the one
 # function that makes this decision.
+#
+# Phase 3 (D-01, D-03): the always-listening audio source below (camera:)
+# is joined by the same database-then-config precedence, through the
+# wizard's own settings table -- an operator who chooses a source in the
+# first-run wizard has that choice stored, and the stored value wins the
+# same way a saved credential does; this file's own shipped default
+# ("camera", the only source this phase builds) wins otherwise. Like a
+# credential, a changed audio source needs a restart to take effect: the
+# source is built once, here, in lifespan, and nothing rebuilds it on a
+# later database write. See spire_voice/routes/wizard.py's
+# resolve_audio_source for the one function that makes this decision.
 
 server:
   # Phase 1 has no accounts and no login (WEB-04 adds those in Phase 3), so
