@@ -56,16 +56,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from spire_mcp.safety import Denied, Policy, allow_call, allow_read
+from spire_voice import config as _config_module
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
-from spire_voice.config import ConfigError, _check_macros_do_not_collide
 from spire_voice.db.repository import Macro, MacroAction, MacroRepository
+from spire_voice.providers.tts_cache import precache_all
 from spire_voice.turn.macros import normalize
+
+# The exact wording UI-SPEC's "Error state -- reply not synthesized" row
+# specifies -- named at module level so `_finish_save` below and any test
+# asserting on it read the same string.
+_REPLY_SYNTHESIS_DEGRADED_MESSAGE = (
+    "This reply couldn't be prepared for fast playback. The macro will still "
+    "work, but won't answer instantly until this succeeds."
+)
 
 router = APIRouter(tags=["macros"])
 
@@ -198,8 +208,20 @@ async def _check_no_collision(
         existing = [m for m in existing if m.id != exclude_macro_id]
     candidate = _CandidateMacro(phrase=phrase, aliases=tuple(aliases))
     try:
-        _check_macros_do_not_collide([*existing, candidate])
-    except ConfigError as exc:
+        # Referenced off the module object, not a name bound at this
+        # module's own import time (`from spire_voice.config import
+        # ConfigError`): `tests/test_config.py`'s own
+        # `test_config_and_turn_macros_import_in_either_order` reloads
+        # `spire_voice.config` in place, which replaces `ConfigError` with
+        # a fresh class object in that module's namespace -- a name bound
+        # here before the reload would then no longer `except` what a
+        # post-reload `_check_macros_do_not_collide` raises. Attribute
+        # access on `_config_module` always resolves against whatever is
+        # currently in `sys.modules['spire_voice.config']`, so this stays
+        # correct across a reload the same way `spire_voice.config`'s own
+        # module docstring already documents that test proving.
+        _config_module._check_macros_do_not_collide([*existing, candidate])
+    except _config_module.ConfigError as exc:
         raise _duplicate_phrase_error(str(exc)) from exc
 
 
@@ -366,6 +388,66 @@ async def get_macro(
     return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
 
 
+async def _finish_save(request: Request, macro: Macro) -> MacroResponse:
+    """After a successful create/update commit, make sure `macro.reply` is
+    in the same cache a turn reads from before this route answers (D-12,
+    T-04-33) -- through `precache_all`, the exact function `app.py`'s own
+    startup precache uses, with the same cache directory, voice id, and
+    sink. One synthesis function, not two, per `tts_cache.py`'s own
+    docstring.
+
+    Skipped when `macro.reply` is already in the cache -- this both spares
+    a reorder-only update the cost of a pointless re-synthesis, and is
+    what makes a retry after a prior failure actually retry: a failed
+    synthesis never writes its text into the cache, so the next save for
+    the same text tries again rather than being skipped as unchanged.
+
+    A synthesis failure is not a failed save (D-12, UI-SPEC): the macro
+    row is already committed by the time this runs, so the response
+    reports a degraded state and a message rather than raising -- losing
+    an operator's edit to a text-to-speech hiccup would be the worse
+    failure.
+
+    Nothing here refreshes what the next turn reads: `_current_macros`
+    (`app.py`) is a live, per-turn repository read by construction (plan
+    04-05), so the database write `create_macro`/`update_macro` already
+    performed is the only thing a future turn needs to see this macro --
+    a second refresh step here would do nothing.
+    """
+    filler_cache = getattr(request.app.state, "filler_cache", None)
+    if filler_cache is None:
+        filler_cache = {}
+        request.app.state.filler_cache = filler_cache
+
+    degraded = False
+    message: str | None = None
+    if macro.reply not in filler_cache:
+        config = request.app.state.config
+        try:
+            new_entries = await precache_all(
+                request.app.state.tts,
+                Path(config.tts.cache_dir),
+                [macro.reply],
+                config.tts.voice_id,
+                request.app.state.tts.browser_sink(),
+            )
+            filler_cache.update(new_entries)
+        except Exception:  # noqa: BLE001 -- any synthesis failure degrades, never loses the edit
+            degraded = True
+            message = _REPLY_SYNTHESIS_DEGRADED_MESSAGE
+
+    policy = await _load_policy_or_none(request)
+    known_entity_ids = await _known_entity_ids(request)
+    return _to_macro_response(
+        macro,
+        policy,
+        known_entity_ids,
+        filler_cache,
+        reply_synthesis_degraded=degraded,
+        reply_synthesis_message=message,
+    )
+
+
 @router.post("/api/macros", status_code=201)
 async def create_macro(
     payload: CreateMacroRequest,
@@ -383,10 +465,7 @@ async def create_macro(
         actions=[(action.tool, action.arguments) for action in payload.actions],
         created_by_user_id=user.id,
     )
-    policy = await _load_policy_or_none(request)
-    known_entity_ids = await _known_entity_ids(request)
-    filler_cache = getattr(request.app.state, "filler_cache", None) or {}
-    return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+    return await _finish_save(request, macro)
 
 
 @router.put("/api/macros/{macro_id}")
@@ -414,10 +493,7 @@ async def update_macro(
         reply=payload.reply,
         actions=[(action.tool, action.arguments) for action in payload.actions],
     )
-    policy = await _load_policy_or_none(request)
-    known_entity_ids = await _known_entity_ids(request)
-    filler_cache = getattr(request.app.state, "filler_cache", None) or {}
-    return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+    return await _finish_save(request, macro)
 
 
 @router.delete("/api/macros/{macro_id}", status_code=204)

@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 
 from spire_voice.auth.tokens import issue_access_token
 from spire_voice.config import SecurityConfig
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.routes.macros import router as macros_router
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
@@ -101,6 +102,40 @@ class _RaisingPolicyRepository:
 
     async def load_policy(self):
         raise RuntimeError("simulated policy read failure")
+
+
+class _FakeMacroTts:
+    """A `precache_all`-compatible fake: `browser_sink()` plus a
+    `synthesize(text_deltas, sink=...)` that records the text it was
+    asked to render and either succeeds with scripted bytes or raises."""
+
+    def __init__(self, chunks: tuple[bytes, ...] = (b"synthesized-audio",), fail: bool = False) -> None:
+        self._chunks = chunks
+        self._fail = fail
+        self.synthesized_texts: list[str] = []
+
+    def browser_sink(self) -> SinkFormat:
+        return SinkFormat(codec="pcm", sample_rate=24000)
+
+    async def synthesize(self, text_deltas, sink=None):
+        text = "".join([delta async for delta in text_deltas])
+        self.synthesized_texts.append(text)
+        if self._fail:
+            raise RuntimeError("simulated synthesis failure")
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _NoOpMacroToolHost:
+    """A `tool_host` a fired macro action can call against -- always
+    succeeds, records nothing else. Distinct from the conflict-check
+    `tool_host` `app.state` carries, matching how `fire_macro` takes its
+    own `tool_host` argument in `run_turn`, independent of the route."""
+
+    async def call_tool(self, name: str, arguments: dict):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(isError=False, content=[])
 
 
 def _macro_kwargs(
@@ -645,3 +680,263 @@ def test_every_write_route_rejects_a_viewer(
     )
     assert client.delete(f"/api/macros/{macro_id}").status_code == 403
     assert macro_id in macro_repo.macros, "a viewer's delete attempt must not have landed"
+
+
+# --- Task 3: the save's side effect, awaited, and a synthesis failure ---
+# that does not lose the edit -------------------------------------------
+
+
+def test_creating_a_macro_synthesizes_its_reply_before_returning_and_merges_it_into_the_turn_cache(
+    monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeMacroTts(chunks=(b"good-night-audio",))
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(
+        security,
+        account_repo,
+        macro_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "good night",
+            "aliases": [],
+            "reply": "good night, sleeping now",
+            "actions": [_action_json()],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["reply_synthesis_degraded"] is False
+    assert body["reply_cached"] is True
+    assert tts.synthesized_texts == ["good night, sleeping now"]
+    # The same dict object the app's filler_cache started as -- proves the
+    # merge happened in place, the exact cache a turn reads from.
+    assert filler_cache["good night, sleeping now"] == b"good-night-audio"
+
+
+def test_updating_a_macro_with_an_unchanged_reply_does_not_resynthesize(
+    monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(
+        macros=[_macro_kwargs(phrase="good night", reply="good night, sleeping now")]
+    )
+    policy_repo = fake_policy_repository()
+    tts = _FakeMacroTts()
+    filler_cache: dict = {"good night, sleeping now": b"already-cached-audio"}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(
+        security,
+        account_repo,
+        macro_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    response = client.put(
+        f"/api/macros/{macro_id}",
+        json={
+            "phrase": "good night",
+            "aliases": [],
+            "reply": "good night, sleeping now",  # unchanged
+            "actions": [_action_json(entity_id="switch.example_reordered")],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert tts.synthesized_texts == [], "an unchanged reply must never trigger a re-synthesis call"
+    assert response.json()["reply_cached"] is True
+
+
+def test_a_synthesis_failure_returns_a_degraded_success_and_the_macro_is_still_readable(
+    monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeMacroTts(fail=True)
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(
+        security,
+        account_repo,
+        macro_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "good night",
+            "aliases": [],
+            "reply": "this reply will fail to synthesize",
+            "actions": [_action_json()],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["reply_synthesis_degraded"] is True
+    assert body["reply_synthesis_message"]
+    assert "this reply will fail to synthesize" not in filler_cache
+
+    # The macro is still readable, with its new content -- the failed
+    # synthesis did not lose the operator's edit.
+    macro_id = body["id"]
+    read_back = client.get(f"/api/macros/{macro_id}")
+    assert read_back.status_code == 200
+    assert read_back.json()["reply"] == "this reply will fail to synthesize"
+
+
+async def test_a_macro_saved_through_the_route_matches_on_the_next_turn_with_no_restart(
+    monkeypatch,
+    tmp_path,
+    fake_account_repository,
+    fake_macro_repository,
+    fake_policy_repository,
+    fake_audio_source,
+    fake_stt,
+    fake_brain,
+    fake_tts,
+):
+    """T-04-33's own proof: a macro saved through the route is matched by
+    a real `run_turn` call, in the same test, with no restart in between
+    -- driven from the exact `Macro` the repository now holds and the
+    exact `filler_cache` dict the save route updated in place."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeMacroTts(chunks=(b"good-night-live-audio",))
+    filler_cache: dict = {}
+
+    # `_issue_cookie` calls `asyncio.run(...)`, which cannot run inside
+    # this test's own already-running event loop (this test is `async
+    # def`, unlike its sync siblings above) -- await the repository call
+    # directly instead.
+    operator = await account_repo.create_user(
+        email="operator@example.invalid",
+        display_name="An Operator",
+        password_hash="not-checked-by-this-test",
+        role="operator",
+    )
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(
+        security,
+        account_repo,
+        macro_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "good night",
+            "aliases": [],
+            "reply": "good night, sleeping now",
+            "actions": [_action_json(entity_id="switch.example_lamp")],
+        },
+    )
+    assert response.status_code == 201, response.text
+    macro_id = response.json()["id"]
+
+    # No restart: read the macro straight back through the same live
+    # repository -- exactly what `_current_macros` (`app.py`) would hand
+    # the very next turn.
+    saved_macro = await macro_repo.get_macro(macro_id)
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])  # never called -- a macro hit skips the brain
+    live_tts = fake_tts(chunks=[])  # never called -- the reply is cacheable
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        live_tts,
+        _NoOpMacroToolHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(saved_macro,),
+        filler_cache=app.state.filler_cache,
+    )
+
+    assert timings.turn_outcome == "macro"
+    assert source.sent_audio == [b"good-night-live-audio"]
+    assert len(live_tts.received_text) == 0
+
+
+async def test_deleting_a_macro_removes_it_from_what_the_next_turn_can_match(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
+    policy_repo = fake_policy_repository()
+
+    operator = await account_repo.create_user(
+        email="operator@example.invalid",
+        display_name="An Operator",
+        password_hash="not-checked-by-this-test",
+        role="operator",
+    )
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    response = client.delete(f"/api/macros/{macro_id}")
+    assert response.status_code == 204
+
+    from spire_voice.turn.macros import match
+
+    remaining = await macro_repo.list_macros()
+    assert match(remaining, "good night") is None
