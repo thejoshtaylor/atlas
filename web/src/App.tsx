@@ -5,6 +5,7 @@ import { AppShell } from "@/components/layout/AppShell"
 import { AuthGuard } from "@/components/layout/AuthGuard"
 import { SetupGuard } from "@/components/layout/SetupGuard"
 import { queryClient } from "@/lib/queryClient"
+import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
 import { PlaceholderRoute } from "@/routes/PlaceholderRoute"
 import { SetupRoute } from "@/routes/SetupRoute"
@@ -16,6 +17,11 @@ import { SignInRoute } from "@/routes/SignInRoute"
  * authenticated shell holding the screens later plans fill.
  * `SetupGuard` wraps everything -- the setup-incomplete gate is a
  * product-wide state, not something only authenticated screens can hit.
+ *
+ * `/calibration` (plan 03-06) is not on `AppShell`'s nav -- it is the
+ * component plan 03-10 mounts as one step of the setup wizard, reachable
+ * here by direct URL only so it has a real address to test against
+ * before that wizard exists.
  */
 function AppRoutes() {
   return (
@@ -28,6 +34,7 @@ function AppRoutes() {
           <Route path="/policy" element={<PlaceholderRoute title="Safety policy" />} />
           <Route path="/accounts" element={<PlaceholderRoute title="Accounts" />} />
           <Route path="/settings" element={<PlaceholderRoute title="Settings" />} />
+          <Route path="/calibration" element={<CalibrationRoute />} />
         </Route>
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
