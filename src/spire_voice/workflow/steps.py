@@ -18,6 +18,7 @@ call (05-RESEARCH.md Pitfall 3 and Pitfall 5).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -81,6 +82,27 @@ def _tool_result_payload(result: Any) -> Any:
     return {"text": _result_text(result)}
 
 
+def _transition_refusal(arguments: dict[str, Any]) -> str | None:
+    """The same domain restriction `mcp/spire_mcp/ha.py::handle_call_service`
+    enforces at the process boundary, applied a second time here, before a
+    step authored in the webapp (or by voice) ever reaches that boundary
+    (FLOW-03). Deliberately two layers: the operator finds out immediately
+    a step will never run, and the boundary still refuses on its own if a
+    `transition` value reaches it another way. Returns the refusal text,
+    written to be spoken, or `None` when there is nothing to refuse."""
+    transition = arguments.get("transition")
+    if transition is None:
+        return None
+    domain = arguments.get("domain")
+    if domain != "light":
+        return f"transition is only supported for lights, not {domain}"
+    if isinstance(transition, bool) or not isinstance(transition, (int, float)):
+        return f"transition must be a non-negative number of seconds, got {transition!r}"
+    if not math.isfinite(transition) or transition < 0:
+        return f"transition must be a non-negative number of seconds, got {transition!r}"
+    return None
+
+
 async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> StepOutcome:
     """Calls `ha_call_service` through `tool_host` -- the same tool the
     live turn path calls, via the same `McpToolHostLookup` (D-13). An
@@ -91,7 +113,17 @@ async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> 
     verbatim, never reworded (D-14). A raised exception -- the call itself
     never reached a verdict -- is `failed` with `retry=False` for this
     kind: a service call whose outcome is unknown must not be repeated
-    (PA-D3, T-05-01)."""
+    (PA-D3, T-05-01).
+
+    `_transition_refusal` runs first, before `tool_host.call_tool` is ever
+    awaited: a step that will only ever be refused at the far end of a
+    process boundary is refused here instead, with no request made at all
+    (FLOW-03's second layer)."""
+    refusal = _transition_refusal(step.arguments)
+    if refusal is not None:
+        return StepOutcome(
+            status="denied", detail={"reason": refusal}, speech=refusal, retry=False
+        )
     try:
         result = await tool_host.call_tool("ha_call_service", dict(step.arguments))
     except Exception as exc:

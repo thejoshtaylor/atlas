@@ -22,6 +22,7 @@ model ever rewording it.
 from __future__ import annotations
 
 import json
+import math
 import os
 from typing import Any
 
@@ -83,6 +84,7 @@ async def handle_call_service(
     device_id: str | None = None,
     label_id: str | None = None,
     registry: "HaRegistryClient | None" = None,
+    transition: float | None = None,
 ) -> dict[str, Any]:
     """Run one Home Assistant service call, gated by `allow_call`.
 
@@ -107,17 +109,36 @@ async def handle_call_service(
     one call -- is meaningless if the call that actually runs only touches
     the first one. Posting the list as one call, rather than looping over
     it, is what keeps a refused call from partly succeeding (CMD-07).
+
+    `transition` is Home Assistant's own light-fade parameter (D-06): a
+    light fade posts one service call carrying it, never a ramp of
+    repeated calls built here. It is refused, before any request is
+    built, on any domain but `light` -- what Home Assistant itself does
+    with an unrecognised service-data key on a non-light domain was not
+    confirmed by this phase's research (05-RESEARCH.md Open Question 1),
+    so this project refuses at its own layer regardless of the hub's
+    leniency. A negative or non-finite value is refused the same way: a
+    fade cannot run backwards or forever.
     """
+    if transition is not None:
+        if domain != "light":
+            raise Denied(f"transition is only supported for lights, not {domain}")
+        if not math.isfinite(transition) or transition < 0:
+            raise Denied(f"transition must be a non-negative number of seconds, got {transition!r}")
+
     entity_ids: list[str] = [entity_id] if entity_id else []
     for kind, target_id in zip(_TARGET_KINDS, (area_id, device_id, label_id)):
         if target_id:
             entity_ids.extend(await _resolve_target(registry, kind, target_id))
 
     domain, service, checked_entity_ids = allow_call(policy, domain, service, entity_ids or None)
+    service_data: dict[str, Any] = {"entity_id": checked_entity_ids}
+    if transition is not None:
+        service_data["transition"] = transition
     response = await client.post(
         f"{base_url}/api/services/{domain}/{service}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"entity_id": checked_entity_ids},
+        json=service_data,
     )
     if response.status_code // 100 != 2:
         # A non-2xx response is surfaced as an error result, never an empty
@@ -237,6 +258,7 @@ async def ha_call_service(
     area_id: str | None = None,
     device_id: str | None = None,
     label_id: str | None = None,
+    transition: float | None = None,
 ) -> dict[str, Any]:
     """Run one Home Assistant service call against an allowed entity.
 
@@ -248,6 +270,11 @@ async def ha_call_service(
     not know, a target that resolves to nothing, or a registry this
     process could not reach right now is refused by name, never guessed
     at.
+
+    `transition` is a fade duration in seconds, supported only by lights
+    (`light.turn_on`/`light.turn_off`/`light.toggle`). Given on any other
+    domain, or a negative value, this call is refused before Home
+    Assistant is ever reached.
 
     `Denied` is caught here and re-raised as `ToolError(exc.reason)` --
     `safety.py` stays a plain `Exception`, importing nothing from the `mcp`
@@ -283,6 +310,7 @@ async def ha_call_service(
             device_id=device_id,
             label_id=label_id,
             registry=_registry_client,
+            transition=transition,
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc
@@ -312,7 +340,13 @@ def _startup() -> None:
     global _http_client, _base_url, _token, _registry_client
     _base_url = os.environ["HA_URL"]
     _token = os.environ["HA_TOKEN"]
-    _http_client = httpx.AsyncClient()
+    # Explicit, not relying on httpx's own default (5.0s on every axis --
+    # already bounded, but this project states its own outbound bound
+    # rather than depending on a library default an upgrade could change
+    # silently). The poller (plan 05-01) holds a claimed step row's lock
+    # for the duration of this call (05-RESEARCH.md Assumption A3,
+    # Pitfall 3) -- an unbounded client here is a wedged step there.
+    _http_client = httpx.AsyncClient(timeout=10.0)
     # The registry client authenticates with this same `_token` -- no
     # second credential, no environment variable of its own (SAFE-09). It
     # opens no connection here; `HaRegistryClient.get_snapshot()` fetches

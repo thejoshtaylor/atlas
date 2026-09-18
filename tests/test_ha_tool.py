@@ -93,6 +93,87 @@ async def test_unresolved_area_target_is_refused(fake_ha):
     assert len(fake_ha.requests) == 0
 
 
+# FLOW-03 (plan 05-03): `transition` is new plumbing through this function's
+# own POST body, not a parameter that merely goes unused today. Asserted on
+# the recorded request body, not the return value -- what matters is what
+# Home Assistant actually received.
+
+
+async def test_transition_reaches_the_request_body_on_a_light_call(fake_ha):
+    policy = Policy.from_config(None)
+
+    await handle_call_service(
+        policy,
+        fake_ha.client,
+        "http://ha.invalid",
+        "test-token",
+        "light",
+        "turn_on",
+        "light.example_lamp",
+        transition=5.0,
+    )
+
+    assert len(fake_ha.requests) == 1
+    body = json.loads(fake_ha.requests[0].read())
+    assert body["transition"] == 5.0
+    assert body["entity_id"] == ["light.example_lamp"]
+
+
+async def test_no_transition_given_leaves_the_request_body_unchanged(fake_ha):
+    policy = Policy.from_config(None)
+
+    await handle_call_service(
+        policy,
+        fake_ha.client,
+        "http://ha.invalid",
+        "test-token",
+        "light",
+        "turn_on",
+        "light.example_lamp",
+    )
+
+    assert len(fake_ha.requests) == 1
+    body = json.loads(fake_ha.requests[0].read())
+    assert body == {"entity_id": ["light.example_lamp"]}
+    assert "transition" not in body
+
+
+async def test_transition_on_a_non_light_domain_is_refused_before_any_request(fake_ha):
+    policy = Policy.from_config(None)
+
+    with pytest.raises(Denied):
+        await handle_call_service(
+            policy,
+            fake_ha.client,
+            "http://ha.invalid",
+            "test-token",
+            "switch",
+            "turn_on",
+            "switch.example_fan",
+            transition=5.0,
+        )
+
+    assert len(fake_ha.requests) == 0
+
+
+async def test_negative_transition_is_refused_before_any_request(fake_ha):
+    policy = Policy.from_config(None)
+
+    with pytest.raises(Denied):
+        await handle_call_service(
+            policy,
+            fake_ha.client,
+            "http://ha.invalid",
+            "test-token",
+            "light",
+            "turn_on",
+            "light.example_lamp",
+            transition=-1.0,
+        )
+
+    assert len(fake_ha.requests) == 0
+
+
 # SAFE-09: plan 03-04 gives the child a second protocol to Home Assistant
 # (mcp/spire_mcp/registry.py's WebSocket connection). The child must hold
 # the same one credential it held before -- HA_TOKEN -- and nothing this
