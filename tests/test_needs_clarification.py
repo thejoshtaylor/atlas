@@ -268,3 +268,67 @@ async def test_a_needs_clarification_question_prefers_friendly_names_from_inject
     assert "the desk lamp" in spoken
     assert "light.example_lamp" not in spoken
     assert "light.example_desk_lamp" not in spoken
+
+
+# --- Plan 05-05 Task 3: a pending run is a new candidate type, not a new ---
+# --- mechanism (D-10) -- same envelope, same validators, unchanged.     ---
+
+
+def test_a_reply_asking_which_run_with_two_run_summaries_validates():
+    reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("turn off the porch light", "start the coffee maker"),
+    )
+    assert reply.needs_clarification is True
+    assert reply.candidates == ("turn off the porch light", "start the coffee maker")
+
+
+def test_needs_clarification_with_exactly_one_run_summary_raises():
+    """The same at-least-two rule applies unchanged, whether the
+    candidates are entity ids or run summaries (D-10): a single candidate
+    is a guess wearing a question's clothes either way."""
+    with pytest.raises(ValidationError):
+        TierReply(
+            answer="",
+            confident=False,
+            needs_tool=False,
+            filler=FillerPhrase.LET_ME_CHECK,
+            needs_clarification=True,
+            candidates=("turn off the porch light",),
+        )
+
+
+def test_a_run_disambiguation_reply_cannot_also_claim_needs_tool():
+    """The assistant cannot ask which run was meant and cancel or extend
+    one in the same breath (D-10): the same exclusivity validator that
+    already forbids asking-and-acting for an entity forbids it for a run,
+    unchanged."""
+    with pytest.raises(ValidationError):
+        TierReply(
+            answer="",
+            confident=False,
+            needs_tool=True,
+            filler=FillerPhrase.LET_ME_CHECK,
+            needs_clarification=True,
+            candidates=("turn off the porch light", "start the coffee maker"),
+        )
+
+
+def test_compose_clarifying_question_over_two_run_summaries_names_both_in_order():
+    """`_compose_clarifying_question` already speaks a candidate verbatim
+    when no friendly name is known for it -- a run summary has no entry in
+    `friendly_names` (that mapping is built from entity state, never from
+    workflow runs), so this is the existing fallback path, not new
+    behavior."""
+    from spire_voice.turn.controller import _compose_clarifying_question
+
+    candidates = ("turn off the porch light", "start the coffee maker")
+    question = _compose_clarifying_question(candidates, {})
+
+    assert "turn off the porch light" in question
+    assert "start the coffee maker" in question
+    assert question.index("turn off the porch light") < question.index("start the coffee maker")

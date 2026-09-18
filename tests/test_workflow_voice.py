@@ -493,3 +493,137 @@ async def test_a_macro_turn_cancels_a_started_pending_runs_fetch_without_leaving
 
     assert timings.turn_outcome == "macro"
     assert cancelled == [True]
+
+
+# ---------------------------------------------------------------------------
+# Task 3: asking which run, end to end (FLOW-06, D-10) -- the same
+# needs_clarification envelope Phase 4 built for entities, unchanged, with
+# a pending run's own summary as the candidate instead of an entity id.
+# ---------------------------------------------------------------------------
+
+
+async def test_two_pending_runs_matching_the_words_are_disambiguated_with_zero_tool_calls(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    class _RecordingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    class _NeverFinishesBrain:
+        """The top tier's tool round never returns before the race is
+        already won -- proof the clarifying reply pre-empts it rather
+        than racing it to a tool call, the identical shape Phase 4's own
+        entity-disambiguation test already establishes."""
+
+        async def chat(self, messages, tools=None):
+            await asyncio.sleep(10)
+            raise AssertionError("should have been cancelled before this line")  # pragma: no cover
+
+    run_summary_a = "turn off the porch light"
+    run_summary_b = "start the coffee maker"
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=(run_summary_a, run_summary_b),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+    top_brain = _NeverFinishesBrain()
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=None, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    async def _pending_runs_fetch():
+        return (
+            _pending_run_for_disambiguation(1, run_summary_a),
+            _pending_run_for_disambiguation(2, run_summary_b),
+        )
+
+    tool_host = _RecordingToolHost()
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the light")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=1000,
+        filler_cache=None,
+        pending_runs_fetch=_pending_runs_fetch,
+    )
+
+    assert tool_host.calls == []
+    spoken = tts.received_text[0]
+    assert run_summary_a in spoken
+    assert run_summary_b in spoken
+    # Neither pending run's own numeric id (1, 2) reaches the spoken
+    # question -- the operator never hears an id (D-09/D-10).
+    assert "1" not in spoken
+    assert "2" not in spoken
+    assert timings.turn_outcome == "needs_clarification"
+
+
+def _pending_run_for_disambiguation(run_id: int, summary: str):
+    from datetime import datetime, timezone
+
+    from spire_voice.db.repository import WorkflowRun, WorkflowStep
+
+    now = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)
+    return WorkflowRun(
+        id=run_id,
+        origin="voice",
+        status="pending",
+        summary=summary,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+        steps=(
+            WorkflowStep(
+                id=run_id * 10,
+                run_id=run_id,
+                position=0,
+                kind="speak",
+                arguments={"text": "example"},
+                due_at=now,
+                status="pending",
+                attempts=0,
+                result_detail=None,
+                fired_at=None,
+            ),
+        ),
+    )
