@@ -1,26 +1,32 @@
 import * as React from "react"
+import { useMutation } from "@tanstack/react-query"
 import { Navigate, useLocation } from "react-router-dom"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { SubmitButton } from "@/components/state/SubmitButton"
 import { useSession } from "@/hooks/useSession"
-import { ApiError, login } from "@/lib/api"
-import { queryClient } from "@/lib/queryClient"
+import { loginMutationOptions } from "@/lib/session"
+import { classifyLoginError } from "./authErrors"
 
 /**
  * 03-UI-SPEC.md's Focal Point table: "the email/password pair as one
  * block; the submit button reads as part of it, not as a competing
- * anchor." Errors use the exact Copywriting Contract row for a login
- * failure -- never a paraphrase of whatever `ApiError.message` carries,
- * since a wrong-credentials 401 and a genuine server error are different
- * things an operator should be able to tell apart.
+ * anchor." A wrong email and a wrong password get the exact same
+ * message ("Wrong email or password. Try again.", the Copywriting
+ * Contract's login-error row) -- the server does not tell an
+ * unauthenticated caller which addresses exist
+ * (`_invalid_credentials_error`, `routes/auth.py`), and this screen must
+ * not undo that by distinguishing them. Blank fields never reach the
+ * server: inline field validation catches them first.
  */
 export function SignInRoute() {
   const location = useLocation()
   const session = useSession()
   const [email, setEmail] = React.useState("")
   const [password, setPassword] = React.useState("")
-  const [error, setError] = React.useState<string | null>(null)
+  const [fieldError, setFieldError] = React.useState<string | null>(null)
+  const [serverError, setServerError] = React.useState<string | null>(null)
+  const login = useMutation(loginMutationOptions)
 
   if (session.data) {
     const from = (location.state as { from?: { pathname: string } } | null)?.from
@@ -28,19 +34,21 @@ export function SignInRoute() {
   }
 
   const handleSubmit = async () => {
-    setError(null)
+    setServerError(null)
+    if (!email.trim() || !password) {
+      setFieldError("Enter your email and password.")
+      throw new Error("blank field")
+    }
+    setFieldError(null)
     try {
-      const nextSession = await login({ email, password })
-      queryClient.setQueryData(["session"], nextSession)
+      await login.mutateAsync({ email, password })
     } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) {
-        setError("Wrong email or password. Try again.")
-      } else {
-        setError(caught instanceof Error ? caught.message : "Sign-in failed.")
-      }
+      setServerError(classifyLoginError(caught))
       throw caught
     }
   }
+
+  const error = fieldError ?? serverError
 
   return (
     <main className="flex min-h-svh items-center justify-center p-6">
