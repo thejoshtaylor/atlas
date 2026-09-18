@@ -542,6 +542,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "resolved timezone: %s (server.timezone not set; using the process's own zone)",
             _resolved_timezone_name(),
         )
+    # Plan 05-04: the one process-wide reading of the house's own
+    # configured zone, exposed on `app.state` so `routes/workflows.py`
+    # can hand it to `workflow.schedule.resolve_schedule` for a
+    # zone-less "Run at" string, without resolving a zone name itself
+    # (that module's own acceptance criterion forbids it from importing
+    # `ZoneInfo`). The same `_resolved_timezone` `WorkflowToolHost` below
+    # is already constructed with -- one resolved zone, two readers.
+    app.state.server_timezone = _resolved_timezone
 
     db_engine = build_engine(config.database)
     app.state.db_engine = db_engine
