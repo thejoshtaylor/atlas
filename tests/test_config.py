@@ -549,6 +549,66 @@ def test_session_config_rejects_a_non_positive_retention():
         SessionConfig.from_config({"retain_days": -7})
 
 
+def test_workflow_config_defaults():
+    from spire_voice.config import WorkflowConfig
+
+    workflow = WorkflowConfig.from_config(None)
+    assert workflow.poll_interval_s == 5.0
+    assert workflow.max_steps_per_poll == 20
+    assert workflow.late_threshold_s == 60.0
+    assert workflow.max_attempts == 3
+    assert workflow.retry_backoff_s == 30.0
+
+
+def test_workflow_config_rejects_a_non_positive_poll_interval():
+    from spire_voice.config import ConfigError, WorkflowConfig
+
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"poll_interval_s": 0})
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"poll_interval_s": -5})
+
+
+def test_workflow_config_rejects_a_non_positive_max_steps_per_poll():
+    from spire_voice.config import ConfigError, WorkflowConfig
+
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"max_steps_per_poll": 0})
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"max_steps_per_poll": -1})
+    # Bounds a *count* of steps per tick -- a fractional value is not one.
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"max_steps_per_poll": 1.5})
+
+
+def test_workflow_config_rejects_a_negative_late_threshold():
+    from spire_voice.config import ConfigError, WorkflowConfig
+
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"late_threshold_s": -1})
+    # Zero is allowed: "the instant it was due" is a real, if aggressive,
+    # threshold an operator may choose.
+    assert WorkflowConfig.from_config({"late_threshold_s": 0}).late_threshold_s == 0
+
+
+def test_workflow_config_rejects_a_max_attempts_below_one():
+    from spire_voice.config import ConfigError, WorkflowConfig
+
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"max_attempts": 0})
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"max_attempts": -1})
+
+
+def test_workflow_config_rejects_a_non_positive_retry_backoff():
+    from spire_voice.config import ConfigError, WorkflowConfig
+
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"retry_backoff_s": 0})
+    with pytest.raises(ConfigError):
+        WorkflowConfig.from_config({"retry_backoff_s": -30})
+
+
 def test_wake_config_rejects_an_unknown_engine():
     from spire_voice.config import ConfigError, WakeConfig
 

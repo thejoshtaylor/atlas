@@ -81,6 +81,10 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 05-01: 0006 adds these two -- workflow_steps first, it
+            # holds the foreign key onto workflow_runs.
+            "workflow_steps",
+            "workflow_runs",
             "macro_actions",
             "macro_aliases",
             "macros",
@@ -340,3 +344,79 @@ async def test_seeded_macros_match_the_config_block_they_came_from(tmp_path: Pat
     assert [
         {"tool": r.tool, "arguments": r.arguments} for r in action_rows
     ] == expected["actions"]
+
+
+async def _fetch_workflow_step_index_and_constraint_names(async_url: str) -> tuple[set, set]:
+    """The index/constraint names `run()` (`inspect`) reports on
+    `workflow_steps` -- run through `asyncio.to_thread` since
+    `sqlalchemy.inspect` is a synchronous reflection API with no async
+    counterpart, the same reason `_run_upgrade_head` above runs Alembic's
+    own (synchronous) `command.upgrade` the same way."""
+    from sqlalchemy import inspect
+
+    engine = create_async_engine(async_url)
+
+    def _inspect(sync_conn) -> tuple[set, set]:
+        inspector = inspect(sync_conn)
+        index_names = {ix["name"] for ix in inspector.get_indexes("workflow_steps")}
+        constraint_names = {
+            uc["name"] for uc in inspector.get_unique_constraints("workflow_steps")
+        }
+        return index_names, constraint_names
+
+    async with engine.connect() as conn:
+        index_names, constraint_names = await conn.run_sync(_inspect)
+    await engine.dispose()
+    return index_names, constraint_names
+
+
+@skip_without_postgres
+async def test_workflow_tables_upgrade_from_empty_with_index_and_constraint_and_are_idempotent(
+    monkeypatch,
+):
+    """Migration 0006 (plan 05-01): `workflow_runs`/`workflow_steps` exist
+    after an upgrade to head from empty, `ix_workflow_steps_status_due_at`
+    and `uq_workflow_steps_run_id_position` both exist on `workflow_steps`,
+    and running every migration twice is still a no-op the second time --
+    the same idempotency guarantee `test_migrations_run_from_empty_and_are_
+    idempotent` above already proves for 0001-0005, extended to 0006."""
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("HA_URL", "test-value")
+    monkeypatch.setenv("HA_TOKEN", "test-value")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+    async with engine.connect() as conn:
+        run_count = (
+            await conn.execute(text("SELECT count(*) FROM workflow_runs"))
+        ).scalar_one()
+        step_count = (
+            await conn.execute(text("SELECT count(*) FROM workflow_steps"))
+        ).scalar_one()
+    await engine.dispose()
+    assert run_count == 0
+    assert step_count == 0
+
+    index_names, constraint_names = await _fetch_workflow_step_index_and_constraint_names(
+        _TEST_DB_URL
+    )
+    assert "ix_workflow_steps_status_due_at" in index_names
+    assert "uq_workflow_steps_run_id_position" in constraint_names
+
+    # Idempotent: a second upgrade to the same head must not error and
+    # must not duplicate the index or the constraint.
+    _run_upgrade_head()
+    second_index_names, second_constraint_names = (
+        await _fetch_workflow_step_index_and_constraint_names(_TEST_DB_URL)
+    )
+    assert second_index_names == index_names
+    assert second_constraint_names == constraint_names

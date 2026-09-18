@@ -426,6 +426,10 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
         # here would `KeyError` on every boot this fake drives, the same
         # reasoning `credential_repo`/`settings_repo` were added for above.
         "macro_repo": conftest.FakeMacroRepository(),
+        # Plan 05-01: `lifespan` now also builds a `WorkflowToolHost` and
+        # a `WorkflowScheduler` over `repositories["workflow_repo"]` --
+        # same reasoning as `macro_repo` immediately above.
+        "workflow_repo": conftest.FakeWorkflowRepository(),
     }
 
 
@@ -951,6 +955,7 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
             "setup_repo": conftest.FakeSetupRepository(),
             "settings_repo": conftest.FakeSettingsRepository(),
             "macro_repo": conftest.FakeMacroRepository(),
+            "workflow_repo": conftest.FakeWorkflowRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
@@ -1218,6 +1223,10 @@ async def _reset_policy_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 05-01: migration 0006 adds these two -- workflow_steps
+            # first, it holds the foreign key onto workflow_runs.
+            "workflow_steps",
+            "workflow_runs",
             "macro_actions",
             "macro_aliases",
             "macros",

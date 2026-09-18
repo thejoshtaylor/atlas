@@ -48,6 +48,10 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 05-01: migration 0006 adds these two -- workflow_steps
+            # first, it holds the foreign key onto workflow_runs.
+            "workflow_steps",
+            "workflow_runs",
             "macro_actions",
             "macro_aliases",
             "macros",

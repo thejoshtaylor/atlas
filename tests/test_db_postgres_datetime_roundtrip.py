@@ -64,6 +64,14 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 05-01: migration 0006 adds these two -- workflow_steps
+            # first, it holds the foreign key onto workflow_runs. Same
+            # reasoning as the macro_actions/macro_aliases/macros comment
+            # below: omitting a migration's own tables here is exactly the
+            # gap that leaves a second run of this fixture finding
+            # "relation already exists" (DuplicateTable).
+            "workflow_steps",
+            "workflow_runs",
             # Plan 04-05: migration 0005 adds these three -- omitting them
             # here left a second run of this file's own fixture finding
             # "macros already exists" (DuplicateTable), the same
