@@ -18,12 +18,40 @@ missing.
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# `web/dist` is `vite.config.ts`'s own `build.outDir` (a comment there names
+# `app.frontend()` in `src/spire_voice/app.py` as the consumer plan 03-05
+# wires -- the two must name the same path). Walking `git ls-files` rather
+# than trusting `.gitignore` to be correct is the same posture
+# `test_repo_hygiene.py`'s `test_no_session_path_or_audio_extension_is_tracked_by_git`
+# already takes for exactly this class of mistake: a *new* build step is
+# exactly the kind of change that can accidentally commit its own output
+# once, before the ignore rule is confirmed to actually cover the real
+# emitted path.
+_BUILD_OUTPUT_PREFIX = "web/dist/"
+
 
 def test_the_built_frontend_is_not_tracked_by_git():
     """No file under the frontend's build output directory may be tracked
-    by git -- plan 03-03 fills this in, once that directory exists."""
-    raise AssertionError(
-        "plan 03-03 fills this in (WEB-08: the built frontend is a build artifact, never tracked)"
+    by git, regardless of whether a build has run in this environment --
+    `git ls-files` reports what git actually tracks, not what merely
+    exists on disk right now."""
+    proc = subprocess.run(
+        ["git", "ls-files"], capture_output=True, text=True, cwd=_REPO_ROOT, timeout=30
+    )
+    assert proc.returncode == 0, f"git ls-files failed: {proc.stderr}"
+
+    tracked_build_output = [
+        line for line in proc.stdout.splitlines() if line.startswith(_BUILD_OUTPUT_PREFIX)
+    ]
+
+    assert not tracked_build_output, (
+        "found tracked file(s) under the frontend build output directory "
+        f"(WEB-08: it is a build artifact, never tracked): {tracked_build_output}"
     )
 
 
