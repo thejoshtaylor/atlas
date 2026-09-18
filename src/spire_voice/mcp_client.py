@@ -28,11 +28,32 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, Mapping
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool
+
+# The child `start()` spawns when a caller supplies neither `child_module`
+# nor `env` -- today's Home Assistant child, unchanged from before this
+# plan. A second `McpToolHost` instance (the weather server, D-13) passes
+# both explicitly instead of subclassing.
+_DEFAULT_CHILD_MODULE = "spire_mcp.ha"
+
+
+def _default_ha_env(
+    ha_url: str, ha_token: str, mcp_root: str | os.PathLike[str], safety_block: dict | None
+) -> dict[str, str]:
+    """Today's literal three-or-four-key Home Assistant child environment --
+    factored out of `_spawn` so `start()` and `respawn()` can each build it
+    fresh (a respawn's whole point is a *different* `safety_block`), while
+    `_spawn` itself stays the single place that actually launches a child,
+    generic over which environment it was handed (Task 3, plan 04-01).
+    """
+    env = {"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)}
+    if safety_block is not None:
+        env["SPIRE_SAFETY"] = json.dumps(safety_block)
+    return env
 
 
 class McpToolHost:
@@ -40,15 +61,26 @@ class McpToolHost:
     since Phase 3, can replace that child with a fresh one carrying a new
     policy (`respawn`).
 
-    One `asyncio.Lock` (`_lock`) guards both `respawn()` and `call_tool()`,
-    held for the duration of each. That serializes every tool call behind
-    one lock, which is acceptable here for two reasons: there is exactly one
-    child this host ever owns, and `turn/controller.py`'s own tool rounds
-    are already sequential -- nothing in this codebase calls `call_tool`
-    concurrently with itself today. What the lock buys is narrower and more
-    important: it keeps a tool call from landing on a session that
-    `respawn()` is in the middle of tearing down. No second liveness flag
-    is layered on top of it -- `self._stack`/`self.session` stay the single
+    Readers-writer coordination (Task 3, plan 04-01), replacing the single
+    `asyncio.Lock` this class held through Phase 3: `call_tool()` is a
+    reader, `respawn()` is the writer. Two or more `call_tool()` calls now
+    genuinely overlap -- each registers in `_in_flight` and snapshots
+    `self.session`, then awaits the actual stdio round trip outside that
+    registration step. What the old single lock bought is preserved, not
+    loosened: `respawn()` still never tears the stack down while a call is
+    in flight against it, and a call still never lands on a session
+    `respawn()` is mid-teardown on. `_writer_waiting` is set, and
+    `_readers_admitted` cleared, the instant `respawn()` begins -- before it
+    ever waits for the in-flight count to reach zero -- so a steady stream
+    of turns cannot starve a policy change forever; new readers block from
+    that moment, not merely while the writer holds exclusive access.
+
+    No separate lock guards `_in_flight`/`_writer_waiting`: every mutation
+    of either happens in a synchronous stretch of code with no `await` in
+    between check and update, and asyncio's single-threaded, cooperative
+    scheduler never preempts a coroutine mid-stretch -- the same property
+    that already makes a bare Python `for` loop over `await` points safe
+    elsewhere in this codebase. `self._stack`/`self.session` stay the single
     source of truth for whether a child is running, the same discipline
     `FfmpegSupervisor` already follows with its own subprocess.
     """
@@ -57,14 +89,36 @@ class McpToolHost:
         self._stack = AsyncExitStack()
         self.session: ClientSession | None = None
         self.tools: list[Tool] = []
-        self._lock = asyncio.Lock()
-        # The three spawn arguments `respawn()` needs to repeat -- stored
-        # only after a successful `start()`, so a `respawn()` called before
-        # any `start()` fails the same way `call_tool()` does rather than
+        # Readers-writer state (Task 3, plan 04-01): `_in_flight` counts
+        # calls currently past `call_tool`'s gate and not yet in their
+        # `finally`; `_writer_waiting` is `True` from the instant `respawn()`
+        # is entered until it finishes; `_readers_admitted` is the `asyncio.Event`
+        # every `call_tool()` waits on -- set whenever no writer is active or
+        # waiting (the initial state), cleared by `respawn()` the same
+        # instant it sets `_writer_waiting`, so no new reader can be admitted
+        # from that point until `respawn()` sets it again on its way out.
+        self._in_flight = 0
+        self._writer_waiting = False
+        self._readers_admitted = asyncio.Event()
+        self._readers_admitted.set()
+        # The spawn arguments `respawn()` needs to repeat -- stored only
+        # after a successful `start()`, so a `respawn()` called before any
+        # `start()` fails the same way `call_tool()` does rather than
         # spawning a child with `None`s baked into its environment.
         self._ha_url: str | None = None
         self._ha_token: str | None = None
         self._mcp_root: str | os.PathLike[str] | None = None
+        self._child_module: str = _DEFAULT_CHILD_MODULE
+        # `None` (the default, and every caller that predates this plan)
+        # means `respawn()` rebuilds today's literal Home Assistant
+        # environment fresh from `_ha_url`/`_ha_token`/`_mcp_root` and
+        # whatever new `safety_block` it was given. A caller that passed
+        # `env=` explicitly to `start()` gets exactly that mapping, every
+        # time -- no `HA_URL`, no `HA_TOKEN`, no `SPIRE_SAFETY`, nothing
+        # merged in from anywhere (SAFE-09); `respawn()` is not exercised
+        # against such a host by this plan, but repeats this mapping
+        # unchanged if it ever is.
+        self._env_override: dict[str, str] | None = None
 
     async def start(
         self,
@@ -72,26 +126,42 @@ class McpToolHost:
         ha_token: str,
         mcp_root: str | os.PathLike[str],
         safety_block: dict | None = None,
+        *,
+        child_module: str = _DEFAULT_CHILD_MODULE,
+        env: "Mapping[str, str] | None" = None,
     ) -> None:
         """Spawn the tool server. `safety_block` is the raw `safety:` config.
 
-        The child is the process that actually calls Home Assistant, so it is
-        the process whose `Policy` decides. It cannot read the config file --
-        it receives an explicit env, not an inherited one, which is what keeps
-        `XAI_API_KEY` out of it -- so the block travels as JSON on that same
-        explicit env under `SPIRE_SAFETY`.
+        `child_module` and `env` both default to exactly today's Home
+        Assistant child and its literal environment (Task 3, plan 04-01), so
+        every caller that predates this plan compiles and behaves
+        unchanged. Given explicitly, they let this same class own a
+        different child with no subclass -- D-13's second `McpToolHost`
+        instance for the weather server passes both, and gets none of the
+        Home Assistant keys (SAFE-09): `env`, when given, is used exactly as
+        given, with nothing merged in from `ha_url`/`ha_token`/`safety_block`.
 
-        Passing `None` leaves the child on `safety.py`'s compiled defaults:
-        the generic destructive domains and services, and no entity rules. An
-        empty house policy is a real choice an operator can make; a policy the
-        operator wrote and the enforcing process never received is not, which
-        is why the child refuses to start on a malformed block rather than
-        quietly falling back to defaults.
+        The child is the process that actually calls Home Assistant, so for
+        the default (Home Assistant) child it is the process whose `Policy`
+        decides. It cannot read the config file -- it receives an explicit
+        env, not an inherited one, which is what keeps `XAI_API_KEY` out of
+        it -- so the block travels as JSON on that same explicit env under
+        `SPIRE_SAFETY`.
+
+        Passing `safety_block=None` leaves the default child on `safety.py`'s
+        compiled defaults: the generic destructive domains and services, and
+        no entity rules. An empty house policy is a real choice an operator
+        can make; a policy the operator wrote and the enforcing process never
+        received is not, which is why the child refuses to start on a
+        malformed block rather than quietly falling back to defaults.
         """
-        await self._spawn(ha_url, ha_token, mcp_root, safety_block)
         self._ha_url = ha_url
         self._ha_token = ha_token
         self._mcp_root = mcp_root
+        self._child_module = child_module
+        self._env_override = dict(env) if env is not None else None
+        resolved_env = dict(env) if env is not None else _default_ha_env(ha_url, ha_token, mcp_root, safety_block)
+        await self._spawn(child_module, resolved_env)
 
     async def respawn(self, safety_block: dict | None) -> None:
         """Replace the running child with a fresh one carrying `safety_block`.
@@ -99,34 +169,70 @@ class McpToolHost:
         A policy change reaches the enforcing process this way -- by
         replacing it -- and never by mutating a running child's policy in
         place; there is no in-place update path here to get wrong. Repeats
-        the same `ha_url`/`ha_token`/`mcp_root` the original `start()` call
-        used, so only the policy differs between the old child and the new
-        one.
+        whatever `child_module` and environment `start()` recorded: the
+        default (Home Assistant) case rebuilds the environment fresh from
+        `_ha_url`/`_ha_token`/`_mcp_root` and this call's own `safety_block`
+        -- a respawn's whole point is a *different* policy -- so only the
+        policy differs between the old child and the new one. A host started
+        with an explicit `env=` repeats that mapping unchanged; this plan
+        does not exercise that combination, since the weather server (D-13)
+        never respawns.
+
+        Task 3 (plan 04-01): this is now the writer half of a readers-writer
+        pair with `call_tool()`. `_writer_waiting` is set the instant this
+        method is entered -- before it ever waits for the in-flight count to
+        reach zero -- so new readers block from this call's very first
+        instant, not merely once teardown actually starts (otherwise a
+        steady stream of turns could starve a policy change forever). Only
+        once every already-in-flight `call_tool()` has returned does this
+        close the old stack and spawn the replacement, preserving the
+        property the old single lock actually bought: a call never lands on
+        a session mid-teardown.
         """
-        async with self._lock:
-            if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
-                raise RuntimeError("McpToolHost.respawn called before start()")
+        if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
+            raise RuntimeError("McpToolHost.respawn called before start()")
+        resolved_env = (
+            dict(self._env_override)
+            if self._env_override is not None
+            else _default_ha_env(self._ha_url, self._ha_token, self._mcp_root, safety_block)
+        )
+        # Both statements below run synchronously, with no `await` between
+        # them -- no reader can observe one without the other (this class's
+        # own docstring). From this instant, `call_tool`'s own gate rejects
+        # every new caller until this method sets `_readers_admitted` again
+        # on its way out.
+        self._writer_waiting = True
+        self._readers_admitted.clear()
+        # Drain: every already-in-flight `call_tool()` decrements
+        # `_in_flight` in its own `finally`, synchronously, so this will
+        # observe zero as soon as the last one runs. `asyncio.sleep(0)`
+        # yields to the event loop without imposing any minimum delay --
+        # this notices the drain on the very next loop iteration in which
+        # one was possible, not on a polling timer.
+        while self._in_flight > 0:
+            await asyncio.sleep(0)
+        try:
             await self._stack.aclose()
             self._stack = AsyncExitStack()
-            await self._spawn(self._ha_url, self._ha_token, self._mcp_root, safety_block)
+            await self._spawn(self._child_module, resolved_env)
+        finally:
+            self._writer_waiting = False
+            self._readers_admitted.set()
 
-    async def _spawn(
-        self,
-        ha_url: str,
-        ha_token: str,
-        mcp_root: str | os.PathLike[str],
-        safety_block: dict | None,
-    ) -> None:
-        """The literal-env, real-subprocess spawn both `start()` and
-        `respawn()` perform -- factored out so there is exactly one place
-        that builds the child's environment, not two that could drift apart."""
-        env = {"HA_URL": ha_url, "HA_TOKEN": ha_token, "PYTHONPATH": str(mcp_root)}
-        if safety_block is not None:
-            env["SPIRE_SAFETY"] = json.dumps(safety_block)
+    async def _spawn(self, child_module: str, env: Mapping[str, str]) -> None:
+        """The real-subprocess spawn both `start()` and `respawn()` perform --
+        factored out so there is exactly one place that launches a child.
+        Takes the module path and the environment as arguments (Task 3, plan
+        04-01) rather than building either itself: `start()`/`respawn()` are
+        the only two places that decide what a child's environment holds --
+        the literal-not-inherited discipline this module's docstring states
+        -- and two places building an environment, rather than one, is how
+        that discipline drifts.
+        """
         server_params = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "spire_mcp.ha"],
-            env=env,
+            args=["-m", child_module],
+            env=dict(env),
         )
         read, write = await self._stack.enter_async_context(stdio_client(server_params))
         self.session = await self._stack.enter_async_context(ClientSession(read, write))
@@ -146,13 +252,41 @@ class McpToolHost:
         `is_error` and `content[0].text` straight off this return value, so
         the reason crosses this boundary unchanged, not paraphrased.
 
-        Guarded by the same `_lock` `respawn()` holds, so a call cannot land
-        on a session mid-teardown.
+        Task 3 (plan 04-01): this is the reader half of a readers-writer pair
+        with `respawn()`. Waits on `_readers_admitted` -- cleared from the
+        instant a `respawn()` call begins, not only while it holds exclusive
+        access, so this blocks from that same instant. Once admitted, this
+        re-checks `_writer_waiting` before registering: `_readers_admitted`
+        can be set again by a `respawn()` finishing at the same moment this
+        call's `wait()` was already resolving on the OLD `set()` from before
+        that same `respawn()` started, so a bare `wait()` return is not, by
+        itself, proof no writer is active. Snapshotting `self.session` and
+        incrementing `_in_flight` both happen in the same synchronous
+        stretch as that re-check -- no `await` in between -- so a `respawn()`
+        reading `_in_flight` afterwards never observes a half-registered
+        call. The actual stdio round trip is awaited OUTSIDE that stretch,
+        so two or more concurrent `call_tool()` calls genuinely overlap
+        rather than serializing behind each other. Deregisters in a
+        `finally`, so a call cancelled mid-flight still decrements the count
+        and cannot wedge a later `respawn()` waiting on it to reach zero.
         """
-        async with self._lock:
-            if self.session is None:
+        while True:
+            await self._readers_admitted.wait()
+            if self._writer_waiting:
+                # A writer started (and cleared the event) in the gap
+                # between this `wait()` resolving and this check -- loop
+                # back and wait again rather than proceeding on stale
+                # admission.
+                continue
+            session = self.session
+            if session is None:
                 raise RuntimeError("McpToolHost.call_tool called before start()")
-            return await self.session.call_tool(name, arguments)
+            self._in_flight += 1
+            break
+        try:
+            return await session.call_tool(name, arguments)
+        finally:
+            self._in_flight -= 1
 
     async def aclose(self) -> None:
         await self._stack.aclose()
