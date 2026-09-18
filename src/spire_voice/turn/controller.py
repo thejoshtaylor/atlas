@@ -265,6 +265,7 @@ async def run_turn(
     macros: tuple[MacroConfig, ...] = (),
     state_fetch: Callable[[], Any] | None = None,
     session_recorder: SessionRecorder | None = None,
+    speech_lock: "asyncio.Lock | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -304,6 +305,13 @@ async def run_turn(
     (`system_prompt`, user text) this function always has; supplying it adds
     a second, volatile system message built from the fetch's result, so a
     tier sees three messages in catalog-state-user order (D-14).
+
+    `speech_lock=None` (the default, and every caller that predates plan
+    05-03) is threaded unchanged into every `_speak` call this function
+    makes; every pre-existing caller keeps sharing no lock with anything.
+    Given a lock, this turn's filler and answer utterances -- and a
+    scheduled step's own utterance sharing the same lock elsewhere -- can
+    never interleave on the one speaker the room has.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -403,7 +411,13 @@ async def run_turn(
             # truncate against. `_DENIED_FALLBACK_REPLY` covers only the one
             # case where there are no words at all.
             await _speak(
-                source, speaking_tts, timings, outcome.text or _DENIED_FALLBACK_REPLY, kind="answer", barge_in=barge_in
+                source,
+                speaking_tts,
+                timings,
+                outcome.text or _DENIED_FALLBACK_REPLY,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
             )
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -512,7 +526,15 @@ async def run_turn(
             # skipped entirely: the turn waits in silence rather than
             # synthesizing at turn time.
             phrase = first_filler or DEFAULT_FILLER
-            await _speak(source, CachedTts(filler_cache), timings, FILLER_TEXT[phrase], kind="filler", barge_in=barge_in)
+            await _speak(
+                source,
+                CachedTts(filler_cache),
+                timings,
+                FILLER_TEXT[phrase],
+                kind="filler",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+            )
 
         winner = await race_task
         timings.mark_tool_rounds_done()
@@ -529,12 +551,16 @@ async def run_turn(
             # out of scope and deliberately not built by this branch.
             timings.turn_outcome = "needs_clarification"
             question = _compose_clarifying_question(winner.candidates, friendly_names)
-            await _speak(source, tts, timings, question, kind="answer", barge_in=barge_in)
+            await _speak(
+                source, tts, timings, question, kind="answer", barge_in=barge_in, speech_lock=speech_lock
+            )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
 
-        await _speak(source, tts, timings, winner.answer, kind="answer", barge_in=barge_in)
+        await _speak(
+            source, tts, timings, winner.answer, kind="answer", barge_in=barge_in, speech_lock=speech_lock
+        )
         await _emit_event(source, timings.to_event())
         timings.log()
     finally:
@@ -847,8 +873,24 @@ async def _speak(
     *,
     kind: Literal["filler", "answer"],
     barge_in: "_BargeInMonitor | None" = None,
+    speech_lock: "asyncio.Lock | None" = None,
 ) -> None:
     """Speak one utterance, and mark whichever timing(s) `kind` calls for.
+
+    `speech_lock=None` -- the default, and every caller that predates
+    plan 05-03 -- runs this function exactly as it always has: nothing
+    below changes for a caller that never heard of a second speaker.
+    Given a lock, the whole synthesize-and-write loop below runs inside
+    it, not around a single `source.send_audio()` call: this phase puts a
+    second speaker in the room for the first time (a scheduled step's own
+    utterance, `app.py`'s scheduled-speech closure), and a scheduled
+    utterance's chunks interleaved with a live reply's chunks on the same
+    FIFO is garbled audio, not two sentences (05-CONTEXT.md's own opening
+    failure class, applied to the speaker rather than a light). Held for
+    the whole loop, not acquired per chunk, because the point is one
+    utterance finishes before the other's first chunk is written -- a
+    per-chunk lock would still let the two interleave, just at chunk
+    granularity instead of byte granularity.
 
     `kind` has no default on purpose: it is the one thing keeping a filler
     from setting the answer mark. Both kinds mark `first_audio` on the first
@@ -899,43 +941,50 @@ async def _speak(
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
 
-    first_audio_marked = False
-    interrupted = False
-    chunks_sent = 0
-    chunks_total = 0
-    async for chunk in tts.synthesize(_one_delta()):
-        chunks_total += 1
-        if interrupted:
-            # Nothing left to cancel (module docstring) -- the rest of this
-            # loop only counts how many chunks the cut reply would have
-            # held, without writing any more of them to the speaker.
-            continue
-        if not first_audio_marked:
-            first_audio_marked = True
-            now = _time.monotonic()
-            if timings.first_audio_at is None:
-                timings.first_audio_at = now
-            if kind == "answer" and timings.answer_audio_at is None:
-                timings.answer_audio_at = now
+    async def _synthesize_and_write() -> None:
+        first_audio_marked = False
+        interrupted = False
+        chunks_sent = 0
+        chunks_total = 0
+        async for chunk in tts.synthesize(_one_delta()):
+            chunks_total += 1
+            if interrupted:
+                # Nothing left to cancel (module docstring) -- the rest of this
+                # loop only counts how many chunks the cut reply would have
+                # held, without writing any more of them to the speaker.
+                continue
+            if not first_audio_marked:
+                first_audio_marked = True
+                now = _time.monotonic()
+                if timings.first_audio_at is None:
+                    timings.first_audio_at = now
+                if kind == "answer" and timings.answer_audio_at is None:
+                    timings.answer_audio_at = now
+                if barge_in is not None and barge_in.enabled:
+                    barge_in.mark_playback_started(now)
+            if barge_in is not None and barge_in.enabled and barge_in.interrupt_requested:
+                interrupted = True
+                timings.turn_outcome = "barged_in"
+                continue
+            await source.send_audio(chunk)
+            chunks_sent += 1
             if barge_in is not None and barge_in.enabled:
-                barge_in.mark_playback_started(now)
-        if barge_in is not None and barge_in.enabled and barge_in.interrupt_requested:
-            interrupted = True
-            timings.turn_outcome = "barged_in"
-            continue
-        await source.send_audio(chunk)
-        chunks_sent += 1
-        if barge_in is not None and barge_in.enabled:
-            trace = getattr(barge_in, "trace", None)
-            if trace is not None:
-                trace.append(chunk)
+                trace = getattr(barge_in, "trace", None)
+                if trace is not None:
+                    trace.append(chunk)
 
-    if interrupted:
-        await _emit_event(
-            source,
-            {"type": "reply.interrupted", "chunks_sent": chunks_sent, "chunks_total": chunks_total},
-        )
-    await _emit_event(source, {"type": "reply.text", "text": reply_text})
+        if interrupted:
+            await _emit_event(
+                source,
+                {"type": "reply.interrupted", "chunks_sent": chunks_sent, "chunks_total": chunks_total},
+            )
+        await _emit_event(source, {"type": "reply.text", "text": reply_text})
+
+    if speech_lock is not None:
+        async with speech_lock:
+            await _synthesize_and_write()
+    else:
+        await _synthesize_and_write()
 
 
 async def _emit_event(source: _AudioSource, event: dict[str, Any]) -> None:
