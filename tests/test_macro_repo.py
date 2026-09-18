@@ -22,7 +22,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import ConfigError, MacroConfig
+from spire_voice import config as _config_module
+from spire_voice.config import MacroConfig
 from spire_voice.db.postgres import PostgresMacroRepository
 
 _TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
@@ -274,7 +275,17 @@ async def test_concurrent_creates_with_colliding_phrases_produce_exactly_one_mac
                 actions=[("ha_call_service", {"entity_id": "light.example_collision"})],
                 created_by_user_id=None,
             )
-        except ConfigError:
+        # Caught off the module object, not a name bound at this module's
+        # own import time (`from spire_voice.config import ConfigError`):
+        # `test_config_and_turn_macros_import_in_either_order`
+        # (`tests/test_config.py`) reloads `spire_voice.config` in place
+        # somewhere else in a full suite run, which replaces `ConfigError`
+        # with a fresh class object in that module's namespace -- a name
+        # bound here before the reload would then no longer `except` what
+        # a post-reload `_check_macros_do_not_collide` raises (exactly the
+        # failure mode `routes/macros.py::_check_no_collision`'s own
+        # comment already documents for this same reason).
+        except _config_module.ConfigError:
             return None
 
     results = await asyncio.gather(*(_attempt(n) for n in range(10)))
