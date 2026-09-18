@@ -126,3 +126,18 @@ body {
   min-height: 2.75rem;
   min-width: 2.75rem;
 }
+
+/* The single-line-scroll treatment for a long value in a single-line
+ * field (03-UI-SPEC.md's UI Considerations table's two "long-text"
+ * backstop rows: a 200+ character provider credential, the wizard's hub
+ * URL and provider key inputs). The field scrolls horizontally inside
+ * itself rather than wrapping or widening its container -- composed as
+ * `<Input className="scroll-field font-mono" .../>` by the screens that
+ * hold those fields (plans 03-06/03-09). Defined here, once, because a
+ * per-screen reimplementation is exactly what drifts (this plan's Task 3
+ * own text).
+ */
+@utility scroll-field {
+  overflow-x: auto;
+  white-space: nowrap;
+}
