@@ -173,6 +173,50 @@ def test_every_other_route_reports_setup_incomplete_until_an_admin_exists(tmp_pa
         assert client.get("/health").status_code == 200
 
 
+def test_turn_surfaces_refuse_an_unauthenticated_caller_once_setup_is_complete(
+    tmp_path, monkeypatch
+):
+    """T-03-32: once an admin exists (the setup gate no longer masks the
+    role gate), the unauthenticated-endpoint-that-can-start-a-turn this
+    phase closes must refuse with 401, not silently answer -- checked
+    directly against `/webrtc/offer` and the calibration routes (the
+    enumeration test in `tests/test_auth_roles.py` proves the *structural*
+    presence of a role dependency; this proves the *behavior* it produces
+    against a caller with no session cookie at all)."""
+    with _boot_with_empty_accounts(tmp_path, monkeypatch) as client:
+        create_response = client.post(
+            "/api/auth/create-admin",
+            json={
+                "email": "turn-guard-admin@example.invalid",
+                "display_name": "Turn Guard Admin",
+                "password": "a-fictional-turn-guard-password",
+            },
+        )
+        assert create_response.status_code == 201, create_response.text
+
+        # A fresh, cookie-less client -- the admin session above must not
+        # leak into these calls.
+        anonymous = TestClient(app_module.app)
+
+        webrtc_response = anonymous.post(
+            "/webrtc/offer", json={"sdp": "not-a-real-sdp", "type": "offer"}
+        )
+        assert webrtc_response.status_code == 401, webrtc_response.text
+
+        calibration_get = anonymous.get("/calibration/echo-path")
+        assert calibration_get.status_code == 401, calibration_get.text
+
+        calibration_run = anonymous.post("/calibration/echo-path/run", json={})
+        assert calibration_run.status_code == 401, calibration_run.text
+
+        try:
+            with anonymous.websocket_connect("/ws/turn"):
+                raise AssertionError("/ws/turn accepted an unauthenticated connection")
+        except Exception as exc:  # noqa: BLE001 -- asserting on the denial itself
+            status_code = getattr(exc, "status_code", None)
+            assert status_code == 401, f"/ws/turn denial carried status {status_code!r}, not 401"
+
+
 def test_sign_in_gives_the_same_refusal_for_an_unknown_email_and_a_wrong_password(
     tmp_path, monkeypatch
 ):
