@@ -264,6 +264,7 @@ async def run_turn(
     filler_cache: Mapping[str, bytes] | None = None,
     macros: tuple[MacroConfig, ...] = (),
     state_fetch: Callable[[], Any] | None = None,
+    pending_runs_fetch: Callable[[], Any] | None = None,
     session_recorder: SessionRecorder | None = None,
     speech_lock: "asyncio.Lock | None" = None,
 ) -> None:
@@ -312,6 +313,22 @@ async def run_turn(
     Given a lock, this turn's filler and answer utterances -- and a
     scheduled step's own utterance sharing the same lock elsewhere -- can
     never interleave on the one speaker the room has.
+
+    `pending_runs_fetch` (plan 05-05 Task 2, D-09) is `state_fetch`'s own
+    sibling: an awaitable factory the caller supplies, started as its own
+    task alongside `state_task` before the transcript drain below is ever
+    awaited, so it overlaps the operator still speaking exactly the way
+    `state_fetch` already does. `pending_runs_fetch=None` (the default,
+    and every caller that predates this plan) produces byte-identical
+    behavior -- no second task, no cost, `_state_message` called with its
+    own `pending_runs=()` default. Given a factory, its result is threaded
+    into `_state_message` alongside `states` so a tier sees the pending-run
+    block in the same volatile system message live entity state already
+    occupies. A fetch that raised is logged and treated as "nothing
+    scheduled" rather than ending the turn, the identical T-01.1-17
+    posture `state_fetch` already carries; cancelled and its cancellation
+    awaited on the macro path and the empty-transcript early return,
+    exactly where `state_task` already is, never left dangling.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -334,6 +351,14 @@ async def run_turn(
     # the task entirely: no fetch, no cost, no behavior change for a caller
     # that predates this plan.
     state_task: asyncio.Task[Any] | None = asyncio.create_task(state_fetch()) if state_fetch is not None else None
+    # D-09: the same overlap-the-operator-still-speaking discipline
+    # `state_task` above already establishes, for the pending-run block
+    # rather than live entity state -- started here, not after, so a slow
+    # workflow-repository read costs nothing inside the measured budget
+    # either.
+    pending_runs_task: asyncio.Task[Any] | None = (
+        asyncio.create_task(pending_runs_fetch()) if pending_runs_fetch is not None else None
+    )
 
     if session_recorder is not None:
         # Resolved from the source's own declaration, never assumed (D-13),
@@ -372,6 +397,7 @@ async def run_turn(
             # distinguishable in the log even though the reply path is shared.
             timings.turn_outcome = "timeout" if final is None else "empty_transcript"
             await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
             await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -390,8 +416,12 @@ async def run_turn(
             # (state_fetch does not know yet whether this turn will match a
             # macro), so it must be cancelled and its cancellation awaited here,
             # never left dangling. Same cancel-then-await shape `race_tiers`
-            # already uses for a losing tier -- not a second mechanism.
+            # already uses for a losing tier -- not a second mechanism. The
+            # pending-runs task (D-09) shares the identical fate for the
+            # identical reason: a macro turn never builds the message list
+            # its result would have joined either.
             await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
             outcome = await fire_macro(matched_macro, tool_host)
             timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
             # A macro reply is an answer, not a holding phrase -- it is the one
@@ -431,6 +461,12 @@ async def run_turn(
         # otherwise, in which case `_compose_clarifying_question` falls back
         # to speaking the id itself.
         friendly_names: dict[str, str] = {}
+        states: dict[str, str] = {}
+        # D-09: the pending-run block's own payload, threaded into
+        # `_state_message` alongside `states` below -- `()` (the default)
+        # when `pending_runs_fetch` was never given, matching `states`' own
+        # `{}` default for the identical reason.
+        pending_runs: "tuple[Any, ...]" = ()
         if state_task is not None:
             # `state_task` was started before the drain above, so by now it has
             # usually already finished -- this await rarely actually waits. A
@@ -460,6 +496,25 @@ async def run_turn(
                 if isinstance(states_payload, list)
                 else {}
             )
+        if pending_runs_task is not None:
+            # Same T-01.1-17 posture `state_task` above already carries,
+            # applied to D-09's own fetch: a workflow-repository read that
+            # raised is logged and treated as "nothing scheduled known"
+            # rather than ending the turn -- the operator can still cancel
+            # or schedule a run this turn even when this particular read
+            # failed, and failing the whole turn over it would be a worse
+            # outcome than answering with an empty pending-run block.
+            try:
+                pending_runs_payload = await pending_runs_task
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "pending-runs fetch raised; continuing turn with nothing scheduled known"
+                )
+                pending_runs_payload = ()
+            pending_runs = tuple(pending_runs_payload) if pending_runs_payload else ()
+        if state_task is not None or pending_runs_task is not None:
             # Deferred, not module-level: `app.py` imports `run_turn` from this
             # module at load time, so a module-level import here of anything
             # from `app.py` would deadlock the two modules' load order. By the
@@ -471,7 +526,9 @@ async def run_turn(
             # `brain_race.py` already uses for `_run_tool_rounds`.
             from spire_voice.app import _state_message
 
-            messages.append({"role": "system", "content": _state_message(states)})
+            messages.append(
+                {"role": "system", "content": _state_message(states, pending_runs)}
+            )
         messages.append({"role": "user", "content": final_text})
 
         if tiers is None:

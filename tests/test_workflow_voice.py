@@ -385,3 +385,111 @@ async def test_append_on_a_firing_run_is_refused_distinguishably_from_a_missing_
     assert missing_result.is_error
     assert firing_result.content[0].text != missing_result.content[0].text
     assert "does not exist" in missing_result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the pending-runs fetch, turn-level (D-09, T-01.1-17's own posture
+# extended to the second injected fetch)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_raising_pending_runs_fetch_still_reaches_speech(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """A pending-runs fetch that raises is logged and treated as nothing
+    scheduled known rather than ending the turn -- the identical
+    T-01.1-17 posture `state_fetch` already carries, applied to D-09's
+    own second fetch."""
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    async def _raising_pending_runs_fetch():
+        raise RuntimeError("workflow repository unreachable")
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        pending_runs_fetch=_raising_pending_runs_fetch,
+    )
+
+    assert tts.received_text == ["turned on the fan"]
+    assert timings.turn_outcome == "completed"
+
+
+async def test_a_macro_turn_cancels_a_started_pending_runs_fetch_without_leaving_it_dangling(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """A macro turn never builds the message list its result would have
+    joined -- but the fetch was already started before the macro check
+    ran, so it must be cancelled and its cancellation awaited, never left
+    dangling, the identical shape `state_task` already follows."""
+    import asyncio
+
+    from spire_mcp.safety import Policy
+    from spire_voice.config import MacroActionConfig, MacroConfig
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    from test_turn_controller import _FakeToolHost
+
+    macro = MacroConfig(
+        phrase="good night",
+        aliases=(),
+        reply="good night",
+        actions=(
+            MacroActionConfig(
+                tool="ha_call_service",
+                arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+            ),
+        ),
+    )
+    policy = Policy.from_config(None)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])
+    tts = fake_tts(chunks=[])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    cancelled: list[bool] = []
+
+    async def _hanging_pending_runs_fetch():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+        return ()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        filler_cache={"good night": b"\x01\x02"},
+        pending_runs_fetch=_hanging_pending_runs_fetch,
+    )
+
+    assert timings.turn_outcome == "macro"
+    assert cancelled == [True]
