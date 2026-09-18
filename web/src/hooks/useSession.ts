@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
-import { fetchSession, SetupIncompleteError } from "@/lib/api"
+import { SetupIncompleteError } from "@/lib/api"
+import { sessionQueryOptions } from "@/lib/session"
 
 /**
  * "The session query" every authenticated route's guard reads (this
@@ -11,10 +12,7 @@ import { fetchSession, SetupIncompleteError } from "@/lib/api"
  * distinction themselves.
  */
 export function useSession() {
-  return useQuery({
-    queryKey: ["session"],
-    queryFn: fetchSession,
-  })
+  return useQuery(sessionQueryOptions)
 }
 
 export { SetupIncompleteError }

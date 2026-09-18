@@ -3,14 +3,17 @@ import { Menu, X } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { useSession } from "@/hooks/useSession"
 import { cn } from "@/lib/utils"
 
 const NAV_ITEMS = [
-  { to: "/", label: "Home" },
-  { to: "/policy", label: "Safety policy" },
-  { to: "/accounts", label: "Accounts" },
-  { to: "/settings", label: "Settings" },
+  { to: "/", label: "Home", minimumRole: "viewer" },
+  { to: "/policy", label: "Safety policy", minimumRole: "operator" },
+  { to: "/accounts", label: "Accounts", minimumRole: "admin" },
+  { to: "/settings", label: "Settings", minimumRole: "admin" },
 ] as const
+
+const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2 }
 
 /**
  * Phone-first from the first commit (WEB-08, D-17): single column at
@@ -20,6 +23,14 @@ const NAV_ITEMS = [
  */
 export function AppShell() {
   const [navOpen, setNavOpen] = React.useState(false)
+  const session = useSession()
+  // Presentation only, T-03-47: a viewer simply never sees a link to a
+  // screen their role cannot use. This holds no line by itself -- the
+  // route itself refuses a role that cannot use it
+  // (`RequireRole`/`require_role`), regardless of what this nav shows or
+  // hides. A hidden link is convenience, not a permission boundary.
+  const role = session.data?.role ?? "viewer"
+  const visibleNavItems = NAV_ITEMS.filter((item) => ROLE_RANK[role] >= ROLE_RANK[item.minimumRole])
 
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground">
@@ -40,7 +51,7 @@ export function AppShell() {
       {navOpen ? (
         <nav aria-label="Primary" className="border-b border-border">
           <ul className="flex flex-col">
-            {NAV_ITEMS.map((item) => (
+            {visibleNavItems.map((item) => (
               <li key={item.to}>
                 <NavLink
                   to={item.to}

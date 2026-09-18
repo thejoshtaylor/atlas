@@ -3,13 +3,17 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { Toaster } from "@/components/ui/sonner"
 import { AppShell } from "@/components/layout/AppShell"
 import { AuthGuard } from "@/components/layout/AuthGuard"
+import { RequireRole } from "@/components/layout/RequireRole"
 import { SetupGuard } from "@/components/layout/SetupGuard"
 import { queryClient } from "@/lib/queryClient"
+import { AcceptInviteRoute } from "@/routes/auth/AcceptInviteRoute"
+import { SignInRoute } from "@/routes/auth/SignInRoute"
+import { AccountsRoute } from "@/routes/accounts/AccountsRoute"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
-import { PlaceholderRoute } from "@/routes/PlaceholderRoute"
+import { PolicyRoute } from "@/routes/policy/PolicyRoute"
+import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { SetupRoute } from "@/routes/SetupRoute"
-import { SignInRoute } from "@/routes/SignInRoute"
 
 /**
  * The route tree (CD-1, executor's discretion within the phone-first
@@ -27,13 +31,18 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/sign-in" element={<SignInRoute />} />
+      <Route path="/invite/:token" element={<AcceptInviteRoute />} />
       <Route path="/setup" element={<SetupRoute />} />
       <Route element={<AuthGuard />}>
         <Route element={<AppShell />}>
           <Route index element={<HomeRoute />} />
-          <Route path="/policy" element={<PlaceholderRoute title="Safety policy" />} />
-          <Route path="/accounts" element={<PlaceholderRoute title="Accounts" />} />
-          <Route path="/settings" element={<PlaceholderRoute title="Settings" />} />
+          <Route element={<RequireRole minimum="operator" />}>
+            <Route path="/policy" element={<PolicyRoute />} />
+          </Route>
+          <Route element={<RequireRole minimum="admin" />}>
+            <Route path="/accounts" element={<AccountsRoute />} />
+            <Route path="/settings" element={<SettingsRoute />} />
+          </Route>
           <Route path="/calibration" element={<CalibrationRoute />} />
         </Route>
       </Route>

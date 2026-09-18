@@ -121,38 +121,12 @@ export async function apiFetch<T = unknown>(path: string, init: ApiFetchInit = {
   return (await response.json()) as T
 }
 
-export interface Session {
-  email: string
-  role: "admin" | "operator" | "viewer"
-}
-
-/**
- * "The session query" every authenticated route's guard reads (Task 2's
- * own text). Its error modes are exactly the setup gate's two states:
- * `SetupIncompleteError` (the terminal, no-CTA message) versus anything
- * else (the "can't reach the server" message with a retry) -- the
- * planner assumption this plan's objective records, asserted to have no
- * third state.
- */
-export function fetchSession(): Promise<Session> {
-  return apiFetch<Session>("/auth/session")
-}
-
-export interface LoginCredentials {
-  email: string
-  password: string
-}
-
-export function login(credentials: LoginCredentials): Promise<Session> {
-  return apiFetch<Session>("/auth/login", { method: "POST", body: credentials })
-}
-
-/**
- * The setup gate's "Retry" button (SetupGate/SetupGuard) calls this
- * rather than the session query's own `.refetch()` directly, so the
- * network-retrigger stays inside this module -- the one seam -- rather
- * than a bare `<query>.refetch()` call sitting in a layout component.
- */
-export function retrySessionCheck(): void {
-  void queryClient.refetchQueries({ queryKey: ["session"] })
-}
+// `Session`, `fetchSession`, `login`, and `retrySessionCheck` used to
+// live here, pointed at `/auth/session`/`/auth/login` -- routes that were
+// never real. They now live in `./session.ts`
+// (`SESSION_QUERY_KEY`/`fetchSession`/`loginMutationOptions`/
+// `logoutMutationOptions`/`retrySessionCheck`), which is this plan's
+// (03-08) canonical session module; `apiFetch`'s own 401 handling above
+// still writes `["session"]` directly (matching `SESSION_QUERY_KEY`'s
+// literal value) so this file has no import-cycle back onto
+// `./session.ts`.

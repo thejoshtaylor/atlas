@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { useSession } from "@/hooks/useSession"
-import { SetupIncompleteError, UnauthorizedError, retrySessionCheck } from "@/lib/api"
+import { SetupIncompleteError, UnauthorizedError } from "@/lib/api"
+import { retrySessionCheck } from "@/lib/session"
 import { SetupGate } from "./SetupGate"
 
 /**
