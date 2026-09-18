@@ -52,6 +52,7 @@ whatever it last happened to know.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -70,6 +71,22 @@ import websockets
 # new area, or adds a device, should not have to restart the assistant for
 # voice control to see it.
 REGISTRY_REFRESH_INTERVAL_S = 300.0
+
+# WR-01 fix (code review): neither `_authenticate` nor `_fetch_registry_lists`
+# bounded their `ws.recv()` calls, and `McpToolHost.call_tool` holds one lock
+# for the full duration of a tool call (`mcp_client.py`) -- a Home Assistant
+# connection that accepts the socket and then stops answering (a half-open
+# connection behind a NAT, a restart that drops the listener but leaves an
+# established connection dangling) hung this call forever and, with it,
+# every other tool call queued behind the same lock: a stuck area/device/
+# label expansion turned into a full outage of voice control. This bounds
+# the whole handshake-plus-fetch, not one `recv()` at a time, so a partial
+# exchange (auth answered, registry list never sent) cannot still add up to
+# an unbounded wait. Ten seconds is generous for a local-network WebSocket
+# round trip and small compared to `REGISTRY_REFRESH_INTERVAL_S` -- a
+# genuinely slow-but-alive Home Assistant fails one expansion and tries
+# again on the next call, rather than blocking the process indefinitely.
+REGISTRY_FETCH_TIMEOUT_S = 10.0
 
 _REGISTRY_COMMANDS: Mapping[str, str] = {
     "areas": "config/area_registry/list",
@@ -293,12 +310,14 @@ class HaRegistryClient:
         connect: Callable[[str], Any] = websockets.connect,
         clock: Callable[[], float] = time.monotonic,
         refresh_interval_s: float = REGISTRY_REFRESH_INTERVAL_S,
+        fetch_timeout_s: float = REGISTRY_FETCH_TIMEOUT_S,
     ) -> None:
         self._ws_url = ws_url
         self._token = token
         self._connect = connect
         self._clock = clock
         self._refresh_interval_s = refresh_interval_s
+        self._fetch_timeout_s = fetch_timeout_s
         self._cached: RegistrySnapshot | None = None
 
     async def get_snapshot(self) -> RegistrySnapshot:
@@ -312,16 +331,36 @@ class HaRegistryClient:
 
     async def _fetch_snapshot(self) -> RegistrySnapshot:
         try:
-            async with self._connect(self._ws_url) as ws:
-                await self._authenticate(ws)
-                raw = await self._fetch_registry_lists(ws)
+            raw = await asyncio.wait_for(self._connect_and_fetch(), timeout=self._fetch_timeout_s)
         except RegistryError:
             raise
-        except Exception as exc:  # connection refused, DNS failure, closed socket, timeout, ...
+        except TimeoutError as exc:
+            # Named separately from the generic branch below: `str(exc)` on
+            # a bare `TimeoutError` from `asyncio.wait_for` is empty, which
+            # would otherwise read as "could not reach home assistant's
+            # registry: " with nothing after the colon -- naming the bound
+            # itself is the actionable half of this message.
+            raise RegistryUnavailableError(
+                f"home assistant's registry did not answer within "
+                f"{self._fetch_timeout_s:g}s -- refusing rather than waiting "
+                "indefinitely"
+            ) from exc
+        except Exception as exc:  # connection refused, DNS failure, closed socket, ...
             raise RegistryUnavailableError(
                 f"could not reach home assistant's registry: {exc}"
             ) from exc
         return RegistrySnapshot.from_raw(raw, fetched_at=self._clock())
+
+    async def _connect_and_fetch(self) -> dict[str, list[dict[str, Any]]]:
+        """The connect-authenticate-fetch sequence `_fetch_snapshot` bounds
+        with `asyncio.wait_for` (WR-01 fix) -- split out because
+        `wait_for` needs one awaitable covering the whole exchange, not
+        just the final `recv()`: a connection that answers `auth_ok` and
+        then stops responding must not still add up to an unbounded wait
+        just because the hang happened to land in the second half."""
+        async with self._connect(self._ws_url) as ws:
+            await self._authenticate(ws)
+            return await self._fetch_registry_lists(ws)
 
     async def _authenticate(self, ws: Any) -> None:
         """Home Assistant's documented handshake: it speaks first with

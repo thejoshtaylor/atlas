@@ -14,7 +14,9 @@ handshake and matching logic directly.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 
@@ -212,3 +214,59 @@ async def test_a_refresh_failure_never_falls_back_to_the_stale_snapshot():
 
     with pytest.raises(RegistryUnavailableError):
         await client.get_snapshot()
+
+
+class _HangingWs:
+    """A connection that accepts the auth handshake and then never answers
+    again -- the shape WR-01's finding names: a half-open connection
+    behind a NAT, or a Home Assistant restart that drops the listener but
+    leaves an established connection dangling. `recv()` after the
+    handshake awaits an `Event` this test never sets, standing in for a
+    socket read that would otherwise block forever."""
+
+    def __init__(self) -> None:
+        self._replies = [json.dumps(_AUTH_REQUIRED), json.dumps(_AUTH_OK)]
+        self.sent: list[dict] = []
+
+    async def send(self, message: str) -> None:
+        self.sent.append(json.loads(message))
+
+    async def recv(self) -> str:
+        if self._replies:
+            return self._replies.pop(0)
+        await asyncio.Event().wait()  # pragma: no cover -- never returns
+
+    async def __aenter__(self) -> "_HangingWs":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+async def test_a_hung_connection_refuses_within_the_fetch_timeout_instead_of_blocking_forever():
+    """WR-01 fix (code review): neither `_authenticate` nor
+    `_fetch_registry_lists` bounded `ws.recv()` before this fix -- a
+    connection that answered the auth handshake and then stopped
+    responding hung `get_snapshot()` (and, through `McpToolHost.call_tool`'s
+    one lock, every other tool call) for the life of the process. A tiny
+    `fetch_timeout_s` (not the real ten-second default -- this test must
+    stay fast) proves the bound is real and wall-clock-measured, not
+    merely present in the signature.
+    """
+    ws = _HangingWs()
+    client = HaRegistryClient(
+        "ws://ha.invalid/api/websocket",
+        "good-token",
+        connect=_connect_returning(ws),
+        fetch_timeout_s=0.05,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(RegistryUnavailableError, match="did not answer within"):
+        await client.get_snapshot()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, (
+        f"get_snapshot() took {elapsed:.2f}s against a 0.05s fetch_timeout_s -- "
+        "the timeout is not actually bounding the hung recv()"
+    )
