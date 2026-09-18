@@ -310,6 +310,85 @@ class MacroAliasRow(Base):
     alias: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class WorkflowRunRow(Base):
+    """One scheduled plan: an operator's spoken or webapp-authored intent
+    to do something later, made of ordered `WorkflowStepRow`s (D-07, D-08).
+
+    `origin` is `voice` or `webapp` -- one table, one shape, one execution
+    path regardless of where a run was authored (D-08), so the operator
+    never has two places to look for what the house is about to do.
+    `status` is one of `pending`, `firing`, `completed`, `cancelled`,
+    `failed`: `pending` until the poller claims its first step, `firing`
+    from that claim until every step reaches a terminal state, then
+    `completed` (every step completed) or `failed` (at least one did not)
+    -- never deleted on cancellation (D-12), so `cancelled` is terminal
+    too, not a removal. There is deliberately no `due_at` column here: a
+    run's own schedule is its first step's `due_at`, and a second copy
+    would be a second, potentially disagreeing answer to when the house
+    acts -- the same duplication Phase 3 and Phase 4 each spent a Critical
+    finding on. `summary` is stored, not derived, because FLOW-04/FLOW-06
+    match the operator's own words against it -- deriving it at read time
+    would let a later change to the composer silently change which run
+    "the lights" now means. `created_by_user_id` follows `MacroRow`'s own
+    convention: `NULL` for a spoken run (nobody signed in authored it),
+    a real user id for one created through the webapp.
+    """
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+
+class WorkflowStepRow(Base):
+    """One step of a `WorkflowRunRow`, in `position` order -- `wait`,
+    `call_service`, or `speak`, exactly three kinds and no more (D-05).
+
+    Per-step state lives in real columns (`kind`, `status`, `attempts`,
+    `due_at`, `fired_at`), not folded into a JSON blob, the same split
+    `MacroActionRow.tool`/`.arguments` already draws: only the per-kind
+    payload -- a service call's domain/service/entity id, a wait's
+    duration, or the words a `speak` step says -- is `arguments`, so a
+    query or a constraint can reach everything else directly (D-07). This
+    is what makes exactly-once (FLOW-08) and "which step failed, and why"
+    both answerable from the table alone.
+
+    `due_at` is absolute and naive UTC (D-04, this project's own
+    database-boundary convention -- see `db/postgres.py`'s
+    `_to_naive_utc`/`_to_aware_utc`): a step that came due while the
+    process was down is still claimable on the next poll, never silently
+    dropped. `status` is one of `pending`, `completed`, `denied`,
+    `failed`, `cancelled`. `attempts` bounds the retry policy
+    (`spire_voice.config.WorkflowConfig.max_attempts`); `result_detail`
+    carries what happened, including a fire-time refusal's reason
+    verbatim (D-14); `fired_at` is when the step actually ran, so
+    lateness is `fired_at - due_at`, a fact rather than an inference
+    (D-04).
+    """
+
+    __tablename__ = "workflow_steps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSON, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(nullable=False, default=0)
+    result_detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    fired_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
 class ProviderCredentialRow(Base):
     """One encrypted provider credential slot (PROV-04, D-07).
 

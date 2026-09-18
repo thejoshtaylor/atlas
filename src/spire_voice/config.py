@@ -1124,6 +1124,80 @@ class MacroConfig:
 
 
 @dataclass(frozen=True)
+class WorkflowConfig:
+    """The `workflow:` block: the five values that shape the in-process
+    poller `workflow/scheduler.py` starts in `lifespan` (D-01, D-02, D-03).
+
+    Every one of these is a declared value with a named `ConfigError` on a
+    bad one (Claude's Discretion, 05-CONTEXT.md: "the value is declared
+    rather than implicit"), the same frozen-dataclass-plus-`from_config`
+    shape `SessionConfig` above already establishes.
+
+    `poll_interval_s` is how often the poller wakes to check for due
+    steps. `max_steps_per_poll` bounds one tick's drain, so a large
+    backlog cannot starve the loop the way an unbounded `while True: claim
+    another` would. `late_threshold_s` is the boundary past which a fired
+    step reports how late it was rather than staying silent about it
+    (D-04) -- read by `workflow/steps.py`'s lateness composer once that
+    lands (plan 05-03), not by this class. `max_attempts` bounds retry so
+    a permanently failing step reaches a terminal state instead of
+    retrying forever; `retry_backoff_s` is how far a retried step's
+    `due_at` is pushed out each time.
+    """
+
+    poll_interval_s: float = 5.0
+    max_steps_per_poll: int = 20
+    late_threshold_s: float = 60.0
+    max_attempts: int = 3
+    retry_backoff_s: float = 30.0
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "WorkflowConfig":
+        raw = raw or {}
+        poll_interval_s = raw.get("poll_interval_s", cls.poll_interval_s)
+        if isinstance(poll_interval_s, bool) or not isinstance(poll_interval_s, (int, float)) or poll_interval_s <= 0:
+            raise ConfigError(
+                f"workflow.poll_interval_s must be a positive number, got {poll_interval_s!r}"
+            )
+        max_steps_per_poll = raw.get("max_steps_per_poll", cls.max_steps_per_poll)
+        if (
+            isinstance(max_steps_per_poll, bool)
+            or not isinstance(max_steps_per_poll, int)
+            or max_steps_per_poll <= 0
+        ):
+            raise ConfigError(
+                f"workflow.max_steps_per_poll must be a positive integer, got "
+                f"{max_steps_per_poll!r} -- this bounds one poll tick's drain so a large "
+                "backlog cannot starve the loop"
+            )
+        late_threshold_s = raw.get("late_threshold_s", cls.late_threshold_s)
+        if isinstance(late_threshold_s, bool) or not isinstance(late_threshold_s, (int, float)) or late_threshold_s < 0:
+            raise ConfigError(
+                f"workflow.late_threshold_s must be a non-negative number, got "
+                f"{late_threshold_s!r}"
+            )
+        max_attempts = raw.get("max_attempts", cls.max_attempts)
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ConfigError(
+                f"workflow.max_attempts must be an integer >= 1, got {max_attempts!r} -- this "
+                "bounds retry so a permanently failing run reaches a terminal state rather "
+                "than retrying forever"
+            )
+        retry_backoff_s = raw.get("retry_backoff_s", cls.retry_backoff_s)
+        if isinstance(retry_backoff_s, bool) or not isinstance(retry_backoff_s, (int, float)) or retry_backoff_s <= 0:
+            raise ConfigError(
+                f"workflow.retry_backoff_s must be a positive number, got {retry_backoff_s!r}"
+            )
+        return cls(
+            poll_interval_s=poll_interval_s,
+            max_steps_per_poll=max_steps_per_poll,
+            late_threshold_s=late_threshold_s,
+            max_attempts=max_attempts,
+            retry_backoff_s=retry_backoff_s,
+        )
+
+
+@dataclass(frozen=True)
 class Config:
     """The top-level configuration: one section per subsystem.
 
@@ -1180,6 +1254,7 @@ class Config:
     mcp_servers: dict[str, McpServerConfig]
     database: DatabaseConfig
     security: SecurityConfig
+    workflow: WorkflowConfig
 
     @classmethod
     def from_config(
@@ -1213,6 +1288,7 @@ class Config:
             },
             database=DatabaseConfig.from_config(raw.get("database")),
             security=SecurityConfig.from_config(raw.get("security")),
+            workflow=WorkflowConfig.from_config(raw.get("workflow")),
         )
 
 

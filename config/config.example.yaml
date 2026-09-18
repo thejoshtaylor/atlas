@@ -527,3 +527,33 @@ calibration:
   # is a deliberate operator choice until WEB-01/WEB-04 (Phase 3) ship
   # authentication in front of it.
   route_enabled: false
+
+workflow:
+  # Scheduled workflows (FLOW-01 through FLOW-10, SAFE-08): a spoken or
+  # webapp-authored plan of ordered steps (wait, call_service, speak), each
+  # claimed off the database when its own due_at comes due. There is no
+  # workflows: block here for a migration to seed from -- runs and steps
+  # live only in the database (workflow_runs/workflow_steps,
+  # alembic/versions/0006_workflow_tables.py), never in this file.
+  #
+  # A step that came due while the process was down runs on the next poll
+  # after restart, late, and says so -- it is never silently dropped
+  # (D-04). This is what makes poll_interval_s a responsiveness knob, not a
+  # correctness one.
+  poll_interval_s: 5
+
+  # Bounds one poll tick's drain, so a large backlog of due steps cannot
+  # starve the loop -- the poller claims at most this many steps before
+  # sleeping again, even if more are due.
+  max_steps_per_poll: 20
+
+  # Past this many seconds of lateness, a fired step's spoken/recorded
+  # outcome says how late it ran, rather than staying silent about it.
+  late_threshold_s: 60
+
+  # A step that fails for a transient reason retries up to this many times
+  # before its run is left in a terminal failed state -- never forever.
+  max_attempts: 3
+
+  # How far a retried step's due_at is pushed out each attempt.
+  retry_backoff_s: 30
