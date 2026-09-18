@@ -6,10 +6,15 @@ asked which one they meant when the words fit more than one (FLOW-06).
 Task 1 drives the widened `WorkflowToolHost` directly, against
 `tests/conftest.py`'s `FakeWorkflowRepository` -- no database, the same
 Postgres-free discipline `test_workflow_repo.py` already establishes for
-everything but its own one `integration`-marked test. Task 2 adds the
-pending-run fetch's own turn-level evidence; Task 3 adds the end-to-end
-`needs_clarification` shape for a pending run. Every entity id below is
-invented, per `tests/test_repo_hygiene.py`'s own rule.
+everything but its own one `integration`-marked test -- with one
+exception: `test_flow_01_...` drives the real `run_turn` pipeline end to
+end, because FLOW-01's own "ordered steps" (plural) claim is only true
+once a spoken sentence, not a Python dict handed straight to the tool
+host, produces a multi-step run (see this plan's own PLAN.md
+`<this_plan_owns_flow_01>` note). Task 2 adds the pending-run fetch's own
+turn-level evidence; Task 3 adds the end-to-end `needs_clarification`
+shape for a pending run. Every entity id below is invented, per
+`tests/test_repo_hygiene.py`'s own rule.
 """
 
 from __future__ import annotations
@@ -63,6 +68,80 @@ async def test_a_three_step_call_stores_three_steps_in_spoken_order_with_kinds_i
     assert len(runs) == 1
     run = runs[0]
     assert run.summary == "turn off the porch light in a bit"
+    assert [step.kind for step in run.steps] == ["wait", "call_service", "speak"]
+    assert [step.position for step in run.steps] == [0, 1, 2]
+
+
+async def test_flow_01_a_spoken_sentence_drives_run_turn_to_an_ordered_multi_step_run(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_workflow_repository
+):
+    """The claim plan 05-01's own tracer deliberately did not make: a
+    spoken sentence, through the real `run_turn` pipeline (STT -> a
+    tool-calling brain -> this plan's own `WorkflowToolHost` -> the
+    repository), produces a durable run with more than one ordered step,
+    in the order the model called them. Plan 05-01's tracer proved the
+    tool host's own boundary for one step; this test is what makes
+    FLOW-01 -- "ordered steps", plural -- actually true end to end."""
+    from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    repo = fake_workflow_repository()
+    clock_time = [datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)]
+    tool_host = WorkflowToolHost(repo, zone=None, clock=lambda: clock_time[0])
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(
+        events=[FinalTranscript(text="in twenty minutes, wait a minute then turn off the fan and tell me")]
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="schedule_workflow",
+                        arguments={
+                            "steps": [
+                                {"kind": "wait", "arguments": {"duration_s": 60}},
+                                {
+                                    "kind": "call_service",
+                                    "arguments": {
+                                        "domain": "switch",
+                                        "service": "turn_off",
+                                        "entity_id": "switch.example_fan",
+                                    },
+                                },
+                                {"kind": "speak", "arguments": {"text": "the fan is off now"}},
+                            ],
+                            "delay_seconds": 1200,
+                            "summary": "turn off the fan in twenty minutes",
+                        },
+                    )
+                ]
+            ),
+            BrainReply(text="okay, i'll take care of it"),
+        ]
+    )
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_text == ["okay, i'll take care of it"]
+    runs = await repo.list_runs()
+    assert len(runs) == 1
+    run = runs[0]
+    assert run.summary == "turn off the fan in twenty minutes"
     assert [step.kind for step in run.steps] == ["wait", "call_service", "speak"]
     assert [step.position for step in run.steps] == [0, 1, 2]
 
