@@ -602,12 +602,17 @@ async def _run_tool_rounds(
     own doctrine) -- the turn ends by saying so, never with a success
     confirmation, per CMD-01's transparency prohibition.
 
-    `commitment`, when given, is set the instant a call to `tool_host.call_tool`
-    returns -- whichever way it resolved (CR-01). A stdio round trip to the
-    MCP child cannot be un-sent once dispatched, so from that point on
-    `race_tiers` must not let a triage tier's confident reply end the race
-    in this tier's place; only this tier's own settled outcome may describe
-    what actually happened.
+    `commitment`, when given, is set the instant one round's dispatch begins --
+    before `asyncio.gather` is awaited, not after any one call returns (CR-01,
+    widened by Task 1 of plan 04-01). A stdio round trip to the MCP child
+    cannot be un-sent once dispatched, and with three or more calls genuinely
+    in flight at once, waiting for the first result to land would leave a
+    window in which a racing triage tier's confident reply could still end
+    the race while uncancellable service calls are running -- exactly the
+    hazard CR-01 closed for the single-call case. From the moment dispatch
+    begins, `race_tiers` must not let a triage tier's confident reply end the
+    race in this tier's place; only this tier's own settled outcome may
+    describe what actually happened.
     """
     for _round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
@@ -640,33 +645,75 @@ async def _run_tool_rounds(
             }
         )
 
-        for i, tc in enumerate(reply.tool_calls):
-            result = await tool_host.call_tool(tc.name, tc.arguments)
-            if commitment is not None:
-                commitment.committed = True
-            content_text = _result_text(result)
-            if _is_error(result):
+        # CMD-06: every call in this round is dispatched together and run to
+        # completion -- `asyncio.gather(..., return_exceptions=True)`, never
+        # `asyncio.TaskGroup`, whose cancel-every-sibling-on-first-exception
+        # semantics would abort actions two and three the instant action one
+        # raised, which is the exact behaviour this task removes (the same
+        # reasoning `turn/brain_race.py`'s own module docstring already
+        # records for its own choice not to use a `TaskGroup`). `commitment`
+        # is set the instant dispatch begins, above, not after a result
+        # returns -- see this function's own docstring for why. `gather`
+        # always returns results positionally aligned with the awaitables it
+        # was given, so `results[i]` is `reply.tool_calls[i]`'s own result
+        # regardless of which call happens to finish first (D-05) -- there is
+        # no separate correlation step to get wrong.
+        if commitment is not None:
+            commitment.committed = True
+        results = await asyncio.gather(
+            *(tool_host.call_tool(tc.name, tc.arguments) for tc in reply.tool_calls),
+            return_exceptions=True,
+        )
+
+        # Collect every result before deciding anything (D-06): the first
+        # error-shaped or raised entry, in `reply.tool_calls` order -- never
+        # completion order -- is what a mixed batch reports on. This branch is
+        # Task 1's minimal fix only: it proves every action ran and that the
+        # first failure's own text still reaches speech unreworded, exactly
+        # as the single-action path already did. Task 2 replaces this
+        # short-circuit with a composer that speaks one clause per action;
+        # until then a mixed batch still ends the turn here, without a second
+        # brain round touching it.
+        failure_index: int | None = None
+        for i, result in enumerate(results):
+            if isinstance(result, BaseException) or _is_error(result):
+                failure_index = i
+                break
+
+        if failure_index is not None:
+            failed_result = results[failure_index]
+            if isinstance(failed_result, BaseException):
+                logger.exception(
+                    "tool call %r raised instead of returning a result",
+                    reply.tool_calls[failure_index].name,
+                    exc_info=failed_result,
+                )
+                content_text = ""
+            else:
                 # An error-shaped result short-circuits straight to speech --
                 # no second brain call touches it. For a refusal this is the
                 # boundary's own doctrine: `spire_mcp.safety.Denied.reason`
                 # crosses the MCP boundary as `content_text` unchanged (see
                 # `mcp_client.py`'s module docstring), so `content_text` here
                 # IS `Denied.reason`, verbatim, with nothing in between to
-                # reword it. This branch is deliberately the only place a
-                # tool result can end a turn without another round -- it
-                # covers both a refusal and an ordinary tool-level failure,
-                # and neither one reaches the caller as a confirmation.
-                # No length check or truncation applies: a refusal never
-                # passes through a model, so `brain.max_tokens` has nothing
-                # to say about it. `_DENIED_FALLBACK_REPLY` covers only the
-                # case where `content_text` itself is empty, so a refusal is
-                # never indistinguishable from a dropped turn.
-                return content_text or _DENIED_FALLBACK_REPLY
+                # reword it. No length check or truncation applies: a refusal
+                # never passes through a model, so `brain.max_tokens` has
+                # nothing to say about it. `_DENIED_FALLBACK_REPLY` covers
+                # only the case where `content_text` itself is empty, so a
+                # refusal is never indistinguishable from a dropped turn.
+                content_text = _result_text(failed_result)
+            return content_text or _DENIED_FALLBACK_REPLY
+
+        # Every call in this round succeeded: byte-identical to the
+        # pre-concurrency behaviour -- one `role: tool` message per call, in
+        # `reply.tool_calls` index order, and the loop continues to the next
+        # round where the next `brain.chat` call composes the confirmation.
+        for i, result in enumerate(results):
             # A non-2xx Home Assistant response (see `handle_call_service`)
             # is not a refusal -- it comes back as an ordinary, non-error
             # result whose content names the failure, so the next brain call
             # reports it rather than confirming success.
-            messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content_text})
+            messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": _result_text(result)})
 
     logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
     timings.turn_outcome = "round_cap"
