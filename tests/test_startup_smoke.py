@@ -1201,10 +1201,20 @@ async def _reset_policy_schema(async_url: str) -> None:
     first boot from a later one by real Alembic revision history
     (`db.engine.get_current_revision`), so it needs a genuinely empty
     database, not whatever a previous run of this same throwaway Postgres
-    left behind."""
+    left behind.
+
+    Plan 04-05 extends this list with the three tables migration `0005`
+    adds (`macros`, `macro_actions`, `macro_aliases`) -- the same
+    generalization this file's own boot tests below apply to the two-stage
+    boot itself: one shared helper handling a second legacy key's tables,
+    not a second, copy-pasted reset function.
+    """
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            "macro_actions",
+            "macro_aliases",
+            "macros",
             "settings",
             "setup_steps",
             "setup_state",
@@ -1323,5 +1333,277 @@ def test_first_boot_seeds_a_legacy_safety_block_through_the_real_lifespan_and_th
     # distinct class a real `app.py` raise could never match).
     ConfigError = app_module.ConfigError
     with pytest.raises(ConfigError, match="safety:.*no longer exists"):
+        with TestClient(app_module.app):
+            pass
+
+
+# --- Plan 04-05 (D-09, D-16, T-04-23): the same CR-01 proof, generalized to
+# a second legacy key. Written first, against a mechanism that does not
+# exist yet -- these four collect and fail until app.py's two-stage boot,
+# config.py's retirement of the macros: key, and the migration that seeds
+# it are all in place (Task 1's own instruction). ---------------------------
+
+
+def _example_macros_block() -> list[dict]:
+    """One invented, two-action, two-alias macro -- fictional throughout
+    (`switch.example_*`/`light.example_*`, this repository's own naming
+    convention for a value that must never be a real entity id), shaped
+    exactly like `MacroConfig.from_config` and `config/config.example.yaml`
+    both already expect: a phrase, aliases, a reply, and an ordered action
+    list. Content-asserted below, not merely counted -- a seed that dropped
+    every alias would still pass a row-count check, and aliases are how a
+    macro matches more than one spoken phrase.
+    """
+    return [
+        {
+            "phrase": "example goodnight macro",
+            "aliases": ["example goodnight", "example night night macro"],
+            "reply": "okay, goodnight",
+            "actions": [
+                {
+                    "tool": "ha_call_service",
+                    "arguments": {
+                        "domain": "switch",
+                        "service": "turn_off",
+                        "entity_id": "switch.example_macro_seed_fan",
+                    },
+                },
+                {
+                    "tool": "ha_call_service",
+                    "arguments": {
+                        "domain": "light",
+                        "service": "turn_off",
+                        "entity_id": "light.example_macro_seed_lamp",
+                    },
+                },
+            ],
+        },
+    ]
+
+
+async def _fetch_seeded_macros(async_url: str) -> list[dict]:
+    """Read `macros`/`macro_actions`/`macro_aliases` back through a fresh
+    connection -- the same "never through `app.state`'s own repository"
+    precedent the safety-block test above sets, for the same reason: that
+    repository's pool is bound to a loop this test's plain `asyncio.run`
+    is not running on, and is torn down by the time the `TestClient`
+    `with` block exits.
+
+    Returns one dict per macro, actions already ordered by `position` and
+    aliases as a plain set -- the shape the tests below compare directly
+    against `_example_macros_block()`.
+    """
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            macro_rows = (
+                await conn.execute(text("SELECT id, phrase, reply FROM macros"))
+            ).fetchall()
+            macros: list[dict] = []
+            for row in macro_rows:
+                action_rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT tool, arguments FROM macro_actions "
+                            "WHERE macro_id = :macro_id ORDER BY position"
+                        ),
+                        {"macro_id": row.id},
+                    )
+                ).fetchall()
+                alias_rows = (
+                    await conn.execute(
+                        text("SELECT alias FROM macro_aliases WHERE macro_id = :macro_id"),
+                        {"macro_id": row.id},
+                    )
+                ).fetchall()
+                macros.append(
+                    {
+                        "phrase": row.phrase,
+                        "reply": row.reply,
+                        "aliases": {a.alias for a in alias_rows},
+                        "actions": [
+                            {"tool": a.tool, "arguments": a.arguments} for a in action_rows
+                        ],
+                    }
+                )
+            return macros
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.integration
+@skip_without_postgres
+def test_first_boot_seeds_a_legacy_macros_block_through_the_real_lifespan_and_starts(
+    tmp_path, monkeypatch
+):
+    """The macros: sibling of the safety: test above. First boot, a real,
+    freshly-emptied Postgres, a config file carrying a populated macros:
+    block: the application must start, and the seeded rows must match the
+    block's phrase, every alias, the reply, and the actions in written
+    order -- not merely a non-zero row count (D-09).
+    """
+    asyncio.run(_reset_policy_schema(_TEST_DB_URL))
+
+    macros_block = _example_macros_block()
+    config_path = _write_fake_config(
+        tmp_path, extra={"database": {"url": _TEST_DB_URL}, "macros": macros_block}
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    # The migration itself reads SPIRE_CONFIG independently of app.py's
+    # CONFIG_PATH (mirroring the safety-block test above) -- both must
+    # point at the same file for the seed to read the block this test just
+    # wrote.
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        pass
+
+    seeded_macros = asyncio.run(_fetch_seeded_macros(_TEST_DB_URL))
+    assert len(seeded_macros) == 1
+    seeded = seeded_macros[0]
+    expected = macros_block[0]
+    assert seeded["phrase"] == expected["phrase"]
+    assert seeded["reply"] == expected["reply"]
+    assert seeded["aliases"] == set(expected["aliases"])
+    assert seeded["actions"] == expected["actions"]
+
+
+@pytest.mark.integration
+@skip_without_postgres
+def test_a_second_boot_with_the_legacy_macros_block_still_present_refuses_naming_the_key(
+    tmp_path, monkeypatch
+):
+    """The reject half of the same pair: identical config file, same
+    macros: block still present, against the database the first boot just
+    seeded -- this must refuse to start, naming the same key by the same
+    wording `MACROS_KEY_REJECTED_ERROR` gives it, proving the rejection
+    still fires once the seed has actually happened and was not simply
+    disabled by the generalization (CR-01's own lesson, applied to the
+    second key).
+    """
+    asyncio.run(_reset_policy_schema(_TEST_DB_URL))
+
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={"database": {"url": _TEST_DB_URL}, "macros": _example_macros_block()},
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    # First boot: seeds silently.
+    with TestClient(app_module.app):
+        pass
+
+    # Second boot: the same macros: block, against the now-seeded
+    # database -- must refuse, naming the key.
+    ConfigError = app_module.ConfigError
+    with pytest.raises(ConfigError, match="macros:.*no longer exists"):
+        with TestClient(app_module.app):
+            pass
+
+
+@pytest.mark.integration
+@skip_without_postgres
+def test_a_first_boot_with_both_legacy_safety_and_macros_keys_present_seeds_both_and_starts(
+    tmp_path, monkeypatch
+):
+    """T-04-23's own named worry: a copy-pasted second branch is most
+    likely to get the two-key case wrong. A single boot, both safety: and
+    macros: present in the same file, against a genuinely empty database
+    -- the application must start, and both must be seeded, proving one
+    shared sequence handles two legacy keys rather than two independent
+    ones that happen to both work alone.
+    """
+    asyncio.run(_reset_policy_schema(_TEST_DB_URL))
+
+    safety_block = {
+        "mode": "allow_all_except_denylist",
+        "deny_entities": ["switch.example_both_keys_seed_test_socket"],
+    }
+    macros_block = _example_macros_block()
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "database": {"url": _TEST_DB_URL},
+            "safety": safety_block,
+            "macros": macros_block,
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app):
+        pass
+
+    async def _fetch_seeded_policy_mode() -> str:
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                return (
+                    await conn.execute(text("SELECT mode FROM safety_policy WHERE id = 1"))
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+
+    seeded_mode = asyncio.run(_fetch_seeded_policy_mode())
+    assert seeded_mode == safety_block["mode"]
+
+    seeded_macros = asyncio.run(_fetch_seeded_macros(_TEST_DB_URL))
+    assert len(seeded_macros) == 1
+    assert seeded_macros[0]["phrase"] == macros_block[0]["phrase"]
+
+
+@pytest.mark.integration
+@skip_without_postgres
+def test_a_boot_with_migrations_disabled_and_a_macros_block_present_refuses(
+    tmp_path, monkeypatch
+):
+    """A boot that never runs the migration must not warn-and-continue on
+    a lingering macros: key -- nothing seeded it, so tolerating the key
+    here would strand the operator on the same "the log line describes a
+    seed that never happened" failure CR-01 already found once. Setting
+    `database.run_migrations_at_startup: false` reaches the classification
+    step with `is_first_seed_boot` false unconditionally (the same
+    generalized rule the two boots above exercise from the other side),
+    so this must refuse rather than seed-and-warn.
+    """
+    asyncio.run(_reset_policy_schema(_TEST_DB_URL))
+
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "database": {"url": _TEST_DB_URL, "run_migrations_at_startup": False},
+            "macros": _example_macros_block(),
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    ConfigError = app_module.ConfigError
+    with pytest.raises(ConfigError, match="macros:.*no longer exists"):
         with TestClient(app_module.app):
             pass
