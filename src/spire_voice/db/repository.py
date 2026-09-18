@@ -346,9 +346,9 @@ class Credential:
     ciphertext only, the same reason `Invite.token_hash` and
     `RefreshToken.token_hash` never carry a plaintext bearer value. This
     class never decrypts anything: decryption is
-    `spire_voice.crypto.credentials.decrypt_credential`, called from
-    exactly one place (that module's own docstring), never from a
-    repository."""
+    `spire_voice.crypto.credentials.decrypt_credential` (see that module's
+    own docstring for the call sites and the guarantee that actually holds
+    -- WR-02, code review), never from a repository."""
 
     slot: str
     ciphertext: bytes

@@ -37,6 +37,7 @@ from spire_voice.auth.tokens import issue_access_token
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.config import SecurityConfig
 from spire_voice.crypto.credentials import CredentialSlot, encrypt_credential
+from spire_voice.db.repository import Credential
 from spire_voice.routes.auth import router as auth_router, setup_router
 from spire_voice.routes.wizard import router as wizard_router
 import spire_voice.routes.wizard as wizard_module
@@ -275,6 +276,58 @@ def test_the_hub_step_completes_only_after_a_successful_call_and_records_when(mo
     hub_step = next(s for s in after.json()["steps"] if s["name"] == "hub")
     assert hub_step["complete"] is True
     assert hub_step["detail"]["checked_at"] == body["detail"]["checked_at"]
+
+
+def test_the_hub_check_route_never_returns_the_decrypted_home_assistant_token(monkeypatch):
+    """WR-02 (code review): `check_hub_step` is the second call site
+    `resolve_credential_value`/`decrypt_credential` reach, alongside
+    `app.py`'s `lifespan` -- `crypto/credentials.py`'s own docstring now
+    names both and states the guarantee that actually matters: the
+    decrypted value is used only for a server-side outbound call and
+    never included in a response body. This is that guarantee, checked
+    directly against this specific route (the review's own suggested
+    follow-up to `test_credentials_crypto.py::
+    test_a_saved_credential_never_comes_back_from_any_route`, which never
+    walks a POST route and so never exercised this one).
+
+    A real, database-stored (not environment-fallback) Home Assistant
+    token is used here specifically -- `resolve_credential_value` only
+    reaches `decrypt_credential` at all when a database row exists to
+    decrypt; the environment-fallback path this file's other hub tests
+    use never calls it, and would pass this assertion vacuously.
+    """
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    # The one placeholder value `tests/test_repo_hygiene.py`'s own
+    # credential-literal check already allowlists (see that file's
+    # `_ALLOWED_CREDENTIAL_VALUES`) -- an invented value here, not a real
+    # Home Assistant token shape, is the point either way.
+    stored_value = "test-key"
+
+    app, client, _security, _admin, credential_repo, _setup_repo, _settings_repo = _authed_app(
+        monkeypatch, config=_fake_config()
+    )
+    ciphertext, key_version = encrypt_credential(stored_value, security)
+    credential_repo.credentials[CredentialSlot.HOME_ASSISTANT.value] = Credential(
+        slot=CredentialSlot.HOME_ASSISTANT.value,
+        ciphertext=ciphertext,
+        key_version=key_version,
+        updated_at=datetime.now(timezone.utc),
+        updated_by_user_id=None,
+    )
+
+    fake_ha = conftest.FakeHomeAssistant()
+    app.state.ha_http_client = fake_ha.client
+
+    response = client.post("/api/wizard/steps/hub/check")
+    assert response.status_code == 200, response.text
+    assert stored_value not in response.text, (
+        "check_hub_step's response body must never contain the decrypted "
+        "Home Assistant token -- WR-02's whole point is that this route "
+        "reaches decrypt_credential without becoming a second way to read "
+        "a credential back out"
+    )
+    assert set(response.json()) == {"name", "complete", "detail"}
 
 
 def test_a_refused_connection_is_reported_as_unreachable(monkeypatch):

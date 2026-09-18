@@ -21,11 +21,24 @@ already-issued token or already-encrypted credential the same way (see
 `auth/tokens.py`'s own wire-format warning) -- do not edit
 `_CREDENTIAL_ENCRYPTION_INFO` after this ships.
 
-`decrypt_credential` is a server-side function, called from exactly one
-place: `app.py`'s `lifespan`, where a provider credential is resolved
-once at startup. It is never reachable from a route -- PROV-04's
-write-only property is a backend guarantee, not a display decision a
-response model makes by omitting a field.
+`decrypt_credential` is a server-side function, reached through
+`resolve_credential_value` from two places: `app.py`'s `lifespan`, where
+every provider credential is resolved once at startup, and
+`routes/wizard.py`'s `check_hub_step` (plan 03-09), which resolves the
+Home Assistant slot on each hub-check request to probe the operator's own
+instance with it. WR-02 (code review) caught this docstring still
+claiming "never reachable from a route" after that second call site
+shipped -- true when this was written, false since. The guarantee that
+actually holds, and that PROV-04's write-only property actually depends
+on, is narrower and still true at both call sites: the decrypted value is
+used only for a server-side outbound call (constructing a provider client
+in `app.py`, probing Home Assistant in `check_hub_step`) and is never
+included in a response body -- `check_hub_step`'s own `WizardStepStatus`
+carries only `checked_at`/`entity_count` in its `detail`, never the token
+it checked with. A future route that calls `resolve_credential_value` and
+then places the result in anything a response model serializes would
+break that guarantee; reaching `decrypt_credential` from a route at all
+does not.
 
 `key_version` travels alongside every ciphertext so a future rotation
 through `cryptography.fernet.MultiFernet` has something to match
