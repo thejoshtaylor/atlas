@@ -28,7 +28,45 @@ from typing import Any
 import httpx
 
 from mcp.server.mcpserver import MCPServer
-from spire_mcp.safety import Policy, allow_call, allow_read
+from spire_mcp.registry import HaRegistryClient, RegistryError, UnknownRegistryTargetError, expand_target, ws_url_from_http
+from spire_mcp.safety import Denied, Policy, allow_call, allow_read
+
+# `handle_call_service`'s three target kinds, in the order they are
+# checked -- a fixed tuple rather than three near-identical `if` blocks, so
+# adding a fourth kind later is one line here, not three call sites.
+_TARGET_KINDS: tuple[str, ...] = ("area", "device", "label")
+
+
+async def _resolve_target(
+    registry: "HaRegistryClient | None",
+    kind: str,
+    target_id: str,
+) -> list[str]:
+    """Resolve one area/device/label target to entity ids, or raise
+    `Denied` naming exactly why it could not be done. Never guesses
+    (D-12): every non-success outcome raises here, before `allow_call`
+    ever sees this target.
+
+    Three distinguishable reasons, because the operator hears one of them
+    and each means something different: the registry does not know this
+    id at all; the registry knows it and it holds nothing; or the
+    registry itself could not be reached, in which case this never falls
+    back to expanding against whatever snapshot this process last
+    happened to have cached.
+    """
+    if registry is None:
+        raise Denied(f"i can't reach the home assistant registry to look up that {kind}")
+    try:
+        snapshot = await registry.get_snapshot()
+    except RegistryError as exc:
+        raise Denied(f"i can't reach the home assistant registry to look up that {kind}") from exc
+    try:
+        entity_ids = expand_target(snapshot, kind, target_id)
+    except UnknownRegistryTargetError:
+        raise Denied(f"i don't know a {kind} called {target_id!r}") from None
+    if not entity_ids:
+        raise Denied(f"that {kind} has nothing in it")
+    return sorted(entity_ids)
 
 
 async def handle_call_service(
@@ -43,28 +81,42 @@ async def handle_call_service(
     area_id: str | None = None,
     device_id: str | None = None,
     label_id: str | None = None,
+    registry: "HaRegistryClient | None" = None,
 ) -> dict[str, Any]:
     """Run one Home Assistant service call, gated by `allow_call`.
 
-    `allow_call` runs before any `httpx` request is constructed. A denied
-    call, or a call carrying an `area_id`/`device_id`/`label_id` that was
-    never expanded to entity ids, never reaches this function's
+    An `area_id`, `device_id`, or `label_id` is expanded to entity ids
+    against `registry`'s snapshot before `allow_call` ever runs (SAFE-03).
+    A target that cannot be resolved raises `Denied` immediately, naming
+    which of the three ways it failed -- unknown to the registry, known
+    but empty, or the registry unreachable -- rather than falling through
+    to `allow_call`'s own generic unresolved-target refusal. This is what
+    makes the three reasons distinguishable: `allow_call` itself carries
+    one fixed message for "unresolved", and this function's job is to
+    never let a resolvable-or-not target reach that line un-classified.
+
+    Every entity id that did resolve -- direct or expanded -- is checked
+    by the one, unchanged `allow_call`. A denied call, or a call whose
+    target could not be resolved, never reaches this function's
     `client.post` line at all -- both raise before that line runs.
 
-    Per D-15 this phase builds no registry expansion: `area_id`,
-    `device_id`, and `label_id` are accepted so the caller's target is
-    never silently dropped, then handed to `allow_call`'s
-    `unresolved_targets` so it can refuse rather than guess. SAFE-03 in
-    Phase 3 is what fills the expansion in.
+    The whole checked entity id list is posted in one request, not the
+    first id alone: an expanded area can carry several entities, and
+    SAFE-04's guarantee -- one denied entity refuses the whole call, as
+    one call -- is meaningless if the call that actually runs only touches
+    the first one. Posting the list as one call, rather than looping over
+    it, is what keeps a refused call from partly succeeding (CMD-07).
     """
-    unresolved_targets = [t for t in (area_id, device_id, label_id) if t]
-    domain, service, entity_ids = allow_call(
-        policy, domain, service, entity_id, unresolved_targets=unresolved_targets
-    )
+    entity_ids: list[str] = [entity_id] if entity_id else []
+    for kind, target_id in zip(_TARGET_KINDS, (area_id, device_id, label_id)):
+        if target_id:
+            entity_ids.extend(await _resolve_target(registry, kind, target_id))
+
+    domain, service, checked_entity_ids = allow_call(policy, domain, service, entity_ids or None)
     response = await client.post(
         f"{base_url}/api/services/{domain}/{service}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"entity_id": entity_ids[0]},
+        json={"entity_id": checked_entity_ids},
     )
     if response.status_code // 100 != 2:
         # A non-2xx response is surfaced as an error result, never an empty
@@ -173,6 +225,7 @@ _policy: Policy = _load_policy()
 _http_client: httpx.AsyncClient | None = None
 _base_url: str = ""
 _token: str = ""
+_registry_client: HaRegistryClient | None = None
 
 
 @mcp_server.tool()
@@ -186,9 +239,14 @@ async def ha_call_service(
 ) -> dict[str, Any]:
     """Run one Home Assistant service call against an allowed entity.
 
-    `area_id`, `device_id`, and `label_id` are accepted so a target selector
-    is never silently dropped, but any of them being non-empty is refused
-    rather than expanded -- this phase builds no registry expansion (D-15).
+    `area_id`, `device_id`, and `label_id` are expanded to entity ids
+    against Home Assistant's own area/device/label registry before the
+    safety check runs (SAFE-03) -- an area target reaches every entity
+    that area actually holds, including one that inherits its area from
+    its device rather than carrying its own. A target the registry does
+    not know, a target that resolves to nothing, or a registry this
+    process could not reach right now is refused by name, never guessed
+    at.
     """
     assert _http_client is not None, "ha_call_service invoked before startup"
     return await handle_call_service(
@@ -202,6 +260,7 @@ async def ha_call_service(
         area_id=area_id,
         device_id=device_id,
         label_id=label_id,
+        registry=_registry_client,
     )
 
 
@@ -220,10 +279,15 @@ async def ha_list_entities() -> list[dict[str, Any]]:
 
 
 def _startup() -> None:
-    global _http_client, _base_url, _token
+    global _http_client, _base_url, _token, _registry_client
     _base_url = os.environ["HA_URL"]
     _token = os.environ["HA_TOKEN"]
     _http_client = httpx.AsyncClient()
+    # The registry client authenticates with this same `_token` -- no
+    # second credential, no environment variable of its own (SAFE-09). It
+    # opens no connection here; `HaRegistryClient.get_snapshot()` fetches
+    # on first use and caches, per `registry.py`'s own module doctrine.
+    _registry_client = HaRegistryClient(ws_url_from_http(_base_url), _token)
 
 
 async def _run() -> None:
