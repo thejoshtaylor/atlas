@@ -31,9 +31,12 @@ from spire_voice.db.repository import (
     SetupStep,
     User,
     WorkflowRun,
+    WorkflowRunNotAppendableError,
+    WorkflowRunNotFoundError,
     WorkflowStep,
     WorkflowStepSpec,
     assign_step_due_ats,
+    next_append_due_at,
 )
 from spire_voice.transports.base import SourceFormat
 
@@ -584,6 +587,7 @@ def fake_macro_repository():
 
 
 _FAKE_WORKFLOW_CLAIMABLE_RUN_STATUSES = ("pending", "firing")
+_FAKE_WORKFLOW_TERMINAL_RUN_STATUSES = ("completed", "cancelled", "failed")
 
 
 class FakeWorkflowRepository:
@@ -727,6 +731,111 @@ class FakeWorkflowRepository:
             run["status"] = "failed" if incomplete else "completed"
         run["updated_at"] = now
         return True
+
+    async def list_runs(self, *, statuses: Sequence[str] | None = None) -> list[WorkflowRun]:
+        run_ids = sorted(
+            self._runs.keys(),
+            key=lambda run_id: (self._runs[run_id]["created_at"], run_id),
+            reverse=True,
+        )
+        if statuses:
+            statuses_set = set(statuses)
+            run_ids = [rid for rid in run_ids if self._runs[rid]["status"] in statuses_set]
+        return [self._run_view(run_id) for run_id in run_ids]
+
+    async def get_run(self, run_id: int) -> WorkflowRun | None:
+        if run_id not in self._runs:
+            return None
+        return self._run_view(run_id)
+
+    async def cancel_run(
+        self, run_id: int, *, now: datetime, cancelled_by_user_id: int | None
+    ) -> bool:
+        run = self._runs.get(run_id)
+        if run is None or run["status"] in _FAKE_WORKFLOW_TERMINAL_RUN_STATUSES:
+            return False
+        run["status"] = "cancelled"
+        run["updated_at"] = now
+        for step in self._steps.values():
+            if step["run_id"] == run_id and step["status"] == "pending":
+                step["status"] = "cancelled"
+                step["result_detail"] = {"cancelled_by_user_id": cancelled_by_user_id}
+        return True
+
+    async def _append_or_replace(
+        self,
+        run_id: int,
+        specs: Sequence[WorkflowStepSpec],
+        *,
+        now: datetime,
+        replace: bool,
+    ) -> WorkflowRun:
+        run = self._runs.get(run_id)
+        if run is None:
+            raise WorkflowRunNotFoundError(run_id)
+        if run["status"] != "pending":
+            raise WorkflowRunNotAppendableError(run_id, run["status"])
+
+        existing_step_ids = sorted(
+            (sid for sid, s in self._steps.items() if s["run_id"] == run_id),
+            key=lambda sid: self._steps[sid]["position"],
+        )
+
+        if replace:
+            base_time = (
+                self._steps[existing_step_ids[0]]["due_at"] if existing_step_ids else now
+            )
+            for sid in existing_step_ids:
+                del self._steps[sid]
+            start_position = 0
+        else:
+            existing_steps = [self._step_view(sid) for sid in existing_step_ids]
+            base_time = next_append_due_at(existing_steps, now)
+            start_position = (
+                self._steps[existing_step_ids[-1]]["position"] + 1 if existing_step_ids else 0
+            )
+
+        due_ats = assign_step_due_ats(specs, base_time)
+        for offset, (spec, due_at) in enumerate(zip(specs, due_ats)):
+            step_id = self._next_step_id
+            self._next_step_id += 1
+            self._steps[step_id] = {
+                "id": step_id,
+                "run_id": run_id,
+                "position": start_position + offset,
+                "kind": spec.kind,
+                "arguments": spec.arguments,
+                "due_at": due_at,
+                "status": "pending",
+                "attempts": 0,
+                "result_detail": None,
+                "fired_at": None,
+            }
+        run["updated_at"] = now
+        return self._run_view(run_id)
+
+    async def append_steps(
+        self, run_id: int, specs: Sequence[WorkflowStepSpec], *, now: datetime
+    ) -> WorkflowRun:
+        return await self._append_or_replace(run_id, specs, now=now, replace=False)
+
+    async def replace_steps(
+        self, run_id: int, specs: Sequence[WorkflowStepSpec], *, now: datetime
+    ) -> WorkflowRun:
+        return await self._append_or_replace(run_id, specs, now=now, replace=True)
+
+
+@pytest.fixture
+def fake_workflow_repository():
+    """Factory: `fake_workflow_repository()` builds an empty scripted
+    `FakeWorkflowRepository`, matching `fake_macro_repository`'s own
+    fixture-factory convention. Has no interleaving to race -- the
+    exactly-once and append-guard claims are earned in
+    `tests/test_workflow_scheduler_concurrency.py` and
+    `tests/test_workflow_repo.py` against real Postgres, never here, the
+    same caveat `FakeAccountRepository` already carries for its own
+    concurrency-sensitive methods."""
+    return FakeWorkflowRepository
 
 
 class FakeAccountRepository:

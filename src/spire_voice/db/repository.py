@@ -624,6 +624,23 @@ def push_out_due_at(due_at: datetime, seconds: float) -> datetime:
     return due_at + timedelta(seconds=seconds)
 
 
+def next_append_due_at(steps: "Sequence[WorkflowStep]", now: datetime) -> datetime:
+    """The absolute instant an appended step's own `due_at` folds forward
+    from (`WorkflowRepository.append_steps`, D-11, plan 05-02): the
+    existing last step's own `due_at`, plus that last step's own
+    `duration_s` folded forward if it is itself a `wait` step (PA-D1) --
+    an appended step must land after what is already scheduled, never
+    merely after `now`. Falls back to `now` only for the pathological
+    case of a run with no steps at all, never produced by `create_run`
+    (which always writes at least one)."""
+    if not steps:
+        return now
+    last = steps[-1]
+    if last.kind == "wait":
+        return last.due_at + timedelta(seconds=last.arguments.get("duration_s", 0))
+    return last.due_at
+
+
 def assign_step_due_ats(
     steps: "Sequence[WorkflowStepSpec]", base_time: datetime
 ) -> list[datetime]:
@@ -658,14 +675,39 @@ def assign_step_due_ats(
     return due_ats
 
 
-class WorkflowRepository(Protocol):
-    """What scheduled-workflow storage must answer for this plan's own
-    slice (05-01): creating a run, and claiming its next due step.
+class WorkflowRunNotFoundError(Exception):
+    """`append_steps`/`replace_steps`: no `workflow_runs` row exists for
+    the given id -- deliberately a different exception than
+    `WorkflowRunNotAppendableError` below, so a caller (`routes/
+    workflows.py`, plan 05-04) can tell "no such run" (404) apart from
+    "that run already started" (409), the two refusals Task 3's own
+    instruction says must be distinguishable."""
 
-    Plan 05-02 adds the authoring surface (`list_runs`, `get_run`,
-    `cancel_run`, `append_steps`, `replace_steps`) to this same Protocol --
-    this plan defines only what it wires, matching this module's own
-    "define what you wire, not what a later plan needs" convention.
+    def __init__(self, run_id: int) -> None:
+        self.run_id = run_id
+        super().__init__(f"workflow run {run_id} does not exist")
+
+
+class WorkflowRunNotAppendableError(Exception):
+    """`append_steps`/`replace_steps`: the run exists but its `status` is
+    not `pending` -- D-11's own refusal (append-only, refused once a run
+    has started firing). Carries the run's actual status so a caller can
+    compose a refusal that names what state blocked it, not merely that
+    something did."""
+
+    def __init__(self, run_id: int, status: str) -> None:
+        self.run_id = run_id
+        self.status = status
+        super().__init__(f"workflow run {run_id} is not appendable (status={status!r})")
+
+
+class WorkflowRepository(Protocol):
+    """What scheduled-workflow storage must answer: creating a run,
+    claiming its next due step (05-01), and the authoring surface plan
+    05-02 adds here -- `list_runs`, `get_run`, `cancel_run`,
+    `append_steps`, `replace_steps` -- the reads and writes both the
+    webapp (plan 05-04) and the voice path (plan 05-05) need, so neither
+    adds a second implementation of the same rule.
     """
 
     async def create_run(
@@ -701,4 +743,74 @@ class WorkflowRepository(Protocol):
         `pending` or `firing` (a cancelled or terminal run has no
         claimable steps, D-11/D-12). Returns `True` when a step was
         claimed (whatever its outcome), `False` when nothing was due."""
+        ...
+
+    async def list_runs(self, *, statuses: Sequence[str] | None = None) -> Sequence[WorkflowRun]:
+        """Every run, newest first, with its own steps already attached in
+        `position` order -- explicit `ORDER BY` on both, never left to
+        insertion order (Phase 4's HI-01 review: an unordered
+        `list_macros()` meant which row won a collision was undefined --
+        the same defect class, closed on the way in here rather than
+        found in review). `statuses`, when given, restricts to runs whose
+        `status` is one of the given set -- the webapp's own pending-run
+        list (D-16) passes `("pending", "firing")`; `None` returns every
+        run regardless of status."""
+        ...
+
+    async def get_run(self, run_id: int) -> WorkflowRun | None:
+        """One run with its steps, or `None` if `run_id` does not
+        exist."""
+        ...
+
+    async def cancel_run(
+        self, run_id: int, *, now: datetime, cancelled_by_user_id: int | None
+    ) -> bool:
+        """Move `run_id` to `cancelled` and every still-`pending` step of
+        its own to `cancelled`, in one transaction. Returns `False`,
+        changing nothing, when `run_id` does not exist or is already
+        terminal (`completed`/`cancelled`/`failed`) -- `True` only when
+        this call is the one that actually moved it. Never deletes a row
+        (D-12): a cancelled run stays readable for as long as the
+        database does. A step the poller has already claimed (no longer
+        `pending` by the time this runs) is left exactly as the poller
+        left it -- the claim's own run-status guard is what stops
+        anything further in this run from becoming claimable once
+        `status` is `cancelled`, so this method needs no separate
+        coordination with the poller to make that true."""
+        ...
+
+    async def append_steps(
+        self, run_id: int, specs: Sequence[WorkflowStepSpec], *, now: datetime
+    ) -> WorkflowRun:
+        """Append `specs` to the end of `run_id`'s ordered step list,
+        computing each new step's `due_at` from the run's own last step
+        (`next_append_due_at`, never from `now`) so an appended step lands
+        after what is already scheduled (PA-D1). Raises
+        `WorkflowRunNotFoundError` when `run_id` does not exist, and
+        `WorkflowRunNotAppendableError` when the run's `status` is not
+        `pending` (D-11: append-only, refused once a run has started
+        firing) -- the two are deliberately different exceptions so a
+        caller can tell "no such run" apart from "that run already
+        started".
+
+        **The guard is the point of this method.** An implementation must
+        take a row lock on the run first and re-read its `status` under
+        that lock before inserting a single step row, all in one
+        transaction -- the third application of the WR-03 (accounts and
+        invites)/HI-01 (macro phrases) lesson this codebase has now
+        learned twice, applied here before a review finds it a third
+        time, not after. A status read followed by an unguarded insert is
+        the same check-then-act shape both of those were, and the poller
+        can move a run from `pending` to `firing` at any instant."""
+        ...
+
+    async def replace_steps(
+        self, run_id: int, specs: Sequence[WorkflowStepSpec], *, now: datetime
+    ) -> WorkflowRun:
+        """The webapp editor's whole-list save (plan 05-04 only): replace
+        `run_id`'s entire ordered step list with `specs`, recomputing
+        every `due_at` from the run's existing first step's own `due_at`
+        (the run's own schedule start, preserved across an edit that only
+        changes its steps) rather than from `now`. Same row lock, same
+        status refusal, and the same two exceptions as `append_steps`."""
         ...
