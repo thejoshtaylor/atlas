@@ -16,6 +16,11 @@ the actual `/api/auth/create-admin` -> `/api/invites` -> `/api/invites/
 {token}/accept` flow over real HTTP -- the failure mode this file guards
 against is specifically about the wired-together routes, not a handler
 called in isolation.
+
+One more test below is a named Task 3 acceptance criterion, not a
+pre-written scaffold: an invite token must appear in exactly one response
+body, ever -- the create response, and never again from any later route
+that reads the same invite back.
 """
 
 from __future__ import annotations
@@ -117,3 +122,29 @@ def test_an_invite_cannot_be_accepted_twice(tmp_path, monkeypatch):
         )
         assert second_accept.status_code == 400, second_accept.text
         assert "invalid" in second_accept.json()["detail"].lower()
+
+
+def test_an_invite_token_appears_in_exactly_one_response_body_ever(tmp_path, monkeypatch):
+    """An invite's plaintext token is returned exactly once, in the create
+    response -- listing invites must never return the token or its hash,
+    asserted against the serialized body, not merely against the response
+    model's declared fields."""
+    with _boot_with_empty_accounts(tmp_path, monkeypatch) as client:
+        _create_admin(client)
+
+        create_response = client.post(
+            "/api/invites",
+            json={"role": "operator", "email": "token-once@example.invalid"},
+        )
+        assert create_response.status_code == 201, create_response.text
+        token = create_response.json()["token"]
+        assert len(token) > 16, "the plaintext token must be a real, non-trivial bearer credential"
+
+        list_response = client.get("/api/invites")
+        assert list_response.status_code == 200, list_response.text
+        assert token not in list_response.text, (
+            "the plaintext invite token must never reappear in the invite-listing response"
+        )
+        for invite in list_response.json():
+            assert "token" not in invite, f"invite listing entry carries a token field: {invite!r}"
+            assert "token_hash" not in invite, f"invite listing entry carries a token_hash field: {invite!r}"
