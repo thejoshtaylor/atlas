@@ -1613,3 +1613,30 @@ def test_a_boot_with_migrations_disabled_and_a_macros_block_present_refuses(
     with pytest.raises(ConfigError, match="macros:.*no longer exists"):
         with TestClient(app_module.app):
             pass
+
+
+async def test_current_macros_reads_the_repository_fresh_on_every_call():
+    """D-12/T-04-28, proven directly and cheaply rather than only argued in
+    prose: `_current_macros` is a live read, not a cached snapshot -- a
+    macro added to the repository between two calls is visible on the
+    very next one, with no restart and no cache to invalidate. No
+    Postgres needed: `conftest.FakeMacroRepository` is mutated directly,
+    the same fake the rest of this file's Postgres-free tests already
+    trust."""
+    macro_repo = conftest.FakeMacroRepository()
+    app = SimpleNamespace(state=SimpleNamespace(macro_repo=macro_repo))
+
+    before = await app_module._current_macros(app)
+    assert before == ()
+
+    await macro_repo.create_macro(
+        phrase="example live read macro",
+        aliases=[],
+        reply="ok",
+        actions=[("ha_call_service", {"entity_id": "light.example_live_read"})],
+        created_by_user_id=None,
+    )
+
+    after = await app_module._current_macros(app)
+    assert len(after) == 1
+    assert after[0].phrase == "example live read macro"
