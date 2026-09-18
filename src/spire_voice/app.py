@@ -63,7 +63,7 @@ from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
-from spire_voice.providers.tts_cache import precache_all
+from spire_voice.providers.tts_cache import CachedTts, precache_all
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.routes import register_routers
 from spire_voice.routes.wizard import resolve_audio_source
@@ -77,7 +77,7 @@ from spire_voice.transports.camera import CameraAudioSource
 from spire_voice.transports.webrtc import WebrtcTransport, create_offer_answer
 from spire_voice.transports.websocket import WebSocketAudioSource
 from spire_voice.turn import brain_race
-from spire_voice.turn.controller import run_turn
+from spire_voice.turn.controller import _speak, run_turn
 from spire_voice.wake.base import WakeDetector, WakeError
 from spire_voice.wake.vosk_engine import VoskWakeDetector
 from spire_voice.workflow.scheduler import WorkflowScheduler
@@ -409,6 +409,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             macros=await _current_macros(app),
             state_fetch=_make_state_fetch(app.state.tool_host),
             session_recorder=session_recorder,
+            speech_lock=app.state.speaker_lock,
         )
 
     return _run
@@ -754,6 +755,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     wake_detector = _build_wake_detector(config.wake.resolve("camera"))
     app.state.wake_detector = wake_detector
 
+    # Plan 05-03 (T-05-18): the room's one speaker, one lock -- created
+    # once, here, before the camera source that will write through it
+    # exists at all, and shared by every writer this process has: the
+    # live turn path (`_make_run_turn_for_source`, above) and the
+    # scheduler's own scheduled-speech closure (below, once
+    # `app.state.camera_source`/`app.state.tts`/`app.state.filler_cache`
+    # all exist). A scheduled step's utterance interleaved with a live
+    # reply's on the same FIFO is garbled audio, not two sentences.
+    app.state.speaker_lock = asyncio.Lock()
+
     # `on_reconnect=ffmpeg_supervisor.handle_reconnect` closes a gap plan
     # 02-07 recorded and deliberately left open (outside its own file
     # scope): without this, a camera that drops and reconnects gets its
@@ -847,15 +858,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     retention_scheduler.start()
     app.state.retention_scheduler = retention_scheduler
 
+    # Plan 05-03: the scheduler's own utterance sink for a `speak` step
+    # and for a fire-time lateness/refusal sentence (D-14) -- plays
+    # through the exact `_speak` loop a live turn's reply uses, against
+    # the same camera source, sharing `app.state.speaker_lock` with the
+    # live turn path (above) so the two writers can never interleave on
+    # the room's one speaker (T-05-18). Reads from the startup filler/
+    # macro-reply cache through the same `CachedTts` adapter a cached
+    # macro reply already uses when the text was already precached
+    # (04-06's own "is this text already in the cache" keying) -- falling
+    # back to live synthesis, never raising on a miss the way `CachedTts`
+    # alone would, for text no precache pass ever saw (a fire-time
+    # refusal, a lateness sentence, or a `speak` step's own authored
+    # text). A fresh `TurnTimings()` per call, matching
+    # `_make_run_turn_for_source`'s own "never shared across turns" rule.
+    async def _scheduled_speak(text: str) -> None:
+        speaking_tts = (
+            CachedTts(app.state.filler_cache) if text in app.state.filler_cache else app.state.tts
+        )
+        await _speak(
+            app.state.camera_source,
+            speaking_tts,
+            TurnTimings(),
+            text,
+            kind="answer",
+            speech_lock=app.state.speaker_lock,
+        )
+
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
     # exists so its own executor calls through the identical lookup the
     # live turn path calls -- never a workflow-local copy of `allow_call`
     # (D-13). `functools.partial` binds `execute_step`'s own `tool_host`/
-    # `config` parameters once, here; `WorkflowScheduler` itself only ever
-    # calls the result as `executor(step, now)`.
+    # `config`/`speak` parameters once, here; `WorkflowScheduler` itself
+    # only ever calls the result as `executor(step, now)`.
     workflow_executor = functools.partial(
-        execute_step, tool_host=app.state.tool_host_lookup, config=config.workflow
+        execute_step,
+        tool_host=app.state.tool_host_lookup,
+        config=config.workflow,
+        speak=_scheduled_speak,
     )
     workflow_scheduler = WorkflowScheduler(workflow_repo, workflow_executor, config.workflow)
     workflow_scheduler.start()

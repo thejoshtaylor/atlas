@@ -1,31 +1,41 @@
 """`StepOutcome` and `execute_step`: the kind dispatch the poller
 (`scheduler.py`) calls once it has claimed a due `WorkflowStepRow` (D-05).
 
-This task wires `call_service` only -- the single-step tracer's own kind.
-`wait` and `speak` are wired in plan 05-03; calling `execute_step` against
-either here raises a named error rather than silently completing, so a gap
-in coverage is loud, not a quietly-wrong terminal state.
+All three kinds are wired: `call_service` (plan 05-01), `wait` and `speak`
+(plan 05-03). An unknown kind still raises rather than silently completing,
+so a gap in coverage stays loud, not a quietly-wrong terminal state.
 
 There is no suspension for a step's own configured duration anywhere in
-this module. The only step kind with a duration (`wait`) expresses it
-declaratively, folded into `due_at` at creation time
-(`db.repository.assign_step_due_ats`, PA-D1) -- a `wait` executor that
-slept for its own duration would hold the poller's claimed-row transaction
-open for that whole interval, compounding the same row-lock-held-across-
-execution cost the `call_service` kind already accepts for a bounded HTTP
-call (05-RESEARCH.md Pitfall 3 and Pitfall 5).
+this module -- confirmed by this file's own negative-grep acceptance
+criterion, checked at every commit. The only step kind with a duration (`wait`)
+expresses it declaratively, folded into `due_at` at creation time
+(`db.repository.assign_step_due_ats`, PA-D1): its own executor below
+completes instantly and calls nothing. Do not "fix" that into a sleep --
+the claimed row's lock is held for the whole executor call (D-02), and
+`wait` is the one kind with no external I/O to bound a sleep against
+(05-RESEARCH.md Pitfall 3 and Pitfall 5).
+
+`execute_step` also owns two things that are not any single kind's own
+job: recording and, for the run's first step only, speaking a step's own
+lateness (D-04), and speaking a kind's own refusal reason verbatim when it
+has one (D-14) -- both through the one `speak` callable this function is
+constructed with, never a workflow-local reply composer of its own
+(05-RESEARCH.md "Don't Hand-Roll": `turn/controller.py`'s own composers
+and verbatim-refusal path are reused, not re-implemented).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Protocol
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Protocol
 
 from spire_voice.config import WorkflowConfig
 from spire_voice.db.models import WorkflowStepRow
 from spire_voice.turn.controller import _is_error, _result_text
+
+_Speak = Callable[[str], Awaitable[None]]
 
 
 class _ToolHost(Protocol):
@@ -62,9 +72,11 @@ class StepOutcome:
 
 
 class UnwiredStepKindError(Exception):
-    """Raised by `execute_step` for a step kind D-05 names (`wait`,
-    `speak`) but this plan has not wired an executor for yet -- a named
-    gap, never a silent no-op that would look like the step completed."""
+    """Raised by `execute_step` when a step kind D-05 names has no way to
+    run -- today, only a `speak` step claimed while `execute_step` was
+    constructed with no `speak` callable at all (a wiring bug in the
+    caller, `app.py`'s own `lifespan`), never a silent no-op that would
+    look like the step completed."""
 
 
 def _tool_result_payload(result: Any) -> Any:
@@ -143,21 +155,128 @@ async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> 
     )
 
 
+async def _execute_wait() -> StepOutcome:
+    """A `wait` step has no work of its own: its duration was already
+    folded forward into the `due_at` of every step written after it, at
+    creation time (`db.repository.assign_step_due_ats`, PA-D1). Completes
+    instantly and calls nothing -- never suspends for its own configured
+    duration here; see this module's own docstring for why that would be
+    wrong, not merely different."""
+    return StepOutcome(status="completed", detail={}, speech=None, retry=False)
+
+
+async def _execute_speak(step: WorkflowStepRow, speak: "_Speak | None") -> StepOutcome:
+    """Calls the injected `speak(text)` awaitable `execute_step` was
+    constructed with -- this module never builds a text-to-speech
+    provider, an audio sink, or a second sending loop of its own; `app.py`
+    owns all three (D-14's mechanism). `speak is None` is a wiring bug in
+    the caller, not a step-authoring problem, so it raises rather than
+    silently completing.
+
+    A synthesis failure is retryable for this kind and this kind only
+    (PA-D3): re-speaking into a room is harmless, and an unheard sentence
+    is worth another attempt up to `WorkflowConfig.max_attempts` --
+    unlike `call_service`, whose outcome once sent is never safe to repeat."""
+    if speak is None:
+        raise UnwiredStepKindError(
+            "a speak step was claimed but execute_step was given no speak callable"
+        )
+    text = step.arguments.get("text", "")
+    try:
+        await speak(text)
+    except Exception as exc:
+        return StepOutcome(status="failed", detail={"error": str(exc)}, speech=None, retry=True)
+    return StepOutcome(status="completed", detail={"text": text}, speech=None, retry=False)
+
+
+def compose_lateness_sentence(late_by_s: float) -> str:
+    """The spoken lateness line for a step that fired more than
+    `WorkflowConfig.late_threshold_s` past its own `due_at` (D-04's "and
+    says so"). Composed here, in code, never through a model round trip --
+    the same reasoning `turn/controller.py`'s own
+    `_compose_clarifying_question`/`_compose_mixed_outcome_reply` already
+    carry: the same `late_by_s` always produces the same sentence, and
+    nothing here reads a clock or a random source.
+
+    Rounded to whole minutes under an hour, whole hours from an hour on --
+    an operator does not need second-level precision spoken aloud for
+    either "fifty-one seconds late" or "three hours late", and a fixed
+    rounding rule is what keeps this function's own output deterministic
+    for a fixed input, asserted exactly by this file's own tests."""
+    late_by_s = max(0.0, late_by_s)
+    if late_by_s < 3600:
+        minutes = max(1, round(late_by_s / 60))
+        unit = "minute" if minutes == 1 else "minutes"
+        return f"sorry, this was about {minutes} {unit} late."
+    hours = max(1, round(late_by_s / 3600))
+    unit = "hour" if hours == 1 else "hours"
+    return f"sorry, this was about {hours} {unit} late."
+
+
+def _late_by_seconds(due_at: datetime, now: datetime) -> float:
+    """`due_at` (`WorkflowStepRow.due_at`) is naive UTC -- this project's
+    own database-boundary convention (`db.models.WorkflowStepRow`'s own
+    docstring: "lateness is `fired_at - due_at`, a fact rather than an
+    inference"). `now` arrives aware UTC from every caller this project
+    has (`WorkflowScheduler`'s own default `clock`) but is normalized
+    here regardless rather than assumed, and rather than importing
+    `db.postgres`'s own private `_to_naive_utc` across a module boundary
+    this project keeps split on purpose (05-01 SUMMARY: "the module that
+    owns the database boundary never imports timedelta")."""
+    if now.tzinfo is not None:
+        now = now.astimezone(timezone.utc).replace(tzinfo=None)
+    return (now - due_at).total_seconds()
+
+
 async def execute_step(
     step: WorkflowStepRow,
     tool_host: _ToolHost,
     config: WorkflowConfig,
     now: datetime,
+    *,
+    speak: "_Speak | None" = None,
 ) -> StepOutcome:
-    """Dispatches on `step.kind`, a closed set of exactly three (D-05).
-    `config`/`now` are carried through for the two kinds plan 05-03 wires
-    (a `speak` step's retry backoff, a lateness sentence measured against
-    `now`); this task's own `call_service` executor needs neither."""
-    del config, now  # unused by call_service; carried for 05-03's kinds
+    """Dispatches on `step.kind`, a closed set of exactly three (D-05),
+    then applies the two things that are not any single kind's own job:
+
+    Lateness (D-04): every step whose fire time (`now`) is more than
+    `config.late_threshold_s` past its own `due_at` gets `late_by_s`
+    recorded in `result_detail` -- but only the run's first step
+    (`position == 0`) is spoken aloud, through `speak`. A run says once
+    that it is running late; every step after the first is late for the
+    same reason, and repeating it per step would be noise in a room
+    nobody is standing in.
+
+    A refusal (D-14): whenever the kind's own outcome carries `speech`
+    (a fire-time policy denial from `_execute_call_service`, or this
+    module's own `transition`-domain refusal), it is spoken verbatim,
+    through the same `speak` callable -- never reworded, never dropped.
+
+    `speak=None` (a caller with nothing to say through, or a test that
+    only cares about the kind's own outcome) skips both without raising,
+    except that a claimed `speak`-kind step with no `speak` callable at
+    all is a wiring bug, not a quiet no-op -- see `_execute_speak`.
+    """
     if step.kind == "call_service":
-        return await _execute_call_service(step, tool_host)
-    if step.kind in ("wait", "speak"):
-        raise UnwiredStepKindError(
-            f"workflow step kind {step.kind!r} has no executor yet -- wired in plan 05-03"
+        outcome = await _execute_call_service(step, tool_host)
+    elif step.kind == "wait":
+        outcome = await _execute_wait()
+    elif step.kind == "speak":
+        outcome = await _execute_speak(step, speak)
+    else:
+        raise ValueError(f"unknown workflow step kind: {step.kind!r}")
+
+    late_by_s = _late_by_seconds(step.due_at, now)
+    if late_by_s > config.late_threshold_s:
+        detail = dict(outcome.detail)
+        detail["late_by_s"] = late_by_s
+        outcome = StepOutcome(
+            status=outcome.status, detail=detail, speech=outcome.speech, retry=outcome.retry
         )
-    raise ValueError(f"unknown workflow step kind: {step.kind!r}")
+        if step.position == 0 and speak is not None:
+            await speak(compose_lateness_sentence(late_by_s))
+
+    if outcome.speech is not None and speak is not None:
+        await speak(outcome.speech)
+
+    return outcome
