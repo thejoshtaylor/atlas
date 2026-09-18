@@ -196,7 +196,7 @@ export function PolicyRoute() {
             onValueChange={(value) => handleModeSelect(value as Mode)}
             aria-label="Safety policy mode"
           >
-            <div className="flex items-center gap-2">
+            <div className="touch-target flex items-center gap-2">
               <RadioGroupItem
                 value="allow_all_except_denylist"
                 id="mode-deny-list"
@@ -204,7 +204,7 @@ export function PolicyRoute() {
               />
               <Label htmlFor="mode-deny-list">Deny-list (everything reachable except the denylist)</Label>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="touch-target flex items-center gap-2">
               <RadioGroupItem
                 value="allowlist_only"
                 id="mode-allow-only"
