@@ -19,8 +19,6 @@ from typing import Any, AsyncIterator, Callable
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -57,10 +55,14 @@ from spire_voice.wake.vosk_engine import VoskWakeDetector
 logger = logging.getLogger("spire_voice.app")
 
 CONFIG_PATH = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
-STATIC_DIR = Path(__file__).parent / "static"
 # The repository's own `mcp/` directory -- three levels up from this file
 # (src/spire_voice/app.py -> src/spire_voice -> src -> repo root -> mcp).
 MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
+# `web/vite.config.ts`'s own `build.outDir` -- that file's own comment
+# names this exact path as the consumer a rename there would break. Three
+# levels up from this file, the same computation `MCP_ROOT` above uses,
+# since `web/` lives at the repo root beside `src/`, not under it.
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
@@ -256,6 +258,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # pure environment check with no I/O dependency, which is why it runs
     # even before the migration step below.
     validate_secret_key_strength(config.security)
+
+    # `web/dist` is gitignored (it is a build artifact, `tests/
+    # test_web_build.py`'s own first assertion), so a clean clone that has
+    # not run `bun run build` has no directory here yet. Unlike the two
+    # failures this project does refuse to start on (an unmigrated schema,
+    # an uncalibrated correlation gate below) -- both of which would
+    # otherwise enforce something wrongly -- a missing static bundle is not
+    # one of them: a backend developer running only the API must still be
+    # able to start the process. It must not be silent either, because "the
+    # page is blank" is a terrible way to learn the frontend was never
+    # built, so this warns by name rather than staying quiet.
+    if not FRONTEND_DIR.is_dir():
+        logger.warning(
+            "frontend build directory %s does not exist -- the built admin "
+            "webapp will not be served (every other route still works). "
+            "Run `cd web && bun install && bun run build` to build it.",
+            FRONTEND_DIR,
+        )
 
     # Migrations run first, before any other resource is built, and awaited
     # in sequence -- never scheduled as a detached task, which is the exact
@@ -493,12 +513,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # WebSocket turn route below as well as every HTTP route.
 app = FastAPI(lifespan=lifespan, dependencies=[Depends(require_setup_complete)])
 register_routers(app)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(str(STATIC_DIR / "index.html"))
+# The built single-page application, served at the same origin its own
+# session cookie needs (D-15). `app.frontend()` (verified directly against
+# the installed `fastapi==0.141.1`'s source this session, 03-RESEARCH.md
+# Pattern 3) stores these as *low-priority* routes, checked only after
+# every ordinary `@app.get`/`@app.post`/`@app.websocket` route above fails
+# to match, regardless of where this call sits relative to them -- this
+# replaces both the old `/static` mount and the old `GET /` file response
+# in one call, and there is no hand-rolled catch-all route to get the
+# ordering of wrong. `check_dir=False` is explicit, not `"auto"`: a clean
+# clone that has not run `bun run build` yet must still start (the warning
+# above already told the operator why the page will be blank), so this
+# must never raise merely because the directory does not exist yet.
+app.frontend("/", directory=str(FRONTEND_DIR), check_dir=False)
 
 
 @app.get("/health")

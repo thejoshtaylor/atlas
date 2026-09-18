@@ -31,10 +31,28 @@ convention `tests/conftest.py` already uses -- never `unittest.mock`:
   the TTS provider (`precache_all` is replaced with a fake that returns
   immediately, touching neither the network nor the disk cache).
 
-What this test cannot and does not claim to cover: whether the real RTSP
-URL, go2rtc, or a wake model work against actual hardware. That is a live
-human check, tracked in this phase's `<live_verification_debt>`, not
-something a fake can stand in for.
+Plan 03-05 (Phase 3) adds a database, migrations, an application-level
+setup gate, and an authentication dependency to this same startup path --
+this file now also covers: `run_migrations`/`build_engine` substituted so
+no reachable Postgres is needed (`_fake_run_migrations`/`_fake_build_engine`
+below, and the dedicated migration-failure test); `_build_repositories`
+substituted with `FakePolicyRepository`/`FakeAccountRepository`, the latter
+pre-seeded with one fake admin so this file's own (unrelated) wiring
+assertions are not all turned into 503s by the new setup gate;
+`SPIRE_SECRET_KEY` set to a structurally-valid test value by this file's own
+autouse fixture, since `validate_secret_key_strength` now runs before
+anything else in `lifespan`; and one dedicated test
+(`test_the_real_boot_answers_create_admin_while_every_other_route_reports_setup_incomplete`)
+proving the setup gate itself is real against a genuinely empty account
+repository, through a real boot rather than a unit call.
+
+What this file cannot and does not claim to cover: whether the real RTSP
+URL, go2rtc, or a wake model work against actual hardware (unchanged from
+Phase 1/2); and, new as of this plan, whether a real browser can actually
+sign in through the built webapp, and whether the built application
+renders at all -- both remain human checks (this plan's own `<verify>`
+block names the clean-install sign-in as one), not something any fake here
+can stand in for.
 """
 
 from __future__ import annotations
@@ -110,6 +128,9 @@ _EXPECTED_STATE_ATTRS = [
     "db_engine",
     "policy_repo",
     "safety_block",
+    # Plan 03-05: the account repository `require_setup_complete` and
+    # every account/invite route read off `app.state`.
+    "account_repo",
 ]
 
 
@@ -691,3 +712,58 @@ def test_an_unreadable_calibration_with_correlation_off_boots_normally(tmp_path,
         assert response.status_code == 200
         runner = app_module.app.state.source_runners[0]
         assert runner._calibration is None
+
+
+# --- Plan 03-05 Task 4: the setup gate, through a real boot -----------------
+
+
+def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setup_incomplete(
+    tmp_path, monkeypatch
+):
+    """Phase 1's own lesson, applied to the newest startup path this phase
+    adds: `tests/test_auth_setup.py` already proves the setup gate
+    exhaustively, over every registered route, but against a hand-rolled
+    minimal boot. This is that same guarantee's cheapest possible real-boot
+    form, in the file whose whole purpose is "the real `lifespan`, not a
+    unit call" -- a genuinely empty `FakeAccountRepository` (unlike this
+    file's own default, pre-seeded for its unrelated wiring assertions),
+    `POST /api/auth/create-admin` answering, and an ordinary route
+    (`/transport`) refusing with the named 503 until it does.
+    """
+    import conftest
+
+    def _empty_repositories(config: object, engine: object) -> dict:
+        return {
+            "policy_repo": conftest.FakePolicyRepository(),
+            "account_repo": conftest.FakeAccountRepository(),
+        }
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _empty_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    with TestClient(app_module.app) as client:
+        before = client.get("/transport")
+        assert before.status_code == 503
+        assert "setup incomplete" in before.json()["detail"].lower()
+
+        created = client.post(
+            "/api/auth/create-admin",
+            json={
+                "email": "smoke-boot-admin@example.invalid",
+                "display_name": "Smoke Boot Admin",
+                "password": "a-plainly-fictional-test-password",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        after = client.get("/transport")
+        assert after.status_code == 200
+        assert "transport" in after.json()

@@ -152,13 +152,6 @@ _ROLE_EXEMPT_PATHS = {
     # Unauthenticated by necessity: the person accepting has no account
     # yet (T-03-31's own reasoning).
     "/api/invites/{token}/accept",
-    # A `StaticFiles` mount, not an endpoint route -- no `dependant` to
-    # inspect at all.
-    "/static",
-    # The Phase 1 dev-mic index page. Plan 03-05's own Task 4 replaces
-    # this route entirely with `app.frontend(...)`; recorded here rather
-    # than left for Task 4 to silently change the shape of this test.
-    "/",
     # A health check answering only to an authenticated caller is not a
     # health check a container orchestrator or load balancer can use --
     # also exempt from the setup gate by name.

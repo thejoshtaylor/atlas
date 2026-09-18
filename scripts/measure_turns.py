@@ -37,7 +37,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_WAV = _REPO_ROOT / "tests" / "fixtures" / "one_command_16k_mono.wav"
 _DEFAULT_URL = "http://127.0.0.1:8080"
 
-# The AudioWorklet render quantum `static/pcm-worklet.js` posts one
+# The AudioWorklet render quantum `web/public/dev-mic/pcm-worklet.js` posts one
 # Int16Array per: 128 frames, 256 bytes at 16-bit mono. Chunking and pacing
 # to anything else measures a cadence no real microphone stream produces
 # (Pitfall 5, 01.1-RESEARCH.md) -- referenced by name below, never
@@ -257,7 +257,7 @@ async def _run_websocket_turn(ws_url: str, chunks: list[bytes], schedule: list[f
 
 
 async def _wait_ice_gathering_complete(pc: RTCPeerConnection) -> None:
-    """Mirror `static/webrtc.js`'s `waitForIceGatheringComplete`: wait for
+    """Mirror `web/public/dev-mic/webrtc.js`'s `waitForIceGatheringComplete`: wait for
     every ICE candidate to be gathered so the one POST this harness makes
     already carries all of them, rather than trickling candidates in after
     the fact -- the same non-trickle exchange the real page performs.
@@ -275,7 +275,7 @@ async def _wait_ice_gathering_complete(pc: RTCPeerConnection) -> None:
 
 
 async def _run_webrtc_turn(offer_url: str, wav_path: Path) -> dict[str, Any] | None:
-    """Drive one turn over `/webrtc/offer`, mirroring `static/webrtc.js`:
+    """Drive one turn over `/webrtc/offer`, mirroring `web/public/dev-mic/webrtc.js`:
     build the same offer, POST it, read the same data channel the page
     reads. `aiortc.contrib.media.MediaPlayer` supplies the recording as a
     real-time-paced track -- no hand-rolled `MediaStreamTrack` reading raw
