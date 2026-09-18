@@ -28,7 +28,8 @@ from typing import Any
 import httpx
 
 from mcp.server.mcpserver import MCPServer
-from spire_mcp.safety import Policy, allow_call, allow_read
+from mcp.server.mcpserver.exceptions import ToolError
+from spire_mcp.safety import Denied, Policy, allow_call, allow_read
 
 
 async def handle_call_service(
@@ -189,34 +190,55 @@ async def ha_call_service(
     `area_id`, `device_id`, and `label_id` are accepted so a target selector
     is never silently dropped, but any of them being non-empty is refused
     rather than expanded -- this phase builds no registry expansion (D-15).
+
+    `Denied` is caught here and re-raised as `ToolError(exc.reason)` --
+    `safety.py` stays a plain `Exception`, importing nothing from the `mcp`
+    SDK (its own docstring: "it lives alone, it stays pure"), but the SDK's
+    own tool runner treats a bare `Exception` as a crash and withholds its
+    text from the caller, replacing it with a generic "Error executing
+    tool" message (`mcp.server.mcpserver.tools.base`'s own docstring:
+    "the exception's own text stays on the server"). `ToolError` is the
+    SDK's "a failure you anticipated" channel -- its message is exactly
+    what reaches `CallToolResult.content`, which is what makes a `Denied`
+    reason speakable rather than silently swallowed at the process
+    boundary this file's own module docstring describes.
     """
     assert _http_client is not None, "ha_call_service invoked before startup"
-    return await handle_call_service(
-        _policy,
-        _http_client,
-        _base_url,
-        _token,
-        domain,
-        service,
-        entity_id,
-        area_id=area_id,
-        device_id=device_id,
-        label_id=label_id,
-    )
+    try:
+        return await handle_call_service(
+            _policy,
+            _http_client,
+            _base_url,
+            _token,
+            domain,
+            service,
+            entity_id,
+            area_id=area_id,
+            device_id=device_id,
+            label_id=label_id,
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
 
 
 @mcp_server.tool()
 async def ha_get_state(entity_id: str) -> dict[str, Any]:
     """Read one Home Assistant entity's current state and attributes."""
     assert _http_client is not None, "ha_get_state invoked before startup"
-    return await handle_get_state(_http_client, _base_url, _token, entity_id)
+    try:
+        return await handle_get_state(_http_client, _base_url, _token, entity_id)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
 
 
 @mcp_server.tool()
 async def ha_list_entities() -> list[dict[str, Any]]:
     """List every Home Assistant entity's id, friendly name, and state."""
     assert _http_client is not None, "ha_list_entities invoked before startup"
-    return await handle_list_entities(_policy, _http_client, _base_url, _token)
+    try:
+        return await handle_list_entities(_policy, _http_client, _base_url, _token)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
 
 
 def _startup() -> None:

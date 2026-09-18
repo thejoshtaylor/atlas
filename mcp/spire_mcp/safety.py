@@ -125,6 +125,36 @@ class Policy:
             allow_patterns=tuple(raw.get("allow_patterns", ())),
         )
 
+    @classmethod
+    def from_db_rows(
+        cls,
+        mode: str,
+        deny_entities: Iterable[str],
+        deny_patterns: Iterable[str],
+        allow_entities: Iterable[str],
+        allow_patterns: Iterable[str],
+    ) -> "Policy":
+        """Build a policy from database rows -- the DB-backed sibling of
+        `from_config`, additive and changing nothing about the existing
+        constructor, `denies_entity`, or `allow_call`.
+
+        `deny_domains`/`deny_services` stay the code-owned defaults
+        (`DEFAULT_DENY_DOMAINS`/`DEFAULT_DENY_SERVICES`): only entity-level
+        rules come from the database, matching what the webapp's policy
+        editor actually lets an operator edit (SAFE-07's UI scope). The
+        domain and service denylists are generic to Home Assistant and
+        carry no information about any particular house.
+        """
+        if mode not in ("allow_all_except_denylist", "allowlist_only"):
+            raise ValueError(f"unknown safety mode: {mode!r}")
+        return cls(
+            mode=mode,
+            deny_entities=frozenset(_norm(e) for e in deny_entities),
+            deny_patterns=tuple(deny_patterns),
+            allow_entities=frozenset(_norm(e) for e in allow_entities),
+            allow_patterns=tuple(allow_patterns),
+        )
+
     def denies_entity(self, entity_id: str) -> bool:
         if entity_id in self.deny_entities:
             return True

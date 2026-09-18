@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Sequence
 
@@ -18,6 +19,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from spire_mcp.safety import Policy
+from spire_voice.db.repository import PolicyRule
 from spire_voice.transports.base import SourceFormat
 
 
@@ -349,3 +352,73 @@ async def fake_ha():
     ha = FakeHomeAssistant()
     yield ha
     await ha.aclose()
+
+
+class FakePolicyRepository:
+    """An in-memory `PolicyRepository` (`spire_voice.db.repository`) --
+    the one Postgres-free implementation D-04 ("the suite runs with no
+    Postgres reachable") requires.
+
+    Structurally satisfies the `PolicyRepository` protocol without
+    inheriting from it. Constructed with a starting `mode` and four rule
+    lists, mirroring `Policy.from_config`'s own raw-dict keyword shape so a
+    test can build one from the same literal it would hand to
+    `Policy.from_config`. `record_audit` appends to `audit_log` rather than
+    discarding the call, so a test can assert on what was recorded.
+    """
+
+    def __init__(
+        self,
+        *,
+        mode: str = "allow_all_except_denylist",
+        deny_entities: Sequence[str] = (),
+        deny_patterns: Sequence[str] = (),
+        allow_entities: Sequence[str] = (),
+        allow_patterns: Sequence[str] = (),
+    ) -> None:
+        self.mode = mode
+        self._next_rule_id = 1
+        self.rules: list[PolicyRule] = []
+        self._add_rules("deny_entity", deny_entities)
+        self._add_rules("deny_pattern", deny_patterns)
+        self._add_rules("allow_entity", allow_entities)
+        self._add_rules("allow_pattern", allow_patterns)
+        self.audit_log: list[dict] = []
+
+    def _add_rules(self, kind: str, values: Sequence[str]) -> None:
+        for value in values:
+            self.rules.append(
+                PolicyRule(
+                    id=self._next_rule_id,
+                    kind=kind,
+                    value=value,
+                    note=None,
+                    created_at=datetime.now(timezone.utc),
+                    created_by_user_id=None,
+                )
+            )
+            self._next_rule_id += 1
+
+    async def load_policy(self) -> Policy:
+        return Policy.from_db_rows(
+            mode=self.mode,
+            deny_entities=[r.value for r in self.rules if r.kind == "deny_entity"],
+            deny_patterns=[r.value for r in self.rules if r.kind == "deny_pattern"],
+            allow_entities=[r.value for r in self.rules if r.kind == "allow_entity"],
+            allow_patterns=[r.value for r in self.rules if r.kind == "allow_pattern"],
+        )
+
+    async def list_rules(self) -> list[PolicyRule]:
+        return list(self.rules)
+
+    async def record_audit(self, action: str, detail: dict, actor_user_id: int | None) -> None:
+        self.audit_log.append(
+            {"action": action, "detail": detail, "actor_user_id": actor_user_id}
+        )
+
+
+@pytest.fixture
+def fake_policy_repository():
+    """Factory: `fake_policy_repository(mode=..., deny_entities=[...])`
+    builds a scripted `FakePolicyRepository`."""
+    return FakePolicyRepository
