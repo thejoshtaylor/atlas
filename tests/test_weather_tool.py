@@ -226,3 +226,68 @@ async def test_live_current_conditions_has_the_fields_the_parser_reads():
     assert isinstance(result["condition"], str) and result["condition"]
     assert isinstance(result["local_time"], str) and result["local_time"]
     assert isinstance(result["timezone"], str) and result["timezone"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the two tool handlers
+# ---------------------------------------------------------------------------
+
+
+async def test_current_conditions_handler_returns_a_speech_ready_dict():
+    from spire_mcp.weather import handle_weather_current
+
+    recorder = _RecordingTransport(_CURRENT_BODY)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        result = await handle_weather_current(client, _FAKE_LATITUDE, _FAKE_LONGITUDE)
+
+    assert result["temperature_c"] == 24.4
+    assert result["condition"] == "overcast"
+    assert "local_time" in result
+
+
+async def test_forecast_handler_returns_bounded_days_and_refuses_an_out_of_range_count():
+    from spire_mcp.weather import handle_weather_forecast
+
+    recorder = _RecordingTransport(_FORECAST_BODY)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        result = await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=3)
+        assert len(result["days"]) == 3
+        for day in result["days"]:
+            assert set(day) >= {"date", "high_c", "low_c", "condition"}
+
+        with pytest.raises(ValueError):
+            await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=0)
+        with pytest.raises(ValueError):
+            await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=17)
+
+
+async def test_handlers_take_their_client_as_a_parameter_and_propagate_upstream_errors():
+    from spire_mcp.weather import handle_weather_current
+
+    def _raise_connect_error(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with _client_for(_raise_connect_error) as http_client:
+        client = OpenMeteoClient(http_client)
+        with pytest.raises(UpstreamUnreachableError):
+            await handle_weather_current(client, _FAKE_LATITUDE, _FAKE_LONGITUDE)
+
+
+def test_handler_docstrings_are_non_empty_tool_descriptions():
+    from spire_mcp import weather
+
+    assert weather.handle_weather_current.__doc__
+    assert weather.handle_weather_forecast.__doc__
+
+
+def test_no_handler_body_references_a_module_level_client_name():
+    import inspect
+
+    from spire_mcp import weather
+
+    for name in ("handle_weather_current", "handle_weather_forecast"):
+        source = inspect.getsource(getattr(weather, name))
+        assert "_http_client" not in source
+        assert "_open_meteo_client" not in source
