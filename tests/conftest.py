@@ -20,7 +20,7 @@ import pytest
 import pytest_asyncio
 
 from spire_mcp.safety import Policy
-from spire_voice.db.repository import Invite, PolicyRule, RefreshToken, User
+from spire_voice.db.repository import Credential, Invite, PolicyRule, RefreshToken, User
 from spire_voice.transports.base import SourceFormat
 
 
@@ -635,3 +635,48 @@ def fake_account_repository():
     file's factory-fixture convention even though this one fake takes no
     constructor arguments."""
     return FakeAccountRepository
+
+
+class FakeCredentialRepository:
+    """An in-memory `CredentialRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, matching `FakePolicyRepository`'s and
+    `FakeAccountRepository`'s own precedent above exactly. Holds
+    ciphertext only, the same as the real implementation -- nothing here
+    ever decrypts a value.
+    """
+
+    def __init__(self) -> None:
+        self.credentials: dict[str, Credential] = {}
+
+    async def get_credential(self, slot: str) -> Credential | None:
+        return self.credentials.get(slot)
+
+    async def list_credentials(self) -> list[Credential]:
+        return list(self.credentials.values())
+
+    async def upsert_credential(
+        self,
+        slot: str,
+        *,
+        ciphertext: bytes,
+        key_version: int,
+        updated_by_user_id: int | None,
+    ) -> Credential:
+        credential = Credential(
+            slot=slot,
+            ciphertext=ciphertext,
+            key_version=key_version,
+            updated_at=datetime.now(timezone.utc),
+            updated_by_user_id=updated_by_user_id,
+        )
+        self.credentials[slot] = credential
+        return credential
+
+
+@pytest.fixture
+def fake_credential_repository():
+    """Factory: `fake_credential_repository()` builds an empty
+    `FakeCredentialRepository` -- every test populates it itself,
+    matching `fake_account_repository`'s own convention."""
+    return FakeCredentialRepository

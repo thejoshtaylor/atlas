@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from spire_voice.routes.accounts import router as accounts_router
 from spire_voice.routes.auth import router as auth_router
 from spire_voice.routes.auth import setup_router
+from spire_voice.routes.credentials import router as credentials_router
 from spire_voice.routes.policy import router as policy_router
 
 
@@ -18,3 +19,4 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(setup_router)
     app.include_router(accounts_router)
     app.include_router(policy_router)
+    app.include_router(credentials_router)

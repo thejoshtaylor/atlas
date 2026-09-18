@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Text
+from sqlalchemy import ForeignKey, LargeBinary, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -166,4 +166,29 @@ class RefreshTokenRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     rotated_to_id: Mapped[int | None] = mapped_column(
         ForeignKey("refresh_tokens.id"), nullable=True
+    )
+
+
+class ProviderCredentialRow(Base):
+    """One encrypted provider credential slot (PROV-04, D-07).
+
+    `slot` is unique across the table and drawn from the closed set
+    `spire_voice.crypto.credentials.CredentialSlot` names -- a route
+    write to an unknown slot is refused before it ever reaches this
+    table, so this uniqueness constraint is defense in depth, not the
+    only guard. `ciphertext`/`key_version` are exactly what
+    `spire_voice.crypto.credentials.encrypt_credential` returns; nothing
+    in this table, nor in any repository built on it, ever holds a
+    plaintext value.
+    """
+
+    __tablename__ = "provider_credentials"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slot: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_version: Mapped[int] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
     )

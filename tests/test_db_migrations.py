@@ -73,11 +73,13 @@ async def _reset_schema(async_url: str) -> None:
     drop order regardless of which side a leftover constraint points from,
     but every table either migration creates must be named here or a
     second test run against the same throwaway Postgres finds the first
-    run's tables still present.
+    run's tables still present. Plan 03-07 extends it again:
+    `0003_credentials.py` adds `provider_credentials`.
     """
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            "provider_credentials",
             "refresh_tokens",
             "invites",
             "users",
