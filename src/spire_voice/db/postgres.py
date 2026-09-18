@@ -10,6 +10,7 @@ sessionmaker it is handed.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,6 +18,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from spire_mcp.safety import Policy
+from spire_voice import config as _config_module
 from spire_voice.db.models import (
     AuditRow,
     InviteRow,
@@ -43,6 +45,7 @@ from spire_voice.db.repository import (
     SetupStep,
     User,
 )
+from spire_voice.turn.macros import normalize as _normalize_macro_key
 
 # Discovered while fixing WR-03 (code review): every `Mapped[datetime]`
 # column in `db/models.py` maps, with no `timezone=True`, to Postgres'
@@ -765,6 +768,72 @@ async def _load_macro(session: AsyncSession, row: MacroRow) -> Macro:
     )
 
 
+async def _list_macros_in_session(
+    session: AsyncSession, *, exclude_id: int | None = None
+) -> list[Macro]:
+    """The read half of both `list_macros()` and the collision recheck
+    `create_macro`/`update_macro` perform under `_MACRO_WRITE_LOCK_KEY`
+    (HI-01 fix, phase 4 code review) -- one query and one row-to-`Macro`
+    assembly, not two copies of either. `ORDER BY id` (HI-01's second,
+    smaller finding): with no order, `match()` (`turn/macros.py`) --
+    which returns the *first* macro whose normalized keys contain a given
+    transcript's key -- picked whichever macro Postgres happened to
+    return first, not guaranteed stable across a `VACUUM` or a later
+    `UPDATE` moving a heap tuple. Ordering by id (insertion order) is a
+    second, independent source of determinism this fix closes regardless
+    of whether the collision itself is ever hit."""
+    query = select(MacroRow).order_by(MacroRow.id)
+    rows = (await session.execute(query)).scalars().all()
+    macros = [await _load_macro(session, row) for row in rows]
+    if exclude_id is not None:
+        macros = [m for m in macros if m.id != exclude_id]
+    return macros
+
+
+@dataclass(frozen=True)
+class _CandidateMacro:
+    """The would-be macro `create_macro`/`update_macro` are about to
+    write, shaped exactly like `Macro`'s own duck-typed contract
+    (`.phrase`, `.normalized_keys`) so it can sit in the same list
+    `_config_module._check_macros_do_not_collide` walks alongside the
+    real, already-stored `Macro` rows.
+
+    This mirrors `routes/macros.py::_CandidateMacro` exactly but is not
+    imported from there (HI-01 fix, phase 4 code review): a persistence
+    module reaching into the HTTP route layer for a shared helper would
+    invert this codebase's layering, and `routes/macros.py` already
+    imports `spire_voice.db.repository` (transitively, this module) --
+    the reverse import would cycle even if the layering were acceptable.
+    """
+
+    phrase: str
+    aliases: tuple[str, ...]
+
+    @property
+    def normalized_keys(self) -> frozenset[str]:
+        return frozenset(_normalize_macro_key(k) for k in (self.phrase, *self.aliases))
+
+
+# HI-01 fix (phase 4 code review): an arbitrary, fixed bigint naming the
+# macro-create/update critical section for `pg_advisory_xact_lock` -- the
+# same pattern WR-03 (phase 3 code review) established with
+# `_CREATE_FIRST_USER_LOCK_KEY` above, applied to a second table.
+# `_check_no_collision` in `routes/macros.py` was check-then-act with no
+# transaction isolation, lock, or database uniqueness constraint spanning
+# the read and the write: two concurrent creates with colliding
+# normalized phrases could both pass the route's pre-check and both
+# commit, silently shadowing one macro behind the other with which one
+# wins undefined (compounded by `list_macros()` carrying no `ORDER BY`,
+# fixed above). A database-level unique constraint was not the fit here
+# the way it was for `users.email`: a collision is defined over the
+# *normalized* union of a phrase and every alias, not a single column, so
+# the same advisory-lock-and-recheck shape WR-03 used is the more direct
+# fix. Spelled out as the ASCII bytes of "spiremac1", stuffed into a
+# 63-bit int -- distinct from `_CREATE_FIRST_USER_LOCK_KEY` so a macro
+# write and a create-admin call never contend on the same key.
+_MACRO_WRITE_LOCK_KEY = int.from_bytes(b"spiremac1", "big") & 0x7FFFFFFFFFFFFFFF
+
+
 class PostgresMacroRepository:
     """`MacroRepository`, implemented against a real Postgres.
 
@@ -773,6 +842,19 @@ class PostgresMacroRepository:
     every other `Postgres*Repository` class in this module. `create_macro`/
     `update_macro` replace a macro's alias and action rows wholesale rather
     than diffing them, matching the Protocol's own documented contract.
+
+    HI-01 fix (phase 4 code review): `create_macro`/`update_macro` now
+    re-run the same collision check `routes/macros.py`'s own pre-check
+    already runs, under `_MACRO_WRITE_LOCK_KEY`, inside the same
+    transaction the insert/update itself commits in. This does not
+    contradict the Protocol's "the caller validates, this layer only
+    writes" convention so much as complete it: the route's pre-check is
+    still what decides the common-case, non-racing 409 and which fields
+    the error names; this recheck is what makes two concurrent writes
+    with colliding phrases *impossible* rather than merely unlikely, the
+    same division of labor WR-03 established for `create_admin`/
+    `accept_invite` (the route's own read "only decides the early refusal
+    message"; the repository-level check is "the actual authority").
     """
 
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
@@ -780,8 +862,7 @@ class PostgresMacroRepository:
 
     async def list_macros(self) -> list[Macro]:
         async with self._sessionmaker() as session:
-            rows = (await session.execute(select(MacroRow))).scalars().all()
-            return [await _load_macro(session, row) for row in rows]
+            return await _list_macros_in_session(session)
 
     async def get_macro(self, macro_id: int) -> Macro | None:
         async with self._sessionmaker() as session:
@@ -801,6 +882,17 @@ class PostgresMacroRepository:
     ) -> Macro:
         now = _to_naive_utc(datetime.now(timezone.utc))
         async with self._sessionmaker() as session:
+            # HI-01 fix: acquire the write lock, then re-read the current
+            # macro list and recheck the collision -- both inside the
+            # transaction this insert commits in -- before adding a single
+            # row. A second, concurrent caller blocks at lock acquisition
+            # until this transaction ends, then sees this call's own
+            # committed row in its own re-read.
+            await session.execute(select(func.pg_advisory_xact_lock(_MACRO_WRITE_LOCK_KEY)))
+            existing = await _list_macros_in_session(session)
+            candidate = _CandidateMacro(phrase=phrase, aliases=tuple(aliases))
+            _config_module._check_macros_do_not_collide([*existing, candidate])
+
             row = MacroRow(
                 phrase=phrase,
                 reply=reply,
@@ -832,9 +924,20 @@ class PostgresMacroRepository:
         actions: list[tuple[str, dict]] | tuple[tuple[str, dict], ...],
     ) -> Macro:
         async with self._sessionmaker() as session:
+            # HI-01 fix: same lock-then-recheck as create_macro, excluding
+            # this macro's own current row from the collision set -- the
+            # same self-exclusion `routes/macros.py`'s own pre-check
+            # already performs (`exclude_macro_id=macro_id`) -- so a save
+            # that keeps a macro's own phrase is never refused against
+            # itself.
+            await session.execute(select(func.pg_advisory_xact_lock(_MACRO_WRITE_LOCK_KEY)))
             row = await session.get(MacroRow, macro_id)
             if row is None:
                 raise ValueError(f"macro {macro_id} does not exist")
+            existing = await _list_macros_in_session(session, exclude_id=macro_id)
+            candidate = _CandidateMacro(phrase=phrase, aliases=tuple(aliases))
+            _config_module._check_macros_do_not_collide([*existing, candidate])
+
             row.phrase = phrase
             row.reply = reply
             row.updated_at = _to_naive_utc(datetime.now(timezone.utc))

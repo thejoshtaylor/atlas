@@ -458,13 +458,26 @@ async def create_macro(
     macro_repo: MacroRepository = request.app.state.macro_repo
     await _check_no_collision(macro_repo, payload.phrase, payload.aliases)
 
-    macro = await macro_repo.create_macro(
-        phrase=payload.phrase,
-        aliases=payload.aliases,
-        reply=payload.reply,
-        actions=[(action.tool, action.arguments) for action in payload.actions],
-        created_by_user_id=user.id,
-    )
+    # HI-01 fix (phase 4 code review): `_check_no_collision` above is a
+    # check-then-act pre-check -- it decides the common-case, non-racing
+    # 400 and names the colliding phrases in it -- but it is not, by
+    # itself, what makes two concurrent creates with colliding phrases
+    # impossible. `macro_repo.create_macro` now reruns the identical
+    # check under a database-level advisory lock, inside the same
+    # transaction as the insert; a losing concurrent request raises the
+    # same `ConfigError` here, which this route converts to the same
+    # refusal shape `_check_no_collision` already produces, rather than
+    # letting it surface as an unhandled 500.
+    try:
+        macro = await macro_repo.create_macro(
+            phrase=payload.phrase,
+            aliases=payload.aliases,
+            reply=payload.reply,
+            actions=[(action.tool, action.arguments) for action in payload.actions],
+            created_by_user_id=user.id,
+        )
+    except _config_module.ConfigError as exc:
+        raise _duplicate_phrase_error(str(exc)) from exc
     return await _finish_save(request, macro)
 
 
@@ -486,13 +499,22 @@ async def update_macro(
     # Ordering is sent, not inferred: the whole action list is replaced in
     # the order the request carried, which is what makes a reorder-only
     # update persist exactly as sent (Task 2's own instruction).
-    macro = await macro_repo.update_macro(
-        macro_id,
-        phrase=payload.phrase,
-        aliases=payload.aliases,
-        reply=payload.reply,
-        actions=[(action.tool, action.arguments) for action in payload.actions],
-    )
+    #
+    # HI-01 fix (phase 4 code review): same reasoning as create_macro
+    # above -- `macro_repo.update_macro` reruns the collision check under
+    # the advisory lock, inside the same transaction as the write, and a
+    # losing concurrent request's `ConfigError` is converted to the same
+    # refusal shape here.
+    try:
+        macro = await macro_repo.update_macro(
+            macro_id,
+            phrase=payload.phrase,
+            aliases=payload.aliases,
+            reply=payload.reply,
+            actions=[(action.tool, action.arguments) for action in payload.actions],
+        )
+    except _config_module.ConfigError as exc:
+        raise _duplicate_phrase_error(str(exc)) from exc
     return await _finish_save(request, macro)
 
 

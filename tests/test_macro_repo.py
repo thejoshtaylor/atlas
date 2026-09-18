@@ -15,13 +15,14 @@ test_db_migrations.py` covers that separately).
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import MacroConfig
+from spire_voice.config import ConfigError, MacroConfig
 from spire_voice.db.postgres import PostgresMacroRepository
 
 _TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
@@ -247,3 +248,81 @@ async def test_a_database_loaded_macro_matches_normalized_keys_with_a_file_loade
     )
 
     assert db_loaded.normalized_keys == file_loaded.normalized_keys
+
+
+@skip_without_postgres
+async def test_concurrent_creates_with_colliding_phrases_produce_exactly_one_macro(sessionmaker):
+    """HI-01 fix (phase 4 code review): `_check_no_collision`
+    (`routes/macros.py`) was check-then-act with no transaction isolation,
+    lock, or database uniqueness constraint -- two concurrent creates for
+    phrases that both normalize to the same key could both pass the
+    route's own pre-check and both commit, silently shadowing one macro
+    behind the other. This fires ten real concurrent `create_macro` calls
+    -- not through the fake repository, which has no interleaving to race
+    in the first place (the same reasoning `test_account_repository_
+    concurrency.py`'s own docstring gives for WR-03) -- for phrases that
+    all normalize to the identical key, and asserts exactly one commits.
+    """
+    repo = PostgresMacroRepository(sessionmaker)
+
+    async def _attempt(n: int):
+        try:
+            return await repo.create_macro(
+                phrase=f"Turn Off The Office Lights{'' if n == 0 else ' ' * n}",
+                aliases=[],
+                reply="okay",
+                actions=[("ha_call_service", {"entity_id": "light.example_collision"})],
+                created_by_user_id=None,
+            )
+        except ConfigError:
+            return None
+
+    results = await asyncio.gather(*(_attempt(n) for n in range(10)))
+
+    winners = [r for r in results if r is not None]
+    assert len(winners) == 1, (
+        f"expected exactly one winner among 10 concurrent colliding creates, got "
+        f"{len(winners)}: {winners!r}"
+    )
+
+    stored = await repo.list_macros()
+    matching = [m for m in stored if "turn off the office lights" in m.normalized_keys]
+    assert len(matching) == 1, (
+        f"expected exactly one stored macro normalizing to the colliding key, found "
+        f"{len(matching)}: {matching!r}"
+    )
+
+
+@skip_without_postgres
+async def test_list_macros_is_ordered_by_id(sessionmaker):
+    """HI-01's second finding: `list_macros()` carried no `ORDER BY`, so
+    `match()`'s first-match-wins semantics (`turn/macros.py`) depended on
+    whatever order Postgres happened to return rows in -- not guaranteed
+    stable. Three macros created in a known order must always list back
+    in that same order."""
+    repo = PostgresMacroRepository(sessionmaker)
+
+    first = await repo.create_macro(
+        phrase="example order first",
+        aliases=[],
+        reply="one",
+        actions=[("ha_call_service", {"entity_id": "light.example_order_a"})],
+        created_by_user_id=None,
+    )
+    second = await repo.create_macro(
+        phrase="example order second",
+        aliases=[],
+        reply="two",
+        actions=[("ha_call_service", {"entity_id": "light.example_order_b"})],
+        created_by_user_id=None,
+    )
+    third = await repo.create_macro(
+        phrase="example order third",
+        aliases=[],
+        reply="three",
+        actions=[("ha_call_service", {"entity_id": "light.example_order_c"})],
+        created_by_user_id=None,
+    )
+
+    listed = await repo.list_macros()
+    assert [m.id for m in listed] == [first.id, second.id, third.id]
