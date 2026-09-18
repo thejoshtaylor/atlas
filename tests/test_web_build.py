@@ -21,6 +21,7 @@ ordering guarantee rather than assuming it.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -87,18 +88,35 @@ def test_a_missing_build_directory_does_not_stop_the_application(tmp_path, monke
     must keep working, even when the frontend build directory does not
     exist on disk -- and startup must log a warning naming the directory
     and the command that builds it, not stay silent about a blank page."""
-    assert not app_module.FRONTEND_DIR.exists(), (
-        f"{app_module.FRONTEND_DIR} unexpectedly exists in this environment -- this "
-        "test asserts the genuinely-missing-directory behavior; run it in a clone "
-        "that has not run `bun run build` (a real build artifact left over from a "
-        "previous session would make this assertion meaningless)"
-    )
     _apply_smoke_monkeypatches(tmp_path, monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
-        with TestClient(app_module.app) as client:
-            response = client.get("/health")
-            assert response.status_code == 200
+    # The frontend route binds to FRONTEND_DIR's absolute path at import time
+    # on the one module-level `app` singleton, so there is no per-test way to
+    # redirect it -- the sibling test below says the same thing from the other
+    # direction. So genuinely absent means genuinely absent: move a real build
+    # aside for the duration and put it back afterwards, exactly as that
+    # sibling does in reverse. Asserting the directory is missing instead would
+    # make this test fail for any developer who has run `bun run build`, which
+    # is every developer who has run the application.
+    frontend_dir = app_module.FRONTEND_DIR
+    stashed = frontend_dir.parent / f"{frontend_dir.name}.stashed-by-test"
+    had_build = frontend_dir.exists()
+    if had_build:
+        if stashed.exists():
+            shutil.rmtree(stashed)
+        frontend_dir.rename(stashed)
+    try:
+        assert not frontend_dir.exists()
+
+        with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+            with TestClient(app_module.app) as client:
+                response = client.get("/health")
+                assert response.status_code == 200
+    finally:
+        if had_build:
+            if frontend_dir.exists():
+                shutil.rmtree(frontend_dir)
+            stashed.rename(frontend_dir)
 
     warning_messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(
