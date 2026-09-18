@@ -54,15 +54,18 @@ add one that would do nothing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from spire_mcp.safety import Denied, Policy, allow_call, allow_read
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
+from spire_voice.config import ConfigError, _check_macros_do_not_collide
 from spire_voice.db.repository import Macro, MacroAction, MacroRepository
+from spire_voice.turn.macros import normalize
 
 router = APIRouter(tags=["macros"])
 
@@ -71,6 +74,35 @@ ConflictAnnotation = Literal["ok", "denied", "not_found", "unknown"]
 
 def _macro_not_found_error(macro_id: int) -> HTTPException:
     return HTTPException(status_code=404, detail=f"no macro with id {macro_id}")
+
+
+def _zero_actions_error(phrase: str) -> HTTPException:
+    """The exact reason `spire_voice.config.MacroConfig.from_config`
+    already refuses a zero-action macro (D-12's own precache guarantee):
+    an unconditionally-precached reply for a macro that did nothing would
+    be a lie."""
+    return HTTPException(
+        status_code=400,
+        detail=(
+            f"macro {phrase!r} has no actions -- a zero-action macro's precached "
+            "reply would be an unconditional lie"
+        ),
+    )
+
+
+def _missing_tool_name_error(phrase: str, index: int) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=f"macro {phrase!r}'s action at position {index} is missing its 'tool' name",
+    )
+
+
+def _duplicate_phrase_error(message: str) -> HTTPException:
+    """`message` is `_check_macros_do_not_collide`'s own `ConfigError`
+    text, carried through unchanged -- it already names both colliding
+    macros by their written phrases, the exact shape the file parser's own
+    refusal uses."""
+    return HTTPException(status_code=400, detail=message)
 
 
 class MacroActionResponse(BaseModel):
@@ -103,6 +135,72 @@ class MacroResponse(BaseModel):
     # anything.
     reply_synthesis_degraded: bool = False
     reply_synthesis_message: str | None = None
+
+
+class MacroActionInput(BaseModel):
+    tool: str = ""
+    arguments: dict = Field(default_factory=dict)
+
+
+class CreateMacroRequest(BaseModel):
+    phrase: str
+    aliases: list[str] = Field(default_factory=list)
+    reply: str
+    actions: list[MacroActionInput] = Field(default_factory=list)
+
+
+class UpdateMacroRequest(BaseModel):
+    phrase: str
+    aliases: list[str] = Field(default_factory=list)
+    reply: str
+    actions: list[MacroActionInput] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _CandidateMacro:
+    """The would-be macro a create or update is about to write, shaped
+    exactly like `spire_voice.db.repository.Macro`'s own duck-typed
+    contract (`.phrase`, `.normalized_keys`) so it can sit in the same
+    list `_check_macros_do_not_collide` walks alongside the real,
+    already-stored `Macro` rows -- with no change to that function."""
+
+    phrase: str
+    aliases: tuple[str, ...]
+
+    @property
+    def normalized_keys(self) -> frozenset[str]:
+        return frozenset(normalize(k) for k in (self.phrase, *self.aliases))
+
+
+def _validate_actions(phrase: str, actions: Sequence[MacroActionInput]) -> None:
+    if not actions:
+        raise _zero_actions_error(phrase)
+    for index, action in enumerate(actions):
+        if not action.tool:
+            raise _missing_tool_name_error(phrase, index)
+
+
+async def _check_no_collision(
+    macro_repo: MacroRepository,
+    phrase: str,
+    aliases: Sequence[str],
+    *,
+    exclude_macro_id: int | None = None,
+) -> None:
+    """Self-collision is legal, cross-macro collision is not -- the same
+    distinction `Macro.normalized_keys`/`_check_macros_do_not_collide`
+    already draw for the file path. An update excludes its own existing
+    row before adding the candidate back in, so a save that keeps a
+    macro's own phrase is never refused by a check comparing it against
+    itself."""
+    existing = await macro_repo.list_macros()
+    if exclude_macro_id is not None:
+        existing = [m for m in existing if m.id != exclude_macro_id]
+    candidate = _CandidateMacro(phrase=phrase, aliases=tuple(aliases))
+    try:
+        _check_macros_do_not_collide([*existing, candidate])
+    except ConfigError as exc:
+        raise _duplicate_phrase_error(str(exc)) from exc
 
 
 def _tool_result_json(result: object) -> object:
@@ -266,3 +364,67 @@ async def get_macro(
     known_entity_ids = await _known_entity_ids(request)
     filler_cache = getattr(request.app.state, "filler_cache", None) or {}
     return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+
+
+@router.post("/api/macros", status_code=201)
+async def create_macro(
+    payload: CreateMacroRequest,
+    request: Request,
+    user: CurrentUser = Depends(require_role(Role.OPERATOR)),
+) -> MacroResponse:
+    _validate_actions(payload.phrase, payload.actions)
+    macro_repo: MacroRepository = request.app.state.macro_repo
+    await _check_no_collision(macro_repo, payload.phrase, payload.aliases)
+
+    macro = await macro_repo.create_macro(
+        phrase=payload.phrase,
+        aliases=payload.aliases,
+        reply=payload.reply,
+        actions=[(action.tool, action.arguments) for action in payload.actions],
+        created_by_user_id=user.id,
+    )
+    policy = await _load_policy_or_none(request)
+    known_entity_ids = await _known_entity_ids(request)
+    filler_cache = getattr(request.app.state, "filler_cache", None) or {}
+    return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+
+
+@router.put("/api/macros/{macro_id}")
+async def update_macro(
+    macro_id: int,
+    payload: UpdateMacroRequest,
+    request: Request,
+    _user: CurrentUser = Depends(require_role(Role.OPERATOR)),
+) -> MacroResponse:
+    macro_repo: MacroRepository = request.app.state.macro_repo
+    existing = await macro_repo.get_macro(macro_id)
+    if existing is None:
+        raise _macro_not_found_error(macro_id)
+
+    _validate_actions(payload.phrase, payload.actions)
+    await _check_no_collision(macro_repo, payload.phrase, payload.aliases, exclude_macro_id=macro_id)
+
+    # Ordering is sent, not inferred: the whole action list is replaced in
+    # the order the request carried, which is what makes a reorder-only
+    # update persist exactly as sent (Task 2's own instruction).
+    macro = await macro_repo.update_macro(
+        macro_id,
+        phrase=payload.phrase,
+        aliases=payload.aliases,
+        reply=payload.reply,
+        actions=[(action.tool, action.arguments) for action in payload.actions],
+    )
+    policy = await _load_policy_or_none(request)
+    known_entity_ids = await _known_entity_ids(request)
+    filler_cache = getattr(request.app.state, "filler_cache", None) or {}
+    return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+
+
+@router.delete("/api/macros/{macro_id}", status_code=204)
+async def delete_macro(
+    macro_id: int, request: Request, _user: CurrentUser = Depends(require_role(Role.OPERATOR))
+) -> None:
+    macro_repo: MacroRepository = request.app.state.macro_repo
+    # A no-op when `macro_id` is already gone -- matches
+    # `PolicyRepository.remove_rule`'s own convention (`routes/policy.py`).
+    await macro_repo.delete_macro(macro_id)

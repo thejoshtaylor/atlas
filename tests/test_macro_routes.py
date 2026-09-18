@@ -354,3 +354,294 @@ def test_reading_and_listing_reject_an_unauthenticated_request_and_a_viewer(
     token = issue_access_token(user_id=viewer.id, role="viewer", security=security)
     viewer_client = TestClient(app, cookies={security.cookie_name: token})
     assert viewer_client.get("/api/macros").status_code == 403
+
+
+# --- Task 2: write, refused by the same rules the file parser uses ------
+
+
+def _action_json(tool: str = "ha_call_service", **arguments) -> dict:
+    return {"tool": tool, "arguments": arguments or {"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"}}
+
+
+def test_creating_a_macro_with_a_phrase_reply_and_actions_returns_it_stored_in_order(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "good night",
+            "aliases": ["goodnight"],
+            "reply": "good night",
+            "actions": [
+                _action_json(entity_id="switch.example_a"),
+                _action_json(entity_id="switch.example_b"),
+            ],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["phrase"] == "good night"
+    assert [a["arguments"]["entity_id"] for a in body["actions"]] == [
+        "switch.example_a",
+        "switch.example_b",
+    ]
+    assert len(macro_repo.macros) == 1
+
+
+def test_creating_a_macro_with_no_actions_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros", json={"phrase": "no actions", "aliases": [], "reply": "ok", "actions": []}
+    )
+    assert response.status_code == 400
+    assert "no actions" in response.json()["detail"]
+    assert not macro_repo.macros
+
+
+def test_creating_a_macro_whose_phrase_collides_with_an_existing_one_is_refused_naming_both(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="Good Night")])
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "good night",  # normalizes to the same key as "Good Night"
+            "aliases": [],
+            "reply": "ok",
+            "actions": [_action_json()],
+        },
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "Good Night" in detail and "good night" in detail
+    assert len(macro_repo.macros) == 1, "the colliding macro must never be stored"
+
+
+def test_creating_a_macro_action_with_no_tool_name_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={
+            "phrase": "no tool",
+            "aliases": [],
+            "reply": "ok",
+            "actions": [{"tool": "", "arguments": {}}],
+        },
+    )
+    assert response.status_code == 400
+    assert not macro_repo.macros
+
+
+def test_updating_a_macro_replaces_actions_wholesale_and_a_reorder_persists(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(
+        macros=[
+            _macro_kwargs(
+                phrase="good night",
+                actions=(
+                    ("ha_call_service", {"domain": "switch", "service": "turn_off", "entity_id": "switch.example_a"}),
+                    ("ha_call_service", {"domain": "switch", "service": "turn_off", "entity_id": "switch.example_b"}),
+                ),
+            )
+        ]
+    )
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    response = client.put(
+        f"/api/macros/{macro_id}",
+        json={
+            "phrase": "good night",
+            "aliases": [],
+            "reply": "good night",
+            "actions": [
+                _action_json(entity_id="switch.example_b"),
+                _action_json(entity_id="switch.example_a"),
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert [a["arguments"]["entity_id"] for a in response.json()["actions"]] == [
+        "switch.example_b",
+        "switch.example_a",
+    ]
+
+
+def test_updating_a_macro_to_a_phrase_that_collides_with_a_different_macro_is_refused(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(
+        macros=[
+            _macro_kwargs(phrase="good morning"),
+            _macro_kwargs(phrase="good night"),
+        ]
+    )
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_ids = list(macro_repo.macros)
+    good_night_id = next(m.id for m in macro_repo.macros.values() if m.phrase == "good night")
+
+    response = client.put(
+        f"/api/macros/{good_night_id}",
+        json={"phrase": "good morning", "aliases": [], "reply": "ok", "actions": [_action_json()]},
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "good morning" in detail
+    assert macro_repo.macros[good_night_id].phrase == "good night", "the update must not have landed"
+
+
+def test_updating_a_macro_to_its_own_existing_phrase_succeeds(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    response = client.put(
+        f"/api/macros/{macro_id}",
+        json={
+            "phrase": "good night",  # unchanged -- self-collision must be legal
+            "aliases": [],
+            "reply": "updated reply",
+            "actions": [_action_json()],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["reply"] == "updated reply"
+
+
+def test_deleting_a_macro_removes_it_and_deleting_again_is_not_an_error(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    response = client.delete(f"/api/macros/{macro_id}")
+    assert response.status_code == 204
+    assert macro_id not in macro_repo.macros
+
+    # Deleting it again is not an error.
+    response = client.delete(f"/api/macros/{macro_id}")
+    assert response.status_code == 204
+
+
+def test_every_write_route_rejects_a_viewer(
+    monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
+    policy_repo = fake_policy_repository()
+
+    viewer = _issue_cookie(security, account_repo, role="viewer")
+    token = issue_access_token(user_id=viewer.id, role="viewer", security=security)
+
+    app = _build_macro_app(security, account_repo, macro_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    macro_id = next(iter(macro_repo.macros))
+    assert (
+        client.post(
+            "/api/macros",
+            json={"phrase": "x", "aliases": [], "reply": "x", "actions": [_action_json()]},
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put(
+            f"/api/macros/{macro_id}",
+            json={"phrase": "good night", "aliases": [], "reply": "x", "actions": [_action_json()]},
+        ).status_code
+        == 403
+    )
+    assert client.delete(f"/api/macros/{macro_id}").status_code == 403
+    assert macro_id in macro_repo.macros, "a viewer's delete attempt must not have landed"
