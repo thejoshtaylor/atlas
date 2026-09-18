@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Protocol, Sequence
 
 from spire_mcp.safety import Policy
+from spire_voice.turn.macros import normalize
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,138 @@ class PolicyRepository(Protocol):
         values before calling this, and for writing the audit row
         (`record_audit`) that makes the change accountable -- this method
         only changes the row."""
+        ...
+
+
+@dataclass(frozen=True)
+class MacroAction:
+    """One action a macro runs, in written order -- the same `tool`/
+    `arguments` shape `spire_voice.config.MacroActionConfig` carries, plus
+    the database identity (`id`, `position`) a config-parsed action has no
+    need for. A plain value object, never an ORM row, matching every
+    other repository in this module."""
+
+    id: int
+    position: int
+    tool: str
+    arguments: dict
+
+
+@dataclass(frozen=True)
+class Macro:
+    """One macro, with its aliases and ordered actions already attached --
+    a caller never reassembles one from two separate repository calls
+    (Task 2's own instruction).
+
+    Duck-type compatible with `spire_voice.config.MacroConfig` on purpose:
+    `.phrase`, `.reply`, `.actions` (each exposing `.tool`/`.arguments`),
+    and `.normalized_keys` below are exactly the shape `turn/macros.py`'s
+    `match()`/`fire_macro()` and `spire_voice.config._check_macros_do_not_
+    collide()` already read -- neither was written with this class in
+    mind, and neither needs to change for a database-loaded macro to be
+    interchangeable with a file-loaded one everywhere either was already
+    consumed. `id`/`created_at`/`updated_at`/`created_by_user_id` are what
+    `MacroConfig` has no need for and this dataclass adds, for the CRUD
+    surface plan 04-06's routes build on top of this repository.
+    """
+
+    id: int
+    phrase: str
+    aliases: tuple[str, ...]
+    reply: str
+    actions: tuple[MacroAction, ...]
+    created_at: datetime
+    updated_at: datetime
+    created_by_user_id: int | None
+
+    @property
+    def normalized_keys(self) -> frozenset[str]:
+        """The same computation `MacroConfig.normalized_keys`
+        (`spire_voice.config`) performs, over this row's own phrase and
+        aliases rather than a parsed config block -- duplicated rather
+        than imported, since importing `spire_voice.config` here would
+        pull this module's own consumers (`config.py` does not import
+        `db.repository`, but there is no reason to start that dependency
+        for four lines built entirely from `normalize()`, which both
+        modules already import from `turn/macros.py` independently).
+        This is what makes `_check_macros_do_not_collide` -- the check
+        that a database-authored macro must still pass (04-CONTEXT.md,
+        the operator's own instruction on this plan) -- reachable against
+        a `Sequence[Macro]` with no changes to that function at all.
+        """
+        return frozenset(normalize(k) for k in (self.phrase, *self.aliases))
+
+
+class MacroRepository(Protocol):
+    """What macro storage must answer (MACRO-03, D-09, D-10).
+
+    Structurally satisfied by `PostgresMacroRepository` (real) and
+    `FakeMacroRepository` (`tests/conftest.py`), the same
+    dependency-injection-over-subclassing convention every other
+    repository in this module already uses.
+
+    "The caller validates, this layer only writes" (`PolicyRepository.
+    add_rule`'s own wording) applies here too: a zero-action macro, a
+    blank phrase or reply, and a cross-macro collision
+    (`spire_voice.config._check_macros_do_not_collide`, callable directly
+    against a candidate list built from `list_macros()` plus the would-be
+    new or edited macro, since `Macro.normalized_keys` above makes that
+    function's own duck-typed contract hold) are all the caller's
+    responsibility, both at seed time (this plan's migration) and at
+    write time (plan 04-06's routes) -- this protocol's own members never
+    re-run that check themselves.
+    """
+
+    async def list_macros(self) -> Sequence[Macro]:
+        """Every macro, with its aliases and actions already attached, in
+        no particular order beyond what the database returns."""
+        ...
+
+    async def get_macro(self, macro_id: int) -> Macro | None:
+        """One macro by id, or `None` if it does not exist."""
+        ...
+
+    async def create_macro(
+        self,
+        *,
+        phrase: str,
+        aliases: Sequence[str],
+        reply: str,
+        actions: Sequence[tuple[str, dict]],
+        created_by_user_id: int | None,
+    ) -> Macro:
+        """Insert one macro, its aliases, and its actions (`(tool,
+        arguments)` pairs, in the order given -- `position` is assigned
+        from that order, not supplied by the caller) and return it whole.
+        The caller is responsible for having already run the collision
+        check and refused a zero-action macro before calling this -- this
+        method does not re-check either."""
+        ...
+
+    async def update_macro(
+        self,
+        macro_id: int,
+        *,
+        phrase: str,
+        aliases: Sequence[str],
+        reply: str,
+        actions: Sequence[tuple[str, dict]],
+    ) -> Macro:
+        """Replace `macro_id`'s phrase, reply, aliases, and actions
+        wholesale -- the existing alias and action rows are deleted and
+        replaced with the given ones, in the given order, rather than
+        diffed, matching the add/remove/reorder editor shape plan 04-07
+        builds ('here is the new list' is simpler than computing a diff
+        against the old one). Returns the updated macro, including its
+        new actions, so a caller never has to reassemble one from two
+        calls."""
+        ...
+
+    async def delete_macro(self, macro_id: int) -> None:
+        """Delete one macro and its aliases and actions together. A no-op
+        when `macro_id` does not exist -- removing a macro that is
+        already gone is not an error, matching `PolicyRepository.
+        remove_rule`'s own convention."""
         ...
 
 

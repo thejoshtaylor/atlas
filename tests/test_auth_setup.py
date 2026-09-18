@@ -78,6 +78,10 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
             # enumeration walks.
             "setup_repo": conftest.FakeSetupRepository(),
             "settings_repo": conftest.FakeSettingsRepository(),
+            # Plan 04-05: lifespan also reads macros from a repository
+            # rather than from config.macros -- same reasoning as
+            # credential_repo/settings_repo above.
+            "macro_repo": conftest.FakeMacroRepository(),
         }
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within

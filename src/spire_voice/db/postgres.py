@@ -13,13 +13,16 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from spire_mcp.safety import Policy
 from spire_voice.db.models import (
     AuditRow,
     InviteRow,
+    MacroActionRow,
+    MacroAliasRow,
+    MacroRow,
     PolicyRuleRow,
     ProviderCredentialRow,
     RefreshTokenRow,
@@ -32,6 +35,8 @@ from spire_voice.db.models import (
 from spire_voice.db.repository import (
     Credential,
     Invite,
+    Macro,
+    MacroAction,
     PolicyRule,
     RefreshToken,
     Setting,
@@ -726,3 +731,137 @@ class PostgresCredentialRepository:
             await session.commit()
             await session.refresh(row)
             return _credential_from_row(row)
+
+
+async def _load_macro(session: AsyncSession, row: MacroRow) -> Macro:
+    """Assemble one whole `Macro` -- its aliases and its actions, in
+    written order -- from a `MacroRow` already fetched on `session`.
+    Shared by every `PostgresMacroRepository` method that returns a
+    `Macro`, so 'update returns the whole macro including its ordered
+    actions' (Task 2's own instruction) is one code path, not one per
+    method."""
+    alias_rows = (
+        await session.execute(select(MacroAliasRow).where(MacroAliasRow.macro_id == row.id))
+    ).scalars().all()
+    action_rows = (
+        await session.execute(
+            select(MacroActionRow)
+            .where(MacroActionRow.macro_id == row.id)
+            .order_by(MacroActionRow.position)
+        )
+    ).scalars().all()
+    return Macro(
+        id=row.id,
+        phrase=row.phrase,
+        aliases=tuple(a.alias for a in alias_rows),
+        reply=row.reply,
+        actions=tuple(
+            MacroAction(id=a.id, position=a.position, tool=a.tool, arguments=a.arguments)
+            for a in action_rows
+        ),
+        created_at=_to_aware_utc(row.created_at),
+        updated_at=_to_aware_utc(row.updated_at),
+        created_by_user_id=row.created_by_user_id,
+    )
+
+
+class PostgresMacroRepository:
+    """`MacroRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.MacroRepository` (a
+    `typing.Protocol`) -- there is no base class to inherit from, matching
+    every other `Postgres*Repository` class in this module. `create_macro`/
+    `update_macro` replace a macro's alias and action rows wholesale rather
+    than diffing them, matching the Protocol's own documented contract.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def list_macros(self) -> list[Macro]:
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(select(MacroRow))).scalars().all()
+            return [await _load_macro(session, row) for row in rows]
+
+    async def get_macro(self, macro_id: int) -> Macro | None:
+        async with self._sessionmaker() as session:
+            row = await session.get(MacroRow, macro_id)
+            if row is None:
+                return None
+            return await _load_macro(session, row)
+
+    async def create_macro(
+        self,
+        *,
+        phrase: str,
+        aliases: list[str] | tuple[str, ...],
+        reply: str,
+        actions: list[tuple[str, dict]] | tuple[tuple[str, dict], ...],
+        created_by_user_id: int | None,
+    ) -> Macro:
+        now = _to_naive_utc(datetime.now(timezone.utc))
+        async with self._sessionmaker() as session:
+            row = MacroRow(
+                phrase=phrase,
+                reply=reply,
+                created_at=now,
+                updated_at=now,
+                created_by_user_id=created_by_user_id,
+            )
+            session.add(row)
+            await session.flush()
+            for alias in aliases:
+                session.add(MacroAliasRow(macro_id=row.id, alias=alias))
+            for position, (tool, arguments) in enumerate(actions):
+                session.add(
+                    MacroActionRow(
+                        macro_id=row.id, position=position, tool=tool, arguments=arguments
+                    )
+                )
+            await session.commit()
+            await session.refresh(row)
+            return await _load_macro(session, row)
+
+    async def update_macro(
+        self,
+        macro_id: int,
+        *,
+        phrase: str,
+        aliases: list[str] | tuple[str, ...],
+        reply: str,
+        actions: list[tuple[str, dict]] | tuple[tuple[str, dict], ...],
+    ) -> Macro:
+        async with self._sessionmaker() as session:
+            row = await session.get(MacroRow, macro_id)
+            if row is None:
+                raise ValueError(f"macro {macro_id} does not exist")
+            row.phrase = phrase
+            row.reply = reply
+            row.updated_at = _to_naive_utc(datetime.now(timezone.utc))
+            await session.execute(delete(MacroAliasRow).where(MacroAliasRow.macro_id == macro_id))
+            await session.execute(
+                delete(MacroActionRow).where(MacroActionRow.macro_id == macro_id)
+            )
+            for alias in aliases:
+                session.add(MacroAliasRow(macro_id=macro_id, alias=alias))
+            for position, (tool, arguments) in enumerate(actions):
+                session.add(
+                    MacroActionRow(
+                        macro_id=macro_id, position=position, tool=tool, arguments=arguments
+                    )
+                )
+            await session.commit()
+            await session.refresh(row)
+            return await _load_macro(session, row)
+
+    async def delete_macro(self, macro_id: int) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(MacroRow, macro_id)
+            if row is None:
+                return
+            # `ondelete="CASCADE"` on both `MacroActionRow.macro_id` and
+            # `MacroAliasRow.macro_id` (db/models.py) does the rest at the
+            # database level -- this delete removes the macro and its
+            # actions and aliases together in one statement, not three.
+            await session.delete(row)
+            await session.commit()

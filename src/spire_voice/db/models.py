@@ -241,6 +241,75 @@ class SettingRow(Base):
     )
 
 
+class MacroRow(Base):
+    """One macro: a phrase that skips the language model and runs a fixed,
+    ordered list of actions (`MacroActionRow`), plus every alias it also
+    matches on (`MacroAliasRow`) (D-09, D-10, MACRO-03).
+
+    `phrase`/`reply` are exactly `spire_voice.config.MacroConfig.phrase`/
+    `.reply` -- the migration that seeds this table
+    (`alembic/versions/0005_macro_tables.py`) parses through that same
+    class, the one parser both the file and the database go through.
+    `created_by_user_id` follows the same real-foreign-key convention
+    `PolicyRuleRow.created_by_user_id` already established once `users`
+    existed; a seeded row (no operator authored it, the migration did)
+    carries `NULL` here, matching `SafetyPolicyRow`'s own seeded-row
+    convention.
+    """
+
+    __tablename__ = "macros"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    phrase: Mapped[str] = mapped_column(Text, nullable=False)
+    reply: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+
+class MacroActionRow(Base):
+    """One action a macro runs, in `position` order -- the same `tool`/
+    `arguments` shape `spire_voice.config.MacroActionConfig` already
+    carries. `position` is what fixes the written order across an update
+    that reorders (plan 04-07's editor adds, removes, and reorders); `
+    ondelete="CASCADE"` on `macro_id` is what makes deleting a macro also
+    delete its own actions with no second query, the same guarantee
+    `InviteRow`/`RefreshTokenRow`'s foreign keys give `users` rows,
+    applied here to a child a macro fully owns.
+    """
+
+    __tablename__ = "macro_actions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    macro_id: Mapped[int] = mapped_column(
+        ForeignKey("macros.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(nullable=False)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class MacroAliasRow(Base):
+    """One alias a macro also matches on, as its own row rather than an
+    array column -- plan 04-07's editor adds and removes aliases
+    individually, and a macro that lost its aliases in a seed loses most
+    of the ways it can be spoken. `ondelete="CASCADE"` matches
+    `MacroActionRow.macro_id`'s own convention: a macro delete removes its
+    aliases together with its actions, in one statement, with no second
+    query for either child table.
+    """
+
+    __tablename__ = "macro_aliases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    macro_id: Mapped[int] = mapped_column(
+        ForeignKey("macros.id", ondelete="CASCADE"), nullable=False
+    )
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ProviderCredentialRow(Base):
     """One encrypted provider credential slot (PROV-04, D-07).
 

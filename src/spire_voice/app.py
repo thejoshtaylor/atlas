@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -31,6 +31,7 @@ from spire_voice.auth.tokens import validate_secret_key_strength
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import (
+    MACROS_KEY_REJECTED_ERROR,
     SAFETY_KEY_REJECTED_ERROR,
     Config,
     ConfigError,
@@ -45,11 +46,12 @@ from spire_voice.db.engine import build_engine, get_current_revision, run_migrat
 from spire_voice.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
+    PostgresMacroRepository,
     PostgresPolicyRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
 )
-from spire_voice.db.repository import CredentialRepository, SettingsRepository
+from spire_voice.db.repository import CredentialRepository, MacroRepository, SettingsRepository
 from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
@@ -83,6 +85,44 @@ MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
 # levels up from this file, the same computation `MCP_ROOT` above uses,
 # since `web/` lives at the repo root beside `src/`, not under it.
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+
+
+@dataclass(frozen=True)
+class _LegacyConfigKey:
+    """One retired top-level configuration key `lifespan`'s two-stage boot
+    still tolerates on exactly one boot -- the boot whose migration just
+    seeded it -- before rejecting it by name on every boot after (CR-01
+    fix, generalized plan 04-05, D-16).
+
+    `name` is the raw top-level key (`"safety"`, `"macros"`); `rejected_error`
+    is the exact `ConfigError` message this project has always raised for
+    it, lifted to module level in `spire_voice.config` so `Config.from_config`
+    and this file's own database-aware check raise identical words;
+    `seeded_tables_hint` names where an operator finds what was seeded, for
+    the one-boot warning below. Adding a second retired key means adding a
+    second entry to `_LEGACY_CONFIG_KEYS`, never a second copy of the
+    sequence that reads this tuple.
+    """
+
+    name: str
+    rejected_error: str
+    seeded_tables_hint: str
+
+
+_LEGACY_CONFIG_KEYS: tuple[_LegacyConfigKey, ...] = (
+    _LegacyConfigKey(
+        name="safety",
+        rejected_error=SAFETY_KEY_REJECTED_ERROR,
+        seeded_tables_hint="safety_policy/policy_rules tables, or the webapp's policy editor",
+    ),
+    _LegacyConfigKey(
+        name="macros",
+        rejected_error=MACROS_KEY_REJECTED_ERROR,
+        seeded_tables_hint=(
+            "macros/macro_actions/macro_aliases tables, or the webapp's macro editor"
+        ),
+    ),
+)
 
 # D-01 (phase 4): the zone `_state_message` reads the current time and date
 # against. `lifespan` sets this from `config.server.timezone`; `None` --
@@ -255,6 +295,8 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         "credential_repo": PostgresCredentialRepository(sessionmaker),
         "setup_repo": PostgresSetupRepository(sessionmaker),
         "settings_repo": PostgresSettingsRepository(sessionmaker),
+        # Plan 04-05 (D-09): macros live here now, not on `Config`.
+        "macro_repo": PostgresMacroRepository(sessionmaker),
     }
 
 
@@ -292,6 +334,36 @@ async def _open_speaker_writer(writer: FifoWriter) -> None:
         logger.warning("speaker FIFO not yet available at startup", exc_info=True)
 
 
+async def _current_macros(app: FastAPI) -> tuple[Any, ...]:
+    """The macros the database holds right now, read fresh -- never a
+    startup snapshot (D-12, T-04-28, plan 04-05's own must-have: "every
+    turn reads the macros the database currently holds").
+
+    A per-turn repository read, not `app.state`'s own cached
+    `app.state.macros` (set once at boot below, kept only for the wiring
+    check `tests/test_startup_smoke.py`'s `_EXPECTED_STATE_ATTRS` already
+    runs and for the startup precache, which necessarily can only precache
+    what exists at boot). Chosen over a cached app-state value plan 04-06's
+    write route would replace, because a macro table read is small (this
+    project's whole macro set, not a per-row query) and this is the
+    simpler contract to keep correct: a cached value needs the write route
+    to remember to refresh it on every save, forever; a live read needs
+    nothing from that route at all. The cost is one extra database round
+    trip per turn on the one path whose entire reason to exist is speed --
+    accepted deliberately, because it lands before `match()` decides
+    whether this turn is a macro turn at all, and `MacroOutcome.cacheable`
+    still means the macro's own *reply* never pays a live TTS call, which
+    is the latency property macros actually exist to protect. See this
+    plan's own SUMMARY for the full tradeoff this docstring compresses.
+
+    `Macro` (`spire_voice.db.repository`) is duck-type compatible with
+    `spire_voice.config.MacroConfig` -- `match()`/`fire_macro()`
+    (`turn/macros.py`) need no change to accept either.
+    """
+    macro_repo: MacroRepository = app.state.macro_repo
+    return tuple(await macro_repo.list_macros())
+
+
 def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
@@ -318,7 +390,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             tiers=app.state.tier_brains,
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
-            macros=config.macros,
+            macros=await _current_macros(app),
             state_fetch=_make_state_fetch(app.state.tool_host),
             session_recorder=session_recorder,
         )
@@ -328,20 +400,23 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    # Two-stage load (CR-01 fix). `load_config` -- a single, unconditional
-    # `Config.from_config` call -- cannot be used here: it rejects a
-    # lingering `safety:` key immediately, before the seed migration that
-    # is supposed to carry that same key's denylist into the database ever
-    # runs, which strands a real upgrade with no way forward (the key
-    # cannot be removed without discarding the denylist it names, and it
-    # cannot be kept without the process refusing to boot). The raw dict is
-    # read with no validation instead, so a `DatabaseConfig` can be built
-    # and migrations can run regardless of whether the key is present;
-    # whether to reject the key at all is decided further down, against
+    # Two-stage load (CR-01 fix, generalized plan 04-05, D-16). `load_config`
+    # -- a single, unconditional `Config.from_config` call -- cannot be used
+    # here: it rejects a lingering legacy key immediately, before the seed
+    # migration that is supposed to carry that same key's data into the
+    # database ever runs, which strands a real upgrade with no way forward
+    # (the key cannot be removed without discarding the data it names, and
+    # it cannot be kept without the process refusing to boot). The raw dict
+    # is read with no validation instead, so a `DatabaseConfig` can be built
+    # and migrations can run regardless of whether any legacy key is
+    # present; whether to reject each one is decided further down, against
     # real Alembic revision history, once migrations have had their one
-    # chance to seed it.
+    # chance to seed it. `_LEGACY_CONFIG_KEYS` below is what makes this one
+    # sequence handle a second retired key without a second copy of it: a
+    # second `if` chain beside the first is precisely the shape this
+    # generalization exists to prevent.
     raw_config = load_raw_config(CONFIG_PATH)
-    legacy_safety_key_present = "safety" in raw_config
+    legacy_keys_present = [key for key in _LEGACY_CONFIG_KEYS if key.name in raw_config]
     database_config = DatabaseConfig.from_config(raw_config.get("database"))
     security_config = SecurityConfig.from_config(raw_config.get("security"))
 
@@ -372,20 +447,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             FRONTEND_DIR,
         )
 
-    # CR-01 fix: captured before migrations run, and only when there is a
-    # lingering `safety:` key to classify -- `None` here means this
-    # database has never had a migration applied, which means the
-    # migration below (if it runs) is about to seed the safety policy for
-    # the first time ever. That is the one signal that tells a first boot
-    # (the key should be tolerated, logged, and left for the operator to
-    # remove) apart from a later one (a previous boot already seeded the
-    # policy, so the same key now means two sources of truth and must be
-    # rejected) -- `Config.from_config` alone cannot draw this distinction
-    # without a database connection it does not have.
+    # CR-01 fix, generalized: captured before migrations run, and only when
+    # at least one legacy key is present to classify -- `None` here means
+    # this database has never had a migration applied, which means the
+    # migration below (if it runs) is about to seed whatever legacy key(s)
+    # are present for the first time ever. That is the one signal that
+    # tells a first boot (a present key should be tolerated, logged, and
+    # left for the operator to remove) apart from a later one (a previous
+    # boot already seeded it, so the same key now means two sources of
+    # truth and must be rejected) -- `Config.from_config` alone cannot draw
+    # this distinction without a database connection it does not have.
+    # Captured once, not once per key: every migration in this project
+    # shares one Alembic revision history, so one pre-migration read
+    # answers "was this database ever migrated before" for every legacy
+    # key at once.
     revision_before_migration = (
-        get_current_revision(database_config.migration_url)
-        if legacy_safety_key_present
-        else None
+        get_current_revision(database_config.migration_url) if legacy_keys_present else None
     )
 
     # Migrations run first, before any other resource is built, and awaited
@@ -398,32 +475,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if database_config.run_migrations_at_startup:
         await asyncio.to_thread(run_migrations, database_config.migration_url)
 
-    if legacy_safety_key_present:
-        # Only a boot that both actually ran the migration just now *and*
+    if legacy_keys_present:
+        # Only a boot that both actually ran migrations just now *and*
         # found no prior revision stamped counts as "just seeded it" --
         # anything else (an operator running migrations out of band with
         # `run_migrations_at_startup: false`, or a second boot against an
-        # already-migrated database) means the policy this key names was
+        # already-migrated database) means whatever this key names was
         # already carried into the database by an earlier boot, so the key
         # is a stale, conflicting second source of truth and must be
-        # rejected with the same wording this project has always used.
+        # rejected with the same wording this project has always used for
+        # it. One classification rule, applied to every present key in
+        # turn -- not a second `if` chain for the second key.
         is_first_seed_boot = (
             database_config.run_migrations_at_startup and revision_before_migration is None
         )
-        if is_first_seed_boot:
-            logger.warning(
-                "safety: block found in %s, and the policy seed migration just "
-                "ran for the first time against this database -- your policy now "
-                "lives in the database (check the safety_policy/policy_rules "
-                "tables, or the webapp's policy editor, for your seeded entries). "
-                "Delete the safety: block from this file now: the next boot "
-                "refuses to start while it is still present.",
-                CONFIG_PATH,
-            )
-        else:
-            raise ConfigError(SAFETY_KEY_REJECTED_ERROR)
+        for legacy_key in legacy_keys_present:
+            if is_first_seed_boot:
+                logger.warning(
+                    "%s: block found in %s, and its seed migration just ran "
+                    "for the first time against this database -- it now "
+                    "lives in the database (check the %s for your seeded "
+                    "entries). Delete the %s: block from this file now: the "
+                    "next boot refuses to start while it is still present.",
+                    legacy_key.name,
+                    CONFIG_PATH,
+                    legacy_key.seeded_tables_hint,
+                    legacy_key.name,
+                )
+            else:
+                raise ConfigError(legacy_key.rejected_error)
 
-    config = Config.from_config(raw_config, reject_legacy_safety_key=False)
+    config = Config.from_config(
+        raw_config, reject_legacy_safety_key=False, reject_legacy_macros_key=False
+    )
     app.state.config = config
 
     # D-01 (phase 4): resolve the zone `_state_message` reads the current
@@ -451,6 +535,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     policy_repo = repositories["policy_repo"]
     credential_repo = repositories["credential_repo"]
     settings_repo: SettingsRepository = repositories["settings_repo"]
+    macro_repo: MacroRepository = repositories["macro_repo"]
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
     # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
@@ -580,19 +665,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     entities = _tool_result_json(entities_result)
     app.state.catalog_prompt = _catalog_prompt(entities if isinstance(entities, list) else [])
 
-    app.state.macros = config.macros
+    # Plan 04-05 (D-09): macros live in the database now, not on `config`.
+    # This snapshot exists only for the wiring check
+    # (`tests/test_startup_smoke.py`'s `_EXPECTED_STATE_ATTRS`) and for the
+    # precache below, which can only ever precache what exists at boot --
+    # every `run_turn` call site reads fresh through `_current_macros`
+    # instead of this attribute (see that function's own docstring for why).
+    seeded_macros = await macro_repo.list_macros()
+    app.state.macros = tuple(seeded_macros)
 
     # Every filler phrase, every operator-configured extra (short
     # confirmations, per `config.example.yaml`'s own `tts.precache` comment),
-    # and every configured macro's `reply` is rendered once, here, against
-    # the browser sink -- Phase 1's only consumer. A macro reply missing
-    # from this list would raise at turn time instead of here (Pitfall 4,
-    # 01.1-RESEARCH.md), the exact silent-REST-call regression this precache
-    # step exists to prevent. A failure here propagates uncaught, matching
-    # this function's existing posture toward `tool_host.start()`: a broken
-    # startup should stop the process, not start it half-configured with a
-    # filler (or macro-reply) path that will fall over on the first turn.
-    filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in config.macros)]
+    # and every database-held macro's `reply` is rendered once, here,
+    # against the browser sink -- Phase 1's only consumer. A macro reply
+    # missing from this list would raise at turn time instead of here
+    # (Pitfall 4, 01.1-RESEARCH.md), the exact silent-REST-call regression
+    # this precache step exists to prevent -- unchanged by the move from
+    # `config.macros` to the database (D-12): the precache source changed,
+    # the guarantee it gives did not. A failure here propagates uncaught,
+    # matching this function's existing posture toward `tool_host.start()`:
+    # a broken startup should stop the process, not start it
+    # half-configured with a filler (or macro-reply) path that will fall
+    # over on the first turn.
+    filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in seeded_macros)]
     app.state.filler_cache = await precache_all(
         app.state.tts,
         Path(config.tts.cache_dir),
@@ -941,6 +1036,10 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
 
     config: Config = app.state.config
     timings = TurnTimings()
+    # A live read, not `config.macros` (D-12, T-04-28) -- see
+    # `_current_macros`'s own docstring for why this call site reads the
+    # repository directly rather than trusting an app-state snapshot.
+    macros = await _current_macros(app)
     task = asyncio.create_task(
         _run_webrtc_turn(
             transport,
@@ -956,7 +1055,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             tiers=app.state.tier_brains,
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
-            macros=config.macros,
+            macros=macros,
             state_fetch=_make_state_fetch(app.state.tool_host),
             session_recorder=SessionRecorder(config.session, timings),
         )
@@ -1004,6 +1103,10 @@ async def turn_ws(websocket: WebSocket) -> None:
     source = WebSocketAudioSource(websocket)
     config: Config = websocket.app.state.config
     timings = TurnTimings()
+    # A live read, not `config.macros` (D-12, T-04-28) -- see
+    # `_current_macros`'s own docstring for why this call site reads the
+    # repository directly rather than trusting an app-state snapshot.
+    macros = await _current_macros(websocket.app)
     await run_turn(
         source,
         websocket.app.state.stt,
@@ -1018,7 +1121,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         tiers=websocket.app.state.tier_brains,
         filler_after_ms=config.brain.filler_after_ms,
         filler_cache=websocket.app.state.filler_cache,
-        macros=config.macros,
+        macros=macros,
         state_fetch=_make_state_fetch(websocket.app.state.tool_host),
         session_recorder=SessionRecorder(config.session, timings),
     )

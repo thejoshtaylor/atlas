@@ -57,6 +57,10 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 04-05: migration 0005 adds these three.
+            "macro_actions",
+            "macro_aliases",
+            "macros",
             "settings",
             "setup_steps",
             "setup_state",

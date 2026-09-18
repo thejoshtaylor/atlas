@@ -64,6 +64,14 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 04-05: migration 0005 adds these three -- omitting them
+            # here left a second run of this file's own fixture finding
+            # "macros already exists" (DuplicateTable), the same
+            # env-var-sized gap 04-03's own deviation log names for four
+            # other test files this same migration cut across.
+            "macro_actions",
+            "macro_aliases",
+            "macros",
             "settings",
             "setup_steps",
             "setup_state",
