@@ -40,7 +40,7 @@ something a fake can stand in for.
 from __future__ import annotations
 
 import asyncio
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,8 +51,26 @@ from mcp.types import Tool
 
 import conftest
 import spire_voice.app as app_module
+from spire_voice.db.repository import User
 from spire_voice.transports.base import SourceFormat
 from spire_voice.turn.brain_race import TierBrain
+
+# A plainly fictional, but structurally valid (32 raw bytes, real byte
+# variety), urlsafe-base64 key -- shaped exactly like
+# `Fernet.generate_key()`'s own output so it passes
+# `auth/tokens.py::validate_secret_key_strength`'s structural checks
+# (plan 03-05). Every test in this file boots the real `lifespan`, which
+# now calls that function before anything else -- never a real secret,
+# never reused outside this test module.
+import base64 as _base64
+
+_TEST_SECRET_KEY = _base64.urlsafe_b64encode(bytes(range(32))).decode("ascii")
+
+
+@pytest.fixture(autouse=True)
+def _set_test_secret_key(monkeypatch):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+
 
 # Every attribute `lifespan` assigns to `app.state`, read off `app.py` by
 # name rather than spot-checked -- "a resource never assigned to
@@ -220,11 +238,41 @@ def _fake_build_engine(database_config: object) -> object:
 
 def _fake_build_repositories(config: object, engine: object) -> dict:
     """Replaces `spire_voice.app._build_repositories`: the real one builds
-    `PostgresPolicyRepository` against a real sessionmaker. Substituting
-    `conftest.FakePolicyRepository` here is what lets this smoke test cover
-    `lifespan`'s repository wiring without a reachable Postgres -- the same
-    Postgres-free precedent D-04 sets for the rest of the suite."""
-    return {"policy_repo": conftest.FakePolicyRepository()}
+    `PostgresPolicyRepository`/`PostgresAccountRepository` against a real
+    sessionmaker. Substituting `conftest.FakePolicyRepository`/
+    `conftest.FakeAccountRepository` here is what lets this smoke test
+    cover `lifespan`'s repository wiring without a reachable Postgres --
+    the same Postgres-free precedent D-04 sets for the rest of the suite.
+
+    Plan 03-05: every route this application registers now sits behind
+    `require_setup_complete` (an application-level dependency reading
+    `app.state.account_repo`), so a test that boots the real app and calls
+    any route at all -- not just one this file's own tests exercise --
+    needs this key present, not only `policy_repo`.
+
+    The `FakeAccountRepository` here is pre-seeded with one fake admin
+    account, directly (bypassing the async `create_user`, which this sync
+    function cannot `await`) -- every test in this file is asserting on
+    *resource wiring*, not on setup completeness (`tests/test_auth_setup.py`
+    owns that, against its own, deliberately empty fake), so the "already
+    set up" state is this file's correct default rather than every one of
+    its existing assertions turning into an unrelated 503.
+    """
+    account_repo = conftest.FakeAccountRepository()
+    account_repo.users[1] = User(
+        id=1,
+        email="smoke-admin@example.invalid",
+        display_name="Smoke Admin",
+        password_hash="not-a-real-hash-never-checked",
+        role="admin",
+        created_at=datetime.now(timezone.utc),
+        disabled_at=None,
+    )
+    account_repo._next_user_id = 2
+    return {
+        "policy_repo": conftest.FakePolicyRepository(),
+        "account_repo": account_repo,
+    }
 
 
 class _FakeWakeDetector:

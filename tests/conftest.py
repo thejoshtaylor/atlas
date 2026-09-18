@@ -529,6 +529,11 @@ class FakeAccountRepository:
                 invite, accepted_at=accepted_at, accepted_by_user_id=accepted_by_user_id
             )
 
+    async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:
+        invite = self.invites.get(invite_id)
+        if invite is not None and invite.accepted_at is None:
+            self.invites[invite_id] = replace(invite, expires_at=revoked_at)
+
     async def list_invites(self) -> list[Invite]:
         return list(self.invites.values())
 

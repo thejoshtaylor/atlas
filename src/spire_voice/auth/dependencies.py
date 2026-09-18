@@ -18,6 +18,16 @@ request, not after their token expires, matching CONTEXT.md's "read live
 at each check" posture for accounts the same way it already applies to
 policy; and it structurally rules out the one thing WEB-04's own second
 test exists to catch -- a role read from anything the client supplied.
+
+Every function here is typed on `starlette.requests.HTTPConnection`
+(`Request`'s and `WebSocket`'s shared base -- both expose `.cookies` and
+`.app`), not `Request` -- confirmed against the installed `fastapi==0.141.1`
+directly (a `Request`-typed dependency raises a bare `TypeError` when
+resolved inside a WebSocket route's dependency chain; `HTTPConnection`
+resolves correctly against either). `GET /ws/turn` (Task 3, below) needs
+`require_role` to gate it exactly like every HTTP route, so every
+dependency in this file has to work for both from the start, not be
+special-cased per connection type at each call site.
 """
 
 from __future__ import annotations
@@ -25,7 +35,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
+from starlette.requests import HTTPConnection
 
 from spire_voice.auth.tokens import InvalidAccessToken, verify_access_token
 from spire_voice.config import Config, SecurityConfig
@@ -81,16 +92,16 @@ def _setup_incomplete_error() -> HTTPException:
     )
 
 
-async def current_user(request: Request) -> CurrentUser:
+async def current_user(conn: HTTPConnection) -> CurrentUser:
     """Read the access-token cookie, verify it, and load the user it names
     fresh from `app.state.account_repo` -- see the module docstring for why
     this is a repository read on every call rather than a claim copied out
     of the token payload."""
-    config: Config = request.app.state.config
+    config: Config = conn.app.state.config
     security: SecurityConfig = config.security
-    account_repo: AccountRepository = request.app.state.account_repo
+    account_repo: AccountRepository = conn.app.state.account_repo
 
-    token = request.cookies.get(security.cookie_name)
+    token = conn.cookies.get(security.cookie_name)
     if not token:
         raise _unauthenticated_error()
 
@@ -138,13 +149,13 @@ SETUP_GATE_EXEMPT_PATHS: frozenset[str] = frozenset(
 )
 
 
-async def require_setup_complete(request: Request) -> None:
+async def require_setup_complete(conn: HTTPConnection) -> None:
     """Refuse every route but the three named in `SETUP_GATE_EXEMPT_PATHS`
     with a 503 naming "setup incomplete" while no user of any role exists
     (D-08: "no user," not "no admin" -- a system with a viewer and no
     admin is a system somebody got partway into)."""
-    if request.url.path in SETUP_GATE_EXEMPT_PATHS:
+    if conn.url.path in SETUP_GATE_EXEMPT_PATHS:
         return
-    account_repo: AccountRepository = request.app.state.account_repo
+    account_repo: AccountRepository = conn.app.state.account_repo
     if not await account_repo.any_user_exists():
         raise _setup_incomplete_error()

@@ -186,13 +186,15 @@ def hash_refresh_token(token: str) -> str:
 
 async def rotate_refresh_token(
     repo: AccountRepository, presented_token: str, *, security: SecurityConfig
-) -> str | None:
-    """Present `presented_token`, rotate it through `repo`, and return the
-    new opaque token -- or `None` when the presented token is unknown or
-    was already revoked (a replay: `AccountRepository.rotate_refresh_token`
+) -> tuple[str, int] | None:
+    """Present `presented_token`, rotate it through `repo`, and return
+    `(new_token, user_id)` -- or `None` when the presented token is unknown
+    or was already revoked (a replay: `AccountRepository.rotate_refresh_token`
     revokes the whole chain in that case, per its own docstring, and the
     caller here must treat a `None` result as a full sign-out, never a
-    retryable error).
+    retryable error). `user_id` is returned alongside the token because the
+    route calling this (`POST /api/auth/refresh`) needs it to mint a new
+    access token, and this is the one call that already has the row.
     """
     old_hash = hash_refresh_token(presented_token)
     new_token = issue_refresh_token()
@@ -204,7 +206,7 @@ async def rotate_refresh_token(
         issued_at=now,
         expires_at=now + timedelta(seconds=security.refresh_token_ttl_s),
     )
-    return new_token if result is not None else None
+    return (new_token, result.user_id) if result is not None else None
 
 
 _REFRESH_COOKIE_SUFFIX = "_refresh"

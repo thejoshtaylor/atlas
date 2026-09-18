@@ -172,6 +172,15 @@ class AccountRepository(Protocol):
         skipped check."""
         ...
 
+    async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:
+        """Revoke an unaccepted invite before it is ever used, by setting
+        `expires_at` to `revoked_at` -- reusing the expired-invite refusal
+        `accept_invite`'s caller already has to check, rather than adding a
+        second 'revoked' state alongside 'expired' for every future reader
+        of this table to reason about. A no-op against an already-accepted
+        invite -- revoking a used invite has no effect."""
+        ...
+
     async def list_invites(self) -> Sequence[Invite]: ...
 
     async def store_refresh_token(

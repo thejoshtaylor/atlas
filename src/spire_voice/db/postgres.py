@@ -230,6 +230,13 @@ class PostgresAccountRepository:
                 row.accepted_by_user_id = accepted_by_user_id
                 await session.commit()
 
+    async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(InviteRow, invite_id)
+            if row is not None and row.accepted_at is None:
+                row.expires_at = revoked_at
+                await session.commit()
+
     async def list_invites(self) -> list[Invite]:
         async with self._sessionmaker() as session:
             rows = (await session.execute(select(InviteRow))).scalars().all()
