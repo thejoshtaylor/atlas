@@ -30,6 +30,14 @@ from spire_voice.db.repository import CredentialRepository
 
 router = APIRouter(tags=["credentials"])
 
+# Stated fact, not a browser guess (Task 3, D-03): every provider this
+# application builds from a credential slot is constructed once, in
+# `app.py`'s `lifespan`, and nothing rebuilds it on a later database
+# write -- unlike the safety policy, where the same write respawns the
+# enforcing child before the route returns. A credential entered here
+# needs a restart to take effect.
+_APPLIES_LIVE = False
+
 
 def _unknown_slot_error(slot: str) -> HTTPException:
     return HTTPException(
@@ -48,6 +56,7 @@ class CredentialListEntry(BaseModel):
     is_set: bool
     updated_at: datetime | None
     source: str  # "database" | "environment" | "unset"
+    applies_live: bool
 
 
 class CredentialWriteRequest(BaseModel):
@@ -57,7 +66,12 @@ class CredentialWriteRequest(BaseModel):
 async def _to_entry(slot: CredentialSlot, repo: CredentialRepository, config: Config) -> CredentialListEntry:
     is_set, source, updated_at = await resolve_credential_source(slot, repo, config)
     return CredentialListEntry(
-        slot=slot.value, label=SLOT_LABELS[slot], is_set=is_set, updated_at=updated_at, source=source
+        slot=slot.value,
+        label=SLOT_LABELS[slot],
+        is_set=is_set,
+        updated_at=updated_at,
+        source=source,
+        applies_live=_APPLIES_LIVE,
     )
 
 

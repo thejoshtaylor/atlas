@@ -131,6 +131,10 @@ _EXPECTED_STATE_ATTRS = [
     # Plan 03-05: the account repository `require_setup_complete` and
     # every account/invite route read off `app.state`.
     "account_repo",
+    # Plan 03-07: the credential repository the resolution order reads
+    # before any provider is constructed, and `routes/credentials.py`'s
+    # own list/write routes read off `app.state` the same way.
+    "credential_repo",
 ]
 
 
@@ -293,6 +297,7 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
     return {
         "policy_repo": conftest.FakePolicyRepository(),
         "account_repo": account_repo,
+        "credential_repo": conftest.FakeCredentialRepository(),
     }
 
 
@@ -736,6 +741,7 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
         return {
             "policy_repo": conftest.FakePolicyRepository(),
             "account_repo": conftest.FakeAccountRepository(),
+            "credential_repo": conftest.FakeCredentialRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))

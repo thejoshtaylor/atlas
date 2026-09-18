@@ -64,6 +64,12 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
         return {
             "policy_repo": conftest.FakePolicyRepository(),
             "account_repo": conftest.FakeAccountRepository(),
+            # Plan 03-07 (Rule 3): app.py's lifespan now requires
+            # repositories["credential_repo"] to resolve every provider
+            # credential before any provider is constructed -- omitting
+            # this key here would KeyError on every boot this helper
+            # drives, not just the ones this file's own tests are about.
+            "credential_repo": conftest.FakeCredentialRepository(),
         }
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within

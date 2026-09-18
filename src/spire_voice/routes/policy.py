@@ -92,6 +92,13 @@ class PolicyRuleResponse(BaseModel):
 class PolicyResponse(BaseModel):
     mode: str
     rules: list[PolicyRuleResponse]
+    # Stated fact, not a browser guess (Task 3, D-03): a policy write
+    # always respawns the enforcing child before this route returns, so
+    # the policy is live the instant a write succeeds -- unlike a
+    # provider credential, which `GET /api/credentials` reports as
+    # needing a restart (the providers it feeds are constructed once, in
+    # `lifespan`, and nothing rebuilds them on a later write).
+    applies_live: bool = True
 
 
 class AddRuleRequest(BaseModel):

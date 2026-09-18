@@ -8,6 +8,21 @@
 # Env expansion happens once, at load, over the raw text. A ${NAME} with no
 # value in the environment is a startup error rather than an empty string,
 # because an empty RTSP password fails much later and much less clearly.
+#
+# Phase 3 (PROV-04, D-07): the four provider credentials this file's own
+# stt.api_key/brain.api_key/tts.api_key/mcp.servers.ha.env.HA_TOKEN keys
+# name are resolved in one stated order, at startup, before any provider is
+# constructed: a value saved through the webapp's credentials screen (the
+# database) wins when one is stored; otherwise this file's own environment
+# expansion (the values below) wins; otherwise the slot is unset. An
+# existing ${NAME}-only deployment keeps working through this change --
+# the environment remains a real, read-only fallback source, not something
+# this phase deprecates. A credential entered in the webapp needs a
+# restart to take effect: the providers these values feed are constructed
+# once, here, in lifespan, and nothing rebuilds them on a later database
+# write (unlike the safety policy, where the same write respawns the
+# enforcing child). See spire_voice/crypto/credentials.py for the one
+# function that makes this decision.
 
 server:
   # Phase 1 has no accounts and no login (WEB-04 adds those in Phase 3), so

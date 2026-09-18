@@ -26,11 +26,13 @@ from cryptography.fernet import InvalidToken
 
 from spire_voice.auth.tokens import _CREDENTIAL_ENCRYPTION_INFO, _JWT_SIGNING_INFO, _derive_key
 from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import ConfigError, SecurityConfig, read_secret_key
+from spire_voice.config import SecurityConfig, read_secret_key
 from spire_voice.crypto.credentials import (
     CredentialSlot,
     decrypt_credential,
     encrypt_credential,
+    resolve_credential_source,
+    resolve_credential_value,
 )
 from spire_voice.routes.accounts import router as accounts_router
 from spire_voice.routes.auth import router as auth_router, setup_router
@@ -145,11 +147,16 @@ def test_a_saved_credential_never_comes_back_from_any_route(
     assert listing.status_code == 200, listing.text
     entries = {e["slot"]: e for e in listing.json()}
     stt_entry = entries["stt_api_key"]
-    assert set(stt_entry) == {"slot", "label", "is_set", "updated_at", "source"}, (
+    assert set(stt_entry) == {"slot", "label", "is_set", "updated_at", "source", "applies_live"}, (
         f"the listing entry carries an unexpected field: {stt_entry!r}"
     )
     assert stt_entry["is_set"] is True
     assert stt_entry["source"] == "database"
+    assert stt_entry["applies_live"] is False, (
+        "a provider credential needs a restart to take effect -- the providers "
+        "it feeds are constructed once in lifespan, and this field is the "
+        "server-stated fact the webapp's badge reads, never a browser guess"
+    )
 
 
 def test_a_stored_credential_is_unreadable_without_the_key(monkeypatch):
@@ -236,12 +243,102 @@ def test_a_missing_secret_key_raises_configerror_naming_the_variable(monkeypatch
     variable at the moment a credential is read or written, never a
     silently generated ephemeral key -- an encryption key that changes on
     every restart would make every previously-encrypted credential
-    permanently unreadable."""
+    permanently unreadable.
+
+    `ConfigError` is read off `spire_voice.config` fresh, here, rather
+    than the name this file imported at collection time --
+    `tests/test_config.py::test_config_and_turn_macros_import_in_either_order`
+    reloads `spire_voice.config`, which mints a *new* `ConfigError` class
+    distinct from the one a module-level `from spire_voice.config import
+    ConfigError` bound before that reload ran. `read_secret_key` itself
+    always raises whatever class is currently bound in `config.py`'s own
+    namespace, so a stale import here would build a `pytest.raises` that
+    can never match it once that reload has run earlier in the same test
+    session (the exact gotcha `tests/test_startup_smoke.py` documents for
+    `app_module.ConfigError`)."""
+    import spire_voice.config as config_module
+
     monkeypatch.delenv("SPIRE_SECRET_KEY", raising=False)
     security = SecurityConfig()
 
-    with pytest.raises(ConfigError, match="SPIRE_SECRET_KEY"):
+    with pytest.raises(config_module.ConfigError, match="SPIRE_SECRET_KEY"):
         encrypt_credential(_REAL_SECRET_VALUE, security)
 
-    with pytest.raises(ConfigError, match="SPIRE_SECRET_KEY"):
+    with pytest.raises(config_module.ConfigError, match="SPIRE_SECRET_KEY"):
         decrypt_credential(b"not-a-real-ciphertext", 1, security)
+
+
+# --- Task 3: the resolution order, unit-level (D-07) ------------------------
+
+
+def _config_with_env_value(value: str) -> SimpleNamespace:
+    """A `Config`-shaped stand-in whose `stt.api_key` holds `value` --
+    stands in for what `config.py`'s `${XAI_API_KEY}` expansion would
+    have already produced by the time `lifespan` reads it."""
+    return SimpleNamespace(
+        stt=SimpleNamespace(api_key=value),
+        brain=SimpleNamespace(api_key=""),
+        tts=SimpleNamespace(api_key=""),
+        mcp_servers={},
+    )
+
+
+async def test_a_value_in_both_places_the_database_wins(monkeypatch, fake_credential_repository):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    repo = fake_credential_repository()
+    ciphertext, key_version = encrypt_credential("the-database-value", security)
+    await repo.upsert_credential(
+        CredentialSlot.STT.value,
+        ciphertext=ciphertext,
+        key_version=key_version,
+        updated_by_user_id=None,
+    )
+    config = SimpleNamespace(
+        security=security, **_config_with_env_value("the-environment-value").__dict__
+    )
+
+    is_set, source, updated_at = await resolve_credential_source(CredentialSlot.STT, repo, config)
+    assert is_set is True
+    assert source == "database"
+    assert updated_at is not None
+
+    value, value_source = await resolve_credential_value(CredentialSlot.STT, config, repo)
+    assert value == "the-database-value"
+    assert value_source == "database"
+
+
+async def test_a_value_in_only_the_environment_is_used_and_reported(
+    monkeypatch, fake_credential_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    repo = fake_credential_repository()  # empty -- no database row
+    config = SimpleNamespace(
+        security=security, **_config_with_env_value("the-environment-value").__dict__
+    )
+
+    is_set, source, updated_at = await resolve_credential_source(CredentialSlot.STT, repo, config)
+    assert is_set is True
+    assert source == "environment"
+    assert updated_at is None
+
+    value, value_source = await resolve_credential_value(CredentialSlot.STT, config, repo)
+    assert value == "the-environment-value"
+    assert value_source == "environment"
+
+
+async def test_neither_source_is_unset(monkeypatch, fake_credential_repository):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    repo = fake_credential_repository()
+    config = SimpleNamespace(security=security, **_config_with_env_value("").__dict__)
+
+    is_set, source, updated_at = await resolve_credential_source(CredentialSlot.STT, repo, config)
+    assert is_set is False
+    assert source == "unset"
+    assert updated_at is None
+
+    value, value_source = await resolve_credential_value(CredentialSlot.STT, config, repo)
+    assert value == ""
+    assert value_source == "unset"
