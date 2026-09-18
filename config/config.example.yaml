@@ -42,6 +42,16 @@ database:
   # calibration gate already applies, extended to the schema itself.
   run_migrations_at_startup: true
 
+# safety: -- retired (D-11). This file shipped no safety: block before this
+# comment existed, so there is nothing here to delete; this note exists for
+# an operator whose own, separately-held configuration file still has one.
+# The policy now lives in the database, seeded once by the first migration
+# (alembic/versions/0001_policy_tables.py) from whatever safety: block that
+# file held at the time. Edit the denylist and allowlist in the webapp's
+# policy editor from then on -- a safety: key still present here is a
+# startup error naming the key (Config.from_config), the same way brain.model
+# and gate.require_face already are for the keys retired before it.
+
 security:
   # Phase 3 (D-05): an HttpOnly, SameSite=Lax cookie holding a short-lived
   # JWT, plus a longer-lived opaque refresh token stored server-side in

@@ -10,10 +10,15 @@ Two rules that are easy to get backwards:
 2. Every config-shaped section builds itself through a `from_config`
    classmethod that raises `ConfigError` on an invalid value, mirroring
    `spire_mcp.safety.Policy`'s own doctrine: raised, not returned, so a
-   caller cannot silently continue with a bad configuration. The
-   `safety:` block itself is handed to `Policy.from_config` unchanged --
-   this module does not reinterpret, filter, or default any key inside
-   it. That boundary belongs to `safety.py` alone.
+   caller cannot silently continue with a bad configuration. A `safety:`
+   key is one such invalid value now (Phase 3, D-11): the policy it used
+   to carry lives in the database from the first migration onward, and a
+   `safety:` block still present in the file raises `ConfigError` naming
+   the key, the same way `brain.model` and `gate.require_face` already do
+   for the keys retired before it. This module never parses a `safety:`
+   block again -- that boundary belonged to `safety.py` alone, and now
+   belongs to `alembic/versions/0001_policy_tables.py`'s seed step and the
+   database repository that reads what it wrote.
 """
 
 from __future__ import annotations
@@ -24,7 +29,6 @@ from dataclasses import MISSING, dataclass, field, fields, replace
 
 import yaml
 
-from spire_mcp.safety import Policy
 from spire_voice.calibration.record import DEFAULT_CALIBRATION_DIR
 from spire_voice.turn.macros import normalize
 
@@ -1090,12 +1094,7 @@ class MacroConfig:
 
 @dataclass(frozen=True)
 class Config:
-    """The top-level configuration: one section per subsystem, plus the
-    safety policy built from the `safety:` block.
-
-    `Config.from_config` is the only place `Policy` is constructed from
-    configuration (D-12, D-13) -- `Policy` is imported from
-    `spire_mcp.safety`, never copied or re-implemented here.
+    """The top-level configuration: one section per subsystem.
 
     Phase 2 adds six sections here: `camera` and `speaker` are read by the
     camera `AudioSource` and its FIFO-backed speaker supervisor (plan
@@ -1104,6 +1103,13 @@ class Config:
     02-04/02-05); `barge_in` is read by `_speak`'s interrupt point in
     `turn/controller.py` (plan 02-06); `session` is read by the session
     recorder and the retention sweep (plan 02-07/02-08).
+
+    Phase 3 retires the `safety:` block from this file (D-11): the policy it
+    used to carry now lives in the database, seeded by the first migration
+    (`alembic/versions/0001_policy_tables.py`) and read back by a
+    `PolicyRepository`, not by `Config`. A `safety:` key still present here
+    raises `ConfigError` naming it, below -- `Config` carries no field for
+    the parsed policy or the raw block anymore.
     """
 
     server: ServerConfig
@@ -1118,22 +1124,27 @@ class Config:
     session: SessionConfig
     calibration: CalibrationConfig
     mcp_servers: dict[str, McpServerConfig]
-    policy: Policy
     database: DatabaseConfig
     security: SecurityConfig
     # A tuple, not a dict: `macros:` is a list in the config file and there is
     # no natural name key the way `mcp.servers` has one.
     macros: tuple[MacroConfig, ...] = ()
-    # The `safety:` block exactly as written, kept alongside the parsed
-    # `policy` because the process that ENFORCES the policy is the MCP child,
-    # not this one. It receives an explicit env, not this Config object, so
-    # the block is forwarded to it verbatim rather than re-serialized from
-    # `Policy` -- one parser, in `safety.py`, on both sides of the boundary.
-    raw_safety: dict | None = None
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "Config":
         raw = raw or {}
+        if "safety" in raw:
+            raise ConfigError(
+                "safety: no longer exists in the configuration file -- the policy it used "
+                "to carry now lives in the database, seeded from this same file by the "
+                "first migration (alembic/versions/0001_policy_tables.py) the first time "
+                "this deployment started under Phase 3. If this is that first boot, do "
+                "not remove the block until the migration has run once against a reachable "
+                "database -- it is what carries your denylist forward. Once it has run "
+                "(check the safety_policy/policy_rules tables, or the webapp's policy "
+                "editor, for your seeded entries), delete the safety: block from this file "
+                "and edit the denylist/allowlist in the webapp from then on."
+            )
         mcp_servers_raw = raw.get("mcp", {}).get("servers", {}) or {}
         macros_raw = raw.get("macros", ()) or ()
         macros = tuple(MacroConfig.from_config(m) for m in macros_raw)
@@ -1154,11 +1165,9 @@ class Config:
                 name: McpServerConfig.from_config(server_raw)
                 for name, server_raw in mcp_servers_raw.items()
             },
-            policy=Policy.from_config(raw.get("safety")),
             database=DatabaseConfig.from_config(raw.get("database")),
             security=SecurityConfig.from_config(raw.get("security")),
             macros=macros,
-            raw_safety=raw.get("safety"),
         )
 
 

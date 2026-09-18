@@ -1,12 +1,13 @@
-"""Config loader: env expansion, per-section validation, the safety handoff.
+"""Config loader: env expansion, per-section validation, the retired safety key.
 
-Requirement coverage: SRC-01 (env expansion, transport selector), SAFE-01
-(the safety block reaches `Policy.from_config` unchanged).
+Requirement coverage: SRC-01 (env expansion, transport selector). The safety
+block's own parsing lives in `mcp/spire_mcp/safety.py` and is exercised by
+`tests/test_safety_integration.py`; this file only proves `Config` rejects a
+`safety:` key rather than reading one (D-11, Phase 3).
 """
 
 import pytest
 
-from spire_mcp.safety import Denied, allow_call
 from spire_voice.config import Config, ConfigError, ServerConfig, expand_env
 
 
@@ -58,7 +59,6 @@ def _minimal_raw_config() -> dict:
                 },
             },
         },
-        "safety": {},
         "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
     }
 
@@ -91,22 +91,31 @@ def test_unknown_transport_value_is_a_startup_error():
     assert defaults.transport == "websocket"
 
 
-def test_safety_block_is_handed_to_policy_from_config():
+def test_safety_key_still_present_is_a_startup_error_naming_it():
+    """D-11: the policy `safety:` used to carry now lives in the database,
+    seeded by the first migration -- a config file still carrying the key
+    raises `ConfigError` naming it, the same way `brain.model` and
+    `gate.require_face` already do for the keys retired before it."""
     raw = _minimal_raw_config()
     raw["safety"] = {
         "mode": "allowlist_only",
         "allow_entities": ["light.example_lamp"],
     }
-    config = Config.from_config(raw)
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw)
+    assert "safety" in str(exc.value)
 
-    # The allowed entity passes allow_call; a different, unreviewed entity
-    # is denied -- proving the block reached Policy.from_config intact,
-    # not a copy or a reinterpretation.
-    assert allow_call(config.policy, "light", "turn_on", "light.example_lamp")[2] == [
-        "light.example_lamp"
-    ]
-    with pytest.raises(Denied):
-        allow_call(config.policy, "light", "turn_on", "light.example_other")
+    # An explicitly empty block is still the key being present -- rejected
+    # the same way, not treated as "nothing to reject."
+    raw_empty = _minimal_raw_config()
+    raw_empty["safety"] = {}
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw_empty)
+    assert "safety" in str(exc.value)
+
+    # No safety: key at all loads cleanly -- this is the shape every other
+    # test in this file already exercises via _minimal_raw_config().
+    Config.from_config(_minimal_raw_config())
 
 
 def test_mcp_server_block_rejects_a_configurable_interpreter():
