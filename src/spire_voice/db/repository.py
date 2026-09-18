@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from spire_mcp.safety import Policy
 
@@ -238,6 +238,105 @@ class AccountRepository(Protocol):
         chain from an old, already-rotated token forward to its still-live
         descendant) are the same operation from this method's point of
         view."""
+        ...
+
+
+@dataclass(frozen=True)
+class SetupStep:
+    """One row from `setup_steps`, as a plain value object -- the same
+    reason every other row in this module is one. Only the `hub` step's
+    row is ever read back by `routes/wizard.py`'s own status computation
+    (its module docstring says why); the other four rows exist so a direct
+    read of `setup_steps` always shows the complete, named set of five
+    steps a fresh install seeds."""
+
+    id: int
+    name: str
+    completed_at: datetime | None
+    detail: dict | None
+
+
+class SetupRepository(Protocol):
+    """What the first-run wizard's own persisted state must answer
+    (WEB-01, WEB-02, WEB-03, D-08).
+
+    `setup_state` (the `is_setup_complete`/`mark_setup_complete` pair) is
+    the terminal "has the wizard ever been finished" marker `routes/
+    wizard.py`'s own module docstring describes; `setup_steps` (the
+    `get_step`/`list_steps`/`complete_step` trio) is the one step (`hub`)
+    whose completion cannot be recomputed live on every read. Structurally
+    satisfied by `PostgresSetupRepository` (real) and `FakeSetupRepository`
+    (`tests/conftest.py`), the same dependency-injection-over-subclassing
+    convention `PolicyRepository`/`AccountRepository`/`CredentialRepository`
+    above already use.
+    """
+
+    async def is_setup_complete(self) -> bool:
+        """`True` once `POST /api/wizard/finish` has ever succeeded."""
+        ...
+
+    async def mark_setup_complete(self, *, completed_at: datetime) -> None:
+        """Write the one `setup_state` row's `completed_at`. The caller
+        (`routes/wizard.py`) is responsible for having already confirmed
+        every step's condition holds -- this method does not re-check any
+        of them, so a caller cannot rely on it to paper over a skipped
+        check."""
+        ...
+
+    async def get_step(self, name: str) -> SetupStep | None:
+        """The named step's own row, or `None` if `name` is not one of
+        the five names the migration seeded (never expected in practice,
+        but not assumed away either)."""
+        ...
+
+    async def list_steps(self) -> Sequence[SetupStep]:
+        """Every `setup_steps` row -- the seeded five, present from the
+        first migration onward."""
+        ...
+
+    async def complete_step(
+        self, name: str, *, detail: dict, completed_at: datetime
+    ) -> SetupStep:
+        """Mark `name`'s row complete with `detail` and `completed_at`.
+        The caller (`routes/wizard.py`'s hub-check route) is responsible
+        for having already verified the step's real condition -- this
+        method only records what the caller already confirmed, matching
+        every other `*_repository` write method's own "the caller
+        validates, this method only writes" contract in this module."""
+        ...
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One row from `settings`, as a plain value object -- the general
+    operator-editable settings store `routes/wizard.py`'s audio-source
+    choice is the first, but not the only, writer of."""
+
+    id: int
+    key: str
+    value: Any
+    updated_at: datetime
+    updated_by_user_id: int | None
+
+
+class SettingsRepository(Protocol):
+    """What the general operator-editable settings store must answer.
+    Two members only, matching `CredentialRepository`'s own read/write
+    shape: `get_setting` is the read every caller needs (the wizard's own
+    audio-source resolution, and any future setting a later phase adds),
+    `set_setting` is the one write path. Structurally satisfied by
+    `PostgresSettingsRepository` (real) and `FakeSettingsRepository`
+    (`tests/conftest.py`)."""
+
+    async def get_setting(self, key: str) -> Setting | None:
+        """The stored row for `key`, or `None` when nothing has been set
+        for it yet."""
+        ...
+
+    async def set_setting(
+        self, key: str, value: Any, *, updated_by_user_id: int | None, updated_at: datetime
+    ) -> Setting:
+        """Insert or replace the one row for `key` and return it."""
         ...
 
 

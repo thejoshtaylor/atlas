@@ -12,6 +12,7 @@ add their own tables here.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import ForeignKey, LargeBinary, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -166,6 +167,77 @@ class RefreshTokenRow(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
     rotated_to_id: Mapped[int | None] = mapped_column(
         ForeignKey("refresh_tokens.id"), nullable=True
+    )
+
+
+class SetupStateRow(Base):
+    """A single-row table (`id` always 1) recording whether the first-run
+    wizard has ever been explicitly finished (WEB-01, WEB-02, D-08).
+
+    `completed_at` is set exactly once, by `POST /api/wizard/finish`, and
+    never cleared -- this is a terminal marker ("has the wizard been
+    finished"), deliberately distinct from "are all five step conditions
+    currently true," which `GET /api/wizard` recomputes live on every
+    read from the real state each step names (accounts, the hub check
+    row, credentials, settings, the calibration file). No row at all
+    (before the first `POST /api/wizard/finish`) means the same thing as
+    `completed_at IS NULL` -- both read as "not finished yet."
+    """
+
+    __tablename__ = "setup_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class SetupStepRow(Base):
+    """One wizard step's own record of the one condition that cannot be
+    recomputed live on every read: "a call to Home Assistant returned
+    successfully, and here is when." `name` is one of the five step names
+    `routes/wizard.py` enumerates (`admin_account`, `hub`, `provider_set`,
+    `audio_source`, `room`) -- seeded once, in this table's own migration,
+    so a fresh install reads every step as present and incomplete rather
+    than finding an empty table that reads as "nothing to do."
+
+    Only the `hub` row's `completed_at`/`detail` are ever read back by
+    `GET /api/wizard` -- the other four steps' completion is derived live
+    from their own real source (the accounts table, the credential
+    listing, the settings table, the calibration file on disk) precisely
+    so an existing deployment's environment-only credential, or a
+    calibration already taken outside the wizard, is recognized without
+    anyone having clicked a wizard button. This table's other rows exist
+    so a direct read of `setup_steps` always shows the complete, named set
+    of five steps, not just the one this application code currently
+    consults.
+    """
+
+    __tablename__ = "setup_steps"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class SettingRow(Base):
+    """One operator-editable setting: a key, a JSON value, when it was
+    last written, and by whom. The wizard's audio-source choice is the
+    one key this phase ever writes (`routes/wizard.py`'s own
+    `AUDIO_SOURCE_SETTING_KEY`), but this table is the general store
+    Phases 4 through 8 extend -- a key/value/updated_at/updated_by shape
+    with no column added per setting, the same one-code-path reasoning
+    `PolicyRuleRow.kind` and `ProviderCredentialRow.slot` already apply to
+    their own closed sets.
+    """
+
+    __tablename__ = "settings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
     )
 
 
