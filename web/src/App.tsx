@@ -16,6 +16,7 @@ import { MacroEditorRoute } from "@/routes/macros/MacroEditorRoute"
 import { MacrosRoute } from "@/routes/macros/MacrosRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
+import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
 import { AudioSourceStep } from "@/routes/wizard/AudioSourceStep"
 import { CreateAdminStep } from "@/routes/wizard/CreateAdminStep"
 import { HubStep } from "@/routes/wizard/HubStep"
@@ -63,6 +64,7 @@ function AppRoutes() {
             <Route path="/macros" element={<MacrosRoute />} />
             <Route path="/macros/new" element={<MacroEditorRoute />} />
             <Route path="/macros/:id" element={<MacroEditorRoute />} />
+            <Route path="/workflows" element={<WorkflowsRoute />} />
             <Route path="/dev-mic" element={<DevMicRoute />} />
           </Route>
           <Route element={<RequireRole minimum="admin" />}>
