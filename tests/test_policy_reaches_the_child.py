@@ -95,12 +95,24 @@ def test_child_refuses_to_start_on_a_malformed_block():
 
 
 def test_app_forwards_the_raw_block_rather_than_reserializing_policy():
-    """One parser, `safety.py`, on both sides of the process boundary."""
+    """One parser, `safety.py`, on both sides of the process boundary.
+
+    Phase 3 (plan 03-02) moves the source: `lifespan` no longer forwards the
+    unparsed block straight off `Config` (that field and the `safety:`
+    config key are both retired, D-11) -- it now derives the block from the
+    database, through `safety_block_from_policy(await
+    policy_repo.load_policy())`. The intent this test protects is
+    unchanged: `lifespan` builds the JSON-shaped block `Policy.from_config`
+    expects, from whatever the repository returns, and never constructs a
+    `Policy` object here and serializes that -- one parser, `safety.py`, on
+    both sides of the process boundary, same as before this plan.
+    """
     import inspect
 
     import spire_voice.app as app_mod
 
     source = inspect.getsource(app_mod.lifespan)
-    assert "safety_block=config.raw_safety" in source, (
-        "app.py must forward the raw safety block to the tool host"
+    assert "safety_block_from_policy(await policy_repo.load_policy())" in source, (
+        "the block handed to the tool host must be derived from the policy repository, "
+        "through safety_block_from_policy(await policy_repo.load_policy())"
     )

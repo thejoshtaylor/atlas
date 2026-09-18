@@ -21,8 +21,20 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# spire-voice: `disable_existing_loggers=False` is not Alembic's generated
+# default -- it is required here. `run_migrations` (db/engine.py) runs
+# `command.upgrade()` inside this application's own long-lived process
+# (D-02), not a short-lived CLI invocation Alembic's template assumes.
+# `fileConfig`'s own default (`disable_existing_loggers=True`) tears down
+# every logger already configured in this process the moment a migration
+# runs -- the application's own runtime logging, and (found the hard way,
+# via test_retention.py/test_speaker_fifo.py/test_wake_gating.py's caplog
+# assertions failing only when they ran after a migration in the same
+# suite) pytest's own log-capture handler. `disable_existing_loggers=False`
+# is the documented remedy for exactly this embedding pattern.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # `Base.metadata` is the single import that makes every model this project
 # ever adds visible to `alembic revision --autogenerate` -- a model class

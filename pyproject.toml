@@ -45,7 +45,13 @@ dependencies = [
     # advisories including CVE-2026-48526, where a public JWK could be
     # accepted as an HMAC secret -- is enforced by this file rather than held
     # accidentally by whatever the mcp SDK happens to require.
-    "sqlalchemy>=2.0,<2.1",
+    # [asyncio] extra pulls in greenlet, which create_async_engine requires
+    # to bridge SQLAlchemy's synchronous core into async code -- not an
+    # independent package choice, but the documented shape of installing
+    # SQLAlchemy's async engine at all. 03-01 pinned sqlalchemy without this
+    # extra, which is a defect corrected here (03-02): the async engine
+    # 03-01 was approved to provide could not actually connect without it.
+    "sqlalchemy[asyncio]>=2.0,<2.1",
     "asyncpg>=0.31,<0.32",
     "psycopg[binary]>=3.3,<4",
     "alembic>=1.20,<2",

@@ -49,6 +49,7 @@ import yaml
 from fastapi.testclient import TestClient
 from mcp.types import Tool
 
+import conftest
 import spire_voice.app as app_module
 from spire_voice.transports.base import SourceFormat
 from spire_voice.turn.brain_race import TierBrain
@@ -84,6 +85,13 @@ _EXPECTED_STATE_ATTRS = [
     # lifespan-owned pattern as `ffmpeg_supervisor` above; needs no
     # reachable session directory on disk to land on `app.state`.
     "retention_scheduler",
+    # Plan 03-02: the database engine and the repositories built on top of
+    # it. `run_migrations`/`build_engine` are substituted with fakes below
+    # (matching `_build_wake_detector`'s own monkeypatch precedent), so
+    # none of these three need a reachable Postgres to land on `app.state`.
+    "db_engine",
+    "policy_repo",
+    "safety_block",
 ]
 
 
@@ -120,14 +128,18 @@ def _write_fake_config(tmp_path: Path, *, extra: dict | None = None) -> Path:
                 },
             },
         },
-        "safety": {},
         # Plan 03-01: database.url has no default (D-01/D-02) -- a real
         # boot never reaches this far without one, and this smoke test's
         # `lifespan` run is no exception. Never actually connected here:
-        # nothing in `lifespan` opens the engine yet, so a syntactically
-        # valid, unreachable connection string is all `Config.from_config`
-        # needs to build without raising.
+        # `run_migrations`/`build_engine` are both monkeypatched with fakes
+        # below, so a syntactically valid, unreachable connection string is
+        # all `Config.from_config` needs to build without raising.
         "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
+        # Plan 03-02: the safety: key is retired (D-11) -- Config.from_config
+        # now raises if it is present, so this fixture stops emitting one.
+        # SecurityConfig's own fields all default, so an empty block (or no
+        # block at all) is enough to load cleanly.
+        "security": {},
     }
     raw.update(extra or {})
     path = tmp_path / "smoke-config.yaml"
@@ -181,6 +193,38 @@ async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voi
     """Replaces `precache_all`: the real one synthesizes every phrase
     through the TTS provider over the network, once per phrase."""
     return {text: b"" for text in texts}
+
+
+def _fake_run_migrations(migration_url: str) -> None:
+    """Replaces `spire_voice.db.engine.run_migrations`: the real one runs
+    Alembic against a reachable Postgres, which this smoke test never has.
+    A no-op here proves `lifespan`'s wiring (awaited, in sequence, before
+    anything else) without needing a real database -- the one test that
+    proves a *failing* migration stops the boot substitutes a raising
+    fake instead, over this same monkeypatch point."""
+    return None
+
+
+def _fake_build_engine(database_config: object) -> object:
+    """Replaces `spire_voice.db.engine.build_engine`: the real one builds a
+    real `AsyncEngine`. This smoke test only needs *something* non-`None`
+    to land on `app.state.db_engine` and to have a no-op `dispose()` for
+    the teardown block to call."""
+
+    class _FakeEngine:
+        async def dispose(self) -> None:
+            return None
+
+    return _FakeEngine()
+
+
+def _fake_build_repositories(config: object, engine: object) -> dict:
+    """Replaces `spire_voice.app._build_repositories`: the real one builds
+    `PostgresPolicyRepository` against a real sessionmaker. Substituting
+    `conftest.FakePolicyRepository` here is what lets this smoke test cover
+    `lifespan`'s repository wiring without a reachable Postgres -- the same
+    Postgres-free precedent D-04 sets for the rest of the suite."""
+    return {"policy_repo": conftest.FakePolicyRepository()}
 
 
 class _FakeWakeDetector:
@@ -269,6 +313,9 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -284,6 +331,37 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
         )
 
 
+def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_application(
+    tmp_path, monkeypatch
+):
+    """Phase 1 shipped three Critical defects on startup paths no test
+    exercised. This is that same discipline applied to the newest startup
+    path this phase adds: a migration failure must propagate uncaught and
+    stop the process, never leave a route table answering against an
+    unmigrated schema (T-03-09). Substitutes a `run_migrations` that raises,
+    and asserts entering the `TestClient` context manager -- which is what
+    actually runs `lifespan` -- raises too, rather than yielding a working
+    application.
+    """
+
+    def _raising_run_migrations(migration_url: str) -> None:
+        raise RuntimeError("simulated migration failure")
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _raising_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with pytest.raises(RuntimeError, match="simulated migration failure"):
+        with TestClient(app_module.app):
+            pass
+
+
 def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypatch):
     """Rule 2 fix, plan 02-08: plan 02-07 added `CameraAudioSource`'s
     `on_reconnect` hook and `FfmpegSupervisor.handle_reconnect()`, but
@@ -297,6 +375,9 @@ def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypa
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -345,6 +426,9 @@ def test_camera_runner_is_wired_with_the_configured_gate_and_barge_in_policy(tmp
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -438,6 +522,9 @@ def test_correlation_enabled_with_no_calibration_refuses_to_start(tmp_path, monk
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -467,6 +554,9 @@ def test_correlation_enabled_with_a_stale_calibration_refuses_to_start(tmp_path,
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -492,6 +582,9 @@ def test_correlation_enabled_with_a_valid_calibration_wires_the_runner(tmp_path,
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -512,6 +605,9 @@ def test_correlation_disabled_boots_unchanged_and_attaches_no_calibration(tmp_pa
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -534,6 +630,9 @@ def test_an_unreadable_calibration_with_correlation_off_boots_normally(tmp_path,
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
     monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
