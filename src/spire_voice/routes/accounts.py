@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.auth.passwords import hash_password
@@ -201,7 +202,18 @@ async def accept_invite(token: str, payload: AcceptInviteRequest, request: Reque
     """Unauthenticated by necessity -- the person accepting has no account
     yet. Creates the user at exactly the role the invite named (T-03-31),
     never a role the request body could ask for -- `AcceptInviteRequest`
-    above has no `role` field at all, so there is nothing to ignore."""
+    above has no `role` field at all, so there is nothing to ignore.
+
+    WR-03 fix (code review): the old shape read the invite, checked
+    `accepted_at is None` and `expires_at`, then created the user, then
+    only afterward called `accept_invite` -- with no atomicity between the
+    check and the write, two concurrent accepts of the same still-valid
+    token could both pass the check and both create a user before either
+    flipped `accepted_at`. The read below still decides the early,
+    friendly refusal and which email/role to use, but `claim_invite` is
+    now the actual authority: it is one atomic compare-and-swap, and only
+    the caller it returns `True` for goes on to create a user at all.
+    """
     account_repo: AccountRepository = request.app.state.account_repo
 
     invite = await account_repo.get_invite_by_token_hash(_hash_invite_token(token))
@@ -226,11 +238,35 @@ async def accept_invite(token: str, payload: AcceptInviteRequest, request: Reque
             detail="this invite has no email of its own -- supply one to accept it",
         )
 
-    user = await account_repo.create_user(
-        email=email,
-        display_name=payload.display_name,
-        password_hash=hash_password(payload.password),
-        role=invite.role,
-    )
-    await account_repo.accept_invite(invite.id, accepted_by_user_id=user.id, accepted_at=now)
+    # The actual gate: an atomic compare-and-swap against the database,
+    # not the plain-Python check above (which only produces a friendlier
+    # early refusal and can itself be stale by the time this line runs).
+    # A caller this returns False for lost the race, or the invite
+    # genuinely became invalid between the read above and here -- either
+    # way, refused the same way a never-valid token is.
+    claimed = await account_repo.claim_invite(invite.id, now=now)
+    if not claimed:
+        raise _invite_invalid_error()
+
+    try:
+        user = await account_repo.create_user(
+            email=email,
+            display_name=payload.display_name,
+            password_hash=hash_password(payload.password),
+            role=invite.role,
+        )
+    except IntegrityError:
+        # A unique-violation on users.email -- per WR-03's own fix
+        # suggestion, this must surface as a named refusal, never an
+        # unhandled 500. The invite stays claimed (its accepted_at is
+        # already set): a colliding email means this specific invite
+        # cannot be completed, and re-issuing a fresh one is the
+        # operator's own remedy, the same as any other invite that
+        # expires unused.
+        raise HTTPException(
+            status_code=409,
+            detail="an account with this email already exists",
+        ) from None
+
+    await account_repo.record_invite_acceptor(invite.id, accepted_by_user_id=user.id)
     return _to_account_response(user)

@@ -158,6 +158,22 @@ class AccountRepository(Protocol):
         skipped normalization step."""
         ...
 
+    async def create_user_if_no_user_exists(
+        self, *, email: str, display_name: str, password_hash: str, role: str
+    ) -> User | None:
+        """WR-03 (code review): the atomic form `routes/auth.py::create_admin`
+        uses instead of `any_user_exists()` followed by `create_user(...)`
+        -- that check-then-act pair has no transaction isolation between
+        the two calls, so two concurrent create-admin requests could both
+        observe an empty table and both insert. An implementation must
+        make the check and the insert atomic (`PostgresAccountRepository`
+        uses a `pg_advisory_xact_lock`, held for one transaction, to
+        serialize concurrent callers of this specific method through the
+        same critical section -- see its own docstring). Returns `None`,
+        inserting nothing, when a user already exists; returns the created
+        `User` otherwise."""
+        ...
+
     async def get_user_by_email(self, email: str) -> User | None:
         """`email` must already be normalized by the caller, matching
         `create_user`'s own contract."""
@@ -185,14 +201,26 @@ class AccountRepository(Protocol):
 
     async def get_invite_by_token_hash(self, token_hash: str) -> Invite | None: ...
 
-    async def accept_invite(
-        self, invite_id: int, *, accepted_by_user_id: int, accepted_at: datetime
-    ) -> None:
-        """Mark one invite accepted. The caller (`routes/accounts.py`) is
-        responsible for checking `accepted_at is None` and `expires_at` are
-        both still satisfied before calling this -- this method itself does
-        not re-check either, so a caller cannot rely on it to paper over a
-        skipped check."""
+    async def claim_invite(self, invite_id: int, *, now: datetime) -> bool:
+        """WR-03 (code review): the atomic compare-and-swap
+        `routes/accounts.py::accept_invite` uses to claim an invite before
+        creating the user it is for. Must check `accepted_at IS NULL` and
+        `expires_at > now` and set `accepted_at = now` as one atomic
+        database operation (`PostgresAccountRepository` uses a single
+        conditional `UPDATE ... WHERE ... RETURNING`) -- not a read
+        followed by a separate write, which is exactly the unguarded
+        window that let two concurrent accepts of the same invite both
+        pass the check and both create a user before either flipped
+        `accepted_at`. Returns whether *this* call is the one that
+        actually claimed it -- `False` for a caller that loses the race,
+        or for an invite that is genuinely already accepted or expired."""
+        ...
+
+    async def record_invite_acceptor(self, invite_id: int, *, accepted_by_user_id: int) -> None:
+        """Records who accepted an invite, called only after `claim_invite`
+        has already returned `True` for the same invite -- by then no
+        other caller can still be contesting it, so this method itself
+        performs no check of its own."""
         ...
 
     async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:

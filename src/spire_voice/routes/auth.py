@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from spire_voice.auth.dependencies import CurrentUser, Role, current_user
 from spire_voice.auth.passwords import hash_password, verify_password
@@ -128,19 +129,38 @@ async def create_admin(
     """Answers only while no user of any role exists (D-08: "no user," not
     "no admin"). There is no default password and no printed setup token
     at any point -- the person creating the admin chooses the password
-    here, in the browser, and nothing about it is ever written to a log."""
+    here, in the browser, and nothing about it is ever written to a log.
+
+    WR-03 fix (code review): `any_user_exists()` followed by a separate
+    `create_user(...)` used to be a check-then-act pair with no atomicity
+    between them -- two concurrent requests could both observe an empty
+    table and both insert, producing two admin accounts from a route this
+    docstring itself says answers exactly once. `create_user_if_no_user_exists`
+    makes the check and the insert one atomic database operation; only the
+    caller it actually returns a `User` for goes on to get a session.
+    """
     config: Config = request.app.state.config
     account_repo: AccountRepository = request.app.state.account_repo
 
-    if await account_repo.any_user_exists():
+    try:
+        user = await account_repo.create_user_if_no_user_exists(
+            email=_normalize_email(payload.email),
+            display_name=payload.display_name,
+            password_hash=hash_password(payload.password),
+            role=Role.ADMIN.value,
+        )
+    except IntegrityError:
+        # Defense in depth, per WR-03's own fix suggestion -- the
+        # advisory-lock serialization above already makes this
+        # unreachable for two `create-admin` calls racing each other, but
+        # a unique-violation from `users.email` must still surface as this
+        # route's own named refusal, never as an unhandled 500 naming a
+        # database column an unauthenticated caller has no reason to see.
+        raise _create_admin_closed_error() from None
+
+    if user is None:
         raise _create_admin_closed_error()
 
-    user = await account_repo.create_user(
-        email=_normalize_email(payload.email),
-        display_name=payload.display_name,
-        password_hash=hash_password(payload.password),
-        role=Role.ADMIN.value,
-    )
     await _issue_new_session(response, user, config.security, account_repo)
     return _to_session_response(user)
 

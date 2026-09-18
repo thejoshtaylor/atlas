@@ -503,6 +503,22 @@ class FakeAccountRepository:
         self._next_user_id += 1
         return user
 
+    async def create_user_if_no_user_exists(
+        self, *, email: str, display_name: str, password_hash: str, role: str
+    ) -> User | None:
+        # WR-03 fix (code review): matches `PostgresAccountRepository`'s
+        # atomicity contract structurally, not merely by return shape --
+        # this method has no `await` between the check and the insert, so
+        # under asyncio's single-threaded cooperative scheduling nothing
+        # can interleave mid-body regardless (a fake never needs the real
+        # implementation's lock to be equally race-free; it is race-free
+        # by construction).
+        if self.users:
+            return None
+        return await self.create_user(
+            email=email, display_name=display_name, password_hash=password_hash, role=role
+        )
+
     async def get_user_by_email(self, email: str) -> User | None:
         for user in self.users.values():
             if user.email == email:
@@ -549,14 +565,22 @@ class FakeAccountRepository:
                 return invite
         return None
 
-    async def accept_invite(
-        self, invite_id: int, *, accepted_by_user_id: int, accepted_at: datetime
-    ) -> None:
+    async def claim_invite(self, invite_id: int, *, now: datetime) -> bool:
+        # WR-03 fix (code review): same "no await between check and
+        # write, so nothing can interleave" reasoning as
+        # `create_user_if_no_user_exists` above -- race-free by
+        # construction under asyncio's cooperative scheduling, matching
+        # `PostgresAccountRepository.claim_invite`'s atomicity contract.
+        invite = self.invites.get(invite_id)
+        if invite is None or invite.accepted_at is not None or invite.expires_at <= now:
+            return False
+        self.invites[invite_id] = replace(invite, accepted_at=now)
+        return True
+
+    async def record_invite_acceptor(self, invite_id: int, *, accepted_by_user_id: int) -> None:
         invite = self.invites.get(invite_id)
         if invite is not None:
-            self.invites[invite_id] = replace(
-                invite, accepted_at=accepted_at, accepted_by_user_id=accepted_by_user_id
-            )
+            self.invites[invite_id] = replace(invite, accepted_by_user_id=accepted_by_user_id)
 
     async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:
         invite = self.invites.get(invite_id)
