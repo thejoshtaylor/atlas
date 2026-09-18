@@ -82,6 +82,10 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
             # rather than from config.macros -- same reasoning as
             # credential_repo/settings_repo above.
             "macro_repo": conftest.FakeMacroRepository(),
+            # Plan 05-01: lifespan also builds a WorkflowToolHost and a
+            # WorkflowScheduler over repositories["workflow_repo"] --
+            # same reasoning as macro_repo immediately above.
+            "workflow_repo": conftest.FakeWorkflowRepository(),
         }
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within

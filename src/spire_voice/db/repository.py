@@ -12,8 +12,8 @@ dependency-injection-over-subclassing convention `FfmpegSupervisor` and
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Protocol, Sequence
+from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 from spire_mcp.safety import Policy
 from spire_voice.turn.macros import normalize
@@ -552,4 +552,153 @@ class CredentialRepository(Protocol):
         """Insert or replace the one row for `slot` and return it. The
         caller (`routes/credentials.py`) is responsible for validating
         `slot` against the closed set before calling this."""
+        ...
+
+
+@dataclass(frozen=True)
+class WorkflowStep:
+    """One step of a `WorkflowRun`, in written order -- a plain value
+    object mirroring `WorkflowStepRow`'s own columns, the same lift
+    `MacroAction` already gives `MacroActionRow` (D-07). `due_at` and
+    `fired_at` are always aware UTC; the repository boundary
+    (`db/postgres.py`'s `_to_naive_utc`/`_to_aware_utc`) is what makes
+    that true regardless of the database column's own naive storage.
+    """
+
+    id: int
+    run_id: int
+    position: int
+    kind: str
+    arguments: dict
+    due_at: datetime
+    status: str
+    attempts: int
+    result_detail: dict | None
+    fired_at: datetime | None
+
+
+@dataclass(frozen=True)
+class WorkflowRun:
+    """One scheduled plan, with its ordered steps already attached -- the
+    same "a caller never reassembles one from two separate repository
+    calls" convention `Macro` already establishes for its own actions."""
+
+    id: int
+    origin: str
+    status: str
+    summary: str
+    created_at: datetime
+    updated_at: datetime
+    created_by_user_id: int | None
+    steps: tuple[WorkflowStep, ...]
+
+
+@dataclass(frozen=True)
+class WorkflowStepSpec:
+    """One step specification a caller hands to
+    `WorkflowRepository.create_run` -- a kind and its own per-kind
+    `arguments` payload, in written order. Mirrors the `(tool, arguments)`
+    pair `MacroRepository.create_macro`'s own `actions` parameter already
+    takes for the identical job: the caller supplies written order, the
+    repository assigns `position` from it.
+
+    A `wait` step's `arguments` carries one key, `duration_s` (a
+    non-negative number of seconds) -- the only kind whose payload
+    `assign_step_due_ats` below reads, because it is the only kind whose
+    duration folds forward into the steps that follow it (PA-D1).
+    """
+
+    kind: str
+    arguments: dict
+
+
+def push_out_due_at(due_at: datetime, seconds: float) -> datetime:
+    """Push an already-claimed step's `due_at` (an aware UTC instant)
+    forward by `seconds` -- the retry backoff
+    `PostgresWorkflowRepository.claim_and_execute_next_due_step` applies
+    when a step's outcome asks for a retry (PA-D3). Kept here rather than
+    inline in `db/postgres.py` for the same reason `assign_step_due_ats`
+    below is: that module's own acceptance criterion forbids it from
+    importing `timedelta` itself, so both of this file's small absolute-
+    instant-arithmetic helpers live in one place."""
+    return due_at + timedelta(seconds=seconds)
+
+
+def assign_step_due_ats(
+    steps: "Sequence[WorkflowStepSpec]", base_time: datetime
+) -> list[datetime]:
+    """The one place `wait` step durations are folded forward into the
+    `due_at` of every step written after them (PA-D1, D-04) -- called by
+    `db/postgres.py`'s `PostgresWorkflowRepository.create_run`, kept here
+    rather than inline so `db/postgres.py` never has to import `timedelta`
+    itself (that module's own acceptance criterion: it contains no
+    `ZoneInfo`, `fromisoformat`, `timedelta`, or `astimezone` of its own --
+    `workflow.schedule.resolve_schedule` is the only place in this project
+    that turns a caller's way of saying "when" into an absolute instant).
+
+    This is arithmetic on an already-absolute instant (`base_time`,
+    `resolve_schedule`'s own return value), never a second resolution of a
+    wall-clock string -- accumulating a fixed count of seconds onto an
+    aware UTC `datetime` cannot be affected by a daylight-saving boundary,
+    which is exactly why `resolve_schedule` itself never needs to touch
+    this function's output afterward.
+
+    Each `wait` step's own row keeps the `due_at` it would have had if it
+    completed instantly (RESEARCH.md Pitfall 5: the waiting is expressed
+    declaratively, in `due_at`, never as a suspended executor holding a
+    claimed row's lock); its `duration_s` is added only to the `due_at` of
+    every step that comes after it in `steps`.
+    """
+    due_ats: list[datetime] = []
+    accumulated = timedelta(0)
+    for step in steps:
+        due_ats.append(base_time + accumulated)
+        if step.kind == "wait":
+            accumulated += timedelta(seconds=step.arguments.get("duration_s", 0))
+    return due_ats
+
+
+class WorkflowRepository(Protocol):
+    """What scheduled-workflow storage must answer for this plan's own
+    slice (05-01): creating a run, and claiming its next due step.
+
+    Plan 05-02 adds the authoring surface (`list_runs`, `get_run`,
+    `cancel_run`, `append_steps`, `replace_steps`) to this same Protocol --
+    this plan defines only what it wires, matching this module's own
+    "define what you wire, not what a later plan needs" convention.
+    """
+
+    async def create_run(
+        self,
+        *,
+        origin: str,
+        summary: str,
+        steps: Sequence[WorkflowStepSpec],
+        base_time: datetime,
+        created_by_user_id: int | None,
+    ) -> WorkflowRun:
+        """Insert one run and its ordered steps in one transaction.
+        `base_time` is already an absolute, aware UTC instant --
+        `workflow.schedule.resolve_schedule`'s own return value. This
+        method performs no zone handling and parses no string; it calls
+        `assign_step_due_ats` to fold every `wait` step's duration forward
+        (PA-D1) and writes the result."""
+        ...
+
+    async def claim_and_execute_next_due_step(
+        self,
+        executor: "Callable[[Any], Awaitable[Any]]",
+        now: datetime,
+    ) -> bool:
+        """Claim the single oldest due, claimable step across every run
+        with `SELECT ... FOR UPDATE SKIP LOCKED`, call `executor` against
+        it, and write its outcome -- all inside the one transaction that
+        claimed it (D-02): the claim and the terminal write share no
+        intervening commit, which is what makes a crash mid-step
+        recoverable rather than ambiguous. A step is claimable only when
+        no earlier-position sibling in its own run is still `pending`
+        (steps run in written order, FLOW-01) and its own run's status is
+        `pending` or `firing` (a cancelled or terminal run has no
+        claimable steps, D-11/D-12). Returns `True` when a step was
+        claimed (whatever its outcome), `False` when nothing was due."""
         ...

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Sequence
 
@@ -30,6 +30,10 @@ from spire_voice.db.repository import (
     Setting,
     SetupStep,
     User,
+    WorkflowRun,
+    WorkflowStep,
+    WorkflowStepSpec,
+    assign_step_due_ats,
 )
 from spire_voice.transports.base import SourceFormat
 
@@ -577,6 +581,152 @@ def fake_macro_repository():
     """Factory: `fake_macro_repository(macros=[...])` builds a scripted
     `FakeMacroRepository`."""
     return FakeMacroRepository
+
+
+_FAKE_WORKFLOW_CLAIMABLE_RUN_STATUSES = ("pending", "firing")
+
+
+class FakeWorkflowRepository:
+    """An in-memory `WorkflowRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, the direct sibling of
+    `FakeMacroRepository` above.
+
+    Implements the same claim predicate
+    `PostgresWorkflowRepository.claim_and_execute_next_due_step` enforces
+    in SQL (earlier-pending-sibling excluded, only `pending`/`firing`
+    runs claimable), in plain Python over two dicts, so a test driving
+    `WorkflowScheduler` against this fake exercises the identical
+    ordering/cancellation contract `db/postgres.py`'s own docstring
+    states -- this plan's own `tests/test_workflow_tracer.py` drives the
+    real Postgres-backed repository instead (D-04's own carve-out: a
+    guarantee this specific, backed by `SELECT ... FOR UPDATE SKIP
+    LOCKED`, needs a real database to actually prove), but every other
+    test in this suite that needs a workflow repository with no reachable
+    Postgres reaches for this one.
+    """
+
+    def __init__(self) -> None:
+        self._next_run_id = 1
+        self._next_step_id = 1
+        self._runs: dict[int, dict[str, Any]] = {}
+        self._steps: dict[int, dict[str, Any]] = {}
+
+    def _step_view(self, step_id: int) -> WorkflowStep:
+        s = self._steps[step_id]
+        return WorkflowStep(
+            id=s["id"],
+            run_id=s["run_id"],
+            position=s["position"],
+            kind=s["kind"],
+            arguments=s["arguments"],
+            due_at=s["due_at"],
+            status=s["status"],
+            attempts=s["attempts"],
+            result_detail=s["result_detail"],
+            fired_at=s["fired_at"],
+        )
+
+    def _run_view(self, run_id: int) -> WorkflowRun:
+        run = self._runs[run_id]
+        ordered_step_ids = sorted(
+            (s["id"] for s in self._steps.values() if s["run_id"] == run_id),
+            key=lambda step_id: self._steps[step_id]["position"],
+        )
+        return WorkflowRun(
+            id=run["id"],
+            origin=run["origin"],
+            status=run["status"],
+            summary=run["summary"],
+            created_at=run["created_at"],
+            updated_at=run["updated_at"],
+            created_by_user_id=run["created_by_user_id"],
+            steps=tuple(self._step_view(step_id) for step_id in ordered_step_ids),
+        )
+
+    async def create_run(
+        self,
+        *,
+        origin: str,
+        summary: str,
+        steps: Sequence[WorkflowStepSpec],
+        base_time: datetime,
+        created_by_user_id: int | None,
+    ) -> WorkflowRun:
+        now = datetime.now(timezone.utc)
+        run_id = self._next_run_id
+        self._next_run_id += 1
+        self._runs[run_id] = {
+            "id": run_id,
+            "origin": origin,
+            "status": "pending",
+            "summary": summary,
+            "created_at": now,
+            "updated_at": now,
+            "created_by_user_id": created_by_user_id,
+        }
+        due_ats = assign_step_due_ats(steps, base_time)
+        for position, (spec, due_at) in enumerate(zip(steps, due_ats)):
+            step_id = self._next_step_id
+            self._next_step_id += 1
+            self._steps[step_id] = {
+                "id": step_id,
+                "run_id": run_id,
+                "position": position,
+                "kind": spec.kind,
+                "arguments": spec.arguments,
+                "due_at": due_at,
+                "status": "pending",
+                "attempts": 0,
+                "result_detail": None,
+                "fired_at": None,
+            }
+        return self._run_view(run_id)
+
+    async def claim_and_execute_next_due_step(self, executor, now: datetime) -> bool:
+        candidates = [
+            s
+            for s in self._steps.values()
+            if s["status"] == "pending"
+            and s["due_at"] <= now
+            and self._runs[s["run_id"]]["status"] in _FAKE_WORKFLOW_CLAIMABLE_RUN_STATUSES
+            and not any(
+                other["run_id"] == s["run_id"]
+                and other["position"] < s["position"]
+                and other["status"] == "pending"
+                for other in self._steps.values()
+            )
+        ]
+        if not candidates:
+            return False
+        candidates.sort(key=lambda s: (s["due_at"], s["run_id"], s["position"]))
+        step = candidates[0]
+        run = self._runs[step["run_id"]]
+        if run["status"] == "pending":
+            run["status"] = "firing"
+
+        outcome = await executor(self._step_view(step["id"]))
+
+        step["attempts"] += 1
+        step["result_detail"] = outcome.detail
+        if outcome.retry and step["attempts"] < 3:
+            step["status"] = "pending"
+            step["due_at"] = now + timedelta(seconds=30)
+        else:
+            step["status"] = "failed" if outcome.retry else outcome.status
+            step["fired_at"] = now
+
+        remaining_pending = any(
+            s["run_id"] == run["id"] and s["status"] == "pending" for s in self._steps.values()
+        )
+        if not remaining_pending:
+            incomplete = any(
+                s["run_id"] == run["id"] and s["status"] != "completed"
+                for s in self._steps.values()
+            )
+            run["status"] = "failed" if incomplete else "completed"
+        run["updated_at"] = now
+        return True
 
 
 class FakeAccountRepository:

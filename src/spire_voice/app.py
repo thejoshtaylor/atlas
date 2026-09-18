@@ -9,6 +9,7 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -50,8 +51,14 @@ from spire_voice.db.postgres import (
     PostgresPolicyRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
+    PostgresWorkflowRepository,
 )
-from spire_voice.db.repository import CredentialRepository, MacroRepository, SettingsRepository
+from spire_voice.db.repository import (
+    CredentialRepository,
+    MacroRepository,
+    SettingsRepository,
+    WorkflowRepository,
+)
 from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
@@ -73,6 +80,9 @@ from spire_voice.turn import brain_race
 from spire_voice.turn.controller import run_turn
 from spire_voice.wake.base import WakeDetector, WakeError
 from spire_voice.wake.vosk_engine import VoskWakeDetector
+from spire_voice.workflow.scheduler import WorkflowScheduler
+from spire_voice.workflow.steps import execute_step
+from spire_voice.workflow.tool import WorkflowToolHost
 
 logger = logging.getLogger("spire_voice.app")
 
@@ -297,6 +307,12 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         "settings_repo": PostgresSettingsRepository(sessionmaker),
         # Plan 04-05 (D-09): macros live here now, not on `Config`.
         "macro_repo": PostgresMacroRepository(sessionmaker),
+        # Plan 05-01: scheduled workflow runs and steps (D-01 .. D-04).
+        "workflow_repo": PostgresWorkflowRepository(
+            sessionmaker,
+            max_attempts=config.workflow.max_attempts,
+            retry_backoff_s=config.workflow.retry_backoff_s,
+        ),
     }
 
 
@@ -536,6 +552,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     credential_repo = repositories["credential_repo"]
     settings_repo: SettingsRepository = repositories["settings_repo"]
     macro_repo: MacroRepository = repositories["macro_repo"]
+    workflow_repo: WorkflowRepository = repositories["workflow_repo"]
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
     # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
@@ -647,18 +664,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             weather_tool_host = candidate_weather_host
     app.state.weather_tool_host = weather_tool_host
 
+    # Plan 05-01 (D-08): the in-process `schedule_workflow` tool host --
+    # in-process, not a spawned child, because it holds `workflow_repo`,
+    # not a credential (SAFE-09 has no isolation boundary to cross for a
+    # database connection). `zone` is `_resolved_timezone`, already
+    # resolved above -- the one process-wide reading of the house's own
+    # configured zone, never re-read or re-derived here.
+    workflow_tool_host = WorkflowToolHost(workflow_repo, zone=_resolved_timezone)
+    app.state.workflow_tool_host = workflow_tool_host
+
     # The lookup the turn controller actually calls through (all three
     # `run_turn` call sites below pass this, never `app.state.tool_host`
-    # directly): one or two hosts, in a fixed order, so the model sees
-    # both children's tools and a call reaches whichever child advertised
-    # it. Built fresh from already-started hosts -- reads no
+    # directly): the Home Assistant child, the weather child (if
+    # configured), and the in-process workflow host, in a fixed order, so
+    # the model sees every host's tools and a call reaches whichever one
+    # advertised it. Built fresh from already-started hosts -- reads no
     # configuration of its own (`McpToolHostLookup`'s own docstring).
     lookup_hosts: list[McpToolHost] = [tool_host]
     if weather_tool_host is not None:
         lookup_hosts.append(weather_tool_host)
+    lookup_hosts.append(workflow_tool_host)
     app.state.tool_host_lookup = McpToolHostLookup(lookup_hosts)
-    app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools) + (
-        mcp_tools_to_openai_tools(weather_tool_host.tools) if weather_tool_host is not None else []
+    app.state.tools_schema = (
+        mcp_tools_to_openai_tools(tool_host.tools)
+        + (mcp_tools_to_openai_tools(weather_tool_host.tools) if weather_tool_host is not None else [])
+        + mcp_tools_to_openai_tools(workflow_tool_host.tools)
     )
 
     entities_result = await tool_host.call_tool("ha_list_entities", {})
@@ -817,6 +847,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     retention_scheduler.start()
     app.state.retention_scheduler = retention_scheduler
 
+    # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
+    # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
+    # exists so its own executor calls through the identical lookup the
+    # live turn path calls -- never a workflow-local copy of `allow_call`
+    # (D-13). `functools.partial` binds `execute_step`'s own `tool_host`/
+    # `config` parameters once, here; `WorkflowScheduler` itself only ever
+    # calls the result as `executor(step, now)`.
+    workflow_executor = functools.partial(
+        execute_step, tool_host=app.state.tool_host_lookup, config=config.workflow
+    )
+    workflow_scheduler = WorkflowScheduler(workflow_repo, workflow_executor, config.workflow)
+    workflow_scheduler.start()
+    app.state.workflow_scheduler = workflow_scheduler
+
     yield
 
     # CR-03 fix (code review): `SourceRunner.run()` now contains a
@@ -838,6 +882,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     wake_detector.close()
     await ffmpeg_supervisor.stop()
     await retention_scheduler.stop()
+    await workflow_scheduler.stop()
     await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()
