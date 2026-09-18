@@ -87,3 +87,184 @@ def test_an_ordinary_needs_tool_reply_is_unchanged_by_the_new_fields():
     reply = TierReply(answer="", confident=False, needs_tool=True, filler=FillerPhrase.LET_ME_CHECK)
     assert reply.needs_clarification is False
     assert reply.candidates == ()
+
+
+# --- Task 3: turn-level cases, driving the real `run_turn` -----------------
+
+
+def test_the_same_candidate_list_produces_the_same_clarifying_sentence_twice():
+    """Composed in code, never through a second model round (D-14): the
+    same candidates, in the same order, always produce the same sentence."""
+    from spire_voice.turn.controller import _compose_clarifying_question
+
+    candidates = ("light.example_lamp", "light.example_desk_lamp")
+    first = _compose_clarifying_question(candidates, {})
+    second = _compose_clarifying_question(candidates, {})
+
+    assert first == second
+    assert "light.example_lamp" in first
+    assert "light.example_desk_lamp" in first
+
+
+async def test_a_needs_clarification_winner_speaks_a_question_and_makes_no_tool_call(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """CMD-09/D-07, end to end: a triage tier's `needs_clarification` reply
+    ends the race before the (deliberately slow) top tier ever reaches the
+    tool host. The operator hears a question naming every candidate, the
+    tool host recorded zero calls, and `turn_outcome` names this case.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    class _RecordingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name, arguments):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    class _NeverFinishesBrain:
+        """The top tier's tool round never returns before the race is
+        already won -- proof the clarifying reply pre-empts it rather than
+        racing it to a tool call."""
+
+        async def chat(self, messages, tools=None):
+            await asyncio.sleep(10)
+            raise AssertionError("should have been cancelled before this line")  # pragma: no cover
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+    top_brain = _NeverFinishesBrain()
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=None, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    tool_host = _RecordingToolHost()
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the lamp")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=1000,
+        filler_cache=None,
+    )
+
+    assert tool_host.calls == []
+    assert len(tts.received_text) == 1
+    spoken = tts.received_text[0]
+    assert "light.example_lamp" in spoken
+    assert "light.example_desk_lamp" in spoken
+    assert timings.turn_outcome == "needs_clarification"
+
+
+async def test_a_needs_clarification_question_prefers_friendly_names_from_injected_state(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """When this turn's own injected live-state fetch carries a friendly
+    name for a candidate, the spoken question uses it and keeps the raw
+    entity id out of the sentence entirely -- an id is not what a person
+    says out loud."""
+    import asyncio
+
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    async def _state_fetch():
+        return [
+            {"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "off"},
+            {"entity_id": "light.example_desk_lamp", "friendly_name": "the desk lamp", "state": "off"},
+        ]
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+
+    class _NeverFinishesBrain:
+        async def chat(self, messages, tools=None):
+            await asyncio.sleep(10)
+            raise AssertionError("should have been cancelled before this line")  # pragma: no cover
+
+    top_brain = _NeverFinishesBrain()
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=None, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the lamp")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=1000,
+        filler_cache=None,
+        state_fetch=_state_fetch,
+    )
+
+    spoken = tts.received_text[0]
+    assert "the lamp" in spoken
+    assert "the desk lamp" in spoken
+    assert "light.example_lamp" not in spoken
+    assert "light.example_desk_lamp" not in spoken

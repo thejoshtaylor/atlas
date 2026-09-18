@@ -48,6 +48,18 @@ in `app.py` alongside `_catalog_prompt` (D-14); this module reaches it with
 the same deferred, function-body import `brain_race.py` already uses for
 `_run_tool_rounds`, since `app.py` imports `run_turn` back from this module
 at load time.
+
+Plan 04-04 adds `needs_clarification` as a third, exclusive outcome a
+triage tier's reply can win the race with (CMD-09, D-07): a spoken name
+matching more than one known entity asks which one was meant instead of
+guessing. `run_turn`'s post-race branch speaks a question composed in code
+from `winner.candidates`, preferring a friendly name from this turn's own
+injected state fetch over the bare entity id, and returns -- no macro
+follow-up, no further tool round, and nothing that holds the audio source
+open past the question (D-08; the operator answers by waking the assistant
+again, and VOICE-21 is deliberately out of scope). `turn_outcome` gains its
+own `"needs_clarification"` value, distinct from an ordinary answer, an
+empty reply, and a round cap.
 """
 
 from __future__ import annotations
@@ -97,6 +109,15 @@ _ACTION_SUCCEEDED_CLAUSE = "succeeded"
 # and was refused" are different facts about the house, and an operator
 # hearing this reply must be able to tell them apart.
 _ACTION_DID_NOT_COMPLETE_CLAUSE = "the call itself did not complete"
+
+# The fixed carrier phrase `_compose_clarifying_question` speaks before every
+# candidate name, for a turn a triage tier's `needs_clarification` reply won
+# (CMD-09, D-07, D-14). Fixed and asserted-on, never model-composed: the
+# candidates are the only variable part of the sentence, joined by code, so
+# the same candidate list always produces the same question -- the same
+# discipline `_compose_mixed_outcome_reply` already applies to a mixed
+# tool-round summary.
+_CLARIFYING_QUESTION_CARRIER = "i'm not sure which one you mean --"
 
 # How often the silence-timeout guard rechecks its deadline while waiting on
 # an STT event that may never arrive. Real events short-circuit this --
@@ -389,6 +410,13 @@ async def run_turn(
             return
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        # CMD-09/D-07: a candidate id is what `TierReply.candidates` carries
+        # and what must not be guessed between, but it is not what a person
+        # says out loud. Populated from this turn's own injected live-state
+        # fetch below when one ran -- never a second lookup -- and left empty
+        # otherwise, in which case `_compose_clarifying_question` falls back
+        # to speaking the id itself.
+        friendly_names: dict[str, str] = {}
         if state_task is not None:
             # `state_task` was started before the drain above, so by now it has
             # usually already finished -- this await rarely actually waits. A
@@ -406,6 +434,15 @@ async def run_turn(
                 states_payload = []
             states = (
                 {entity["entity_id"]: entity["state"] for entity in states_payload}
+                if isinstance(states_payload, list)
+                else {}
+            )
+            friendly_names = (
+                {
+                    entity["entity_id"]: entity["friendly_name"]
+                    for entity in states_payload
+                    if isinstance(entity, dict) and "friendly_name" in entity
+                }
                 if isinstance(states_payload, list)
                 else {}
             )
@@ -479,6 +516,23 @@ async def run_turn(
 
         winner = await race_task
         timings.mark_tool_rounds_done()
+
+        if winner.needs_clarification:
+            # CMD-09/D-07: a third, exclusive outcome -- speaks a question
+            # naming every candidate and stops there. No macro follow-up (the
+            # macro check already ran, above, before a single tier task was
+            # created) and no further tool round: this turn ends exactly the
+            # way an ordinary answered turn does, through the same `_speak`/
+            # `_emit_event`/`timings.log()` sequence, so nothing here keeps
+            # the audio source open. D-08: the operator answers by waking the
+            # assistant again -- VOICE-21 (holding the microphone open) is
+            # out of scope and deliberately not built by this branch.
+            timings.turn_outcome = "needs_clarification"
+            question = _compose_clarifying_question(winner.candidates, friendly_names)
+            await _speak(source, tts, timings, question, kind="answer", barge_in=barge_in)
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
 
         await _speak(source, tts, timings, winner.answer, kind="answer", barge_in=barge_in)
         await _emit_event(source, timings.to_event())
@@ -652,6 +706,33 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
         else:
             clauses.append(_ACTION_SUCCEEDED_CLAUSE)
     return "; ".join(clauses)
+
+
+def _compose_clarifying_question(candidates: "tuple[str, ...]", friendly_names: "Mapping[str, str]") -> str:
+    """The spoken question for a turn a triage tier's `needs_clarification`
+    reply won (CMD-09, D-07).
+
+    Composed here, in code, from the reply's own candidates -- never through
+    a second `brain.chat` round (D-14): a second inference pass over the
+    candidate list is exactly how a question about two entities becomes a
+    model's own paraphrase of one, the same failure `_compose_mixed_outcome_reply`
+    already exists to close off for a tool-round summary. The same candidate
+    list, in the same order, always produces the same sentence -- nothing
+    here reads a clock, a random source, or any per-call state.
+
+    An entity id is what the code holds and what must not be guessed
+    between, but it is not what a person says out loud: `friendly_names`,
+    when it carries an entry for a candidate, is preferred and the id is
+    kept out of the sentence entirely for that candidate. `friendly_names`
+    is built by `run_turn` from this turn's own injected live-state fetch
+    (the same payload `_state_message` renders from) -- never a second
+    lookup this function performs itself. When no friendly name is known
+    for a candidate, the id is spoken instead: worse than a name, better
+    than silence. Every candidate is named regardless -- naming two of
+    three is a worse failure than naming none.
+    """
+    named = [friendly_names.get(candidate, candidate) for candidate in candidates]
+    return f"{_CLARIFYING_QUESTION_CARRIER} {', '.join(named)}?"
 
 
 async def _run_tool_rounds(
