@@ -437,10 +437,24 @@ def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_
     in the fake config, matching `config.example.yaml`'s own
     `route_enabled: false`) must make both routes answer with a client
     error naming the key that would turn them on -- not a 404 that looks
-    like a typo, and not a server error."""
+    like a typo, and not a server error.
+
+    Plan 03-05 moved both routes behind `require_role(Role.OPERATOR)`
+    (T-03-32) -- this test now authenticates as the smoke fixture's
+    pre-seeded admin first, so the assertions below still exercise the
+    calibration-specific refusal rather than an auth 401 that would have
+    masked it.
+    """
     import test_startup_smoke as smoke
     from fastapi.testclient import TestClient
 
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+
+    # `test_startup_smoke.py`'s own autouse fixture only applies within
+    # that module -- this file needs the same structurally-valid test key
+    # (`validate_secret_key_strength`, plan 03-05) set explicitly.
+    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
     monkeypatch.setattr(app_module, "McpToolHost", smoke._FakeToolHost)
     monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
@@ -452,7 +466,12 @@ def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
     monkeypatch.setattr(app_module, "CameraAudioSource", smoke._FakeCameraSource)
 
-    with TestClient(app_module.app) as client:
+    security = SecurityConfig()
+    # id=1/role="admin" is exactly what `smoke._fake_build_repositories`
+    # pre-seeds -- an admin outranks the operator role these routes require.
+    token = issue_access_token(user_id=1, role="admin", security=security)
+
+    with TestClient(app_module.app, cookies={security.cookie_name: token}) as client:
         read_response = client.get("/calibration/echo-path")
         assert read_response.status_code == 403
         assert "calibration.route_enabled" in read_response.json()["detail"]

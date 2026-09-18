@@ -18,25 +18,26 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import Depends, FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from spire_voice.audio.ring import PrerollBuffer
+from spire_voice.auth.dependencies import Role, require_role, require_setup_complete
+from spire_voice.auth.tokens import validate_secret_key_strength
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import Config, ConfigError, WakeConfig, load_config
 from spire_voice.db.engine import build_engine, run_migrations
-from spire_voice.db.postgres import PostgresPolicyRepository
+from spire_voice.db.postgres import PostgresAccountRepository, PostgresPolicyRepository
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
+from spire_voice.routes import register_routers
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.session.retention import RetentionScheduler
 from spire_voice.sources.runner import SourceRunner
@@ -54,10 +55,14 @@ from spire_voice.wake.vosk_engine import VoskWakeDetector
 logger = logging.getLogger("spire_voice.app")
 
 CONFIG_PATH = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
-STATIC_DIR = Path(__file__).parent / "static"
 # The repository's own `mcp/` directory -- three levels up from this file
 # (src/spire_voice/app.py -> src/spire_voice -> src -> repo root -> mcp).
 MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
+# `web/vite.config.ts`'s own `build.outDir` -- that file's own comment
+# names this exact path as the consumer a rename there would break. Three
+# levels up from this file, the same computation `MCP_ROOT` above uses,
+# since `web/` lives at the repo root beside `src/`, not under it.
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 
 
 def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
@@ -172,13 +177,17 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
     A separate, monkeypatchable function -- the same shape
     `_build_wake_detector`/`_build_ffmpeg_supervisor` already use --
     specifically so `tests/test_startup_smoke.py` can substitute a dict of
-    fakes (`FakePolicyRepository` from `conftest.py`) without a reachable
-    Postgres. Returns a dict rather than a single object because later
-    plans in this phase (accounts, invites, credentials) add more
-    repositories here without this factory's call site changing shape.
+    fakes (`FakePolicyRepository`/`FakeAccountRepository` from
+    `conftest.py`) without a reachable Postgres. Returns a dict rather than
+    a single object because a later plan in this phase (credentials) adds
+    one more repository here without this factory's call site changing
+    shape.
     """
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    return {"policy_repo": PostgresPolicyRepository(sessionmaker)}
+    return {
+        "policy_repo": PostgresPolicyRepository(sessionmaker),
+        "account_repo": PostgresAccountRepository(sessionmaker),
+    }
 
 
 async def _open_speaker_writer(writer: FifoWriter) -> None:
@@ -240,6 +249,33 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = load_config(CONFIG_PATH)
     app.state.config = config
+
+    # Refuse to start under a missing, malformed, or placeholder secret --
+    # before anything else, since a running process that hashes no
+    # passwords of its own but signs every session token and will encrypt
+    # every provider credential under this key does not belong behind a
+    # warning nobody reads (03-05 Task 1's checkpoint, CD-3). This is a
+    # pure environment check with no I/O dependency, which is why it runs
+    # even before the migration step below.
+    validate_secret_key_strength(config.security)
+
+    # `web/dist` is gitignored (it is a build artifact, `tests/
+    # test_web_build.py`'s own first assertion), so a clean clone that has
+    # not run `bun run build` has no directory here yet. Unlike the two
+    # failures this project does refuse to start on (an unmigrated schema,
+    # an uncalibrated correlation gate below) -- both of which would
+    # otherwise enforce something wrongly -- a missing static bundle is not
+    # one of them: a backend developer running only the API must still be
+    # able to start the process. It must not be silent either, because "the
+    # page is blank" is a terrible way to learn the frontend was never
+    # built, so this warns by name rather than staying quiet.
+    if not FRONTEND_DIR.is_dir():
+        logger.warning(
+            "frontend build directory %s does not exist -- the built admin "
+            "webapp will not be served (every other route still works). "
+            "Run `cd web && bun install && bun run build` to build it.",
+            FRONTEND_DIR,
+        )
 
     # Migrations run first, before any other resource is built, and awaited
     # in sequence -- never scheduled as a detached task, which is the exact
@@ -466,13 +502,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await db_engine.dispose()
 
 
-app = FastAPI(lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# `require_setup_complete` (WEB-01, D-08) is registered here, as an
+# application-level dependency, rather than repeated on each route below --
+# a route added in a later phase inherits the gate by default this way,
+# which is the whole point: a gate a future route can forget to add is not
+# a gate. `SETUP_GATE_EXEMPT_PATHS` (auth/dependencies.py) is the complete,
+# named exception list; every other route in this process, present or
+# future, is behind it. It is typed on `HTTPConnection`, not `Request`
+# (see that module's own docstring), so it applies uniformly to the
+# WebSocket turn route below as well as every HTTP route.
+app = FastAPI(lifespan=lifespan, dependencies=[Depends(require_setup_complete)])
+register_routers(app)
+# The built single-page application, served at the same origin its own
+# session cookie needs (D-15). `app.frontend()` (verified directly against
+# the installed `fastapi==0.141.1`'s source this session, 03-RESEARCH.md
+# Pattern 3) stores these as *low-priority* routes, checked only after
+# every ordinary `@app.get`/`@app.post`/`@app.websocket` route above fails
+# to match, regardless of where this call sits relative to them -- this
+# replaces both the old `/static` mount and the old `GET /` file response
+# in one call, and there is no hand-rolled catch-all route to get the
+# ordering of wrong. `check_dir=False` is explicit, not `"auto"`: a clean
+# clone that has not run `bun run build` yet must still start (the warning
+# above already told the operator why the page will be blank), so this
+# must never raise merely because the directory does not exist yet.
+app.frontend("/", directory=str(FRONTEND_DIR), check_dir=False)
 
 
-@app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(str(STATIC_DIR / "index.html"))
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Exempt from the setup gate by name (`SETUP_GATE_EXEMPT_PATHS`) --
+    a gate that blocks the one route naming whether the process is even up
+    is a lockout, not a safeguard. Carries no role requirement either: a
+    health check answering only to an authenticated caller is not a health
+    check a container orchestrator or a load balancer can use."""
+    return {"status": "ok"}
 
 
 @app.get("/transport")
@@ -483,6 +546,14 @@ async def get_transport() -> dict[str, str]:
     value already stopped startup back in `config.py`, so by the time this
     route can answer, the value is guaranteed to be one of the two the page
     knows how to branch on.
+
+    Deliberately left without a `require_role` dependency (recorded in
+    03-05-SUMMARY.md's route-by-route table): it discloses a deployment
+    configuration choice (`"websocket"` or `"webrtc"`), never house data,
+    and is not itself a control surface -- unlike the calibration and turn
+    routes below, calling it cannot make anything in a real home happen.
+    It still sits behind the application-level setup gate above, like
+    every other route not named in `SETUP_GATE_EXEMPT_PATHS`.
     """
     config: Config = app.state.config
     return {"transport": config.server.transport}
@@ -533,11 +604,18 @@ def _calibration_response(calibration: EchoCalibration, now: datetime) -> dict[s
     }
 
 
-@app.get("/calibration/echo-path")
+@app.get("/calibration/echo-path", dependencies=[Depends(require_role(Role.OPERATOR))])
 async def get_echo_path_calibration() -> dict[str, Any]:
     """The last stored echo-path calibration and its age, or the
     not-found status when nothing has been measured yet -- the state this
-    project ships in, not an error."""
+    project ships in, not an error.
+
+    Behind `require_role(Role.OPERATOR)` as of plan 03-05 (T-03-32,
+    recorded in 03-05-SUMMARY.md's route-by-route table): CONTEXT.md
+    defines `operator` as the role that "uses the voice surfaces," which
+    this measurement is one of, and it is a real acoustic probe against a
+    real home -- not a read a viewer needs.
+    """
     config: Config = app.state.config
     if not config.calibration.route_enabled:
         raise _calibration_disabled_error()
@@ -547,7 +625,7 @@ async def get_echo_path_calibration() -> dict[str, Any]:
     return _calibration_response(calibration, datetime.now(timezone.utc))
 
 
-@app.post("/calibration/echo-path/run")
+@app.post("/calibration/echo-path/run", dependencies=[Depends(require_role(Role.OPERATOR))])
 async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str, Any]:
     """Run a live echo-path calibration against this process's own
     camera source and speaker writer -- never a second RTSP connection or
@@ -592,9 +670,16 @@ class WebrtcAnswerPayload(BaseModel):
     type: str
 
 
-@app.post("/webrtc/offer")
+@app.post("/webrtc/offer", dependencies=[Depends(require_role(Role.OPERATOR))])
 async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     """The one stateless request/response the WebRTC path signals over.
+
+    Behind `require_role(Role.OPERATOR)` as of plan 03-05 (T-03-32): this
+    is the unauthenticated-endpoint-that-can-start-a-turn 03-CONTEXT.md
+    names explicitly as what this phase closes. See this file's module-level
+    `app = FastAPI(...)` comment for why an `HTTPConnection`-typed
+    dependency, not `Request`, is what makes the same guarantee reach
+    `/ws/turn` below.
 
     This route does not check `ServerConfig.transport` before answering --
     it always exists and always answers whatever offer arrives. Which
@@ -654,8 +739,18 @@ async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any
         await transport.close()
 
 
-@app.websocket("/ws/turn")
+@app.websocket("/ws/turn", dependencies=[Depends(require_role(Role.OPERATOR))])
 async def turn_ws(websocket: WebSocket) -> None:
+    """Behind `require_role(Role.OPERATOR)` as of plan 03-05 (T-03-32) --
+    the same guarantee `/webrtc/offer` above carries, applied to this
+    project's other turn-starting surface. `require_role`'s own dependency
+    chain is typed on `HTTPConnection` specifically so it resolves
+    correctly here: a `Request`-typed dependency raises a bare `TypeError`
+    when FastAPI tries to solve it against a WebSocket connection
+    (confirmed directly against the installed `fastapi==0.141.1`), which
+    would have made this route's own tests the only way this gap was ever
+    found.
+    """
     await websocket.accept()
     source = WebSocketAudioSource(websocket)
     config: Config = websocket.app.state.config

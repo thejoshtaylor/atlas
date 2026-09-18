@@ -1,18 +1,19 @@
 """The SQLAlchemy declarative base every Phase 3 table inherits from, plus
-the three tables plan 03-02 adds: the safety policy the code enforces.
+the three tables plan 03-02 adds (the safety policy the code enforces) and
+the three plan 03-05 adds (accounts, invites, refresh tokens).
 
 `alembic/env.py` reads `Base.metadata` as its `target_metadata` -- a model
 class that does not subclass `Base`, or a model module nobody imports, is a
 model `alembic revision --autogenerate` cannot see. Plan 03-01 added only
-the base itself; later plans in this phase (accounts, invites, provider
-credentials, settings) add their own tables here.
+the base itself; later plans in this phase (provider credentials, settings)
+add their own tables here.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Text
+from sqlalchemy import ForeignKey, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -33,9 +34,10 @@ class SafetyPolicyRow(Base):
     One `mode` column, not two independent flags, for the same reason
     `mcp/spire_mcp/safety.py`'s `Policy.mode` is a single `Literal`: a state
     that is neither `allow_all_except_denylist` nor `allowlist_only` must
-    not be representable (D-13, SAFE-06). `updated_by_user_id` has no
-    foreign key yet -- plan 03-05 adds the `users` table this column will
-    point at; it stays a plain nullable column until then.
+    not be representable (D-13, SAFE-06). `updated_by_user_id` is a real
+    foreign key as of plan 03-05, now that `users` exists -- plan
+    03-02 left it a plain nullable column until then; the migration that
+    adds `users` (`0002_accounts.py`) is the one that adds this constraint.
     """
 
     __tablename__ = "safety_policy"
@@ -43,7 +45,9 @@ class SafetyPolicyRow(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     mode: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(nullable=False)
-    updated_by_user_id: Mapped[int | None] = mapped_column(nullable=True)
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
 
 
 class PolicyRuleRow(Base):
@@ -52,8 +56,8 @@ class PolicyRuleRow(Base):
     One table with a `kind` column (`deny_entity`, `deny_pattern`,
     `allow_entity`, `allow_pattern`) rather than four separate tables --
     the same one-code-path reasoning D-13 gives for `SafetyPolicyRow.mode`.
-    `created_by_user_id` has no foreign key yet, for the same reason
-    `SafetyPolicyRow.updated_by_user_id` does not.
+    `created_by_user_id` is a real foreign key as of plan 03-05, for the
+    same reason `SafetyPolicyRow.updated_by_user_id` now is.
     """
 
     __tablename__ = "policy_rules"
@@ -63,7 +67,9 @@ class PolicyRuleRow(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(nullable=False)
-    created_by_user_id: Mapped[int | None] = mapped_column(nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
 
 
 class AuditRow(Base):
@@ -79,3 +85,85 @@ class AuditRow(Base):
     actor_user_id: Mapped[int | None] = mapped_column(nullable=True)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class UserRow(Base):
+    """One operator, admin, or viewer account (WEB-01, WEB-04, D-08).
+
+    `email` is stored normalized to lower case (the route layer -- plan
+    03-05's `routes/auth.py` -- normalizes before every read and write) with
+    a unique constraint, so the database itself refuses a second account at
+    the same address even if a caller ever forgot the normalization step.
+    `disabled_at` is how access is removed -- never a `DELETE` -- so an
+    audit row or a policy-rule row naming this user's id still resolves
+    after their access ends (`SafetyPolicyRow.updated_by_user_id`,
+    `PolicyRuleRow.created_by_user_id`, both above, and `InviteRow`/
+    `RefreshTokenRow` below all point at this table).
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    disabled_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+
+class InviteRow(Base):
+    """One admin-issued invite: a role to grant, an optional email, and an
+    expiry (WEB-05).
+
+    `token_hash` stores a SHA-256 hash of the bearer token, never the token
+    itself -- the same "a database read that yields live sessions is a
+    different and worse incident than a database read that yields hashes"
+    reasoning `RefreshTokenRow.token_hash` below carries. The plaintext
+    token is returned to the admin exactly once, in the create-invite
+    response body, and this table never sees it again. `accepted_at`/
+    `accepted_by_user_id` are both set together, exactly once, by
+    `routes/accounts.py`'s accept-invite route -- a non-`NULL` `accepted_at`
+    is what makes a second acceptance attempt refusable without a second
+    query.
+    """
+
+    __tablename__ = "invites"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    accepted_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+
+class RefreshTokenRow(Base):
+    """One refresh token in a rotation chain (D-05).
+
+    `token_hash` stores a SHA-256 hash of the opaque bearer token, never the
+    token itself -- a bearer credential is exactly the kind of value a
+    database read should not be able to replay directly; storing only its
+    hash means a compromised database backup cannot mint a live session.
+    `rotated_to_id` is set, alongside `revoked_at`, the moment this token is
+    presented and rotated -- it is the pointer `auth/tokens.py`'s chain-walk
+    follows to find (and revoke) every descendant when an already-rotated
+    token is presented again, which means either a bug or a theft and never
+    a thing to continue through.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    issued_at: Mapped[datetime] = mapped_column(nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    rotated_to_id: Mapped[int | None] = mapped_column(
+        ForeignKey("refresh_tokens.id"), nullable=True
+    )

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Sequence
@@ -20,7 +20,7 @@ import pytest
 import pytest_asyncio
 
 from spire_mcp.safety import Policy
-from spire_voice.db.repository import PolicyRule
+from spire_voice.db.repository import Invite, PolicyRule, RefreshToken, User
 from spire_voice.transports.base import SourceFormat
 
 
@@ -431,3 +431,186 @@ def fake_policy_repository():
     """Factory: `fake_policy_repository(mode=..., deny_entities=[...])`
     builds a scripted `FakePolicyRepository`."""
     return FakePolicyRepository
+
+
+class FakeAccountRepository:
+    """An in-memory `AccountRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, matching `FakePolicyRepository`'s own
+    precedent above exactly.
+
+    Structurally satisfies the `AccountRepository` protocol without
+    inheriting from it. `rotate_refresh_token`/`revoke_refresh_chain`
+    reimplement the same forward-walk-through-`rotated_to_id` chain-revoke
+    behavior `PostgresAccountRepository` uses, in memory, so a test against
+    this fake exercises the same replay-detection semantics a test against
+    real Postgres would.
+    """
+
+    def __init__(self) -> None:
+        self._next_user_id = 1
+        self.users: dict[int, User] = {}
+        self._next_invite_id = 1
+        self.invites: dict[int, Invite] = {}
+        self._next_refresh_id = 1
+        self.refresh_tokens: dict[int, RefreshToken] = {}
+
+    async def any_user_exists(self) -> bool:
+        return bool(self.users)
+
+    async def create_user(
+        self, *, email: str, display_name: str, password_hash: str, role: str
+    ) -> User:
+        user = User(
+            id=self._next_user_id,
+            email=email,
+            display_name=display_name,
+            password_hash=password_hash,
+            role=role,
+            created_at=datetime.now(timezone.utc),
+            disabled_at=None,
+        )
+        self.users[user.id] = user
+        self._next_user_id += 1
+        return user
+
+    async def get_user_by_email(self, email: str) -> User | None:
+        for user in self.users.values():
+            if user.email == email:
+                return user
+        return None
+
+    async def get_user_by_id(self, user_id: int) -> User | None:
+        return self.users.get(user_id)
+
+    async def list_users(self) -> list[User]:
+        return list(self.users.values())
+
+    async def disable_user(self, user_id: int) -> None:
+        user = self.users.get(user_id)
+        if user is not None and user.disabled_at is None:
+            self.users[user_id] = replace(user, disabled_at=datetime.now(timezone.utc))
+
+    async def create_invite(
+        self,
+        *,
+        token_hash: str,
+        role: str,
+        email: str | None,
+        expires_at: datetime,
+        created_by_user_id: int,
+    ) -> Invite:
+        invite = Invite(
+            id=self._next_invite_id,
+            token_hash=token_hash,
+            role=role,
+            email=email,
+            expires_at=expires_at,
+            created_by_user_id=created_by_user_id,
+            accepted_at=None,
+            accepted_by_user_id=None,
+        )
+        self.invites[invite.id] = invite
+        self._next_invite_id += 1
+        return invite
+
+    async def get_invite_by_token_hash(self, token_hash: str) -> Invite | None:
+        for invite in self.invites.values():
+            if invite.token_hash == token_hash:
+                return invite
+        return None
+
+    async def accept_invite(
+        self, invite_id: int, *, accepted_by_user_id: int, accepted_at: datetime
+    ) -> None:
+        invite = self.invites.get(invite_id)
+        if invite is not None:
+            self.invites[invite_id] = replace(
+                invite, accepted_at=accepted_at, accepted_by_user_id=accepted_by_user_id
+            )
+
+    async def revoke_invite(self, invite_id: int, *, revoked_at: datetime) -> None:
+        invite = self.invites.get(invite_id)
+        if invite is not None and invite.accepted_at is None:
+            self.invites[invite_id] = replace(invite, expires_at=revoked_at)
+
+    async def list_invites(self) -> list[Invite]:
+        return list(self.invites.values())
+
+    async def store_refresh_token(
+        self, *, user_id: int, token_hash: str, issued_at: datetime, expires_at: datetime
+    ) -> RefreshToken:
+        token = RefreshToken(
+            id=self._next_refresh_id,
+            user_id=user_id,
+            token_hash=token_hash,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            revoked_at=None,
+            rotated_to_id=None,
+        )
+        self.refresh_tokens[token.id] = token
+        self._next_refresh_id += 1
+        return token
+
+    async def rotate_refresh_token(
+        self,
+        old_token_hash: str,
+        *,
+        new_token_hash: str,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> RefreshToken | None:
+        old = self._find_refresh_by_hash(old_token_hash)
+        if old is None:
+            return None
+        if old.revoked_at is not None:
+            self._revoke_chain(old)
+            return None
+
+        new_token = RefreshToken(
+            id=self._next_refresh_id,
+            user_id=old.user_id,
+            token_hash=new_token_hash,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            revoked_at=None,
+            rotated_to_id=None,
+        )
+        self.refresh_tokens[new_token.id] = new_token
+        self._next_refresh_id += 1
+        self.refresh_tokens[old.id] = replace(
+            old, revoked_at=datetime.now(timezone.utc), rotated_to_id=new_token.id
+        )
+        return new_token
+
+    async def revoke_refresh_chain(self, token_hash: str) -> None:
+        row = self._find_refresh_by_hash(token_hash)
+        if row is not None:
+            self._revoke_chain(row)
+
+    def _find_refresh_by_hash(self, token_hash: str) -> RefreshToken | None:
+        for token in self.refresh_tokens.values():
+            if token.token_hash == token_hash:
+                return token
+        return None
+
+    def _revoke_chain(self, row: RefreshToken) -> None:
+        now = datetime.now(timezone.utc)
+        current: RefreshToken | None = row
+        while current is not None:
+            if current.revoked_at is None:
+                current = replace(current, revoked_at=now)
+                self.refresh_tokens[current.id] = current
+            next_id = current.rotated_to_id
+            current = self.refresh_tokens.get(next_id) if next_id is not None else None
+
+
+@pytest.fixture
+def fake_account_repository():
+    """Factory: `fake_account_repository()` builds an empty
+    `FakeAccountRepository` -- every test populates it itself
+    (`create_user`, `create_invite`, ...), matching the rest of this
+    file's factory-fixture convention even though this one fake takes no
+    constructor arguments."""
+    return FakeAccountRepository
