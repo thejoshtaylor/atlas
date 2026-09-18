@@ -10,34 +10,55 @@ import { AcceptInviteRoute } from "@/routes/auth/AcceptInviteRoute"
 import { SignInRoute } from "@/routes/auth/SignInRoute"
 import { AccountsRoute } from "@/routes/accounts/AccountsRoute"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
+import { DevMicRoute } from "@/routes/dev-mic/DevMicRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
-import { SetupRoute } from "@/routes/SetupRoute"
+import { AudioSourceStep } from "@/routes/wizard/AudioSourceStep"
+import { CreateAdminStep } from "@/routes/wizard/CreateAdminStep"
+import { HubStep } from "@/routes/wizard/HubStep"
+import { ProviderSetStep } from "@/routes/wizard/ProviderSetStep"
+import { RoomStep } from "@/routes/wizard/RoomStep"
+import { WizardRoute } from "@/routes/wizard/WizardRoute"
 
 /**
  * The route tree (CD-1, executor's discretion within the phone-first
- * constraint): a public sign-in route, a setup route, and an
- * authenticated shell holding the screens later plans fill.
+ * constraint): a public sign-in route, the first-run wizard (plan
+ * 03-10), and an authenticated shell holding every other screen.
  * `SetupGuard` wraps everything -- the setup-incomplete gate is a
  * product-wide state, not something only authenticated screens can hit.
  *
- * `/calibration` (plan 03-06) is not on `AppShell`'s nav -- it is the
- * component plan 03-10 mounts as one step of the setup wizard, reachable
- * here by direct URL only so it has a real address to test against
- * before that wizard exists.
+ * The wizard's own steps sit outside `AppShell` (no site nav during
+ * first-run setup, matching the standalone treatment sign-in already
+ * uses) -- `admin_account` needs no session (there is no session to have
+ * yet), every other step is behind `AuthGuard` + `RequireRole
+ * minimum="admin"` (every wizard route, `routes/wizard.py`, requires
+ * `Role.ADMIN`).
+ *
+ * `/calibration` (plan 03-06) stays reachable standalone, inside
+ * `AppShell`, for an operator revisiting the test outside the wizard;
+ * `RoomStep` (`/setup/room`) mounts the same component, never a second
+ * implementation.
  */
 function AppRoutes() {
   return (
     <Routes>
       <Route path="/sign-in" element={<SignInRoute />} />
       <Route path="/invite/:token" element={<AcceptInviteRoute />} />
-      <Route path="/setup" element={<SetupRoute />} />
+      <Route path="/setup" element={<WizardRoute />} />
+      <Route path="/setup/admin_account" element={<CreateAdminStep />} />
       <Route element={<AuthGuard />}>
+        <Route element={<RequireRole minimum="admin" />}>
+          <Route path="/setup/hub" element={<HubStep />} />
+          <Route path="/setup/provider_set" element={<ProviderSetStep />} />
+          <Route path="/setup/audio_source" element={<AudioSourceStep />} />
+          <Route path="/setup/room" element={<RoomStep />} />
+        </Route>
         <Route element={<AppShell />}>
           <Route index element={<HomeRoute />} />
           <Route element={<RequireRole minimum="operator" />}>
             <Route path="/policy" element={<PolicyRoute />} />
+            <Route path="/dev-mic" element={<DevMicRoute />} />
           </Route>
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />
