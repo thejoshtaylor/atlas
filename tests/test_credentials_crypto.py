@@ -39,6 +39,7 @@ from spire_voice.routes.auth import router as auth_router, setup_router
 from spire_voice.routes.credentials import router as credentials_router
 from spire_voice.routes.policy import router as policy_router
 
+import conftest
 from test_auth_roles import _flatten_routes
 from test_auth_setup import _fill_path_params
 
@@ -60,6 +61,12 @@ def _fake_config() -> SimpleNamespace:
         brain=SimpleNamespace(api_key=""),
         tts=SimpleNamespace(api_key=""),
         mcp_servers={},
+        # Plan 03-09: `GET /api/setup/status` (included below) now
+        # recomputes every wizard step live, including `room`
+        # (`find_latest_calibration(config.calibration.dir)`) -- a
+        # directory that does not exist reads as "no calibration yet"
+        # (`find_latest_calibration`'s own docstring), never an error.
+        calibration=SimpleNamespace(dir="/tmp/spire-test-no-such-calibration-dir"),
     )
 
 
@@ -74,6 +81,10 @@ def _build_full_app(security, account_repo, policy_repo, credential_repo, tool_h
     app.state.account_repo = account_repo
     app.state.policy_repo = policy_repo
     app.state.credential_repo = credential_repo
+    # Plan 03-09: `GET /api/setup/status` (included below via
+    # `setup_router`) now reads `setup_repo`/`settings_repo` too.
+    app.state.setup_repo = conftest.FakeSetupRepository()
+    app.state.settings_repo = conftest.FakeSettingsRepository()
     app.state.tool_host = tool_host
     app.state.safety_block = None
     app.include_router(auth_router)

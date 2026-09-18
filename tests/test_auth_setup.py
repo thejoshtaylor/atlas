@@ -70,6 +70,14 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
             # this key here would KeyError on every boot this helper
             # drives, not just the ones this file's own tests are about.
             "credential_repo": conftest.FakeCredentialRepository(),
+            # Plan 03-09: lifespan also resolves the wizard's own
+            # audio-source setting before any provider is constructed,
+            # needing repositories["settings_repo"] -- same reasoning as
+            # credential_repo above. setup_repo is likewise required by
+            # every wizard/setup-status route this file's own route
+            # enumeration walks.
+            "setup_repo": conftest.FakeSetupRepository(),
+            "settings_repo": conftest.FakeSettingsRepository(),
         }
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within
@@ -177,6 +185,35 @@ def test_every_other_route_reports_setup_incomplete_until_an_admin_exists(tmp_pa
         ).status_code in (201, 409)
         assert client.get("/api/setup/status").status_code == 200
         assert client.get("/health").status_code == 200
+
+        # Plan 03-09: the wizard's own routes are exempt from the setup
+        # gate too (WEB-02's "never a lockout") -- none of them may 503
+        # with "setup incomplete." `client` already carries the admin
+        # session cookie `create-admin` just set above (`TestClient`
+        # persists cookies across requests within one instance, the same
+        # as a real browser), so these calls are genuinely authenticated;
+        # the assertion that matters is that the setup gate itself never
+        # answers first with 503, regardless of what each route goes on to
+        # decide (200, 409, or 502 depending on what it finds).
+        for method, path, json_body in (
+            ("GET", "/api/wizard", None),
+            ("POST", "/api/wizard/steps/hub/check", None),
+            ("PUT", "/api/wizard/audio-source", {"source": "camera"}),
+            ("POST", "/api/wizard/finish", None),
+        ):
+            response = client.request(method, path, json=json_body)
+            assert response.status_code != 503, (
+                f"{method} {path} answered 503 (setup incomplete) -- the wizard's own "
+                "routes must be reachable by signing in even before setup is complete, "
+                "never blocked by the same gate they exist to satisfy"
+            )
+
+        # A genuinely anonymous caller (no cookie at all) still needs
+        # `require_role(Role.ADMIN)` to pass -- the setup-gate exemption is
+        # from the gate, never from authentication.
+        anonymous = TestClient(app_module.app)
+        anonymous_response = anonymous.get("/api/wizard")
+        assert anonymous_response.status_code == 401, anonymous_response.text
 
 
 def test_turn_surfaces_refuse_an_unauthenticated_caller_once_setup_is_complete(

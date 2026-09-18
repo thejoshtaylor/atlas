@@ -28,7 +28,8 @@ from spire_voice.auth.tokens import (
     set_session_cookie,
 )
 from spire_voice.config import Config, SecurityConfig
-from spire_voice.db.repository import AccountRepository, User
+from spire_voice.db.repository import AccountRepository, SetupRepository, User
+from spire_voice.routes.wizard import _compute_all_steps
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 setup_router = APIRouter(prefix="/api/setup", tags=["setup"])
@@ -212,11 +213,26 @@ async def me(user: CurrentUser = Depends(current_user)) -> SessionResponse:
 async def setup_status(request: Request) -> SetupStatusResponse:
     """Exempt from the setup gate by construction (`SETUP_GATE_EXEMPT_PATHS`,
     `auth/dependencies.py`) -- this is the route the browser asks before it
-    knows whether anything else will answer. Plan 03-09 extends the step
-    list; this plan gives it the one step that exists today."""
-    account_repo: AccountRepository = request.app.state.account_repo
-    admin_exists = await account_repo.any_user_exists()
+    knows whether anything else will answer.
+
+    Plan 03-09 moves this onto the full five-step wizard state
+    (`routes/wizard.py`'s own `_compute_all_steps`, the same computation
+    `GET /api/wizard` uses, so the two routes can never disagree about
+    what each step's condition is). `complete` reads the `setup_state`
+    row's own terminal marker (`POST /api/wizard/finish` has actually been
+    called), not merely "every condition happens to be true right now" --
+    finishing is a deliberate act, matching WEB-03's "the wizard cannot
+    finish before the mic/speaker test runs" being a property of a route,
+    not of a computed boolean nobody had to act on. `steps` here carries
+    step names and booleans only, never the `detail` field `GET
+    /api/wizard` returns to an authenticated admin -- this route answers
+    before authentication is even possible (T-03-55), so it must leak
+    nothing about the house: no hub address, no entity id, no email.
+    """
+    setup_repo: SetupRepository = request.app.state.setup_repo
+    complete = await setup_repo.is_setup_complete()
+    steps = await _compute_all_steps(request)
     return SetupStatusResponse(
-        complete=admin_exists,
-        steps=[SetupStep(name="admin_account", complete=admin_exists)],
+        complete=complete,
+        steps=[SetupStep(name=s.name, complete=s.complete) for s in steps],
     )

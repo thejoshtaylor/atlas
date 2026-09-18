@@ -36,8 +36,10 @@ from spire_voice.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
     PostgresPolicyRepository,
+    PostgresSettingsRepository,
+    PostgresSetupRepository,
 )
-from spire_voice.db.repository import CredentialRepository
+from spire_voice.db.repository import CredentialRepository, SettingsRepository
 from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
@@ -45,6 +47,7 @@ from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import precache_all
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.routes import register_routers
+from spire_voice.routes.wizard import resolve_audio_source
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.session.retention import RetentionScheduler
 from spire_voice.sources.runner import SourceRunner
@@ -195,6 +198,8 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         "policy_repo": PostgresPolicyRepository(sessionmaker),
         "account_repo": PostgresAccountRepository(sessionmaker),
         "credential_repo": PostgresCredentialRepository(sessionmaker),
+        "setup_repo": PostgresSetupRepository(sessionmaker),
+        "settings_repo": PostgresSettingsRepository(sessionmaker),
     }
 
 
@@ -315,6 +320,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         setattr(app.state, _repo_name, _repo)
     policy_repo = repositories["policy_repo"]
     credential_repo = repositories["credential_repo"]
+    settings_repo: SettingsRepository = repositories["settings_repo"]
+
+    # The wizard's own audio-source choice (`routes/wizard.py`'s
+    # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
+    # credential slots above already follow: the database wins when an
+    # operator has chosen one through the wizard, this file's own shipped
+    # default otherwise -- one function decides, `resolve_audio_source`,
+    # never re-derived here. Only `"camera"` is actually built below today
+    # (the sole `SourceRunner` this application constructs), so this call
+    # currently only proves the resolution order and logs which source
+    # won, by name -- the same "log the source, never the value" posture
+    # `_resolve_and_log_credential` already established, extended to a
+    # setting that carries no secret at all.
+    resolved_audio_source, audio_source_resolved_from = await resolve_audio_source(
+        config, settings_repo
+    )
+    logger.info(
+        "audio source resolved to %r from %s", resolved_audio_source, audio_source_resolved_from
+    )
 
     # Every provider credential is resolved exactly once, here, in the one
     # order D-07 states: the database wins when an operator has saved a

@@ -70,7 +70,7 @@ from mcp.types import Tool
 
 import conftest
 import spire_voice.app as app_module
-from spire_voice.db.repository import User
+from spire_voice.db.repository import Setting, User
 from spire_voice.transports.base import SourceFormat
 from spire_voice.turn.brain_race import TierBrain
 
@@ -299,6 +299,14 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
         "policy_repo": conftest.FakePolicyRepository(),
         "account_repo": account_repo,
         "credential_repo": conftest.FakeCredentialRepository(),
+        # Plan 03-09: `lifespan` now also resolves the wizard's own
+        # audio-source setting (`resolve_audio_source`) before any provider
+        # is constructed, which needs `repositories["settings_repo"]`
+        # present -- omitting it here would `KeyError` on every boot this
+        # fake drives, the same reasoning `credential_repo` was added for
+        # in plan 03-07.
+        "setup_repo": conftest.FakeSetupRepository(),
+        "settings_repo": conftest.FakeSettingsRepository(),
     }
 
 
@@ -743,6 +751,8 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
             "policy_repo": conftest.FakePolicyRepository(),
             "account_repo": conftest.FakeAccountRepository(),
             "credential_repo": conftest.FakeCredentialRepository(),
+            "setup_repo": conftest.FakeSetupRepository(),
+            "settings_repo": conftest.FakeSettingsRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
@@ -888,3 +898,87 @@ def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeyp
         assert secret_value not in record.getMessage(), (
             f"a credential value leaked into a log line: {record.getMessage()!r}"
         )
+
+
+def _fake_build_repositories_with_audio_source(stored_source: str | None):
+    """Like `_fake_build_repositories`, but the returned `settings_repo`
+    is pre-seeded with `audio_source` when `stored_source` is not `None` --
+    a plain dict assignment on the fake's own `.settings` mapping, not a
+    call through its async `set_setting` (this factory runs synchronously,
+    inside `lifespan`'s own synchronous `_build_repositories(...)` call, on
+    a thread already driving an event loop -- `asyncio.run()` would raise
+    there)."""
+
+    def _factory(config: object, engine: object) -> dict:
+        repositories = _fake_build_repositories(config, engine)
+        if stored_source is not None:
+            settings_repo: conftest.FakeSettingsRepository = repositories["settings_repo"]
+            settings_repo.settings["audio_source"] = Setting(
+                id=1,
+                key="audio_source",
+                value=stored_source,
+                updated_at=datetime.now(timezone.utc),
+                updated_by_user_id=None,
+            )
+        return repositories
+
+    return _factory
+
+
+def test_the_application_reads_the_stored_audio_source_setting_when_present(
+    tmp_path, monkeypatch, caplog
+):
+    """Plan 03-09 Task 2: the stored `audio_source` setting is read in
+    `lifespan`, in preference to this file's own shipped default, proven
+    through a real boot -- not a unit call against `resolve_audio_source`
+    alone."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(
+        app_module, "_build_repositories", _fake_build_repositories_with_audio_source("camera")
+    )
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    resolution_records = [r for r in caplog.records if "audio source resolved" in r.getMessage()]
+    assert len(resolution_records) == 1, resolution_records
+    message = resolution_records[0].getMessage()
+    assert "'camera'" in message
+    assert "from database" in message
+
+
+def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is_stored(
+    tmp_path, monkeypatch, caplog
+):
+    """The reverse of the test above: nothing stored in `settings` at
+    all -- the shipped default (`camera`) wins, and the resolution is
+    reported as coming from the configuration, not the database."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(
+        app_module, "_build_repositories", _fake_build_repositories_with_audio_source(None)
+    )
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    resolution_records = [r for r in caplog.records if "audio source resolved" in r.getMessage()]
+    assert len(resolution_records) == 1, resolution_records
+    message = resolution_records[0].getMessage()
+    assert "'camera'" in message
+    assert "from config" in message

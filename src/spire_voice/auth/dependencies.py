@@ -144,8 +144,25 @@ def require_role(minimum: Role):
 # everything else in this application, present or future, is behind this
 # gate by construction (registered as an application-level dependency in
 # `app.py`, not repeated per-route).
+#
+# Plan 03-09 adds the wizard's own routes (`routes/wizard.py`): the
+# create-admin route is permanently closed once an admin exists, so a
+# half-finished install is reachable only by signing in, and a gate that
+# blocks the very routes which would finish setup is a lockout -- the
+# thing WEB-02's "never a lockout" guarantee exists to rule out. Every one
+# of these routes still sits behind `require_role(Role.ADMIN)`
+# (`routes/wizard.py`'s own router), so this is an exemption from the
+# setup gate specifically, never from authentication.
 SETUP_GATE_EXEMPT_PATHS: frozenset[str] = frozenset(
-    {"/api/auth/create-admin", "/api/setup/status", "/health"}
+    {
+        "/api/auth/create-admin",
+        "/api/setup/status",
+        "/health",
+        "/api/wizard",
+        "/api/wizard/steps/hub/check",
+        "/api/wizard/audio-source",
+        "/api/wizard/finish",
+    }
 )
 
 

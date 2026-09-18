@@ -11,6 +11,7 @@ sessionmaker it is handed.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -23,9 +24,24 @@ from spire_voice.db.models import (
     ProviderCredentialRow,
     RefreshTokenRow,
     SafetyPolicyRow,
+    SettingRow,
+    SetupStateRow,
+    SetupStepRow,
     UserRow,
 )
-from spire_voice.db.repository import Credential, Invite, PolicyRule, RefreshToken, User
+from spire_voice.db.repository import (
+    Credential,
+    Invite,
+    PolicyRule,
+    RefreshToken,
+    Setting,
+    SetupStep,
+    User,
+)
+
+# `setup_state` is a single-row table, the same singleton convention
+# `_SINGLETON_POLICY_ID` already establishes for `safety_policy` below.
+_SINGLETON_SETUP_STATE_ID = 1
 
 # `safety_policy` is a single-row table -- `id` is always this value, never
 # generated, so `load_policy`/a future write path never has to discover it.
@@ -380,6 +396,117 @@ class PostgresAccountRepository:
                 current.revoked_at = now
             next_id = current.rotated_to_id
             current = await session.get(RefreshTokenRow, next_id) if next_id is not None else None
+
+
+def _setup_step_from_row(row: SetupStepRow) -> SetupStep:
+    return SetupStep(id=row.id, name=row.name, completed_at=row.completed_at, detail=row.detail)
+
+
+class PostgresSetupRepository:
+    """`SetupRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.SetupRepository` (a
+    `typing.Protocol`) -- there is no base class to inherit from, matching
+    every other `Postgres*Repository` class in this module.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def is_setup_complete(self) -> bool:
+        async with self._sessionmaker() as session:
+            row = await session.get(SetupStateRow, _SINGLETON_SETUP_STATE_ID)
+            return row is not None and row.completed_at is not None
+
+    async def mark_setup_complete(self, *, completed_at: datetime) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(SetupStateRow, _SINGLETON_SETUP_STATE_ID)
+            if row is None:
+                # Defensive, matching `PostgresPolicyRepository.set_mode`'s
+                # own posture toward a missing singleton row: `0004`'s own
+                # seed always inserts this row, but finishing the wizard
+                # must not depend on that having happened.
+                row = SetupStateRow(id=_SINGLETON_SETUP_STATE_ID, completed_at=completed_at)
+                session.add(row)
+            else:
+                row.completed_at = completed_at
+            await session.commit()
+
+    async def get_step(self, name: str) -> SetupStep | None:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(select(SetupStepRow).where(SetupStepRow.name == name))
+            ).scalar_one_or_none()
+            return _setup_step_from_row(row) if row is not None else None
+
+    async def list_steps(self) -> list[SetupStep]:
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(select(SetupStepRow))).scalars().all()
+            return [_setup_step_from_row(r) for r in rows]
+
+    async def complete_step(self, name: str, *, detail: dict, completed_at: datetime) -> SetupStep:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(select(SetupStepRow).where(SetupStepRow.name == name))
+            ).scalar_one_or_none()
+            if row is None:
+                # Defensive, same reasoning as `mark_setup_complete` above --
+                # the migration always seeds this row, but a step route
+                # completing must not depend on that having happened.
+                row = SetupStepRow(name=name, completed_at=completed_at, detail=detail)
+                session.add(row)
+            else:
+                row.completed_at = completed_at
+                row.detail = detail
+            await session.commit()
+            await session.refresh(row)
+            return _setup_step_from_row(row)
+
+
+def _setting_from_row(row: SettingRow) -> Setting:
+    return Setting(
+        id=row.id, key=row.key, value=row.value, updated_at=row.updated_at,
+        updated_by_user_id=row.updated_by_user_id,
+    )
+
+
+class PostgresSettingsRepository:
+    """`SettingsRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.SettingsRepository`
+    (a `typing.Protocol`) -- there is no base class to inherit from,
+    matching every other `Postgres*Repository` class in this module.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def get_setting(self, key: str) -> Setting | None:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(select(SettingRow).where(SettingRow.key == key))
+            ).scalar_one_or_none()
+            return _setting_from_row(row) if row is not None else None
+
+    async def set_setting(
+        self, key: str, value: Any, *, updated_by_user_id: int | None, updated_at: datetime
+    ) -> Setting:
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(select(SettingRow).where(SettingRow.key == key))
+            ).scalar_one_or_none()
+            if row is None:
+                row = SettingRow(
+                    key=key, value=value, updated_at=updated_at, updated_by_user_id=updated_by_user_id
+                )
+                session.add(row)
+            else:
+                row.value = value
+                row.updated_at = updated_at
+                row.updated_by_user_id = updated_by_user_id
+            await session.commit()
+            await session.refresh(row)
+            return _setting_from_row(row)
 
 
 def _credential_from_row(row: ProviderCredentialRow) -> Credential:

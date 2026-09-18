@@ -398,13 +398,17 @@ def test_a_disabled_users_valid_token_is_refused(monkeypatch, fake_account_repos
 
 def test_require_setup_complete_exempts_exactly_the_named_paths():
     """`require_setup_complete`'s exemption list is asserted against the
-    complete, named set -- create-admin, setup-status, and health -- not
-    against one sampled route (this plan's own acceptance criterion for
-    Task 2)."""
+    complete, named set -- create-admin, setup-status, health, and (plan
+    03-09) the wizard's own routes -- not against one sampled route (this
+    plan's own acceptance criterion for Task 2)."""
     from spire_voice.auth.dependencies import SETUP_GATE_EXEMPT_PATHS
 
     assert SETUP_GATE_EXEMPT_PATHS == {
         "/api/auth/create-admin",
         "/api/setup/status",
         "/health",
+        "/api/wizard",
+        "/api/wizard/steps/hub/check",
+        "/api/wizard/audio-source",
+        "/api/wizard/finish",
     }

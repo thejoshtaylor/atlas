@@ -20,7 +20,15 @@ import pytest
 import pytest_asyncio
 
 from spire_mcp.safety import Policy
-from spire_voice.db.repository import Credential, Invite, PolicyRule, RefreshToken, User
+from spire_voice.db.repository import (
+    Credential,
+    Invite,
+    PolicyRule,
+    RefreshToken,
+    Setting,
+    SetupStep,
+    User,
+)
 from spire_voice.transports.base import SourceFormat
 
 
@@ -680,3 +688,93 @@ def fake_credential_repository():
     `FakeCredentialRepository` -- every test populates it itself,
     matching `fake_account_repository`'s own convention."""
     return FakeCredentialRepository
+
+
+class FakeSetupRepository:
+    """An in-memory `SetupRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, matching every other `Fake*Repository`
+    in this file. Seeds the same five named rows the real migration
+    (`0004_setup_state.py`) seeds, so a test never has to special-case "a
+    step nobody has touched yet" between the fake and the real thing.
+    """
+
+    _STEP_NAMES = ("admin_account", "hub", "provider_set", "audio_source", "room")
+
+    def __init__(self) -> None:
+        self._completed_at: datetime | None = None
+        self._next_step_id = 1
+        self.steps: dict[str, SetupStep] = {}
+        for name in self._STEP_NAMES:
+            self.steps[name] = SetupStep(
+                id=self._next_step_id, name=name, completed_at=None, detail=None
+            )
+            self._next_step_id += 1
+
+    async def is_setup_complete(self) -> bool:
+        return self._completed_at is not None
+
+    async def mark_setup_complete(self, *, completed_at: datetime) -> None:
+        self._completed_at = completed_at
+
+    async def get_step(self, name: str) -> SetupStep | None:
+        return self.steps.get(name)
+
+    async def list_steps(self) -> list[SetupStep]:
+        return list(self.steps.values())
+
+    async def complete_step(self, name: str, *, detail: dict, completed_at: datetime) -> SetupStep:
+        existing = self.steps.get(name)
+        step_id = existing.id if existing is not None else self._next_step_id
+        if existing is None:
+            self._next_step_id += 1
+        step = SetupStep(id=step_id, name=name, completed_at=completed_at, detail=detail)
+        self.steps[name] = step
+        return step
+
+
+@pytest.fixture
+def fake_setup_repository():
+    """Factory: `fake_setup_repository()` builds a `FakeSetupRepository`
+    pre-seeded with the same five named, incomplete steps a fresh
+    migration seeds -- matching `fake_account_repository`'s own
+    factory-fixture convention."""
+    return FakeSetupRepository
+
+
+class FakeSettingsRepository:
+    """An in-memory `SettingsRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04 requires, matching every other
+    `Fake*Repository` in this file."""
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self.settings: dict[str, Setting] = {}
+
+    async def get_setting(self, key: str) -> Setting | None:
+        return self.settings.get(key)
+
+    async def set_setting(
+        self, key: str, value, *, updated_by_user_id: int | None, updated_at: datetime
+    ) -> Setting:
+        existing = self.settings.get(key)
+        setting_id = existing.id if existing is not None else self._next_id
+        if existing is None:
+            self._next_id += 1
+        setting = Setting(
+            id=setting_id,
+            key=key,
+            value=value,
+            updated_at=updated_at,
+            updated_by_user_id=updated_by_user_id,
+        )
+        self.settings[key] = setting
+        return setting
+
+
+@pytest.fixture
+def fake_settings_repository():
+    """Factory: `fake_settings_repository()` builds an empty
+    `FakeSettingsRepository` -- every test populates it itself, matching
+    `fake_credential_repository`'s own convention."""
+    return FakeSettingsRepository
