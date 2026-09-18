@@ -134,7 +134,7 @@ def _schedule_error(exc: ScheduleError) -> HTTPException:
 def _invalid_wait_duration_error(index: int) -> HTTPException:
     return HTTPException(
         status_code=400,
-        detail=f"step at position {index}: a wait step's duration_s must be a non-negative number",
+        detail=f"step at position {index}: a wait step's duration_s must be a positive number",
     )
 
 
@@ -231,10 +231,16 @@ def _validate_steps(steps: Sequence[WorkflowStepInput]) -> list[WorkflowStepSpec
         arguments = step.arguments if isinstance(step.arguments, dict) else {}
         if step.kind == "wait":
             duration = arguments.get("duration_s")
+            # IN-01 (code review): `> 0`, matching `WorkflowStepEntry`'s
+            # own voice-tool validation (`workflow/tool.py`) and its own
+            # description ("a positive number of seconds") -- a zero
+            # duration was previously accepted here and refused there,
+            # which meant the webapp could author a `wait` step a spoken
+            # sentence would be refused for building.
             if (
                 not isinstance(duration, (int, float))
                 or isinstance(duration, bool)
-                or duration < 0
+                or duration <= 0
             ):
                 raise _invalid_wait_duration_error(index)
         elif step.kind == "call_service":

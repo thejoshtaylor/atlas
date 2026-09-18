@@ -461,6 +461,34 @@ def test_creating_a_workflow_with_a_negative_wait_duration_is_refused(
     assert response.status_code == 400
 
 
+def test_creating_a_workflow_with_a_zero_wait_duration_is_refused(
+    monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    """IN-01 (code review): this route used to accept `duration_s=0`
+    while `schedule_workflow`/`append_workflow_steps` (the voice tool,
+    `workflow/tool.py`) refused it -- an operator could author by webapp
+    a `wait` step a spoken sentence would be refused for building. Both
+    now agree on `> 0`."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(security, account_repo, workflow_repo, policy_repo=policy_repo)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    response = client.post(
+        "/api/workflows",
+        json={"summary": "x", "run_at": _future_run_at(now), "steps": [_wait_step(0)]},
+    )
+    assert response.status_code == 400
+    assert len(workflow_repo._runs) == 0  # type: ignore[attr-defined]
+
+
 def test_creating_a_call_service_step_with_no_domain_or_service_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
