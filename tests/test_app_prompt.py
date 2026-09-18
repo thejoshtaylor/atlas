@@ -13,12 +13,14 @@ Every entity id below comes from `tests/conftest.py`'s `_FAKE_STATES`, per
 from __future__ import annotations
 
 from datetime import datetime as _real_datetime
+from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import conftest
 
 import spire_voice.app as app_module
 from spire_voice.app import _catalog_prompt, _state_message
+from spire_voice.db.repository import WorkflowRun, WorkflowStep
 
 
 def _entities_from_fake_states() -> list[dict[str, str]]:
@@ -177,3 +179,86 @@ def test_state_message_falls_back_to_the_process_zone_when_unconfigured(monkeypa
 
     assert "Current date:" in message
     assert "Current time:" in message
+
+
+# --- Task 2 (plan 05-05): the pending-run block, D-09 --------------------
+
+
+def _pending_run(run_id: int, summary: str, *, due_at) -> WorkflowRun:
+    """One pending run with one still-pending step due at `due_at` --
+    enough for `summarise_pending_runs` to render a full line without
+    pulling in a real repository."""
+    now = _real_datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    return WorkflowRun(
+        id=run_id,
+        origin="voice",
+        status="pending",
+        summary=summary,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+        steps=(
+            WorkflowStep(
+                id=run_id * 10,
+                run_id=run_id,
+                position=0,
+                kind="speak",
+                arguments={"text": "example"},
+                due_at=due_at,
+                status="pending",
+                attempts=0,
+                result_detail=None,
+                fired_at=None,
+            ),
+        ),
+    )
+
+
+def test_state_message_pending_runs_block_appears_after_the_entity_states():
+    entities = _entities_from_fake_states()
+    states = {entity["entity_id"]: entity["state"] for entity in entities}
+    now = _real_datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    runs = (_pending_run(1, "turn off the porch light", due_at=now + timedelta(minutes=10)),)
+
+    message = _state_message(states, runs)
+
+    state_index = message.index("Current state:")
+    runs_index = message.index("Scheduled runs:")
+    assert runs_index > state_index
+    # Nothing follows the pending-run block -- it is the message's own tail.
+    assert message.rstrip().endswith("step remaining")
+
+
+def test_state_message_empty_pending_runs_renders_the_explicit_no_runs_line():
+    message = _state_message({}, ())
+
+    assert "nothing is scheduled" in message.lower()
+
+
+def test_state_message_two_pending_runs_render_both_in_a_stable_order():
+    now = _real_datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    runs = (
+        _pending_run(1, "turn off the porch light", due_at=now + timedelta(minutes=10)),
+        _pending_run(2, "start the coffee maker", due_at=now + timedelta(hours=2)),
+    )
+
+    first = _state_message({}, runs)
+    second = _state_message({}, runs)
+
+    assert first == second
+    assert "turn off the porch light" in first
+    assert "start the coffee maker" in first
+    assert first.index("turn off the porch light") < first.index("start the coffee maker")
+
+
+def test_state_message_an_overdue_pending_run_is_flagged_as_overdue(monkeypatch):
+    zone = ZoneInfo("America/Los_Angeles")
+    now = _real_datetime(2026, 9, 18, 12, 0, tzinfo=zone)
+    monkeypatch.setattr(app_module, "datetime", _FixedNowDatetime([now]))
+    monkeypatch.setattr(app_module, "_resolved_timezone", zone)
+    overdue_due_at = now.astimezone(timezone.utc) - timedelta(minutes=5)
+    runs = (_pending_run(1, "turn off the porch light", due_at=overdue_due_at),)
+
+    message = _state_message({}, runs)
+
+    assert "overdue" in message.lower()

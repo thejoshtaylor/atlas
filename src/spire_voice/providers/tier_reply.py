@@ -104,15 +104,19 @@ class TierReply(BaseModel):
         default=False,
         description=(
             "True when a spoken name matches more than one entity in the catalog you were "
-            "given, and the operator must be asked which one was meant. A third outcome, "
-            "exclusive of `confident` and `needs_tool` -- never guess between candidates, ask."
+            "given, or when a spoken description matches more than one of the scheduled runs "
+            "you were given, and the operator must be asked which one was meant. A third "
+            "outcome, exclusive of `confident` and `needs_tool` -- never guess between "
+            "candidates, ask."
         ),
     )
     candidates: tuple[str, ...] = Field(
         default=(),
         description=(
-            "The candidate entity ids to name back to the operator when `needs_clarification` "
-            "is true -- every entity the spoken name could plausibly mean, at least two."
+            "The candidates to name back to the operator when `needs_clarification` is true -- "
+            "every entity id or scheduled run the spoken words could plausibly mean, at least "
+            "two. For a scheduled run, give its own summary exactly as given to you, never its "
+            "id -- the operator never hears an id, and this is what they would recognize."
         ),
     )
 

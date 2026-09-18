@@ -81,6 +81,7 @@ from spire_voice.wake.base import WakeDetector, WakeError
 from spire_voice.wake.vosk_engine import VoskWakeDetector
 from spire_voice.workflow.scheduler import WorkflowScheduler
 from spire_voice.workflow.steps import execute_step
+from spire_voice.workflow.summary import summarise_pending_runs
 from spire_voice.workflow.tool import WorkflowToolHost
 
 logger = logging.getLogger("spire_voice.app")
@@ -185,7 +186,7 @@ def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _state_message(states: dict[str, str]) -> str:
+def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ()) -> str:
     """Rebuilt every turn -- deliberately not part of the cached prefix.
 
     Carries the current local date, day of the week, time to the minute,
@@ -199,6 +200,15 @@ def _state_message(states: dict[str, str]) -> str:
     An empty `states` mapping still renders the header with no entity
     lines: that is a message the model can read as "nothing is known,"
     which is a different claim than no message at all reaching it.
+
+    `pending_runs` (plan 05-05 Task 2, D-09) defaults to `()` -- every
+    caller that predates this plan keeps producing byte-identical output.
+    Given a non-empty sequence of `WorkflowRun`s (`WorkflowRepository.
+    list_runs(statuses=("pending", "firing"))`'s own return shape), the
+    block `workflow.summary.summarise_pending_runs` renders joins the
+    entity states here, in the same volatile message -- never the
+    cacheable `_catalog_prompt`, for the identical reason live entity
+    state never lives there either.
     """
     now = _current_moment()
     lines = [
@@ -208,6 +218,7 @@ def _state_message(states: dict[str, str]) -> str:
     ]
     for entity_id, state in states.items():
         lines.append(f"- {entity_id}: {state}")
+    lines.append(summarise_pending_runs(pending_runs, now))
     return "\n".join(lines)
 
 
@@ -226,6 +237,29 @@ def _make_state_fetch(tool_host: McpToolHost) -> Callable[[], Any]:
         result = await tool_host.call_tool("ha_list_entities", {})
         entities = _tool_result_json(result)
         return entities if isinstance(entities, list) else []
+
+    return _fetch
+
+
+def _make_pending_runs_fetch(workflow_repo: WorkflowRepository) -> Callable[[], Any]:
+    """Build the per-turn `pending_runs_fetch` factory `run_turn` awaits
+    concurrently with the operator still speaking, the identical shape
+    `_make_state_fetch` above already establishes for live entity state
+    (plan 05-05 Task 2, D-09, plan 01.1-06's mechanism extended).
+
+    Reads `("pending", "firing")` runs -- D-16's own list, the same one
+    the webapp's pending-run screen reads -- and returns them as-is for
+    `_state_message` to render through `summarise_pending_runs`. A raised
+    fetch is this function's caller's problem to handle (`run_turn`'s own
+    "logged and treated as nothing known" rule, identical to
+    `state_fetch`'s), not this factory's: it performs no try/except of its
+    own, the same bare-call shape `_make_state_fetch._fetch` already
+    uses.
+    """
+
+    async def _fetch() -> "tuple[Any, ...]":
+        runs = await workflow_repo.list_runs(statuses=("pending", "firing"))
+        return tuple(runs)
 
     return _fetch
 
@@ -407,6 +441,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             filler_cache=app.state.filler_cache,
             macros=await _current_macros(app),
             state_fetch=_make_state_fetch(app.state.tool_host),
+            pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=session_recorder,
             speech_lock=app.state.speaker_lock,
         )
@@ -1158,6 +1193,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             filler_cache=app.state.filler_cache,
             macros=macros,
             state_fetch=_make_state_fetch(app.state.tool_host),
+            pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=SessionRecorder(config.session, timings),
         )
     )
@@ -1224,6 +1260,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         filler_cache=websocket.app.state.filler_cache,
         macros=macros,
         state_fetch=_make_state_fetch(websocket.app.state.tool_host),
+        pending_runs_fetch=_make_pending_runs_fetch(websocket.app.state.workflow_repo),
         session_recorder=SessionRecorder(config.session, timings),
     )
 
