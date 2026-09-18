@@ -421,3 +421,79 @@ async def test_a_denylist_rule_added_through_the_route_is_refused_end_to_end_by_
     assert "off limits" in result.content[0].text, (
         f"the refusal text did not match safety.py's own wording: {result.content[0].text!r}"
     )
+
+
+class _EntityListingToolHost(_RecordingToolHost):
+    """Adds a fake `ha_list_entities` on top of `_RecordingToolHost`'s
+    existing `respawn` recording -- 03-08's "Not found in Home Assistant"
+    badge (T-03-54) needs `GET /api/policy` to cross-reference each
+    entity-kind rule's value against a live catalog."""
+
+    def __init__(self, known_entity_ids: list[str]) -> None:
+        super().__init__()
+        self._known_entity_ids = known_entity_ids
+
+    async def call_tool(self, name: str, arguments: dict):
+        assert name == "ha_list_entities"
+        return SimpleNamespace(
+            structuredContent=[{"entity_id": entity_id, "friendly_name": entity_id} for entity_id in self._known_entity_ids],
+            content=[],
+        )
+
+
+def test_get_policy_flags_a_rule_whose_entity_no_longer_resolves(
+    monkeypatch, fake_account_repository, fake_policy_repository
+):
+    """03-08's own must-have truth: 'A denylist row whose entity id no
+    longer resolves in Home Assistant shows that it does not, rather than
+    disappearing.' `GET /api/policy` is where that fact has to come
+    from -- the row must still be present."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    policy_repo = fake_policy_repository(
+        deny_entities=["switch.example_still_there", "switch.example_gone_now"],
+        deny_patterns=["switch.example_*"],
+    )
+    tool_host = _EntityListingToolHost(known_entity_ids=["switch.example_still_there"])
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_policy_app(security, account_repo, policy_repo, tool_host)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.get("/api/policy")
+    assert response.status_code == 200, response.text
+    rules_by_value = {rule["value"]: rule for rule in response.json()["rules"]}
+
+    assert rules_by_value["switch.example_still_there"]["resolved"] is True
+    assert rules_by_value["switch.example_gone_now"]["resolved"] is False, (
+        "an entity-kind rule absent from the live catalog must be flagged, not hidden"
+    )
+    # A pattern-kind rule has no single entity to resolve -- always True,
+    # never flagged as "not found."
+    assert rules_by_value["switch.example_*"]["resolved"] is True
+
+
+def test_get_policy_leaves_every_rule_resolved_when_the_catalog_cannot_be_fetched(
+    monkeypatch, fake_account_repository, fake_policy_repository
+):
+    """A transient failure to reach Home Assistant must never make a real
+    policy row look like it vanished -- `resolved` stays `True` for every
+    rule when the catalog itself could not be retrieved."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    policy_repo = fake_policy_repository(deny_entities=["switch.example_unrelated"])
+    tool_host = _RecordingToolHost()  # no call_tool at all -- simulates an incompatible/unavailable host
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_policy_app(security, account_repo, policy_repo, tool_host)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.get("/api/policy")
+    assert response.status_code == 200, response.text
+    assert all(rule["resolved"] is True for rule in response.json()["rules"])

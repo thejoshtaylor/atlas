@@ -87,6 +87,15 @@ class PolicyRuleResponse(BaseModel):
     value: str
     note: str | None
     created_at: datetime
+    # 03-08's "Not found in Home Assistant" badge (T-03-54): true unless
+    # this is an entity-kind rule *and* a live entity catalog was
+    # actually retrieved *and* the value is absent from it. A
+    # pattern-kind rule (no single entity to resolve) and a catalog that
+    # could not be fetched (HA unreachable, no tool host yet) both leave
+    # this `True` -- a policy row must never look "vanished" because of
+    # a transient failure to check it, only because the entity itself is
+    # genuinely gone.
+    resolved: bool = True
 
 
 class PolicyResponse(BaseModel):
@@ -111,9 +120,64 @@ class SetModeRequest(BaseModel):
     mode: str
 
 
-def _to_rule_response(rule: PolicyRule) -> PolicyRuleResponse:
+_ENTITY_KINDS = ("deny_entity", "allow_entity")
+
+
+def _to_rule_response(rule: PolicyRule, known_entity_ids: frozenset[str] | None = None) -> PolicyRuleResponse:
+    resolved = True
+    if known_entity_ids is not None and rule.kind in _ENTITY_KINDS:
+        resolved = rule.value in known_entity_ids
     return PolicyRuleResponse(
-        id=rule.id, kind=rule.kind, value=rule.value, note=rule.note, created_at=rule.created_at
+        id=rule.id,
+        kind=rule.kind,
+        value=rule.value,
+        note=rule.note,
+        created_at=rule.created_at,
+        resolved=resolved,
+    )
+
+
+def _tool_result_json(result: object) -> object:
+    """Best-effort extraction of a tool result's JSON payload -- the exact
+    logic `app.py::_tool_result_json` already applies, duplicated locally
+    rather than imported: `app.py` imports `spire_voice.routes` (this
+    module, transitively), so an import the other way would cycle."""
+    structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None)
+    if structured is not None:
+        return structured
+    content = getattr(result, "content", None) or []
+    if content:
+        text = getattr(content[0], "text", None)
+        if text:
+            try:
+                import json
+
+                return json.loads(text)
+            except Exception:  # noqa: BLE001 -- malformed text is "no payload," not a crash
+                return None
+    return None
+
+
+async def _known_entity_ids(request: Request) -> frozenset[str] | None:
+    """A best-effort snapshot of entity ids Home Assistant currently
+    reports, used only to flag a policy rule whose entity id no longer
+    resolves (03-08's "Not found in Home Assistant" badge) -- never used
+    to decide what is enforced. `None` (HA unreachable, no tool host)
+    means "unknown," not "empty": `_to_rule_response` treats `None` as
+    "leave every rule marked resolved," since a transient failure to
+    check must never make a real rule look like it vanished."""
+    tool_host = getattr(request.app.state, "tool_host", None)
+    if tool_host is None:
+        return None
+    try:
+        result = await tool_host.call_tool("ha_list_entities", {})
+    except Exception:  # noqa: BLE001 -- any failure here means "unknown," not a broken policy load
+        return None
+    payload = _tool_result_json(result)
+    if not isinstance(payload, list):
+        return None
+    return frozenset(
+        entity["entity_id"] for entity in payload if isinstance(entity, dict) and "entity_id" in entity
     )
 
 
@@ -163,7 +227,10 @@ async def get_policy(
     policy_repo: PolicyRepository = request.app.state.policy_repo
     policy = await policy_repo.load_policy()
     rules = await policy_repo.list_rules()
-    return PolicyResponse(mode=policy.mode, rules=[_to_rule_response(r) for r in rules])
+    known_entity_ids = await _known_entity_ids(request)
+    return PolicyResponse(
+        mode=policy.mode, rules=[_to_rule_response(r, known_entity_ids) for r in rules]
+    )
 
 
 @router.post("/api/policy/rules", status_code=201)
