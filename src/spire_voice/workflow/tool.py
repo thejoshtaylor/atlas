@@ -207,6 +207,23 @@ class WorkflowToolHost:
     `CallToolResult` the turn path already knows how to report
     (`turn/controller.py::_is_error`/`_result_text`) -- never a silently
     dropped schedule, cancellation, or append.
+
+    WR-01 (code review): `cancel_workflow_run`/`append_workflow_steps`
+    additionally refuse a `run_id` this turn's own injected pending-run
+    context (D-09, `workflow.summary.summarise_pending_runs`) never
+    showed the model. PROJECT.md names this project's own threat model by
+    name -- "the microphone hears the television, and a television can
+    speak any sentence" -- and this is the first phase where an injected
+    step fires with nobody in the room to notice, so a plausible-looking
+    but unshown id (a small sequential integer, easy to produce from a
+    leading transcript fragment) must not reach either write.
+    `set_current_turn_run_ids` is called once per turn, by `run_turn`
+    itself, with exactly the ids `summarise_pending_runs` rendered into
+    that same turn's context -- never derived a second time here, so
+    there is only ever one source of "what this turn was actually shown."
+    A turn that never called it (this host constructed but no turn run
+    yet, or a caller with no pending-run fetch wired at all) refuses
+    every `run_id` by default -- fail closed, not fail open.
     """
 
     def __init__(
@@ -219,6 +236,9 @@ class WorkflowToolHost:
         self._repository = repository
         self._zone = zone
         self._clock = clock
+        # WR-01 fix: fail closed -- no run id is valid until a turn
+        # actually shows one, never an unbounded/implicit "anything goes."
+        self._current_turn_run_ids: frozenset[int] = frozenset()
         self.tools: list[Tool] = [
             Tool(
                 name=SCHEDULE_WORKFLOW_TOOL_NAME,
@@ -250,6 +270,20 @@ class WorkflowToolHost:
                 input_schema=AppendWorkflowStepsRequest.model_json_schema(),
             ),
         ]
+
+    def set_current_turn_run_ids(self, run_ids: "frozenset[int] | set[int]") -> None:
+        """Called once per turn, by `run_turn`, with exactly the ids this
+        turn's own `summarise_pending_runs` block showed the model (WR-01
+        fix) -- before either write tool below can be called this turn,
+        since the pending-run fetch that produces `run_ids` is awaited
+        and injected into the model's context before any tool round
+        starts. Replaces the previous turn's set entirely; never merges
+        with it, so a run cancelled or completed since the last turn
+        cannot leak forward as still-valid."""
+        self._current_turn_run_ids = frozenset(run_ids)
+
+    def _run_id_shown_this_turn(self, run_id: int) -> bool:
+        return run_id in self._current_turn_run_ids
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         if name == SCHEDULE_WORKFLOW_TOOL_NAME:
@@ -305,6 +339,20 @@ class WorkflowToolHost:
                 content=[TextContent(type="text", text=str(exc))], is_error=True
             )
 
+        if not self._run_id_shown_this_turn(request.run_id):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"run {request.run_id} was not in this turn's own pending-run "
+                            "list -- refusing to cancel a run id you were not shown"
+                        ),
+                    )
+                ],
+                is_error=True,
+            )
+
         cancelled = await self._repository.cancel_run(
             request.run_id, now=self._clock(), cancelled_by_user_id=None
         )
@@ -332,6 +380,20 @@ class WorkflowToolHost:
         except ValidationError as exc:
             return CallToolResult(
                 content=[TextContent(type="text", text=str(exc))], is_error=True
+            )
+
+        if not self._run_id_shown_this_turn(request.run_id):
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=(
+                            f"run {request.run_id} was not in this turn's own pending-run "
+                            "list -- refusing to append steps to a run id you were not shown"
+                        ),
+                    )
+                ],
+                is_error=True,
             )
 
         specs = [

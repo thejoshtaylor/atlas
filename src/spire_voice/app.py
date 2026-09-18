@@ -445,6 +445,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=session_recorder,
             speech_lock=app.state.speaker_lock,
+            workflow_tool_host=app.state.workflow_tool_host,
         )
 
     return _run
@@ -1196,6 +1197,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             state_fetch=_make_state_fetch(app.state.tool_host),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=SessionRecorder(config.session, timings),
+            workflow_tool_host=app.state.workflow_tool_host,
         )
     )
     app.state.background_turns.add(task)
@@ -1263,6 +1265,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         state_fetch=_make_state_fetch(websocket.app.state.tool_host),
         pending_runs_fetch=_make_pending_runs_fetch(websocket.app.state.workflow_repo),
         session_recorder=SessionRecorder(config.session, timings),
+        workflow_tool_host=websocket.app.state.workflow_tool_host,
     )
 
 

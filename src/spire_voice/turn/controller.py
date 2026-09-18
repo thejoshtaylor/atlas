@@ -267,6 +267,7 @@ async def run_turn(
     pending_runs_fetch: Callable[[], Any] | None = None,
     session_recorder: SessionRecorder | None = None,
     speech_lock: "asyncio.Lock | None" = None,
+    workflow_tool_host: Any | None = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -329,6 +330,19 @@ async def run_turn(
     posture `state_fetch` already carries; cancelled and its cancellation
     awaited on the macro path and the empty-transcript early return,
     exactly where `state_task` already is, never left dangling.
+
+    `workflow_tool_host` (WR-01 code-review fix) is given
+    `set_current_turn_run_ids(...)` -- exactly the ids `pending_runs`
+    resolved to above, the same set this turn's own pending-run context
+    block already showed the model -- once per turn, before the user
+    message and any tool round: `WorkflowToolHost.cancel_workflow_run`/
+    `append_workflow_steps` refuse any `run_id` outside that set. Typed
+    loosely (`Any`, duck-typed to `set_current_turn_run_ids`) rather than
+    importing `spire_voice.workflow.tool.WorkflowToolHost` at module level
+    for the same load-order reason this function already defers its
+    `spire_voice.app` import below. `None` (the default, and every caller
+    that predates this fix) skips the call -- no behavior change for a
+    caller with no workflow tool host to scope.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -514,6 +528,16 @@ async def run_turn(
                 )
                 pending_runs_payload = ()
             pending_runs = tuple(pending_runs_payload) if pending_runs_payload else ()
+        if workflow_tool_host is not None:
+            # WR-01 fix: scope this turn's `cancel_workflow_run`/
+            # `append_workflow_steps` to exactly the ids `pending_runs`
+            # resolved to, whether or not `pending_runs_fetch` actually
+            # produced any (a fetch that raised, or was never given,
+            # leaves `pending_runs = ()` above, which correctly clears
+            # last turn's set rather than leaving it stale).
+            workflow_tool_host.set_current_turn_run_ids(
+                frozenset(run.id for run in pending_runs)
+            )
         if state_task is not None or pending_runs_task is not None:
             # Deferred, not module-level: `app.py` imports `run_turn` from this
             # module at load time, so a module-level import here of anything

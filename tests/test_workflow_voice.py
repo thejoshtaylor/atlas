@@ -343,6 +343,17 @@ async def test_a_transition_value_on_a_non_light_domain_is_rejected(fake_workflo
 # ---------------------------------------------------------------------------
 
 
+def _show(host, *run_ids: int) -> None:
+    """Simulates the one thing `run_turn` itself does before any tool
+    round starts (WR-01 fix, `turn/controller.py`): tells `host` which
+    run ids this turn's own pending-run context actually showed the
+    model. `cancel_workflow_run`/`append_workflow_steps` refuse any other
+    id -- a test driving `WorkflowToolHost.call_tool` directly, with no
+    `run_turn` in between, has to set this up itself or every such call
+    is refused by the same fail-closed default a real, un-shown id gets."""
+    host.set_current_turn_run_ids(set(run_ids))
+
+
 async def _schedule_one(host) -> int:
     result = await host.call_tool(
         "schedule_workflow",
@@ -368,6 +379,7 @@ async def test_cancel_on_a_pending_run_succeeds(fake_workflow_repository):
     repo = fake_workflow_repository()
     host, _clock = _host(repo)
     run_id = await _schedule_one(host)
+    _show(host, run_id)
 
     result = await host.call_tool("cancel_workflow_run", {"run_id": run_id})
 
@@ -416,6 +428,7 @@ async def test_append_on_a_pending_run_lands_after_the_existing_tail(fake_workfl
     repo = fake_workflow_repository()
     host, _clock = _host(repo)
     run_id = await _schedule_one(host)
+    _show(host, run_id)
 
     result = await host.call_tool(
         "append_workflow_steps",
@@ -444,6 +457,17 @@ async def test_append_on_a_firing_run_is_refused_distinguishably_from_a_missing_
     # host's own dispatch, not the poller (`test_workflow_scheduler_*`'s
     # job).
     repo._runs[run_id]["status"] = "firing"
+    # Both ids are treated as shown this turn (WR-01 fix) so this test
+    # keeps proving what it was written to prove -- the *repository's*
+    # own `WorkflowRunNotAppendableError`-vs-`WorkflowRunNotFoundError`
+    # distinction (D-02's key-decision) -- rather than being short-
+    # circuited by the WR-01 gate before either code path runs. A
+    # "firing" run is genuinely still in D-16's own pending-run list
+    # (`list_runs(statuses=("pending", "firing"))`); `run_id + 999`
+    # (never created) is included here only to isolate this test's own
+    # subject -- `_show`'s own docstring covers the un-shown-id refusal
+    # this test does not.
+    _show(host, run_id, run_id + 999)
 
     firing_result = await host.call_tool(
         "append_workflow_steps",
@@ -464,6 +488,71 @@ async def test_append_on_a_firing_run_is_refused_distinguishably_from_a_missing_
     assert missing_result.is_error
     assert firing_result.content[0].text != missing_result.content[0].text
     assert "does not exist" in missing_result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# WR-01 (code review): a run id this turn's own pending-run context never
+# showed the model is refused before either write touches the repository
+# ---------------------------------------------------------------------------
+
+
+async def test_cancel_workflow_run_refuses_a_run_id_not_shown_this_turn(
+    fake_workflow_repository,
+):
+    repo = fake_workflow_repository()
+    host, _clock = _host(repo)
+    run_id = await _schedule_one(host)
+    # Deliberately never calling `_show` -- a fresh `WorkflowToolHost`
+    # fails closed (no run id is valid until a turn actually shows one).
+
+    result = await host.call_tool("cancel_workflow_run", {"run_id": run_id})
+
+    assert result.is_error
+    assert "not in this turn's own pending-run list" in result.content[0].text
+    run = await repo.get_run(run_id)
+    assert run.status == "pending"  # untouched -- the write never ran
+
+
+async def test_append_workflow_steps_refuses_a_run_id_not_shown_this_turn(
+    fake_workflow_repository,
+):
+    repo = fake_workflow_repository()
+    host, _clock = _host(repo)
+    run_id = await _schedule_one(host)
+
+    result = await host.call_tool(
+        "append_workflow_steps",
+        {
+            "run_id": run_id,
+            "steps": [{"kind": "speak", "arguments": {"text": "an injected step"}}],
+        },
+    )
+
+    assert result.is_error
+    assert "not in this turn's own pending-run list" in result.content[0].text
+    run = await repo.get_run(run_id)
+    assert len(run.steps) == 1  # untouched -- the append never ran
+
+
+async def test_showing_a_run_id_one_turn_does_not_leak_into_a_turn_that_never_did(
+    fake_workflow_repository,
+):
+    """`set_current_turn_run_ids` replaces the previous turn's set
+    entirely -- a run shown last turn (or cancelled/completed since) must
+    not still validate a write this turn never actually saw it in."""
+    repo = fake_workflow_repository()
+    host, _clock = _host(repo)
+    run_id = await _schedule_one(host)
+    _show(host, run_id)
+    assert not (await host.call_tool("cancel_workflow_run", {"run_id": run_id})).is_error
+
+    other_run_id = await _schedule_one(host)
+    _show(host, other_run_id)  # this turn's context names only the other run
+
+    result = await host.call_tool("cancel_workflow_run", {"run_id": run_id})
+
+    assert result.is_error
+    assert "not in this turn's own pending-run list" in result.content[0].text
 
 
 # ---------------------------------------------------------------------------
