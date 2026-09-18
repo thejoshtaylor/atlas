@@ -62,13 +62,30 @@ def _migration_url(async_url: str) -> str:
 
 
 async def _reset_schema(async_url: str) -> None:
-    """Drop every table (and Alembic's own bookkeeping table) this
+    """Drop every table (and Alembic's own bookkeeping table) either
     migration touches, so each test starts from a genuinely empty database
     regardless of what a previous test run left behind on the same
-    throwaway Postgres."""
+    throwaway Postgres.
+
+    Plan 03-05 extended this list: `0002_accounts.py` adds `users`,
+    `invites`, and `refresh_tokens`, and adds foreign keys from
+    `safety_policy`/`policy_rules` onto `users` -- `CASCADE` handles the
+    drop order regardless of which side a leftover constraint points from,
+    but every table either migration creates must be named here or a
+    second test run against the same throwaway Postgres finds the first
+    run's tables still present.
+    """
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
-        for table in ("policy_rules", "safety_policy", "audit_log", "alembic_version"):
+        for table in (
+            "refresh_tokens",
+            "invites",
+            "users",
+            "policy_rules",
+            "safety_policy",
+            "audit_log",
+            "alembic_version",
+        ):
             await conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
     await engine.dispose()
 
