@@ -808,3 +808,230 @@ async def test_cancelling_an_unknown_run_and_cancelling_it_twice_answer_differen
     second = client.post(f"/api/workflows/{run.id}/cancel")
     assert second.status_code == 409
     assert second.status_code != not_found.status_code
+
+
+# --- Task 3: a speak step's words, prepared while someone is still there --
+
+
+def test_a_saved_speak_step_is_synthesized_before_the_response_and_reports_ready(
+    monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeWorkflowTts()
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(
+        security,
+        account_repo,
+        workflow_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    response = client.post(
+        "/api/workflows",
+        json={
+            "summary": "say something",
+            "run_at": _future_run_at(now),
+            "steps": [_speak_step("the lights are off now")],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["reply_synthesis_degraded"] is False
+    assert body["steps"][0]["speak_cached"] is True
+    assert "the lights are off now" in filler_cache
+    assert tts.synthesized_texts == ["the lights are off now"]
+
+
+def test_a_synthesis_failure_returns_a_degraded_success_and_the_run_still_commits(
+    monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeWorkflowTts(fail=True)
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(
+        security,
+        account_repo,
+        workflow_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    response = client.post(
+        "/api/workflows",
+        json={
+            "summary": "say something that fails",
+            "run_at": _future_run_at(now),
+            "steps": [_speak_step("this will fail to synthesize")],
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["reply_synthesis_degraded"] is True
+    assert body["reply_synthesis_message"]
+    assert body["steps"][0]["speak_cached"] is False
+    assert "this will fail to synthesize" not in filler_cache
+
+    # The run is still committed and readable, not lost to the failure.
+    run_id = body["id"]
+    read_back = client.get(f"/api/workflows/{run_id}")
+    assert read_back.status_code == 200
+    assert read_back.json()["steps"][0]["arguments"]["text"] == "this will fail to synthesize"
+    # A read never re-synthesizes -- the degraded flag is only meaningful
+    # on the save response itself.
+    assert read_back.json()["reply_synthesis_degraded"] is False
+
+
+def test_a_second_save_of_the_same_words_does_not_resynthesize(
+    monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeWorkflowTts()
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(
+        security,
+        account_repo,
+        workflow_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    first = client.post(
+        "/api/workflows",
+        json={
+            "summary": "say the same thing",
+            "run_at": _future_run_at(now),
+            "steps": [_speak_step("unchanging words")],
+        },
+    )
+    assert first.status_code == 201, first.text
+    run_id = first.json()["id"]
+    assert tts.synthesized_texts == ["unchanging words"]
+
+    second = client.put(
+        f"/api/workflows/{run_id}",
+        json={"steps": [_speak_step("unchanging words")]},
+    )
+    assert second.status_code == 200, second.text
+    assert tts.synthesized_texts == ["unchanging words"], "an unchanged text must never re-synthesize"
+
+
+def test_a_second_save_after_a_failed_synthesis_synthesizes_again(
+    monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeWorkflowTts(fail=True)
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(
+        security,
+        account_repo,
+        workflow_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    first = client.post(
+        "/api/workflows",
+        json={
+            "summary": "will fail then retry",
+            "run_at": _future_run_at(now),
+            "steps": [_speak_step("retry me")],
+        },
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["reply_synthesis_degraded"] is True
+    run_id = first.json()["id"]
+    assert tts.synthesized_texts == ["retry me"]
+
+    tts._fail = False  # the underlying provider recovers before the next save
+
+    second = client.put(
+        f"/api/workflows/{run_id}",
+        json={"steps": [_speak_step("retry me")]},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["reply_synthesis_degraded"] is False
+    assert second.json()["steps"][0]["speak_cached"] is True
+    assert tts.synthesized_texts == ["retry me", "retry me"], "a failed synthesis must retry on the next save"
+
+
+def test_a_run_with_no_speak_step_never_calls_the_synthesizer(
+    monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    workflow_repo = fake_workflow_repository()
+    policy_repo = fake_policy_repository()
+    tts = _FakeWorkflowTts()
+    filler_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_workflow_app(
+        security,
+        account_repo,
+        workflow_repo,
+        policy_repo=policy_repo,
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    now = datetime.now(timezone.utc)
+    response = client.post(
+        "/api/workflows",
+        json={
+            "summary": "no speaking here",
+            "run_at": _future_run_at(now),
+            "steps": [_wait_step(5), _call_service_step()],
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert tts.synthesized_texts == []
+    assert response.json()["reply_synthesis_degraded"] is False

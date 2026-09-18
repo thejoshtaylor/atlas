@@ -37,12 +37,26 @@ no delete call anywhere in this module (D-12) -- `POST
 /api/workflows/{run_id}/cancel` is a status transition, and cancelling an
 already-terminal run is reported distinguishably from cancelling a run that
 never existed.
+
+PA-01: a `speak` step's words ARE precached, the same `precache_all`
+function `app.py`'s own startup precache and `routes/macros.py`'s own save
+path both use -- after a successful `POST`/`PUT` commits, every `speak`
+step's words not already in `app.state.filler_cache` are synthesized
+before the route returns. A synthesis failure is a degraded success, never
+a failed save (the run's rows are already committed by the time this
+runs); every response that carries a `speak` step -- reads included --
+reports whether its words are in the cache right now, computed live from
+cache membership, with no new column: the exact keying rule
+`routes/macros.py`'s own `reply_cached` already uses, extended verbatim to
+a step (04-UI-SPEC.md's precache-state contract, per 05-UI-SPEC.md's own
+unresolved row).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal, Sequence
+from pathlib import Path
+from typing import Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -56,11 +70,22 @@ from spire_voice.db.repository import (
     WorkflowStep,
     WorkflowStepSpec,
 )
+from spire_voice.providers.tts_cache import precache_all
 from spire_voice.routes.conflict import ConflictAnnotation, annotate_conflict, known_entity_ids, load_policy_or_none
 from spire_voice.workflow.schedule import ScheduleError, resolve_schedule
 from spire_voice.workflow.steps import _transition_refusal
 
 router = APIRouter(tags=["workflows"])
+
+# The exact wording 05-UI-SPEC.md's precache-state contract (extended from
+# 04-UI-SPEC.md's "Error state -- reply not synthesized" row) implies for a
+# scheduled step -- named at module level so `_finish_workflow_save` below
+# and any test asserting on it read the same string.
+_SPEAK_SYNTHESIS_DEGRADED_MESSAGE = (
+    "One or more spoken steps couldn't be prepared for fast playback. The run will "
+    "still fire on schedule, but a spoken step may need to synthesize speech at the "
+    "moment it runs."
+)
 
 # D-16: the webapp's own pending-run list -- `WorkflowRepository.list_runs`'s
 # own docstring names this exact pair as what the webapp passes.
@@ -163,6 +188,13 @@ class WorkflowStepResponse(BaseModel):
     # `unknown` is distinct from `ok` on purpose: a failed check must
     # never render as "no conflict."
     conflict: ConflictAnnotation
+    # PA-01: whether a `speak` step's own words are currently in the same
+    # cache a turn reads from -- computed live from cache membership on
+    # every response, reads included, the same `reply_cached` keying rule
+    # `routes/macros.py`'s `MacroResponse` already uses. `False` for every
+    # non-`speak` step -- there is nothing to report about a step with no
+    # words to synthesize.
+    speak_cached: bool
 
 
 class WorkflowRunResponse(BaseModel):
@@ -179,6 +211,11 @@ class WorkflowRunResponse(BaseModel):
     # on-time pending run.
     late: bool
     steps: list[WorkflowStepResponse]
+    # Only meaningful on a create/update response -- `False`/`None` on
+    # every list/read/cancel response, since none of those re-synthesize
+    # anything (mirrors `MacroResponse.reply_synthesis_degraded`).
+    reply_synthesis_degraded: bool = False
+    reply_synthesis_message: str | None = None
 
 
 def _validate_steps(steps: Sequence[WorkflowStepInput]) -> list[WorkflowStepSpec]:
@@ -228,9 +265,25 @@ def _is_late(run: WorkflowRun, now: datetime) -> bool:
     return any(step.status == "pending" and step.due_at <= now for step in run.steps)
 
 
+def _get_filler_cache(request: Request) -> dict:
+    """The same `app.state.filler_cache` dict a turn reads from
+    (`turn/controller.py`) -- created empty here if a throwaway test app
+    never set one, matching `routes/macros.py::_finish_save`'s own
+    convention exactly."""
+    filler_cache = getattr(request.app.state, "filler_cache", None)
+    if filler_cache is None:
+        filler_cache = {}
+        request.app.state.filler_cache = filler_cache
+    return filler_cache
+
+
 def _to_workflow_step_response(
-    step: WorkflowStep, policy, known_entity_ids_snapshot: frozenset[str] | None
+    step: WorkflowStep,
+    policy,
+    known_entity_ids_snapshot: frozenset[str] | None,
+    filler_cache: Mapping[str, bytes],
 ) -> WorkflowStepResponse:
+    text = step.arguments.get("text") if step.kind == "speak" and isinstance(step.arguments, dict) else None
     return WorkflowStepResponse(
         id=step.id,
         position=step.position,
@@ -242,6 +295,7 @@ def _to_workflow_step_response(
         result_detail=step.result_detail,
         fired_at=step.fired_at,
         conflict=annotate_conflict(step.arguments, policy, known_entity_ids_snapshot),
+        speak_cached=text is not None and text in filler_cache,
     )
 
 
@@ -249,8 +303,11 @@ def _to_workflow_run_response(
     run: WorkflowRun,
     policy,
     known_entity_ids_snapshot: frozenset[str] | None,
+    filler_cache: Mapping[str, bytes],
     *,
     now: datetime,
+    reply_synthesis_degraded: bool = False,
+    reply_synthesis_message: str | None = None,
 ) -> WorkflowRunResponse:
     return WorkflowRunResponse(
         id=run.id,
@@ -262,7 +319,67 @@ def _to_workflow_run_response(
         created_by_user_id=run.created_by_user_id,
         step_count=len(run.steps),
         late=_is_late(run, now),
-        steps=[_to_workflow_step_response(step, policy, known_entity_ids_snapshot) for step in run.steps],
+        steps=[
+            _to_workflow_step_response(step, policy, known_entity_ids_snapshot, filler_cache)
+            for step in run.steps
+        ],
+        reply_synthesis_degraded=reply_synthesis_degraded,
+        reply_synthesis_message=reply_synthesis_message,
+    )
+
+
+async def _finish_workflow_save(request: Request, run: WorkflowRun) -> WorkflowRunResponse:
+    """After a successful create/`PUT` commit, make sure every `speak`
+    step's words are in the same cache a turn reads from before this
+    route answers (PA-01) -- through `precache_all`, the exact function
+    `app.py`'s own startup precache and `routes/macros.py`'s own save path
+    both use. Skipped per-text whenever that text is already cached, the
+    same rule that both makes a reorder-only save cheap and makes a retry
+    after a prior failure actually retry (a failed synthesis never writes
+    its text into the cache).
+
+    A synthesis failure is a degraded success, never a failed save: the
+    run's rows are already committed by the time this runs, so the
+    response reports a degraded flag and a message rather than raising --
+    the same reasoning `routes/macros.py::_finish_save` already carries.
+    """
+    filler_cache = _get_filler_cache(request)
+
+    speak_texts = [
+        step.arguments.get("text", "")
+        for step in run.steps
+        if step.kind == "speak" and isinstance(step.arguments, dict)
+    ]
+    to_synthesize = [text for text in speak_texts if text and text not in filler_cache]
+
+    degraded = False
+    message: str | None = None
+    if to_synthesize:
+        config = request.app.state.config
+        try:
+            new_entries = await precache_all(
+                request.app.state.tts,
+                Path(config.tts.cache_dir),
+                to_synthesize,
+                config.tts.voice_id,
+                request.app.state.tts.browser_sink(),
+            )
+            filler_cache.update(new_entries)
+        except Exception:  # noqa: BLE001 -- any synthesis failure degrades, never loses the edit
+            degraded = True
+            message = _SPEAK_SYNTHESIS_DEGRADED_MESSAGE
+
+    policy = await load_policy_or_none(request)
+    known = await known_entity_ids(request)
+    now = datetime.now(timezone.utc)
+    return _to_workflow_run_response(
+        run,
+        policy,
+        known,
+        filler_cache,
+        now=now,
+        reply_synthesis_degraded=degraded,
+        reply_synthesis_message=message,
     )
 
 
@@ -274,8 +391,9 @@ async def list_workflows(
     runs = await workflow_repo.list_runs(statuses=_PENDING_RUN_STATUSES)
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
+    filler_cache = _get_filler_cache(request)
     now = datetime.now(timezone.utc)
-    return [_to_workflow_run_response(run, policy, known, now=now) for run in runs]
+    return [_to_workflow_run_response(run, policy, known, filler_cache, now=now) for run in runs]
 
 
 @router.get("/api/workflows/{run_id}")
@@ -288,8 +406,9 @@ async def get_workflow(
         raise _workflow_not_found_error(run_id)
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
+    filler_cache = _get_filler_cache(request)
     now = datetime.now(timezone.utc)
-    return _to_workflow_run_response(run, policy, known, now=now)
+    return _to_workflow_run_response(run, policy, known, filler_cache, now=now)
 
 
 @router.post("/api/workflows", status_code=201)
@@ -317,9 +436,7 @@ async def create_workflow(
         base_time=due_at,
         created_by_user_id=user.id,
     )
-    policy = await load_policy_or_none(request)
-    known = await known_entity_ids(request)
-    return _to_workflow_run_response(run, policy, known, now=now)
+    return await _finish_workflow_save(request, run)
 
 
 @router.put("/api/workflows/{run_id}")
@@ -338,9 +455,7 @@ async def replace_workflow_steps(
         raise _workflow_not_found_error(run_id) from exc
     except WorkflowRunNotAppendableError as exc:
         raise _workflow_not_appendable_error(run_id, exc.status) from exc
-    policy = await load_policy_or_none(request)
-    known = await known_entity_ids(request)
-    return _to_workflow_run_response(run, policy, known, now=now)
+    return await _finish_workflow_save(request, run)
 
 
 @router.post("/api/workflows/{run_id}/cancel")
@@ -365,4 +480,5 @@ async def cancel_workflow(
     assert updated is not None  # cancel_run just returned True for this id
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
-    return _to_workflow_run_response(updated, policy, known, now=now)
+    filler_cache = _get_filler_cache(request)
+    return _to_workflow_run_response(updated, policy, known, filler_cache, now=now)
