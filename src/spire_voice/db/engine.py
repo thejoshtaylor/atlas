@@ -12,9 +12,40 @@ from __future__ import annotations
 
 from alembic import command
 from alembic.config import Config as AlembicConfig
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from spire_voice.config import DatabaseConfig
+
+
+def get_current_revision(migration_url: str) -> str | None:
+    """The Alembic revision `migration_url`'s database is stamped at right
+    now, or `None` when nothing has ever been applied (a genuinely fresh
+    database, with no `alembic_version` table at all).
+
+    A short-lived, synchronous connection -- opened, queried, and disposed
+    within this call -- matching `run_migrations`'s own synchronous,
+    unbridged shape (D-02, 03-RESEARCH.md Pitfall 1) rather than borrowing
+    the async runtime engine for a one-off read.
+
+    `app.py`'s `lifespan` calls this *before* `run_migrations` (CR-01 fix):
+    `None` here means the migration this call precedes is about to seed the
+    safety policy for the first time ever on this database, which is the
+    one signal that distinguishes a first boot (a lingering `safety:` key
+    should be tolerated and logged) from a later one (the same key should
+    be rejected, because a previous boot already seeded it). `MigrationContext.
+    get_current_revision` is Alembic's own API for this exact question -- it
+    handles the missing-table case itself, so this function raises on
+    nothing an unreachable or malformed database wouldn't already raise on.
+    """
+    engine = create_engine(migration_url)
+    try:
+        with engine.connect() as conn:
+            context = MigrationContext.configure(conn)
+            return context.get_current_revision()
+    finally:
+        engine.dispose()
 
 
 def run_migrations(migration_url: str) -> None:

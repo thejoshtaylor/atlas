@@ -29,9 +29,18 @@ from spire_voice.auth.dependencies import Role, require_role, require_setup_comp
 from spire_voice.auth.tokens import validate_secret_key_strength
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
-from spire_voice.config import Config, ConfigError, WakeConfig, load_config
+from spire_voice.config import (
+    SAFETY_KEY_REJECTED_ERROR,
+    Config,
+    ConfigError,
+    DatabaseConfig,
+    SecurityConfig,
+    WakeConfig,
+    load_config,
+    load_raw_config,
+)
 from spire_voice.crypto.credentials import CredentialSlot, resolve_credential_value
-from spire_voice.db.engine import build_engine, run_migrations
+from spire_voice.db.engine import build_engine, get_current_revision, run_migrations
 from spire_voice.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
@@ -273,8 +282,22 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    config = load_config(CONFIG_PATH)
-    app.state.config = config
+    # Two-stage load (CR-01 fix). `load_config` -- a single, unconditional
+    # `Config.from_config` call -- cannot be used here: it rejects a
+    # lingering `safety:` key immediately, before the seed migration that
+    # is supposed to carry that same key's denylist into the database ever
+    # runs, which strands a real upgrade with no way forward (the key
+    # cannot be removed without discarding the denylist it names, and it
+    # cannot be kept without the process refusing to boot). The raw dict is
+    # read with no validation instead, so a `DatabaseConfig` can be built
+    # and migrations can run regardless of whether the key is present;
+    # whether to reject the key at all is decided further down, against
+    # real Alembic revision history, once migrations have had their one
+    # chance to seed it.
+    raw_config = load_raw_config(CONFIG_PATH)
+    legacy_safety_key_present = "safety" in raw_config
+    database_config = DatabaseConfig.from_config(raw_config.get("database"))
+    security_config = SecurityConfig.from_config(raw_config.get("security"))
 
     # Refuse to start under a missing, malformed, or placeholder secret --
     # before anything else, since a running process that hashes no
@@ -283,7 +306,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # warning nobody reads (03-05 Task 1's checkpoint, CD-3). This is a
     # pure environment check with no I/O dependency, which is why it runs
     # even before the migration step below.
-    validate_secret_key_strength(config.security)
+    validate_secret_key_strength(security_config)
 
     # `web/dist` is gitignored (it is a build artifact, `tests/
     # test_web_build.py`'s own first assertion), so a clean clone that has
@@ -303,6 +326,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             FRONTEND_DIR,
         )
 
+    # CR-01 fix: captured before migrations run, and only when there is a
+    # lingering `safety:` key to classify -- `None` here means this
+    # database has never had a migration applied, which means the
+    # migration below (if it runs) is about to seed the safety policy for
+    # the first time ever. That is the one signal that tells a first boot
+    # (the key should be tolerated, logged, and left for the operator to
+    # remove) apart from a later one (a previous boot already seeded the
+    # policy, so the same key now means two sources of truth and must be
+    # rejected) -- `Config.from_config` alone cannot draw this distinction
+    # without a database connection it does not have.
+    revision_before_migration = (
+        get_current_revision(database_config.migration_url)
+        if legacy_safety_key_present
+        else None
+    )
+
     # Migrations run first, before any other resource is built, and awaited
     # in sequence -- never scheduled as a detached task, which is the exact
     # shape 03-RESEARCH.md Pitfall 1 names as the way this fails silently
@@ -310,8 +349,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # propagates uncaught and stops the process, the same refusal-beats-
     # half-configured posture the barge-in calibration check below already
     # established for this file (D-02, DEP-04).
-    if config.database.run_migrations_at_startup:
-        await asyncio.to_thread(run_migrations, config.database.migration_url)
+    if database_config.run_migrations_at_startup:
+        await asyncio.to_thread(run_migrations, database_config.migration_url)
+
+    if legacy_safety_key_present:
+        # Only a boot that both actually ran the migration just now *and*
+        # found no prior revision stamped counts as "just seeded it" --
+        # anything else (an operator running migrations out of band with
+        # `run_migrations_at_startup: false`, or a second boot against an
+        # already-migrated database) means the policy this key names was
+        # already carried into the database by an earlier boot, so the key
+        # is a stale, conflicting second source of truth and must be
+        # rejected with the same wording this project has always used.
+        is_first_seed_boot = (
+            database_config.run_migrations_at_startup and revision_before_migration is None
+        )
+        if is_first_seed_boot:
+            logger.warning(
+                "safety: block found in %s, and the policy seed migration just "
+                "ran for the first time against this database -- your policy now "
+                "lives in the database (check the safety_policy/policy_rules "
+                "tables, or the webapp's policy editor, for your seeded entries). "
+                "Delete the safety: block from this file now: the next boot "
+                "refuses to start while it is still present.",
+                CONFIG_PATH,
+            )
+        else:
+            raise ConfigError(SAFETY_KEY_REJECTED_ERROR)
+
+    config = Config.from_config(raw_config, reject_legacy_safety_key=False)
+    app.state.config = config
 
     db_engine = build_engine(config.database)
     app.state.db_engine = db_engine

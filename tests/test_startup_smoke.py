@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +68,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from mcp.types import Tool
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 import conftest
 import spire_voice.app as app_module
@@ -982,3 +985,154 @@ def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is
     message = resolution_records[0].getMessage()
     assert "'camera'" in message
     assert "from config" in message
+
+
+# --- CR-01 fix: the seed migration must actually run against a real,
+# populated safety: block, through the real lifespan, before the check
+# that would otherwise reject it -- not `run_migrations` called directly
+# (tests/test_db_migrations.py already covers that in isolation), but the
+# actual boot path an operator's upgrade takes. ---------------------------
+
+_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+
+skip_without_postgres = pytest.mark.skipif(
+    _TEST_DB_URL is None,
+    reason=(
+        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
+        "then re-run the suite, to exercise this test instead of skipping it"
+    ),
+)
+
+
+async def _reset_policy_schema(async_url: str) -> None:
+    """Drop every table either policy migration touches, plus Alembic's own
+    bookkeeping table (`alembic_version`) -- the same list `tests/
+    test_db_migrations.py`'s own `_reset_schema` drops. This test tells a
+    first boot from a later one by real Alembic revision history
+    (`db.engine.get_current_revision`), so it needs a genuinely empty
+    database, not whatever a previous run of this same throwaway Postgres
+    left behind."""
+    engine = create_async_engine(async_url)
+    async with engine.begin() as conn:
+        for table in (
+            "settings",
+            "setup_steps",
+            "setup_state",
+            "provider_credentials",
+            "refresh_tokens",
+            "invites",
+            "users",
+            "policy_rules",
+            "safety_policy",
+            "audit_log",
+            "alembic_version",
+        ):
+            await conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@skip_without_postgres
+def test_first_boot_seeds_a_legacy_safety_block_through_the_real_lifespan_and_the_next_boot_rejects_it(
+    tmp_path, monkeypatch
+):
+    """CR-01 fix, and the test its own Fix section named as the gap this
+    project's "every phase boots the real lifespan" convention was supposed
+    to catch and did not.
+
+    First boot: a real, freshly-emptied Postgres, and a config file
+    carrying a populated `safety:` block (D-11's "the operator's real,
+    already-deployed safety: block" scenario, named in 03-CONTEXT.md). The
+    application must start -- not raise `ConfigError` before the seed
+    migration ever runs, which is exactly what CR-01 caught -- and the
+    seeded policy must match the block that named it, not merely a
+    non-empty one.
+
+    Second boot: the identical config file, still carrying the same
+    `safety:` block, against the database the first boot just seeded. This
+    boot must refuse to start, naming the key by the same message this
+    project has always used -- proving the rejection D-11 depends on (two
+    sources of truth for the safety boundary is the thing SAFE-05 exists to
+    end) still fires once the seed has actually happened, and was not
+    simply disabled by this fix.
+
+    `run_migrations`, `build_engine`, and `_build_repositories` are left
+    real for both boots -- the one thing every other test in this file
+    fakes out (D-04's Postgres-free default) and the one thing this
+    specific test cannot fake without proving nothing.
+    """
+    asyncio.run(_reset_policy_schema(_TEST_DB_URL))
+
+    safety_block = {
+        "mode": "allow_all_except_denylist",
+        "deny_entities": [
+            "switch.example_cr01_seed_test_socket",
+            "switch.example_cr01_seed_test_heater",
+        ],
+        "deny_patterns": ["switch.example_cr01_seed_test_camera_*"],
+        "allow_entities": ["light.example_cr01_seed_test_lamp"],
+    }
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={"database": {"url": _TEST_DB_URL}, "safety": safety_block},
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    # The migration itself (`alembic/versions/0001_policy_tables.py`) reads
+    # SPIRE_CONFIG independently of app.py's CONFIG_PATH (its own module
+    # docstring) -- both must point at the same file for the seed to read
+    # the block this test just wrote.
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", _FakeCameraSource)
+
+    # First boot: the safety: block is present and the database is
+    # genuinely empty -- this must succeed, and must seed the block
+    # verbatim.
+    with TestClient(app_module.app):
+        pass
+
+    # Read the seeded rows back through a fresh connection, not
+    # `app.state.policy_repo` -- that repository's pool was opened inside
+    # `TestClient`'s own portal event loop and is torn down (and, even
+    # while open, is bound to a loop this test's plain `asyncio.run` is not
+    # running on) by the time the `with` block above exits, the same
+    # "query through a new engine" precedent `tests/test_db_migrations.py`'s
+    # own `_fetch_rows` already sets for reading a migration's seeded state
+    # back out.
+    async def _fetch_seeded_policy() -> tuple[str, list[tuple[str, str]]]:
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                mode = (
+                    await conn.execute(text("SELECT mode FROM safety_policy WHERE id = 1"))
+                ).scalar_one()
+                rules = (
+                    await conn.execute(text("SELECT kind, value FROM policy_rules"))
+                ).fetchall()
+                return mode, [(r.kind, r.value) for r in rules]
+        finally:
+            await engine.dispose()
+
+    seeded_mode, seeded_rules = asyncio.run(_fetch_seeded_policy())
+
+    assert seeded_mode == safety_block["mode"]
+    assert {v for k, v in seeded_rules if k == "deny_entity"} == set(safety_block["deny_entities"])
+    assert {v for k, v in seeded_rules if k == "deny_pattern"} == set(safety_block["deny_patterns"])
+    assert {v for k, v in seeded_rules if k == "allow_entity"} == set(safety_block["allow_entities"])
+
+    # Second boot: identical config file, same safety: block still
+    # present, against the database the first boot just seeded -- this
+    # must refuse to start, naming the same key this project has always
+    # named. `ConfigError` comes off `app_module` itself, matching the
+    # sibling tests above (`test_correlation_enabled_with_no_calibration_
+    # refuses_to_start`'s docstring explains why: a fresh import mints a
+    # distinct class a real `app.py` raise could never match).
+    ConfigError = app_module.ConfigError
+    with pytest.raises(ConfigError, match="safety:.*no longer exists"):
+        with TestClient(app_module.app):
+            pass

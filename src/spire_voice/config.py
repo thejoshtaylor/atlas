@@ -1110,6 +1110,21 @@ class Config:
     `PolicyRepository`, not by `Config`. A `safety:` key still present here
     raises `ConfigError` naming it, below -- `Config` carries no field for
     the parsed policy or the raw block anymore.
+
+    That rejection cannot be unconditional at the point this classmethod
+    runs, though: `from_config` has no database connection, so it cannot
+    itself tell "the seed migration has already carried this block forward"
+    apart from "the seed migration has never run and this boot is the one
+    that must run it." `reject_legacy_safety_key` exists for that reason --
+    `load_config`'s default (`True`) preserves this classmethod's original,
+    unconditional behaviour for every caller that has no database state to
+    consult (the CLI scripts under `scripts/`, this module's own test
+    suite). `app.py`'s `lifespan` is the one caller that does have that
+    state: it passes `False`, builds a `Config` regardless of whether the
+    key is present, and decides whether to raise itself -- against real
+    Alembic revision history, after migrations have had their one chance to
+    seed -- using `SAFETY_KEY_REJECTED_ERROR` below so the message an
+    operator sees is identical either way.
     """
 
     server: ServerConfig
@@ -1131,20 +1146,10 @@ class Config:
     macros: tuple[MacroConfig, ...] = ()
 
     @classmethod
-    def from_config(cls, raw: dict | None) -> "Config":
+    def from_config(cls, raw: dict | None, *, reject_legacy_safety_key: bool = True) -> "Config":
         raw = raw or {}
-        if "safety" in raw:
-            raise ConfigError(
-                "safety: no longer exists in the configuration file -- the policy it used "
-                "to carry now lives in the database, seeded from this same file by the "
-                "first migration (alembic/versions/0001_policy_tables.py) the first time "
-                "this deployment started under Phase 3. If this is that first boot, do "
-                "not remove the block until the migration has run once against a reachable "
-                "database -- it is what carries your denylist forward. Once it has run "
-                "(check the safety_policy/policy_rules tables, or the webapp's policy "
-                "editor, for your seeded entries), delete the safety: block from this file "
-                "and edit the denylist/allowlist in the webapp from then on."
-            )
+        if "safety" in raw and reject_legacy_safety_key:
+            raise ConfigError(SAFETY_KEY_REJECTED_ERROR)
         mcp_servers_raw = raw.get("mcp", {}).get("servers", {}) or {}
         macros_raw = raw.get("macros", ()) or ()
         macros = tuple(MacroConfig.from_config(m) for m in macros_raw)
@@ -1193,10 +1198,49 @@ def _check_macros_do_not_collide(macros: tuple[MacroConfig, ...]) -> None:
             seen[key] = macro
 
 
-def load_config(path: str | os.PathLike) -> Config:
-    """Read `path`, expand its environment placeholders, and build a `Config`."""
+# The exact wording `Config.from_config` has always raised for a lingering
+# `safety:` key, lifted to module level so `app.py`'s `lifespan` can raise
+# the identical message from its own, database-aware check (CR-01 fix) --
+# an operator must see the same words regardless of which of the two call
+# sites caught the key still being present.
+SAFETY_KEY_REJECTED_ERROR = (
+    "safety: no longer exists in the configuration file -- the policy it used "
+    "to carry now lives in the database, seeded from this same file by the "
+    "first migration (alembic/versions/0001_policy_tables.py) the first time "
+    "this deployment started under Phase 3. If this is that first boot, do "
+    "not remove the block until the migration has run once against a reachable "
+    "database -- it is what carries your denylist forward. Once it has run "
+    "(check the safety_policy/policy_rules tables, or the webapp's policy "
+    "editor, for your seeded entries), delete the safety: block from this file "
+    "and edit the denylist/allowlist in the webapp from then on."
+)
+
+
+def load_raw_config(path: str | os.PathLike) -> dict:
+    """Read `path` and expand its environment placeholders, returning the
+    parsed YAML dict with no validation performed -- never raises
+    `ConfigError`, since nothing here checks a single key's shape.
+
+    `load_config` below is this function plus `Config.from_config`, split
+    apart for `app.py`'s `lifespan` (CR-01 fix): it needs the raw dict
+    early, to build a `DatabaseConfig` and run migrations, before it is
+    safe to decide whether a lingering `safety:` key should still be
+    rejected -- a decision `Config.from_config` alone cannot make without a
+    database connection it does not have.
+    """
     with open(path, encoding="utf-8") as fh:
         raw_text = fh.read()
     expanded_text = expand_env(raw_text)
-    raw = yaml.safe_load(expanded_text)
-    return Config.from_config(raw)
+    return yaml.safe_load(expanded_text) or {}
+
+
+def load_config(path: str | os.PathLike) -> Config:
+    """Read `path`, expand its environment placeholders, and build a `Config`.
+
+    Rejects a lingering `safety:` key unconditionally (`reject_legacy_safety_key`
+    defaults `True` on `Config.from_config`) -- every caller of this function
+    has no database state to consult, so this is the same unconditional
+    check this module has always run. `app.py`'s `lifespan` does not call
+    this function for that reason; see `Config.from_config`'s docstring.
+    """
+    return Config.from_config(load_raw_config(path))
