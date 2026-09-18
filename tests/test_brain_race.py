@@ -570,6 +570,148 @@ async def test_a_committed_top_tier_survives_a_confident_triage_reply_end_to_end
     assert tts.received_text == [top_answer]
 
 
+async def test_a_needs_clarification_triage_reply_ends_the_race_early():
+    """CMD-09, D-07: a triage tier asking which entity was meant ends the
+    race exactly the way a confident reply already does -- before the (here,
+    deliberately slow) top tier's own outcome ever lands.
+    """
+    import asyncio
+
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    top_reply = TierReply(answer="never reached", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+
+    async def _triage() -> TierReply:
+        return clarifying_reply
+
+    async def _top() -> TierReply:
+        await asyncio.sleep(10)
+        return top_reply  # pragma: no cover - cancelled before this returns
+
+    tasks = {0: asyncio.create_task(_triage()), 1: asyncio.create_task(_top())}
+    winner = await brain_race.race_tiers(tasks)
+
+    assert winner is clarifying_reply
+
+
+async def test_a_needs_clarification_reply_is_dropped_once_a_tool_call_has_been_dispatched():
+    """CR-01's already-acted guard applies to the new outcome through the
+    same predicate as the confident one: a real tool call cannot be
+    un-sent, so once one has been dispatched, only the tier that dispatched
+    it may describe what happened -- asking a question after an action
+    already ran is a second kind of lying about the house, not a safer
+    alternative to one.
+    """
+    import asyncio
+
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    commitment = brain_race.ToolCommitment(committed=True)
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    top_reply = TierReply(
+        answer="turned off the lamp", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+
+    async def _triage() -> TierReply:
+        return clarifying_reply
+
+    async def _top() -> TierReply:
+        await asyncio.sleep(0.01)
+        return top_reply
+
+    tasks = {0: asyncio.create_task(_triage()), 1: asyncio.create_task(_top())}
+    winner = await brain_race.race_tiers(tasks, commitment=commitment)
+
+    assert winner is top_reply
+
+
+async def test_needs_clarification_ties_still_break_by_ascending_tier_index():
+    """The same tie-break discipline the confident case already has, proven
+    for the new outcome: inside one `asyncio.wait` batch, ascending tier
+    index wins, never set iteration order."""
+    import asyncio
+
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    low_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    high_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("switch.example_fan", "switch.example_server_socket"),
+    )
+
+    async def _immediate(reply: TierReply) -> TierReply:
+        return reply
+
+    for _ in range(20):
+        tasks = {
+            0: asyncio.create_task(_immediate(low_reply)),
+            1: asyncio.create_task(_immediate(high_reply)),
+        }
+        winner = await brain_race.race_tiers(tasks)
+        assert winner is low_reply
+
+
+async def test_a_top_tiers_needs_clarification_reply_still_ends_the_race():
+    """The top tier's reply ends the race whichever way its flags read --
+    unchanged by this task, and worth pinning directly since a
+    `needs_clarification=True` top-tier reply is a new, reachable shape."""
+    import asyncio
+
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    top_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+
+    async def _slow_triage() -> TierReply:
+        await asyncio.sleep(10)
+        raise AssertionError("should have been cancelled")  # pragma: no cover
+
+    async def _top() -> TierReply:
+        return top_reply
+
+    tasks = {0: asyncio.create_task(_slow_triage()), 1: asyncio.create_task(_top())}
+    winner = await brain_race.race_tiers(tasks)
+
+    assert winner is top_reply
+
+
 async def test_run_turn_rejects_two_tiers_both_flagged_calls_tools(
     fake_audio_source, fake_stt, fake_tts, fake_envelope_client
 ):
