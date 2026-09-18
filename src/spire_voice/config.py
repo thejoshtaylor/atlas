@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import MISSING, dataclass, field, fields, replace
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -78,11 +79,22 @@ class ServerConfig:
     no silent default for a value the operator typed wrong -- an
     unrecognized transport raises at load, the same way
     `Policy.from_config` raises on an unknown mode.
+
+    `timezone` (D-01, phase 4) is the zoneinfo key `_state_message`
+    (`app.py`) reads the current time and date against, so a time question
+    is answered from the house's own zone rather than the container's. Unset
+    (`None`, the default) means the process's own local zone -- `app.py`'s
+    `lifespan` resolves that at startup and logs it by name, rather than
+    this class guessing one. A configured value that `zoneinfo` does not
+    recognize raises here, naming the key: a value that silently comes from
+    nowhere declared is how a house ends up told the wrong time with
+    nothing to point at.
     """
 
     bind_host: str = "127.0.0.1"
     port: int = 8080
     transport: str = "websocket"
+    timezone: str | None = None
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "ServerConfig":
@@ -90,10 +102,22 @@ class ServerConfig:
         transport = raw.get("transport", "websocket")
         if transport not in ("websocket", "webrtc"):
             raise ConfigError(f"unknown server transport: {transport!r}")
+        timezone_name = raw.get("timezone")
+        if timezone_name is not None:
+            try:
+                ZoneInfo(timezone_name)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ConfigError(
+                    f"server.timezone {timezone_name!r} is not a zoneinfo name "
+                    "zoneinfo recognizes -- use an IANA name such as "
+                    "'America/Los_Angeles', or remove the key to use the "
+                    "process's own local zone"
+                ) from exc
         return cls(
             bind_host=raw.get("bind_host", "127.0.0.1"),
             port=raw.get("port", 8080),
             transport=transport,
+            timezone=timezone_name,
         )
 
 

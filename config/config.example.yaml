@@ -47,6 +47,15 @@ server:
   # admin surface exposes this same key once the webapp exists to hold it.
   transport: websocket
 
+  # Phase 4 (D-01, CMD-03): the zone the assistant reads the current time
+  # and date from when answering a spoken time or date question. Unset (the
+  # default, and what this example ships) means the process's own local
+  # zone -- resolved at startup and logged by name, never guessed silently.
+  # Set to an IANA zoneinfo name (e.g. "America/Los_Angeles") to pin one
+  # explicitly regardless of the container's own zone; an unrecognized name
+  # stops startup, naming this key.
+  # timezone: "America/Los_Angeles"
+
 database:
   # Phase 3 (D-01): the database is authoritative for everything an operator
   # edits -- the safety policy, provider credentials, accounts and invites.
@@ -466,6 +475,30 @@ mcp:
       env:
         HA_URL: "${HA_URL}"
         HA_TOKEN: "${HA_TOKEN}"
+
+    weather:
+      # Phase 4 (D-02, D-13, CMD-04): a second, independent MCP child,
+      # spawned with its own environment and its own lock -- no Home
+      # Assistant URL, no token, no provider key. open-meteo needs no
+      # credential at all (D-02), which is why this is the cleanest
+      # possible demonstration of SAFE-09: the environment below carries
+      # only what this child needs to run and locate itself.
+      #
+      # A latitude/longitude pinpoints the physical house -- exactly the
+      # kind of detail this public repository never carries literally
+      # (see this file's own header). Both arrive through the same
+      # ${NAME} env-expansion every other secret in this file uses,
+      # resolved from a Secret in the real deployment. A missing or
+      # unparseable value stops this child from starting rather than
+      # serving a default location (spire_mcp.weather's own
+      # _read_coordinate) -- lifespan logs that failure by name and
+      # continues with the Home Assistant tools only (T-04-16): a house
+      # without a forecast is a better outcome than a house that will not
+      # boot because a public weather API was unreachable at startup.
+      args: ["-m", "spire_mcp.weather"]
+      env:
+        WEATHER_LATITUDE: "${WEATHER_LATITUDE}"
+        WEATHER_LONGITUDE: "${WEATHER_LONGITUDE}"
 
 debug:
   # One directory per interaction, holding the audio, every event with an

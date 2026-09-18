@@ -91,6 +91,22 @@ def test_unknown_transport_value_is_a_startup_error():
     assert defaults.transport == "websocket"
 
 
+def test_server_timezone_defaults_to_unset():
+    assert ServerConfig.from_config({}).timezone is None
+    assert ServerConfig.from_config({"transport": "websocket"}).timezone is None
+
+
+def test_server_timezone_accepts_a_real_zoneinfo_name():
+    config = ServerConfig.from_config({"timezone": "America/Los_Angeles"})
+    assert config.timezone == "America/Los_Angeles"
+
+
+def test_server_timezone_rejects_an_unrecognized_name():
+    with pytest.raises(ConfigError) as exc_info:
+        ServerConfig.from_config({"timezone": "Mars/Olympus_Mons"})
+    assert "server.timezone" in str(exc_info.value)
+
+
 def test_safety_key_still_present_is_a_startup_error_naming_it():
     """D-11: the policy `safety:` used to carry now lives in the database,
     seeded by the first migration -- a config file still carrying the key
@@ -380,6 +396,13 @@ def test_example_config_loads_end_to_end(monkeypatch):
         "HA_TOKEN",
     ):
         monkeypatch.setenv(name, "test-value")
+    # Plan 04-03: mcp.servers.weather's two placeholders -- a coordinate,
+    # not an arbitrary string, since spire_mcp.weather parses these as
+    # floats (never exercised by this test, which only loads Config, but
+    # a numeric-shaped value is the honest placeholder for what these
+    # actually carry).
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     # database.url must be a valid postgresql+asyncpg:// string --
     # DatabaseConfig.from_config validates the scheme eagerly, unlike the
     # plain passthrough values above.
@@ -435,6 +458,17 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # credentials, or database name.
     assert config.database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
     assert config.database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+
+    # Plan 04-03: the weather child's own server block loads with the two
+    # coordinate placeholders expanded, and carries no Home Assistant
+    # credential (SAFE-09) -- the example file and the parser drifting
+    # apart on this key is the failure this line prevents.
+    weather_server = config.mcp_servers["weather"]
+    assert weather_server.args == ("-m", "spire_mcp.weather")
+    assert weather_server.env == {"WEATHER_LATITUDE": "0.0", "WEATHER_LONGITUDE": "0.0"}
+    assert "HA_TOKEN" not in weather_server.env
+    assert "HA_URL" not in weather_server.env
+
     assert config.database.run_migrations_at_startup is True
     assert config.security.secret_key_env == "SPIRE_SECRET_KEY"
     assert config.security.access_token_ttl_s == 900

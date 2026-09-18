@@ -17,6 +17,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, WebSocket
@@ -49,7 +50,7 @@ from spire_voice.db.postgres import (
     PostgresSetupRepository,
 )
 from spire_voice.db.repository import CredentialRepository, SettingsRepository
-from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
+from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
@@ -83,6 +84,38 @@ MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
 # since `web/` lives at the repo root beside `src/`, not under it.
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
 
+# D-01 (phase 4): the zone `_state_message` reads the current time and date
+# against. `lifespan` sets this from `config.server.timezone`; `None` --
+# the default, and every module-load before `lifespan` has run a single
+# time -- means the process's own local zone, resolved fresh on every call
+# by `_current_moment()` below rather than baked in once at import time.
+_resolved_timezone: "ZoneInfo | None" = None
+
+
+def _current_moment() -> datetime:
+    """The instant `_state_message` describes, in `_resolved_timezone`.
+
+    `datetime.now()` with no argument returns a naive local-time value;
+    `.astimezone(tz)` treats a naive `self` as already being in the
+    system's own zone and converts it to an aware one in `tz` -- and when
+    `tz` is `None`, "convert to `tz`" means "attach the system's own zone",
+    per `datetime.astimezone`'s own documented behavior. That is exactly
+    why this one call handles both cases without a branch: `_resolved_timezone`
+    unset resolves to the process zone, and a configured `ZoneInfo`
+    resolves to that zone, through the same expression.
+    """
+    return datetime.now().astimezone(_resolved_timezone)
+
+
+def _resolved_timezone_name() -> str:
+    """The zone name `_state_message` speaks and `lifespan` logs at
+    startup -- the configured IANA key, or the system's own abbreviated
+    name (e.g. "UTC", "PST") when no `server.timezone` was set.
+    """
+    if _resolved_timezone is not None:
+        return str(_resolved_timezone)
+    return _current_moment().tzname() or "the local zone"
+
 
 def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
     """Byte-identical across every turn -- the cacheable prefix.
@@ -106,11 +139,24 @@ def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
 def _state_message(states: dict[str, str]) -> str:
     """Rebuilt every turn -- deliberately not part of the cached prefix.
 
-    An empty mapping still renders the header with no entity lines: that is
-    a message the model can read as "nothing is known," which is a
-    different claim than no message at all reaching it.
+    Carries the current local date, day of the week, time to the minute,
+    and resolved timezone (D-01, CMD-03) ahead of the entity states, read
+    fresh through `_current_moment()`/`_resolved_timezone_name()` on every
+    call -- two calls a minute apart describe two different minutes. This
+    is what lets a spoken time or date question be answered with no tool
+    call of its own: the answer is already in context before the model
+    speaks, and a `get_time` tool would fail CMD-03 by definition.
+
+    An empty `states` mapping still renders the header with no entity
+    lines: that is a message the model can read as "nothing is known,"
+    which is a different claim than no message at all reaching it.
     """
-    lines = ["Current state:"]
+    now = _current_moment()
+    lines = [
+        f"Current date: {now:%A, %B %d, %Y}",
+        f"Current time: {now:%H:%M} {_resolved_timezone_name()}",
+        "Current state:",
+    ]
     for entity_id, state in states.items():
         lines.append(f"- {entity_id}: {state}")
     return "\n".join(lines)
@@ -263,7 +309,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             app.state.stt,
             app.state.brain,
             app.state.tts,
-            app.state.tool_host,
+            app.state.tool_host_lookup,
             app.state.tools_schema,
             app.state.catalog_prompt,
             config.brain.max_tool_rounds,
@@ -380,6 +426,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     config = Config.from_config(raw_config, reject_legacy_safety_key=False)
     app.state.config = config
 
+    # D-01 (phase 4): resolve the zone `_state_message` reads the current
+    # time and date against, and log which one won, by name -- an
+    # unlogged, implicit container zone is how a house ends up told the
+    # wrong time with nothing to point at. `ServerConfig.from_config`
+    # already validated a configured name against `zoneinfo`, so this
+    # `ZoneInfo(...)` call cannot raise here.
+    global _resolved_timezone
+    if config.server.timezone:
+        _resolved_timezone = ZoneInfo(config.server.timezone)
+        logger.info("resolved timezone: %s (from server.timezone)", config.server.timezone)
+    else:
+        _resolved_timezone = None
+        logger.info(
+            "resolved timezone: %s (server.timezone not set; using the process's own zone)",
+            _resolved_timezone_name(),
+        )
+
     db_engine = build_engine(config.database)
     app.state.db_engine = db_engine
     repositories = _build_repositories(config, db_engine)
@@ -456,11 +519,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         safety_block=safety_block,
     )
     app.state.tool_host = tool_host
-    app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools)
     # Kept on app.state so plan 03-07's write routes can compare a would-be
     # new block against the one the running child was actually spawned
     # with, before deciding whether a respawn is needed.
     app.state.safety_block = safety_block
+
+    # D-13 (phase 4): a second, independent `McpToolHost` for the weather
+    # child, spawned only if `mcp.servers.weather` is configured, with an
+    # environment built literally from that block plus `PYTHONPATH` --
+    # nothing merged in from `ha_url`/`ha_token`/`safety_block` (SAFE-09:
+    # this child holds no Home Assistant credential and no provider key).
+    # `app.state.tool_host` stays pointed at the Home Assistant host,
+    # unchanged (T-04-13): the policy editor's respawn
+    # (`routes/policy.py`) and `_make_state_fetch` both read that
+    # attribute by name, and repointing it at a multi-host object would
+    # break both.
+    weather_tool_host: McpToolHost | None = None
+    weather_config = config.mcp_servers.get("weather")
+    if weather_config is not None:
+        candidate_weather_host = McpToolHost()
+        try:
+            await candidate_weather_host.start(
+                ha_url="",
+                ha_token="",
+                mcp_root=MCP_ROOT,
+                child_module="spire_mcp.weather",
+                env={**weather_config.env, "PYTHONPATH": str(MCP_ROOT)},
+            )
+        except Exception:
+            # T-04-16: a weather child that will not start must not take
+            # the whole application down with it -- the opposite posture
+            # from the Home Assistant child above, whose `start()` failure
+            # propagates uncaught. A house working without a forecast is a
+            # better outcome than a house that will not boot because a
+            # public weather API was unreachable at start. Logged by name;
+            # the lookup below carries just the Home Assistant host.
+            logger.exception(
+                "weather MCP child failed to start -- continuing with the "
+                "Home Assistant tools only"
+            )
+        else:
+            weather_tool_host = candidate_weather_host
+    app.state.weather_tool_host = weather_tool_host
+
+    # The lookup the turn controller actually calls through (all three
+    # `run_turn` call sites below pass this, never `app.state.tool_host`
+    # directly): one or two hosts, in a fixed order, so the model sees
+    # both children's tools and a call reaches whichever child advertised
+    # it. Built fresh from already-started hosts -- reads no
+    # configuration of its own (`McpToolHostLookup`'s own docstring).
+    lookup_hosts: list[McpToolHost] = [tool_host]
+    if weather_tool_host is not None:
+        lookup_hosts.append(weather_tool_host)
+    app.state.tool_host_lookup = McpToolHostLookup(lookup_hosts)
+    app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools) + (
+        mcp_tools_to_openai_tools(weather_tool_host.tools) if weather_tool_host is not None else []
+    )
 
     entities_result = await tool_host.call_tool("ha_list_entities", {})
     entities = _tool_result_json(entities_result)
@@ -632,6 +746,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()
+    if weather_tool_host is not None:
+        await weather_tool_host.aclose()
     await db_engine.dispose()
 
 
@@ -831,7 +947,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             app.state.stt,
             app.state.brain,
             app.state.tts,
-            app.state.tool_host,
+            app.state.tool_host_lookup,
             app.state.tools_schema,
             app.state.catalog_prompt,
             config.brain.max_tool_rounds,
@@ -893,7 +1009,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         websocket.app.state.stt,
         websocket.app.state.brain,
         websocket.app.state.tts,
-        websocket.app.state.tool_host,
+        websocket.app.state.tool_host_lookup,
         websocket.app.state.tools_schema,
         websocket.app.state.catalog_prompt,
         config.brain.max_tool_rounds,

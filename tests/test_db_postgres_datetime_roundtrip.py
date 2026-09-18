@@ -98,6 +98,10 @@ async def sessionmaker(monkeypatch):
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("HA_URL", "test-value")
     monkeypatch.setenv("HA_TOKEN", "test-value")
+    # Plan 04-03: config.example.yaml's mcp.servers.weather block adds two
+    # more ${...} placeholders this real-file load must expand too.
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     await _reset_schema(_TEST_DB_URL)
