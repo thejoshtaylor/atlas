@@ -11,6 +11,11 @@ const NAV_ITEMS = [
   { to: "/policy", label: "Safety policy", minimumRole: "operator" },
   { to: "/accounts", label: "Accounts", minimumRole: "admin" },
   { to: "/settings", label: "Settings", minimumRole: "admin" },
+  // The developer microphone page (plan 03-10, D-19) -- a genuine nav
+  // entry, not reachable by direct URL alone the way /calibration is
+  // (that page is a wizard step first; this one is a standalone
+  // diagnostic tool an operator navigates to on purpose).
+  { to: "/dev-mic", label: "Developer mic", minimumRole: "operator" },
 ] as const
 
 const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2 }
