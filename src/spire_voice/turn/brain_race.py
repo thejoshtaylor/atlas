@@ -168,27 +168,48 @@ async def run_top_tier(
     )
 
 
+def _triage_tier_wins(reply: TierReply) -> bool:
+    """The two ways a triage tier's own reply can end the race early.
+
+    A confident answer and a `needs_clarification` question are both
+    settled outcomes a triage tier can reach without ever touching a tool --
+    CMD-09/D-07 gives the second the identical early-exit treatment the
+    first already had, through this one predicate, so a third outcome added
+    later cannot be guarded here and forgotten at the (single) call site
+    below.
+    """
+    return reply.confident or reply.needs_clarification
+
+
 async def race_tiers(
     tasks_by_index: dict[int, "asyncio.Task[TierReply]"],
     commitment: ToolCommitment | None = None,
 ) -> TierReply:
-    """Resolve to the first confident reply, always breaking ties by index.
+    """Resolve to the first settled triage reply, always breaking ties by index.
 
-    Inside every `asyncio.wait` batch that contains more than one done task,
-    the tasks are inspected in ascending tier index -- never set iteration
-    order -- so the same two completions always produce the same winner.
-    The top tier's reply ends the race whichever way its `confident` flag
-    reads: there is nothing above it to escalate to. A triage tier that
-    raises is logged and dropped from the race; the top tier raising
-    propagates, because there is no fallback behind it.
+    A triage tier can win the race two ways: a confident answer, or (CMD-09,
+    D-07) a `needs_clarification` reply asking which entity was meant --
+    `_triage_tier_wins` above is the one predicate covering both, so this
+    function's win condition never needs to distinguish which outcome an
+    early triage reply carries. Inside every `asyncio.wait` batch that
+    contains more than one done task, the tasks are inspected in ascending
+    tier index -- never set iteration order -- so the same two completions
+    always produce the same winner. The top tier's reply ends the race
+    whichever way its flags read: there is nothing above it to escalate to.
+    A triage tier that raises is logged and dropped from the race; the top
+    tier raising propagates, because there is no fallback behind it.
 
-    CR-01: once `commitment.committed` is True -- the top tier has already
-    made a real, uncancellable tool call this turn -- a triage tier's
-    confident reply is dropped rather than ending the race. Continuing to
-    wait for the top tier's own outcome is the only choice that cannot
-    discard an already-executed side effect; `commitment=None` (the
-    default) preserves the exact prior behavior for any caller that races
-    tiers with no top-tier tool round at all.
+    CR-01, and now D-07 by the identical reasoning: once `commitment.committed`
+    is True -- the top tier has already made a real, uncancellable tool call
+    this turn -- a triage tier's early-win reply (confident or
+    `needs_clarification`) is dropped rather than ending the race. A real
+    tool call cannot be un-sent, so a clarifying question arriving after one
+    has already run would be a second kind of lying about the house, not a
+    safer alternative to one -- continuing to wait for the top tier's own
+    outcome is the only choice that cannot discard an already-executed side
+    effect. `commitment=None` (the default) preserves the exact prior
+    behavior for any caller that races tiers with no top-tier tool round at
+    all.
 
     When a winner is found, every still-pending task is cancelled and its
     unwind is awaited (`return_exceptions=True`) before this function
@@ -201,6 +222,20 @@ async def race_tiers(
     triage tier still pending at that moment was neither cancelled nor
     awaited, its underlying request left running detached from the turn
     that started it.
+
+    `needs_clarification` is exercised on the triage tier only, this
+    release. A top-tier reply still wins unconditionally at
+    `index == top_index`, unchanged by this function -- if the top tier's
+    own settled-conversation envelope call ever set `needs_clarification`
+    itself, that reply would win exactly like any other top-tier outcome,
+    with no special handling here. This is a known, accepted gap rather
+    than something this function closes: the top tier only reaches its
+    envelope call after its own tool round has already run (and may already
+    have dispatched real, uncancellable calls), so a clarification
+    discovered there arrives too late to be an honest "nothing happened
+    yet" question -- and this house's small, low-collision entity catalogue
+    makes that path unlikely enough that closing it now is not worth the
+    mechanism it would need.
     """
     top_index = max(tasks_by_index)
     task_index = {task: index for index, task in tasks_by_index.items()}
@@ -222,12 +257,12 @@ async def race_tiers(
                 if index == top_index:
                     winner = reply
                     break
-                if reply.confident:
+                if _triage_tier_wins(reply):
                     if commitment is not None and commitment.committed:
                         # The top tier already reached the tool host this
                         # turn -- its own outcome is the only one allowed to
-                        # end the race now (CR-01). Drop this reply and keep
-                        # waiting.
+                        # end the race now (CR-01, and D-07 by the identical
+                        # reasoning). Drop this reply and keep waiting.
                         continue
                     winner = reply
                     break
