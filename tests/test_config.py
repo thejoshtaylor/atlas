@@ -458,6 +458,17 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # credentials, or database name.
     assert config.database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
     assert config.database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+
+    # Plan 04-03: the weather child's own server block loads with the two
+    # coordinate placeholders expanded, and carries no Home Assistant
+    # credential (SAFE-09) -- the example file and the parser drifting
+    # apart on this key is the failure this line prevents.
+    weather_server = config.mcp_servers["weather"]
+    assert weather_server.args == ("-m", "spire_mcp.weather")
+    assert weather_server.env == {"WEATHER_LATITUDE": "0.0", "WEATHER_LONGITUDE": "0.0"}
+    assert "HA_TOKEN" not in weather_server.env
+    assert "HA_URL" not in weather_server.env
+
     assert config.database.run_migrations_at_startup is True
     assert config.security.secret_key_env == "SPIRE_SECRET_KEY"
     assert config.security.access_token_ttl_s == 900

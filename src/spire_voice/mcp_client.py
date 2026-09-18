@@ -28,7 +28,7 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -290,6 +290,71 @@ class McpToolHost:
 
     async def aclose(self) -> None:
         await self._stack.aclose()
+
+
+class UnknownToolError(Exception):
+    """Raised by `McpToolHostLookup.call_tool` when no host in the lookup
+    advertises the requested tool name.
+
+    Never picks the first host as a fallback: a misrouted call is the
+    failure mode that turns a weather question into a service call
+    (T-04-12), so an unrecognized name must stop the turn rather than
+    guess which child was meant.
+    """
+
+
+class AmbiguousToolError(Exception):
+    """Raised by `McpToolHostLookup.__init__` when two or more of the
+    hosts it was built over advertise the same tool name.
+
+    Raised at construction, not at call time: a name landing on the wrong
+    child by silent last-write-wins is exactly the misrouting T-04-12
+    names, and a construction-time raise is the earliest point this
+    lookup can refuse to be built ambiguous in the first place.
+    """
+
+
+class McpToolHostLookup:
+    """A name-to-host lookup over an explicit, ordered sequence of
+    already-started `McpToolHost` instances (D-13).
+
+    Exposes exactly one method, `call_tool(name, arguments)` -- the same
+    structural shape `turn/controller.py`'s `_ToolHost` Protocol already
+    expects from a single host, so every `run_turn` call site changes
+    only which object it passes, never how it calls it.
+
+    Reads no configuration: it takes `hosts` as a constructor argument and
+    builds its name-to-host map from each host's own `.tools` list
+    (populated by that host's own `start()`), never from a server-block
+    mapping parsed anywhere else in this codebase. Building a
+    configuration-driven router that spawns hosts of its own is Phase 6's
+    job, with Phase 6's information (04-CONTEXT.md D-13) -- this object
+    only ever routes among hosts it was handed, already running.
+    """
+
+    def __init__(self, hosts: "Sequence[Any]") -> None:
+        self._by_tool_name: dict[str, Any] = {}
+        claimed_by_index: dict[str, int] = {}
+        for index, host in enumerate(hosts):
+            for tool in host.tools:
+                if tool.name in self._by_tool_name:
+                    raise AmbiguousToolError(
+                        f"tool {tool.name!r} is advertised by more than one host in "
+                        f"this lookup (host {claimed_by_index[tool.name]} and host "
+                        f"{index}) -- a name two hosts both advertise cannot be "
+                        "routed unambiguously"
+                    )
+                self._by_tool_name[tool.name] = host
+                claimed_by_index[tool.name] = index
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        host = self._by_tool_name.get(name)
+        if host is None:
+            raise UnknownToolError(
+                f"no host in this lookup advertises tool {name!r} -- known tools: "
+                f"{sorted(self._by_tool_name)!r}"
+            )
+        return await host.call_tool(name, arguments)
 
 
 _MISSING = object()

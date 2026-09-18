@@ -378,7 +378,19 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 # config.example.yaml's ${...} placeholders load_config must expand -- these
 # tests drive main() against the real example config, so they need the same
 # fictional values tests/test_config.py's own end-to-end case sets.
-_CONFIG_ENV_VARS = ("XAI_API_KEY", "TAPO_USER", "TAPO_PASSWORD", "SPEAKER_ENSURE_URL", "HA_URL", "HA_TOKEN")
+_CONFIG_ENV_VARS = (
+    "XAI_API_KEY",
+    "TAPO_USER",
+    "TAPO_PASSWORD",
+    "SPEAKER_ENSURE_URL",
+    "HA_URL",
+    "HA_TOKEN",
+    # Plan 04-03: config.example.yaml's mcp.servers.weather block adds two
+    # more ${...} placeholders these tests must expand too, same reasoning
+    # as the six above.
+    "WEATHER_LATITUDE",
+    "WEATHER_LONGITUDE",
+)
 
 
 def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:

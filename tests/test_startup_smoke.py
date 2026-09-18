@@ -105,6 +105,14 @@ _EXPECTED_STATE_ATTRS = [
     "brain",
     "tts",
     "tool_host",
+    # Plan 04-03 (D-13): the lookup every `run_turn` call site actually
+    # passes -- always present (one host, or two), even when no
+    # `mcp.servers.weather` block is configured at all. `weather_tool_host`
+    # is deliberately NOT in this list: it is a legitimate `None` both
+    # when weather is unconfigured and when its child failed to start
+    # (T-04-16), so "present" cannot mean "non-None" for that one
+    # attribute the way it does for every other resource here.
+    "tool_host_lookup",
     "tools_schema",
     "catalog_prompt",
     "macros",
@@ -234,6 +242,109 @@ class _FakeToolHost:
 
     async def aclose(self) -> None:
         return None
+
+
+class _FakeWeatherToolHost:
+    """A second, distinctly-tooled twin of `_FakeToolHost` (D-13, plan
+    04-03): its `.tools` list carries a name no HA-shaped fake in this
+    file advertises, so `McpToolHostLookup`'s own ambiguous-name check
+    (T-04-12) has nothing to trip on when both the Home Assistant and
+    weather children in a test are built from fakes defined in this same
+    module.
+    """
+
+    def __init__(self) -> None:
+        self.tools = [
+            Tool(
+                name="weather_current",
+                description="Current outdoor weather.",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+        ]
+
+    async def start(self, **kwargs: object) -> None:
+        return None
+
+    async def call_tool(self, name: str, arguments: dict) -> object:
+        return SimpleNamespace(structuredContent={}, content=[])
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakeRaisingWeatherToolHost:
+    """A weather-shaped fake whose `start()` raises -- proving T-04-16:
+    a weather child that fails to start must not stop the whole
+    application, and the Home Assistant host must still be reachable
+    afterwards.
+    """
+
+    def __init__(self) -> None:
+        self.tools: list[Tool] = []
+
+    async def start(self, **kwargs: object) -> None:
+        raise RuntimeError("simulated weather child startup failure")
+
+    async def call_tool(self, name: str, arguments: dict) -> object:
+        raise AssertionError("call_tool must never be reached on a host that failed to start")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _make_two_host_fake_tool_host_factory():
+    """A callable, monkeypatched over `McpToolHost` itself, that hands out
+    an HA-shaped fake on its first call and a weather-shaped fake on
+    every call after -- matching `lifespan`'s own two `McpToolHost()`
+    call order (Home Assistant, then weather, D-13). A bare class cannot
+    do this: both calls construct with no arguments, so only call order
+    can tell them apart.
+    """
+    calls = {"count": 0}
+
+    def _factory(*args: object, **kwargs: object) -> object:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _FakeToolHost()
+        return _FakeWeatherToolHost()
+
+    return _factory
+
+
+def _make_failing_weather_tool_host_factory():
+    """Same call-order trick as `_make_two_host_fake_tool_host_factory`,
+    but the second (weather) host is the one whose `start()` raises."""
+    calls = {"count": 0}
+
+    def _factory(*args: object, **kwargs: object) -> object:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return _FakeToolHost()
+        return _FakeRaisingWeatherToolHost()
+
+    return _factory
+
+
+def _weather_mcp_servers_extra() -> dict:
+    """The `mcp.servers` block `_write_fake_config`'s own `extra` merges
+    in whole (it replaces the top-level `mcp` key outright, not a deep
+    merge) -- repeats the base fixture's `ha` block alongside a `weather`
+    one, matching `config.example.yaml`'s own two-child shape.
+    """
+    return {
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
+                },
+                "weather": {
+                    "args": ["-m", "spire_mcp.weather"],
+                    "env": {"WEATHER_LATITUDE": "0.0", "WEATHER_LONGITUDE": "0.0"},
+                },
+            },
+        },
+    }
 
 
 async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voice_id: str, sink: object) -> dict:
@@ -446,6 +557,84 @@ def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_appli
     with pytest.raises(RuntimeError, match="simulated migration failure"):
         with TestClient(app_module.app):
             pass
+
+
+def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_lookup(
+    tmp_path, monkeypatch
+):
+    """D-13, T-04-13: a second `McpToolHost` for weather, a small
+    name-to-host lookup over both, `app.state.tool_host` still the exact
+    Home Assistant host object, and the merged tool schema carrying both
+    children's tool names.
+    """
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config(tmp_path, extra=_weather_mcp_servers_extra())),
+    )
+    monkeypatch.setattr(app_module, "McpToolHost", _make_two_host_fake_tool_host_factory())
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app) as client:
+        response = client.get("/transport")
+        assert response.status_code == 200
+
+        ha_host = app_module.app.state.tool_host
+        weather_host = app_module.app.state.weather_tool_host
+        lookup = app_module.app.state.tool_host_lookup
+
+        assert weather_host is not None
+        assert lookup is not None
+        # T-04-13: the policy editor's respawn (routes/policy.py) and
+        # _make_state_fetch both read app.state.tool_host by name -- it
+        # must still be the exact object the Home Assistant child was
+        # started on, not the lookup and not the weather host.
+        assert app_module.app.state.tool_host is ha_host
+        assert app_module.app.state.tool_host is not lookup
+        assert app_module.app.state.tool_host is not weather_host
+
+        tool_names = {entry["function"]["name"] for entry in app_module.app.state.tools_schema}
+        assert "ha_list_entities" in tool_names
+        assert "weather_current" in tool_names
+
+
+def test_a_weather_child_that_fails_to_start_does_not_stop_the_boot(tmp_path, monkeypatch):
+    """T-04-16: a weather child that will not start must not take the
+    whole application down with it -- the opposite posture from the Home
+    Assistant child, whose `start()` failure does propagate. The
+    application still boots, with the Home Assistant tools reachable and
+    no weather host in the lookup.
+    """
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config(tmp_path, extra=_weather_mcp_servers_extra())),
+    )
+    monkeypatch.setattr(app_module, "McpToolHost", _make_failing_weather_tool_host_factory())
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app) as client:
+        response = client.get("/transport")
+        assert response.status_code == 200
+
+        assert app_module.app.state.weather_tool_host is None
+        assert app_module.app.state.tool_host_lookup is not None
+
+        tool_names = {entry["function"]["name"] for entry in app_module.app.state.tools_schema}
+        assert "ha_list_entities" in tool_names
+        assert "weather_current" not in tool_names
 
 
 def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypatch):

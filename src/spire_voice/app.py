@@ -50,7 +50,7 @@ from spire_voice.db.postgres import (
     PostgresSetupRepository,
 )
 from spire_voice.db.repository import CredentialRepository, SettingsRepository
-from spire_voice.mcp_client import McpToolHost, mcp_tools_to_openai_tools
+from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
@@ -309,7 +309,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             app.state.stt,
             app.state.brain,
             app.state.tts,
-            app.state.tool_host,
+            app.state.tool_host_lookup,
             app.state.tools_schema,
             app.state.catalog_prompt,
             config.brain.max_tool_rounds,
@@ -519,11 +519,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         safety_block=safety_block,
     )
     app.state.tool_host = tool_host
-    app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools)
     # Kept on app.state so plan 03-07's write routes can compare a would-be
     # new block against the one the running child was actually spawned
     # with, before deciding whether a respawn is needed.
     app.state.safety_block = safety_block
+
+    # D-13 (phase 4): a second, independent `McpToolHost` for the weather
+    # child, spawned only if `mcp.servers.weather` is configured, with an
+    # environment built literally from that block plus `PYTHONPATH` --
+    # nothing merged in from `ha_url`/`ha_token`/`safety_block` (SAFE-09:
+    # this child holds no Home Assistant credential and no provider key).
+    # `app.state.tool_host` stays pointed at the Home Assistant host,
+    # unchanged (T-04-13): the policy editor's respawn
+    # (`routes/policy.py`) and `_make_state_fetch` both read that
+    # attribute by name, and repointing it at a multi-host object would
+    # break both.
+    weather_tool_host: McpToolHost | None = None
+    weather_config = config.mcp_servers.get("weather")
+    if weather_config is not None:
+        candidate_weather_host = McpToolHost()
+        try:
+            await candidate_weather_host.start(
+                ha_url="",
+                ha_token="",
+                mcp_root=MCP_ROOT,
+                child_module="spire_mcp.weather",
+                env={**weather_config.env, "PYTHONPATH": str(MCP_ROOT)},
+            )
+        except Exception:
+            # T-04-16: a weather child that will not start must not take
+            # the whole application down with it -- the opposite posture
+            # from the Home Assistant child above, whose `start()` failure
+            # propagates uncaught. A house working without a forecast is a
+            # better outcome than a house that will not boot because a
+            # public weather API was unreachable at start. Logged by name;
+            # the lookup below carries just the Home Assistant host.
+            logger.exception(
+                "weather MCP child failed to start -- continuing with the "
+                "Home Assistant tools only"
+            )
+        else:
+            weather_tool_host = candidate_weather_host
+    app.state.weather_tool_host = weather_tool_host
+
+    # The lookup the turn controller actually calls through (all three
+    # `run_turn` call sites below pass this, never `app.state.tool_host`
+    # directly): one or two hosts, in a fixed order, so the model sees
+    # both children's tools and a call reaches whichever child advertised
+    # it. Built fresh from already-started hosts -- reads no
+    # configuration of its own (`McpToolHostLookup`'s own docstring).
+    lookup_hosts: list[McpToolHost] = [tool_host]
+    if weather_tool_host is not None:
+        lookup_hosts.append(weather_tool_host)
+    app.state.tool_host_lookup = McpToolHostLookup(lookup_hosts)
+    app.state.tools_schema = mcp_tools_to_openai_tools(tool_host.tools) + (
+        mcp_tools_to_openai_tools(weather_tool_host.tools) if weather_tool_host is not None else []
+    )
 
     entities_result = await tool_host.call_tool("ha_list_entities", {})
     entities = _tool_result_json(entities_result)
@@ -695,6 +746,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await speaker_http_client.aclose()
     await speaker_writer.close()
     await tool_host.aclose()
+    if weather_tool_host is not None:
+        await weather_tool_host.aclose()
     await db_engine.dispose()
 
 
@@ -894,7 +947,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             app.state.stt,
             app.state.brain,
             app.state.tts,
-            app.state.tool_host,
+            app.state.tool_host_lookup,
             app.state.tools_schema,
             app.state.catalog_prompt,
             config.brain.max_tool_rounds,
@@ -956,7 +1009,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         websocket.app.state.stt,
         websocket.app.state.brain,
         websocket.app.state.tts,
-        websocket.app.state.tool_host,
+        websocket.app.state.tool_host_lookup,
         websocket.app.state.tools_schema,
         websocket.app.state.catalog_prompt,
         config.brain.max_tool_rounds,
