@@ -12,6 +12,7 @@ import { AccountsRoute } from "@/routes/accounts/AccountsRoute"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
 import { DevMicRoute } from "@/routes/dev-mic/DevMicRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
+import { MacrosRoute } from "@/routes/macros/MacrosRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { AudioSourceStep } from "@/routes/wizard/AudioSourceStep"
@@ -58,6 +59,7 @@ function AppRoutes() {
           <Route index element={<HomeRoute />} />
           <Route element={<RequireRole minimum="operator" />}>
             <Route path="/policy" element={<PolicyRoute />} />
+            <Route path="/macros" element={<MacrosRoute />} />
             <Route path="/dev-mic" element={<DevMicRoute />} />
           </Route>
           <Route element={<RequireRole minimum="admin" />}>
