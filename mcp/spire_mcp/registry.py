@@ -18,11 +18,16 @@ docstring states its rules first:
    own house, before this module's expansion logic is trusted blind.
 
 2. This module gives the child a second protocol to Home Assistant, and
-   the child gains no new credential for it. It authenticates with the
-   same `HA_TOKEN` `ha.py` already holds, over a connection to the same
-   host `HA_URL` already names. Nothing here reads an environment variable
-   of its own, opens a database connection, or asks the parent process for
-   anything the child did not already have (SAFE-09).
+   the child still holds exactly one credential in total: `HA_TOKEN`.
+   `HaRegistryClient` authenticates with that same token `ha.py` already
+   holds, over a connection to the same host `HA_URL` already names.
+   Nothing here reads an environment variable of its own, opens a
+   database connection of any kind, or asks the parent process for
+   anything the child did not already have -- a plugin child scoped to
+   Home Assistant stays scoped to Home Assistant even once it speaks a
+   second protocol to it (SAFE-09). `tests/test_ha_tool.py`'s
+   hostile-parent-environment test proves this against a real spawned
+   child, not just this paragraph.
 
 `HaRegistryClient` is the only stateful thing in this module, and its
 state is exactly one cached `RegistrySnapshot` plus the time it was taken.
