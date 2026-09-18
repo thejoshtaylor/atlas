@@ -16,6 +16,10 @@ constraint. That constraint applies to a test fixture as much as to source.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import httpx
 import pytest
 
@@ -24,6 +28,8 @@ from spire_mcp.open_meteo import (
     UpstreamMalformedError,
     UpstreamUnreachableError,
 )
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _FAKE_LATITUDE = 0.0
 _FAKE_LONGITUDE = 0.0
@@ -291,3 +297,76 @@ def test_no_handler_body_references_a_module_level_client_name():
         source = inspect.getsource(getattr(weather, name))
         assert "_http_client" not in source
         assert "_open_meteo_client" not in source
+
+
+# ---------------------------------------------------------------------------
+# Task 3: the stdio server
+# ---------------------------------------------------------------------------
+
+
+def _spawn_weather_child(env_extra: dict[str, str]) -> subprocess.Popen:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": f"{REPO}/mcp",
+        **env_extra,
+    }
+    return subprocess.Popen(
+        [sys.executable, "-m", "spire_mcp.weather"],
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=f"{REPO}/mcp",
+        text=True,
+    )
+
+
+async def test_the_real_child_lists_exactly_the_two_weather_tools():
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "spire_mcp.weather"],
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONPATH": f"{REPO}/mcp",
+            "WEATHER_LATITUDE": "0.0",
+            "WEATHER_LONGITUDE": "0.0",
+        },
+        cwd=f"{REPO}/mcp",
+    )
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            listed = await session.list_tools()
+
+    names = sorted(tool.name for tool in listed.tools)
+    assert names == ["weather_current", "weather_forecast"]
+    for tool in listed.tools:
+        assert tool.description
+
+
+def test_a_child_started_with_no_coordinate_variables_refuses_to_start():
+    proc = _spawn_weather_child({})
+    try:
+        _, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, stderr = proc.communicate()
+        raise
+    assert proc.returncode != 0, "a child with no coordinates must not serve a default location"
+    assert "WEATHER_LATITUDE" in stderr or "WEATHER_LONGITUDE" in stderr
+
+
+def test_weather_module_imports_no_policy_and_holds_no_credential_shaped_name():
+    import re
+
+    weather_path = os.path.join(REPO, "mcp", "spire_mcp", "weather.py")
+    open_meteo_path = os.path.join(REPO, "mcp", "spire_mcp", "open_meteo.py")
+
+    for path in (weather_path, open_meteo_path):
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        assert not re.search(r"from spire_mcp\.safety|import safety|allow_call|allow_read", source)
+        assert not re.search(r"HA_TOKEN|HA_URL|XAI_API_KEY|api_key", source)
