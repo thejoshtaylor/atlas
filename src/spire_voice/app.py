@@ -687,10 +687,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     resolved_tts_key = await _resolve_and_log_credential(
         CredentialSlot.TTS, config, credential_repo
     )
-    resolved_ha_token = await _resolve_and_log_credential(
-        CredentialSlot.HOME_ASSISTANT, config, credential_repo
-    )
-
+    # WR-06 (code review): there is no fourth resolution here any more.
+    # The Home Assistant token lives in `plugin_config_values` (D-01) and
+    # is read by `PluginManager` at spawn and by the wizard's hub check;
+    # `resolved_ha_token` was assigned here and never used by anything,
+    # which is how the orphaned `ha_token` credential row went unnoticed.
     app.state.stt = XaiStt(replace(config.stt, api_key=resolved_stt_key))
     tier_brains = brain_race.build_tiers(replace(config.brain, api_key=resolved_brain_key))
     app.state.tier_brains = tier_brains

@@ -85,6 +85,13 @@ def _build_full_app(security, account_repo, policy_repo, credential_repo, tool_h
     # `setup_router`) now reads `setup_repo`/`settings_repo` too.
     app.state.setup_repo = conftest.FakeSetupRepository()
     app.state.settings_repo = conftest.FakeSettingsRepository()
+    # WR-06 (code review): the `ha_token` slot is stored as the Home
+    # Assistant plugin's own `HA_TOKEN` configuration value -- the one
+    # place anything reads that token from -- so the credentials routes
+    # read `plugin_repo` for that one slot. Seeded empty here: this file
+    # is about the three provider slots and the write-only property they
+    # all share.
+    app.state.plugin_repo = conftest.FakePluginRepository()
     app.state.tool_host = tool_host
     app.state.safety_block = None
     app.include_router(auth_router)
@@ -353,3 +360,92 @@ async def test_neither_source_is_unset(monkeypatch, fake_credential_repository):
     value, value_source = await resolve_credential_value(CredentialSlot.STT, config, repo)
     assert value == ""
     assert value_source == "unset"
+
+
+def test_the_home_assistant_token_is_written_where_the_assistant_reads_it(
+    monkeypatch, fake_account_repository, fake_policy_repository, fake_credential_repository
+):
+    """WR-06 (code review): plan 06-01 moved the Home Assistant token into
+    `plugin_config_values` (D-01) and left the `ha_token` credential slot
+    behind. `GET /api/credentials` still listed it, `PUT /api/credentials/
+    ha_token` still encrypted and stored a row, `resolve_credential_source`
+    still called it `database` once written -- and nothing anywhere read
+    that row again. An operator rotating the token on the settings screen,
+    or typing it into the setup wizard's own hub step (which posts to
+    exactly this route), saved it into a table no code consults and was
+    told a restart would apply it. No restart would.
+
+    The slot's storage is the Home Assistant plugin's own `HA_TOKEN`
+    configuration value now. This asserts the write lands where the
+    readers actually look: `routes/wizard.py`'s hub check reads it back
+    through its own `_ha_plugin_connection_info`, which is the same
+    decryption `PluginManager` performs when it spawns the child.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from spire_voice.routes.wizard import _ha_plugin_connection_info
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    now = datetime.now(timezone.utc)
+    ha = Plugin(
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio",
+        args=("-m", "spire_mcp.ha"), url=None, enabled=True, builtin=True,
+        enforces_policy=True, timeout_ms=5000, created_at=now, updated_at=now,
+        created_by_user_id=None,
+    )
+    plugin_repo = conftest.FakePluginRepository(
+        plugins=[ha],
+        config_values={
+            1: [
+                PluginConfigValue(
+                    key="HA_URL", secret=False, value="http://hub.invalid:8123",
+                    ciphertext=None, key_version=None,
+                )
+            ]
+        },
+    )
+
+    app = _build_full_app(security, account_repo, fake_policy_repository(), fake_credential_repository())
+    app.state.plugin_repo = plugin_repo
+    client = TestClient(app)
+
+    created = client.post(
+        "/api/auth/create-admin",
+        json={
+            "email": "admin@example.invalid",
+            "display_name": "The Admin",
+            "password": "a-plainly-fictional-test-password",
+        },
+    )
+    assert created.status_code == 201, created.text
+    client.cookies.set(
+        security.cookie_name,
+        issue_access_token(user_id=created.json()["id"], role="admin", security=security),
+    )
+
+    before = {entry["slot"]: entry for entry in client.get("/api/credentials").json()}
+    assert before["ha_token"]["is_set"] is False
+    assert before["ha_token"]["source"] == "unset"
+
+    written = client.put("/api/credentials/ha_token", json={"value": _REAL_SECRET_VALUE})
+    assert written.status_code == 200, written.text
+    assert _REAL_SECRET_VALUE not in written.text
+    assert written.json()["is_set"] is True
+    assert written.json()["source"] == "database"
+
+    # The one thing the old slot could not do: reach a reader.
+    base_url, token = asyncio.run(_ha_plugin_connection_info(plugin_repo, security))
+    assert base_url == "http://hub.invalid:8123", "the other configuration values survive the write"
+    assert token == _REAL_SECRET_VALUE
+
+    # Still write-only, and still encrypted at rest.
+    listing = client.get("/api/credentials")
+    assert _REAL_SECRET_VALUE not in listing.text
+    [stored] = [v for v in plugin_repo.config_values[1] if v.key == "HA_TOKEN"]
+    assert stored.secret is True
+    assert stored.value is None
+    assert _REAL_SECRET_VALUE.encode("utf-8") not in stored.ciphertext

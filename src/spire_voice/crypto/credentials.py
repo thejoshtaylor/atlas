@@ -167,10 +167,16 @@ def env_value_for_slot(slot: CredentialSlot, config: Config) -> str:
         # `PluginManager`'s own spawn path (D-03) and the wizard's hub
         # check (`routes/wizard.py::_ha_plugin_connection_info`), never
         # read back through `Config`. This slot therefore has no
-        # configuration-file source any more; `GET /api/credentials`
-        # reports it `"database"` when a provider credential row exists
-        # for it, `"unset"` otherwise -- `"environment"` is no longer
-        # reachable for this one slot.
+        # configuration-file source any more.
+        #
+        # WR-06 (code review): it has no `credentials` row either.
+        # `routes/credentials.py` answers this one slot from the Home
+        # Assistant plugin's own configuration value -- the one place
+        # anything reads that token from -- so this function is not
+        # reached for it at all. The branch stays because a caller
+        # enumerating `CredentialSlot` must never hit the `raise` below,
+        # and "" is the honest answer to "what did the environment
+        # produce for this slot": nothing.
         return ""
     raise ValueError(f"no environment source mapped for credential slot {slot!r}")
 

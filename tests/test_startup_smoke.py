@@ -1202,20 +1202,20 @@ def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeyp
             pass
 
     resolution_records = [r for r in caplog.records if "credential slot" in r.getMessage()]
-    assert len(resolution_records) == 4, (
+    # WR-06 (code review): three, not four. `lifespan` resolved a fourth
+    # slot (`ha_token`) into a local nothing ever read -- the Home
+    # Assistant token has lived in `plugin_config_values` since plan 06-01
+    # (D-01), and `routes/credentials.py` answers that slot from there.
+    assert len(resolution_records) == 3, (
         f"expected one resolution log line per slot, got {[r.getMessage() for r in resolution_records]!r}"
     )
     for record in resolution_records:
         message = record.getMessage()
-        # Plan 06-01: `CredentialSlot.HOME_ASSISTANT` has no
-        # configuration-file source left (`Config.mcp_servers` is
-        # retired) -- it resolves "unset" regardless of what this test's
-        # own config file carries, unlike the three AI-provider slots
-        # `_write_fake_config_with_credential` actually sets.
-        if "ha_token" in message:
-            assert "resolved from unset" in message
-        else:
-            assert "resolved from environment" in message
+        assert "ha_token" not in message, (
+            "the Home Assistant token is not a provider credential this boot "
+            "resolves -- it is plugin configuration (D-01, WR-06)"
+        )
+        assert "resolved from environment" in message
         assert secret_value not in message
 
     for record in caplog.records:

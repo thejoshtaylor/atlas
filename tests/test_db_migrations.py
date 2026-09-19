@@ -536,3 +536,120 @@ async def test_workflow_tables_upgrade_from_empty_with_index_and_constraint_and_
     )
     assert second_index_names == index_names
     assert second_constraint_names == constraint_names
+
+
+def _run_upgrade_to(revision: str) -> None:
+    """`_run_upgrade_head` above, stopped at a named revision -- what a
+    test needs to stand where a real deployment stood before the migration
+    under test existed."""
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    cfg = AlembicConfig("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", _migration_url(_TEST_DB_URL))
+    command.upgrade(cfg, revision)
+
+
+@skip_without_postgres
+async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_reads_it(
+    tmp_path: Path, monkeypatch
+):
+    """WR-06 (06-REVIEW.md), DEP-04 ("an upgrade keeps existing data"):
+    migration `0008` seeded `HA_TOKEN` purely from the configuration
+    file's own `mcp.servers.ha.env` block and never looked at the
+    `ha_token` credential row an operator may have saved in the browser --
+    so an operator who had rotated that token silently got the older,
+    file-sourced value back, and every later write through the credentials
+    screen went into a table nothing reads.
+
+    Migration `0009` carries the credential row across, in the direction
+    Phase 3's own resolution order already states (a value saved in the
+    database wins over one the configuration file's environment expansion
+    produced), and deletes it afterwards so one token has one home.
+    """
+    from spire_voice.config import SecurityConfig
+    from spire_voice.crypto.credentials import decrypt_credential, encrypt_credential
+
+    await _reset_schema(_TEST_DB_URL)
+
+    file_seeded_value = "a-plainly-fictional-token-from-the-config-file"
+    rotated_value = "a-plainly-fictional-token-the-operator-rotated-to"
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {"HA_URL": "http://ha.invalid:8123", "HA_TOKEN": file_seeded_value},
+                },
+            },
+        },
+        "database": {"url": _TEST_DB_URL},
+        "security": {},
+    }
+    config_path = tmp_path / "ha-token-carry-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    # Stand where a real deployment stood: plugins seeded from the file,
+    # and a token the operator rotated through the credentials screen.
+    _run_upgrade_to("0008")
+    ciphertext, key_version = encrypt_credential(rotated_value, SecurityConfig())
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO provider_credentials (slot, ciphertext, key_version, updated_at) "
+                    "VALUES ('ha_token', :ciphertext, :key_version, now())"
+                ),
+                {"ciphertext": ciphertext, "key_version": key_version},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            stored = (
+                await conn.execute(
+                    text(
+                        "SELECT v.secret, v.value, v.ciphertext, v.key_version "
+                        "FROM plugin_config_values v JOIN plugins p ON p.id = v.plugin_id "
+                        "WHERE p.slug = 'ha' AND v.key = 'HA_TOKEN'"
+                    )
+                )
+            ).fetchall()
+            remaining = (
+                await conn.execute(
+                    text("SELECT slot FROM provider_credentials WHERE slot = 'ha_token'")
+                )
+            ).fetchall()
+    finally:
+        await engine.dispose()
+
+    assert len(stored) == 1, "the carry must update the seeded row, never add a second one"
+    [row] = stored
+    assert row.secret is True
+    assert row.value is None
+    assert decrypt_credential(row.ciphertext, row.key_version, SecurityConfig()) == rotated_value, (
+        "the operator's rotated token must survive the upgrade -- the file-seeded "
+        "value silently winning is the WR-06 data loss"
+    )
+    assert remaining == [], "one token, one home: the credential row is not left behind"
+
+    # Idempotent, like every other migration in this file.
+    _run_upgrade_head()
