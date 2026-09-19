@@ -13,7 +13,11 @@ module never builds a second read path for one origin or the other.
 The conflict annotation on each `call_service` step is computed by
 `routes/conflict.py`'s shared `annotate_conflict`, the exact same module
 `routes/macros.py` reads from -- never a second, workflow-specific copy of
-the check (see that module's own docstring for the full reasoning).
+the check (see that module's own docstring for the full reasoning). Plan
+06-05 (D-12) reuses that same call for a `call_service` step's own bare
+tool name (always `ha_call_service`, `workflow/steps.py::
+_HA_CALL_SERVICE_TOOL`) becoming ambiguous -- a `wait`/`speak` step passes
+no `tool_name` at all, since neither kind ever calls a plugin's tool.
 
 `workflow.schedule.resolve_schedule` is the only place this module turns a
 caller's "Run at" string into an absolute instant -- this module performs
@@ -56,7 +60,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -71,9 +75,15 @@ from spire_voice.db.repository import (
     WorkflowStepSpec,
 )
 from spire_voice.providers.tts_cache import precache_all
-from spire_voice.routes.conflict import ConflictAnnotation, annotate_conflict, known_entity_ids, load_policy_or_none
+from spire_voice.routes.conflict import (
+    ConflictAnnotation,
+    annotate_conflict,
+    known_entity_ids,
+    load_policy_or_none,
+    tool_owners_for,
+)
 from spire_voice.workflow.schedule import ScheduleError, resolve_schedule
-from spire_voice.workflow.steps import _transition_refusal
+from spire_voice.workflow.steps import _HA_CALL_SERVICE_TOOL, _transition_refusal
 
 router = APIRouter(tags=["workflows"])
 
@@ -288,8 +298,14 @@ def _to_workflow_step_response(
     policy,
     known_entity_ids_snapshot: frozenset[str] | None,
     filler_cache: Mapping[str, bytes],
+    tool_owners: "Callable[[str], tuple[str, ...]]",
 ) -> WorkflowStepResponse:
     text = step.arguments.get("text") if step.kind == "speak" and isinstance(step.arguments, dict) else None
+    # Only a `call_service` step ever names a plugin's tool at all (always
+    # `_HA_CALL_SERVICE_TOOL`, `workflow/steps.py`'s own fixed constant) --
+    # `wait`/`speak` pass `tool_name=None`, which `annotate_conflict`
+    # treats exactly like a caller that predates plan 06-05.
+    tool_name = _HA_CALL_SERVICE_TOOL if step.kind == "call_service" else None
     return WorkflowStepResponse(
         id=step.id,
         position=step.position,
@@ -300,7 +316,13 @@ def _to_workflow_step_response(
         attempts=step.attempts,
         result_detail=step.result_detail,
         fired_at=step.fired_at,
-        conflict=annotate_conflict(step.arguments, policy, known_entity_ids_snapshot),
+        conflict=annotate_conflict(
+            step.arguments,
+            policy,
+            known_entity_ids_snapshot,
+            tool_name=tool_name,
+            tool_owners=tool_owners,
+        ),
         speak_cached=text is not None and text in filler_cache,
     )
 
@@ -310,6 +332,7 @@ def _to_workflow_run_response(
     policy,
     known_entity_ids_snapshot: frozenset[str] | None,
     filler_cache: Mapping[str, bytes],
+    tool_owners: "Callable[[str], tuple[str, ...]]",
     *,
     now: datetime,
     reply_synthesis_degraded: bool = False,
@@ -326,7 +349,7 @@ def _to_workflow_run_response(
         step_count=len(run.steps),
         late=_is_late(run, now),
         steps=[
-            _to_workflow_step_response(step, policy, known_entity_ids_snapshot, filler_cache)
+            _to_workflow_step_response(step, policy, known_entity_ids_snapshot, filler_cache, tool_owners)
             for step in run.steps
         ],
         reply_synthesis_degraded=reply_synthesis_degraded,
@@ -377,12 +400,14 @@ async def _finish_workflow_save(request: Request, run: WorkflowRun) -> WorkflowR
 
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
+    tool_owners = tool_owners_for(request)
     now = datetime.now(timezone.utc)
     return _to_workflow_run_response(
         run,
         policy,
         known,
         filler_cache,
+        tool_owners,
         now=now,
         reply_synthesis_degraded=degraded,
         reply_synthesis_message=message,
@@ -398,8 +423,11 @@ async def list_workflows(
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
     filler_cache = _get_filler_cache(request)
+    tool_owners = tool_owners_for(request)
     now = datetime.now(timezone.utc)
-    return [_to_workflow_run_response(run, policy, known, filler_cache, now=now) for run in runs]
+    return [
+        _to_workflow_run_response(run, policy, known, filler_cache, tool_owners, now=now) for run in runs
+    ]
 
 
 @router.get("/api/workflows/{run_id}")
@@ -413,8 +441,9 @@ async def get_workflow(
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
     filler_cache = _get_filler_cache(request)
+    tool_owners = tool_owners_for(request)
     now = datetime.now(timezone.utc)
-    return _to_workflow_run_response(run, policy, known, filler_cache, now=now)
+    return _to_workflow_run_response(run, policy, known, filler_cache, tool_owners, now=now)
 
 
 @router.post("/api/workflows", status_code=201)
@@ -499,4 +528,5 @@ async def cancel_workflow(
     policy = await load_policy_or_none(request)
     known = await known_entity_ids(request)
     filler_cache = _get_filler_cache(request)
-    return _to_workflow_run_response(updated, policy, known, filler_cache, now=now)
+    tool_owners = tool_owners_for(request)
+    return _to_workflow_run_response(updated, policy, known, filler_cache, tool_owners, now=now)

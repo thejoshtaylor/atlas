@@ -21,6 +21,18 @@ into "no conflict" -- an operator shipping a macro or a scheduled step on
 the strength of a badge that was actually a failed check is exactly the
 outcome this distinction exists to prevent.
 
+Plan 06-05 (D-12) reuses this exact value for a second, unrelated reason a
+check can be unresolvable: the action's or step's own bare tool name is no
+longer owned by exactly one plugin. `annotate_conflict` below checks this
+first, before it ever looks at `arguments` -- a tool name two plugins now
+publish is unresolvable regardless of what the call would have targeted,
+and this module adds no second annotator to say so (both editors already
+call this one, and both screens already render its `unknown` value).
+`tool_owners_for` reads the answer directly from the running
+`PluginManager` (`plugins/naming.py`'s own computed fact, plan 06-04) --
+never a second implementation of "how many plugins publish this bare
+name" in this route layer.
+
 This module never widens the check beyond what the shipped macro editor
 already did: it only annotates an action or a step shaped like a
 single-entity `ha_call_service` call (`domain`, `service`, and `entity_id`
@@ -41,13 +53,35 @@ run.
 from __future__ import annotations
 
 import json
-from typing import Literal, Mapping
+from typing import Callable, Literal, Mapping
 
 from fastapi import Request
 
 from spire_mcp.safety import Denied, Policy, allow_call, allow_read
 
 ConflictAnnotation = Literal["ok", "denied", "not_found", "unknown"]
+
+# What `tool_owners_for` falls back to when a request's app never wired a
+# `plugin_manager` (every route test file predating plan 06-05) -- answers
+# "no owners" for every bare name, which correctly folds into `ok`, not
+# `unknown`: a throwaway test app with no plugin manager at all is a
+# different situation from a real deployment's policy or catalog read
+# failing, and must not sound like one.
+def _no_owners(_bare_name: str) -> "tuple[str, ...]":
+    return ()
+
+
+def tool_owners_for(request: Request) -> "Callable[[str], tuple[str, ...]]":
+    """A callable bound to the running `PluginManager`'s own naming
+    pre-pass answer for how many plugins currently publish a given bare
+    tool name (`plugins/naming.py::NamingResult.owners_of_bare_name`,
+    plan 06-04, exposed as `PluginManager.owners_of_bare_name`) -- read
+    directly from the one place that fact is computed, per this module's
+    own "never a second implementation" rule."""
+    plugin_manager = getattr(request.app.state, "plugin_manager", None)
+    if plugin_manager is None:
+        return _no_owners
+    return plugin_manager.owners_of_bare_name
 
 
 def _tool_result_json(result: object) -> object:
@@ -125,12 +159,27 @@ def call_target(arguments: Mapping | None) -> tuple[str, str, str] | None:
 
 
 def annotate_conflict(
-    arguments: Mapping | None, policy: Policy | None, known_entity_ids: frozenset[str] | None
+    arguments: Mapping | None,
+    policy: Policy | None,
+    known_entity_ids: frozenset[str] | None,
+    *,
+    tool_name: str | None = None,
+    tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
 ) -> ConflictAnnotation:
     """Read-only: calls `allow_read`/`allow_call` exactly as the fire path
     does, but never performs the service call the action or step names.
     See the module docstring for why this must stay the one check, not a
-    second, per-caller one."""
+    second, per-caller one.
+
+    `tool_name`/`tool_owners` (plan 06-05, D-12) are both optional and
+    both default to `None` -- a caller that predates this plan (or a step
+    kind with no tool name of its own to check, like `wait`/`speak`) gets
+    byte-identical behavior, the entity-conflict check below unchanged.
+    When both are given, the ambiguity check runs first and short-circuits
+    the rest: a tool name two or more plugins now publish is unresolvable
+    regardless of what `arguments` would have targeted."""
+    if tool_name is not None and tool_owners is not None and len(tool_owners(tool_name)) > 1:
+        return "unknown"
     target = call_target(arguments)
     if target is None:
         return "ok"

@@ -48,7 +48,7 @@ from spire_voice.mcp_client import (
     mcp_tools_to_openai_tools,
 )
 from spire_voice.plugins.host import start_plugin_host
-from spire_voice.plugins.naming import PluginTool, PluginTools, rename_collisions
+from spire_voice.plugins.naming import NamingResult, PluginTool, PluginTools, rename_collisions
 
 logger = logging.getLogger("spire_voice.plugins.manager")
 
@@ -176,6 +176,17 @@ class PluginManager:
         # deployment with no colliding plugins gets a prompt
         # byte-identical to one with no ownership block at all.
         self.tool_ownership_prompt: str = ""
+        # Plan 06-05 (D-12): the naming pre-pass's own answer to "how many
+        # plugins currently publish this bare tool name", kept across
+        # `rebuild()` calls so `owners_of_bare_name` below always answers
+        # against the *current* plugin set -- never a second computation of
+        # the fact `plugins/naming.py` already owns (06-04-SUMMARY.md's own
+        # Next Phase Readiness note names this exact read as what plan
+        # 06-05 needs). `rename_collisions([])` here matches every other
+        # "nothing running yet" field above: every bare name has zero
+        # owners before the first `rebuild()` call, which is the correct,
+        # unambiguous answer, not a `None` a caller would need to guard.
+        self._naming_result: NamingResult = rename_collisions([])
 
     @property
     def hosts(self) -> list[Any]:
@@ -209,6 +220,18 @@ class PluginManager:
             if running.plugin.enforces_policy and running.host is not None:
                 return running.host
         return None
+
+    def owners_of_bare_name(self, bare_name: str) -> "tuple[str, ...]":
+        """Every plugin slug that currently publishes `bare_name`, per the
+        naming pre-pass's own answer (`plugins/naming.py::NamingResult.
+        owners_of_bare_name`, plan 06-04) -- delegated directly, never
+        recomputed here. A length of 2 or more is exactly what makes a
+        stored macro action's or workflow step's bare tool name ambiguous
+        (D-12, plan 06-05): `routes/conflict.py`'s shared annotator and
+        `turn/macros.py`/`workflow/steps.py`'s fire-time refusals both read
+        this, so the fact is computed in exactly one place regardless of
+        which of those three callers asks."""
+        return self._naming_result.owners_of_bare_name(bare_name)
 
     def tool_host_for(self, slug: str) -> McpToolHost | None:
         """The running host for `slug`, or `None` if it is not running
@@ -647,6 +670,12 @@ class PluginManager:
         self.tool_host_lookup = McpToolHostLookup(hosts)
         self.tools_schema = schema
         self.tool_ownership_prompt = naming_result.ownership_prompt
+        # Plan 06-05 (D-12): kept on the exact same swap as the three
+        # attributes above, for the identical reason `tool_ownership_prompt`
+        # already is -- `owners_of_bare_name` must never answer against a
+        # plugin set older than what `tool_host_lookup`/`tools_schema`
+        # already reflect.
+        self._naming_result = naming_result
 
     def _ping_interval_s(self, plugin: Plugin) -> float:
         """The ping watchdog's own poll interval for `plugin` -- well

@@ -21,7 +21,11 @@ so this module never writes a second, editor-specific copy of the check.
 read that failed is reported as "could not check," never silently folded
 into "no conflict" -- an operator shipping a macro on the strength of a
 badge that was actually a failed check is exactly the outcome this
-distinction exists to prevent.
+distinction exists to prevent. Plan 06-05 reuses this exact value for an
+action whose own `tool` is no longer owned by exactly one plugin
+(D-12) -- `annotate_conflict` itself decides this, from `action.tool` and
+the running `PluginManager`'s own naming answer, never a second check in
+this module.
 
 Every refusal the file-parsed `spire_voice.config.MacroConfig`/
 `MacroActionConfig` would make on a malformed macro, this module makes
@@ -57,7 +61,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -72,6 +76,7 @@ from spire_voice.routes.conflict import (
     annotate_conflict,
     known_entity_ids as _known_entity_ids,
     load_policy_or_none as _load_policy_or_none,
+    tool_owners_for as _tool_owners_for,
 )
 from spire_voice.turn.macros import normalize
 
@@ -267,6 +272,7 @@ def _to_macro_response(
     policy: Policy | None,
     known_entity_ids: frozenset[str] | None,
     filler_cache: Mapping[str, bytes],
+    tool_owners: "Callable[[str], tuple[str, ...]]",
     *,
     reply_synthesis_degraded: bool = False,
     reply_synthesis_message: str | None = None,
@@ -282,7 +288,13 @@ def _to_macro_response(
                 position=action.position,
                 tool=action.tool,
                 arguments=action.arguments,
-                conflict=annotate_conflict(action.arguments, policy, known_entity_ids),
+                conflict=annotate_conflict(
+                    action.arguments,
+                    policy,
+                    known_entity_ids,
+                    tool_name=action.tool,
+                    tool_owners=tool_owners,
+                ),
             )
             for action in macro.actions
         ],
@@ -304,7 +316,10 @@ async def list_macros(
     policy = await _load_policy_or_none(request)
     known_entity_ids = await _known_entity_ids(request)
     filler_cache = getattr(request.app.state, "filler_cache", None) or {}
-    return [_to_macro_response(macro, policy, known_entity_ids, filler_cache) for macro in macros]
+    tool_owners = _tool_owners_for(request)
+    return [
+        _to_macro_response(macro, policy, known_entity_ids, filler_cache, tool_owners) for macro in macros
+    ]
 
 
 @router.get("/api/macros/{macro_id}")
@@ -318,7 +333,8 @@ async def get_macro(
     policy = await _load_policy_or_none(request)
     known_entity_ids = await _known_entity_ids(request)
     filler_cache = getattr(request.app.state, "filler_cache", None) or {}
-    return _to_macro_response(macro, policy, known_entity_ids, filler_cache)
+    tool_owners = _tool_owners_for(request)
+    return _to_macro_response(macro, policy, known_entity_ids, filler_cache, tool_owners)
 
 
 async def _finish_save(request: Request, macro: Macro) -> MacroResponse:
@@ -371,11 +387,13 @@ async def _finish_save(request: Request, macro: Macro) -> MacroResponse:
 
     policy = await _load_policy_or_none(request)
     known_entity_ids = await _known_entity_ids(request)
+    tool_owners = _tool_owners_for(request)
     return _to_macro_response(
         macro,
         policy,
         known_entity_ids,
         filler_cache,
+        tool_owners,
         reply_synthesis_degraded=degraded,
         reply_synthesis_message=message,
     )

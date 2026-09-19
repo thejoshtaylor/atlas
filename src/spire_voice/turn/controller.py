@@ -278,6 +278,7 @@ async def run_turn(
     session_recorder: SessionRecorder | None = None,
     speech_lock: "asyncio.Lock | None" = None,
     workflow_tool_host: Any | None = None,
+    tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -353,6 +354,13 @@ async def run_turn(
     `spire_voice.app` import below. `None` (the default, and every caller
     that predates this fix) skips the call -- no behavior change for a
     caller with no workflow tool host to scope.
+
+    `tool_owners` (06-CONTEXT.md D-12, plan 06-05) is forwarded unchanged
+    to `fire_macro` on the macro path below -- this function has no
+    opinion of its own about plugin ownership, only a caller-supplied
+    answer to "how many plugins currently publish this bare tool name" it
+    passes through. `None` (the default, and every caller that predates
+    this plan) reproduces `fire_macro`'s own pre-existing behavior exactly.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -446,7 +454,7 @@ async def run_turn(
             # its result would have joined either.
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
-            outcome = await fire_macro(matched_macro, tool_host)
+            outcome = await fire_macro(matched_macro, tool_host, tool_owners=tool_owners)
             timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
             # A macro reply is an answer, not a holding phrase -- it is the one
             # utterance in this system that is both the answer and instant. On

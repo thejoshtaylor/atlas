@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Callable
 
 import pytest
 from mcp.types import Tool
@@ -37,6 +38,7 @@ from pydantic import ValidationError
 
 from spire_voice.config import MacroActionConfig, MacroConfig, WorkflowConfig
 from spire_voice.db.models import WorkflowStepRow
+from spire_voice.db.repository import WorkflowStepSpec
 from spire_voice.mcp_client import McpToolHostLookup, RenamedToolHostView
 from spire_voice.plugins.naming import PluginTool, PluginTools, rename_collisions
 from spire_voice.providers.base import FinalTranscript
@@ -189,3 +191,278 @@ async def test_an_ambiguous_capability_speaks_a_question_naming_both_plugins_and
     assert "Weather" in spoken
     assert "Garden Sensors" in spoken
     assert timings.turn_outcome == "needs_clarification"
+
+
+# --- Task 2: a stored row naming a now-ambiguous tool is flagged, never ---
+# --- rewritten, and refuses at fire time in both runners (D-12) ----------
+
+
+def _owners(*slugs: str) -> "Callable[[str], tuple[str, ...]]":
+    """A `tool_owners` callable that always answers `slugs`, standing in
+    for `PluginManager.owners_of_bare_name` -- every caller under test
+    here takes this exact shape, matching the real accessor's own
+    signature (`str -> tuple[str, ...]`)."""
+
+    def _fn(_bare_name: str) -> tuple[str, ...]:
+        return slugs
+
+    return _fn
+
+
+def test_annotate_conflict_is_ok_for_a_tool_only_one_plugin_publishes():
+    """Unchanged from before this plan: a tool name with exactly one
+    owner is not ambiguous, and the entity-conflict check runs exactly as
+    it always has (here: no target in `arguments` at all, so `ok`)."""
+    annotation = annotate_conflict({}, None, None, tool_name="forecast", tool_owners=_owners("weather"))
+    assert annotation == "ok"
+
+
+def test_annotate_conflict_is_unknown_for_a_tool_two_plugins_now_publish():
+    annotation = annotate_conflict(
+        {}, None, None, tool_name="forecast", tool_owners=_owners("weather", "garden")
+    )
+    assert annotation == "unknown"
+
+
+def test_annotate_conflict_with_no_tool_owners_given_is_unaffected():
+    """A caller that predates this plan (`tool_name`/`tool_owners` both
+    omitted) reaches the pre-existing entity-conflict logic unchanged --
+    here, no target in `arguments`, so `ok`."""
+    assert annotate_conflict({}, None, None) == "ok"
+
+
+async def test_fire_macro_refuses_an_ambiguous_action_and_calls_no_tool_host():
+    class _RecordingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name: str, arguments: dict):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    macro = MacroConfig(
+        phrase="what's the forecast",
+        aliases=(),
+        reply="here you go",
+        actions=(MacroActionConfig(tool="forecast", arguments={}),),
+    )
+    tool_host = _RecordingToolHost()
+
+    outcome = await fire_macro(macro, tool_host, tool_owners=_owners("weather", "garden"))
+
+    assert outcome.succeeded is False
+    assert "forecast" in outcome.text
+    assert tool_host.calls == []
+
+
+async def test_fire_macro_with_no_ambiguity_still_calls_the_tool_host():
+    class _RecordingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name: str, arguments: dict):
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    macro = MacroConfig(
+        phrase="what's the forecast",
+        aliases=(),
+        reply="here you go",
+        actions=(MacroActionConfig(tool="forecast", arguments={}),),
+    )
+    tool_host = _RecordingToolHost()
+
+    outcome = await fire_macro(macro, tool_host, tool_owners=_owners("weather"))
+
+    assert outcome.succeeded is True
+    assert tool_host.calls == [("forecast", {})]
+
+
+def _make_call_service_step(arguments: dict) -> WorkflowStepRow:
+    return WorkflowStepRow(
+        id=1,
+        run_id=1,
+        position=0,
+        kind="call_service",
+        arguments=arguments,
+        due_at=datetime(2026, 1, 1, 12, 0, 0),
+        status="pending",
+        attempts=0,
+        result_detail=None,
+        fired_at=None,
+    )
+
+
+class _RecordingWorkflowToolHost:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        return SimpleNamespace(is_error=False, content=[], name=name)
+
+
+async def test_execute_step_refuses_an_ambiguous_call_service_step_and_calls_no_tool_host():
+    step = _make_call_service_step({"domain": "climate", "service": "set_temperature"})
+    tool_host = _RecordingWorkflowToolHost()
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    outcome = await execute_step(
+        step,
+        tool_host,
+        WorkflowConfig(),
+        now,
+        tool_owners=_owners("ha", "another_ha_lookalike"),
+    )
+
+    assert outcome.status == "denied"
+    assert outcome.retry is False
+    assert _HA_CALL_SERVICE_TOOL in (outcome.speech or "")
+    assert tool_host.calls == []
+
+
+async def test_execute_step_with_no_ambiguity_still_reaches_the_tool_host():
+    step = _make_call_service_step({"domain": "climate", "service": "set_temperature"})
+    tool_host = _RecordingWorkflowToolHost()
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    outcome = await execute_step(
+        step,
+        tool_host,
+        WorkflowConfig(),
+        now,
+        tool_owners=_owners("ha"),
+    )
+
+    assert outcome.status == "completed"
+    assert tool_host.calls == [(_HA_CALL_SERVICE_TOOL, {"domain": "climate", "service": "set_temperature"})]
+
+
+async def test_a_wait_step_is_unaffected_by_tool_owners_since_it_calls_no_tool():
+    step = WorkflowStepRow(
+        id=1,
+        run_id=1,
+        position=0,
+        kind="wait",
+        arguments={},
+        due_at=datetime(2026, 1, 1, 12, 0, 0),
+        status="pending",
+        attempts=0,
+        result_detail=None,
+        fired_at=None,
+    )
+    tool_host = _RecordingWorkflowToolHost()
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    outcome = await execute_step(
+        step, tool_host, WorkflowConfig(), now, tool_owners=_owners("ha", "another_ha_lookalike")
+    )
+
+    assert outcome.status == "completed"
+    assert tool_host.calls == []
+
+
+async def test_installing_a_colliding_plugin_writes_nothing_to_macro_or_workflow_storage(
+    fake_plugin_repository, fake_macro_repository, fake_workflow_repository
+):
+    """D-12's own must_have, pinned directly: `PluginManager` never takes
+    a `MacroRepository` or a `WorkflowRepository` as a constructor
+    argument at all, so a collision discovered by `rebuild()` -- driven
+    here exactly the way `tests/test_plugin_manager.py`'s own two-plugin
+    collision tests drive it, with no real subprocess -- cannot write to
+    either repository. This test proves it empirically: a macro action and
+    a workflow step naming the bare tool name that becomes contested are
+    read back byte-identical after the collision is introduced."""
+    from mcp.types import Tool
+
+    from spire_voice.config import SecurityConfig
+    from spire_voice.db.repository import Plugin
+    from spire_voice.plugins.manager import PluginManager, PluginState, RunningPlugin
+
+    async def _no_policy():
+        return None
+
+    class _FakeHost:
+        def __init__(self, tool_specs: "list[tuple[str, str]]") -> None:
+            self.tools = [
+                Tool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
+                for name, description in tool_specs
+            ]
+
+        async def call_tool(self, name: str, arguments: dict):
+            return SimpleNamespace(is_error=False, content=[], name=name)
+
+    now = datetime.now(timezone.utc)
+    ha_plugin = Plugin(
+        id=1,
+        slug="ha",
+        display_name="ha",
+        transport="stdio",
+        args=("-m", "spire_mcp.ha"),
+        url=None,
+        enabled=True,
+        builtin=True,
+        enforces_policy=False,
+        timeout_ms=5000,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+    )
+    other_plugin = Plugin(
+        id=2,
+        slug="lookalike",
+        display_name="lookalike",
+        transport="stdio",
+        args=("-m", "spire_mcp.weather"),
+        url=None,
+        enabled=True,
+        builtin=False,
+        enforces_policy=False,
+        timeout_ms=5000,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+    )
+
+    manager = PluginManager(
+        fake_plugin_repository(plugins=[]),
+        mcp_root=".",
+        security=SecurityConfig(),
+        safety_block_provider=_no_policy,
+    )
+    manager._plugins[1] = RunningPlugin(
+        plugin=ha_plugin, host=_FakeHost([("ha_call_service", "call an HA service")]), state=PluginState.RUNNING
+    )
+    manager.rebuild()
+    assert manager.owners_of_bare_name("ha_call_service") == ("ha",)
+
+    macro_repo = fake_macro_repository(
+        macros=[("good night", (), "good night", [("ha_call_service", {"domain": "light"})])]
+    )
+    workflow_repo = fake_workflow_repository()
+    run = await workflow_repo.create_run(
+        origin="webapp",
+        summary="turn off the lights",
+        steps=[WorkflowStepSpec(kind="call_service", arguments={"domain": "light"})],
+        base_time=now,
+        created_by_user_id=None,
+    )
+    before_macro_tools = [action.tool for macro in await macro_repo.list_macros() for action in macro.actions]
+    before_step_kinds = [(s.kind, dict(s.arguments)) for s in (await workflow_repo.get_run(run.id)).steps]
+
+    # A second plugin now also publishes `ha_call_service` -- the
+    # collision `owners_of_bare_name` must report, with no write to
+    # either repository as a side effect of discovering it.
+    manager._plugins[2] = RunningPlugin(
+        plugin=other_plugin,
+        host=_FakeHost([("ha_call_service", "a lookalike service")]),
+        state=PluginState.RUNNING,
+    )
+    manager.rebuild()
+    assert len(manager.owners_of_bare_name("ha_call_service")) == 2
+
+    after_macro_tools = [action.tool for macro in await macro_repo.list_macros() for action in macro.actions]
+    after_step_kinds = [(s.kind, dict(s.arguments)) for s in (await workflow_repo.get_run(run.id)).steps]
+
+    assert after_macro_tools == before_macro_tools == ["ha_call_service"]
+    assert after_step_kinds == before_step_kinds == [("call_service", {"domain": "light"})]

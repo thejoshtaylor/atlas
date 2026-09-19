@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 if TYPE_CHECKING:
     # Annotation-only: `spire_voice.config` imports `normalize` from this
@@ -126,7 +126,26 @@ class MacroOutcome:
     cacheable: bool
 
 
-async def fire_macro(macro: "MacroConfig", tool_host: _ToolHost) -> MacroOutcome:
+def _ambiguous_tool_refusal(tool_name: str) -> str:
+    """The fixed refusal spoken when `tool_name` is now published by more
+    than one plugin (06-CONTEXT.md D-12): the boundary refuses rather than
+    guessing which plugin's version to call, and reaches neither. Shaped
+    exactly like a boundary refusal's own text -- CMD-08's "the boundary's
+    own words, verbatim" applies here too, even though this reason is
+    composed by this module rather than read off a `Denied`, since the
+    caller (`turn/controller.py`) speaks `MacroOutcome.text` unchanged
+    either way."""
+    return (
+        f"{tool_name} is now offered by more than one plugin, so i won't guess which one to use"
+    )
+
+
+async def fire_macro(
+    macro: "MacroConfig",
+    tool_host: _ToolHost,
+    *,
+    tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
+) -> MacroOutcome:
     """Run `macro.actions` one at a time, in written order, through `tool_host`.
 
     Every action reaches `tool_host.call_tool` -- the exact entry a
@@ -135,6 +154,15 @@ async def fire_macro(macro: "MacroConfig", tool_host: _ToolHost) -> MacroOutcome
     the boundary: there is no second, macro-specific path to Home Assistant,
     and no config-load validation this function trusts instead of re-asking
     the boundary at fire time.
+
+    `tool_owners` (06-CONTEXT.md D-12, plan 06-05) is checked before
+    `tool_host.call_tool` is ever awaited for that action: when `action.tool`
+    is now published by more than one plugin, this stops right there with a
+    refusal naming the ambiguity, and the call never reaches `tool_host` at
+    all -- reaching one of the two plugins that now publish the name would
+    be exactly the silent misrouting a deterministic priority order was
+    rejected for (06-CONTEXT.md D-11). `tool_owners=None` (every caller that
+    predates this plan) skips the check entirely, byte-identical behavior.
 
     On the first error-shaped result, this stops -- the remaining actions
     never run -- and returns the boundary's own text unmodified as the
@@ -162,6 +190,10 @@ async def fire_macro(macro: "MacroConfig", tool_host: _ToolHost) -> MacroOutcome
     from spire_voice.turn.controller import _is_error, _result_text
 
     for action in macro.actions:
+        if tool_owners is not None and len(tool_owners(action.tool)) > 1:
+            return MacroOutcome(
+                succeeded=False, text=_ambiguous_tool_refusal(action.tool), cacheable=False
+            )
         result = await tool_host.call_tool(action.tool, action.arguments)
         if _is_error(result):
             return MacroOutcome(succeeded=False, text=_result_text(result), cacheable=False)

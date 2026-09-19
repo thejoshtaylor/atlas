@@ -118,6 +118,20 @@ def _transition_refusal(arguments: dict[str, Any]) -> str | None:
 _HA_CALL_SERVICE_TOOL = "ha_call_service"
 
 
+def _ambiguous_tool_refusal(tool_name: str) -> str:
+    """The fixed refusal spoken when `tool_name` is now published by more
+    than one plugin (06-CONTEXT.md D-12) -- the mirror of
+    `turn/macros.py::_ambiguous_tool_refusal` for the workflow side.
+    Duplicated locally rather than imported: this module has no other
+    dependency on `turn.macros`, and the two runners' refusal texts are
+    each free to read naturally for their own caller without coupling one
+    module's wording to the other's."""
+    return (
+        f"{tool_name} is now offered by more than one plugin, so this step won't guess "
+        "which one to use"
+    )
+
+
 def _is_policy_refusal(tool_name: str, text: str) -> bool:
     """Distinguishes a deliberate `Denied` refusal from any other
     MCP-level tool failure, using the one signal the installed MCP SDK's
@@ -179,7 +193,12 @@ def _recovered_call_service_outcome() -> StepOutcome:
     )
 
 
-async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> StepOutcome:
+async def _execute_call_service(
+    step: WorkflowStepRow,
+    tool_host: _ToolHost,
+    *,
+    tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
+) -> StepOutcome:
     """Calls `ha_call_service` through `tool_host` -- the same tool the
     live turn path calls, via the same `McpToolHostLookup` (D-13). An
     error-shaped result whose text carries more than the SDK's own
@@ -194,9 +213,21 @@ async def _execute_call_service(step: WorkflowStepRow, tool_host: _ToolHost) -> 
     `_transition_refusal` runs first, before `tool_host.call_tool` is ever
     awaited: a step that will only ever be refused at the far end of a
     process boundary is refused here instead, with no request made at all
-    (FLOW-03's second layer)."""
+    (FLOW-03's second layer). `tool_owners` (06-CONTEXT.md D-12, plan
+    06-05) runs immediately after: when `_HA_CALL_SERVICE_TOOL` is now
+    published by more than one plugin, this step refuses the same way,
+    before `tool_host.call_tool` is ever awaited -- reaching one of the
+    two plugins that now publish the name would be exactly the silent
+    misrouting a deterministic priority order was rejected for
+    (06-CONTEXT.md D-11). `tool_owners=None` (every caller that predates
+    this plan) skips the check, byte-identical behavior."""
     refusal = _transition_refusal(step.arguments)
     if refusal is not None:
+        return StepOutcome(
+            status="denied", detail={"reason": refusal}, speech=refusal, retry=False
+        )
+    if tool_owners is not None and len(tool_owners(_HA_CALL_SERVICE_TOOL)) > 1:
+        refusal = _ambiguous_tool_refusal(_HA_CALL_SERVICE_TOOL)
         return StepOutcome(
             status="denied", detail={"reason": refusal}, speech=refusal, retry=False
         )
@@ -301,6 +332,7 @@ async def execute_step(
     now: datetime,
     *,
     speak: "_Speak | None" = None,
+    tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
 ) -> StepOutcome:
     """Dispatches on `step.kind`, a closed set of exactly three (D-05),
     then applies the two things that are not any single kind's own job:
@@ -336,13 +368,20 @@ async def execute_step(
     call_tool` -- see `_recovered_call_service_outcome`. `wait` and
     `speak` are unaffected: re-running either is safe (T-05-01 only ever
     named `call_service`'s own repetition as the double-execution risk).
+
+    `tool_owners` (06-CONTEXT.md D-12, plan 06-05) is forwarded unchanged
+    to `_execute_call_service` -- this function has no opinion of its own
+    about plugin ownership, only a caller-supplied answer it passes
+    through. `None` (the default, and every caller that predates this
+    plan) reproduces `_execute_call_service`'s own pre-existing behavior
+    exactly.
     """
     recovered = getattr(step, "recovered", False)
     if step.kind == "call_service":
         outcome = (
             _recovered_call_service_outcome()
             if recovered
-            else await _execute_call_service(step, tool_host)
+            else await _execute_call_service(step, tool_host, tool_owners=tool_owners)
         )
     elif step.kind == "wait":
         outcome = await _execute_wait()

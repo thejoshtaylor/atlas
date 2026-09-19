@@ -484,6 +484,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             session_recorder=session_recorder,
             speech_lock=app.state.speaker_lock,
             workflow_tool_host=app.state.workflow_tool_host,
+            tool_owners=app.state.plugin_manager.owners_of_bare_name,
         )
 
     return _run
@@ -986,7 +987,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # execute_step(step, ..., now)` shape is the one this closure follows.
     async def _workflow_executor(step: Any, now: datetime) -> Any:
         return await execute_step(
-            step, app.state.tool_host_lookup, config.workflow, now, speak=_scheduled_speak
+            step,
+            app.state.tool_host_lookup,
+            config.workflow,
+            now,
+            speak=_scheduled_speak,
+            tool_owners=app.state.plugin_manager.owners_of_bare_name,
         )
 
     workflow_scheduler = WorkflowScheduler(workflow_repo, _workflow_executor, config.workflow)
@@ -1252,6 +1258,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=SessionRecorder(config.session, timings),
             workflow_tool_host=app.state.workflow_tool_host,
+            tool_owners=app.state.plugin_manager.owners_of_bare_name,
         )
     )
     app.state.background_turns.add(task)
@@ -1326,6 +1333,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         pending_runs_fetch=_make_pending_runs_fetch(websocket.app.state.workflow_repo),
         session_recorder=SessionRecorder(config.session, timings),
         workflow_tool_host=websocket.app.state.workflow_tool_host,
+        tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
     )
 
 
