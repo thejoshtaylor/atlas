@@ -1246,27 +1246,17 @@ async def _reset_policy_schema(async_url: str) -> None:
     """
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
-        for table in (
-            # Plan 05-01: migration 0006 adds these two -- workflow_steps
-            # first, it holds the foreign key onto workflow_runs.
-            "workflow_steps",
-            "workflow_runs",
-            "macro_actions",
-            "macro_aliases",
-            "macros",
-            "settings",
-            "setup_steps",
-            "setup_state",
-            "provider_credentials",
-            "refresh_tokens",
-            "invites",
-            "users",
-            "policy_rules",
-            "safety_policy",
-            "audit_log",
-            "alembic_version",
-        ):
-            await conn.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+        # Phase 6 (plan 06-01 follow-up): drop the whole schema, never a
+        # hand-maintained table list. Migration 0008 added `plugins` and
+        # `plugin_config_values`, and not one of the nine copies of this
+        # helper knew about them -- so a reset dropped `alembic_version` but
+        # left those two tables standing, and the very next `upgrade head`
+        # died on `DuplicateTable: relation "plugins" already exists`. Every
+        # Postgres-backed test after the first one failed that way. A list
+        # that has to be edited in nine files each time a migration lands is
+        # itself the defect; a schema drop cannot drift out of date.
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
     await engine.dispose()
 
 
