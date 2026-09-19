@@ -672,6 +672,14 @@ class FakePluginRepository:
         self.plugins[plugin_id] = updated
         return updated
 
+    async def set_timeout_ms(self, plugin_id: int, timeout_ms: int) -> Plugin:
+        existing = self.plugins.get(plugin_id)
+        if existing is None:
+            raise ValueError(f"plugin {plugin_id} does not exist")
+        updated = replace(existing, timeout_ms=timeout_ms, updated_at=datetime.now(timezone.utc))
+        self.plugins[plugin_id] = updated
+        return updated
+
     async def set_config_values(
         self, plugin_id: int, values: Sequence[PluginConfigValue]
     ) -> list[PluginConfigValue]:

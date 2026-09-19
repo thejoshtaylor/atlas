@@ -16,8 +16,9 @@ recorded as one of the small closed set of states in `PluginState` below
 following plan) cannot be spelled two ways.
 
 Every plugin's environment is built literally -- the declared config
-values (a secret one decrypted at this single point, D-03), `PYTHONPATH`
-pointing at the repository's `mcp` directory, and the serialized safety
+values (a secret one decrypted here -- one of the three server-side points
+D-03 names, IN-04), `PYTHONPATH` pointing at the repository's `mcp`
+directory, and the serialized safety
 block for the row `enforces_policy` names -- and started through
 `plugins.host.start_plugin_host` (never a second spawn path, D-04, Pitfall
 2). `rebuild()` builds a new tools list and a new `McpToolHostLookup` and
@@ -756,8 +757,9 @@ class PluginManager:
 
     async def _remote_bearer_token(self, plugin: Plugin) -> "str | None":
         """`plugin`'s own secret config value, decrypted at exactly this
-        point (D-03) -- building the connection, the same single point
-        `_build_env` decrypts one for the stdio side -- and nowhere else;
+        point (D-03) -- building the connection, one of the three
+        server-side points D-03 names (IN-04), beside `_build_env`'s own
+        for the stdio side and the wizard's hub check -- and nowhere else;
         `start_plugin_host` never sees ciphertext, only this already-
         decrypted value. A remote plugin declares at most one secret
         config value (D-16's plain key/value shape, no OAuth flow in
@@ -816,7 +818,8 @@ class PluginManager:
     async def _build_env(self, plugin: Plugin, *, safety_block: "dict | None") -> dict[str, str]:
         """The literal, key-by-key environment `plugin`'s child gets
         (SAFE-09, D-02): every declared config value (a secret one
-        decrypted here, the single point D-03 names), plus `PYTHONPATH`
+        decrypted here, one of the three server-side points D-03 names,
+        IN-04), plus `PYTHONPATH`
         pointing at this repository's own `mcp/` directory, plus the
         serialized safety block for the one row `enforces_policy` names.
         Never a filtered copy of this process's own `os.environ`.
@@ -986,8 +989,11 @@ def _env_from_config_values(
 ) -> dict[str, str]:
     """The literal environment build itself, factored out of `_build_env`
     so it needs no `self` -- every declared config value, a secret one
-    decrypted through `decrypt_credential` (D-03, the single point this
-    codebase ever turns plugin ciphertext back into a usable value), plus
+    decrypted through `decrypt_credential` (D-03; one of the three
+    server-side points this codebase turns plugin ciphertext back into a
+    usable value, IN-04 -- this one, `_remote_bearer_token`, and the
+    wizard's own hub check. None of the three crosses a response body,
+    which is the property D-03 is actually about), plus
     `PYTHONPATH`, plus the serialized safety block when one is given.
 
     Plan 06-06: a secret value with `ciphertext=None` is a declared-but-

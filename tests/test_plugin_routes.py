@@ -1251,3 +1251,49 @@ def test_an_unreadable_catalog_is_a_named_refusal_not_a_bare_500(
 
     installed = client.post("/api/plugins", json={"catalog_entry": "Weather"})
     assert installed.status_code == 503, installed.text
+
+
+def test_the_per_plugin_timeout_can_be_changed_after_install(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """IN-04 (code review): D-06 calls `timeout_ms` admin-editable, and no
+    route could change it after install -- the editor loaded the stored
+    value into its draft and had nowhere to send it, so the per-plugin
+    deadline was install-time-only in practice. The configuration save
+    carries it now, and the same save restarts the plugin, which is what
+    makes the new deadline take effect (`plugins/host.py` reads it off the
+    row when it builds the host)."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=True, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[plugin])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put("/api/plugins/1/config", json={"values": {}, "timeout_ms": 9000})
+    assert response.status_code == 200, response.text
+    assert response.json()["timeout_ms"] == 9000
+    assert plugin_repo.plugins[1].timeout_ms == 9000
+    assert manager.start_calls == [1], "the restart is what applies the new deadline"
+
+    refused = client.put("/api/plugins/1/config", json={"values": {}, "timeout_ms": 0})
+    assert refused.status_code == 400, refused.text
+    assert plugin_repo.plugins[1].timeout_ms == 9000
+
+    # Omitted means "leave it alone" -- every caller written before this
+    # field existed keeps its exact behaviour.
+    unchanged = client.put("/api/plugins/1/config", json={"values": {}})
+    assert unchanged.status_code == 200
+    assert plugin_repo.plugins[1].timeout_ms == 9000

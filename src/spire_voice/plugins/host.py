@@ -124,7 +124,8 @@ async def start_plugin_host(
     its own -- and instead builds the caller-owned `httpx2.AsyncClient`
     `McpToolHost` will enter into its own exit stack (T-06-15), with
     `bearer_token` (already decrypted by `PluginManager`, at the same
-    single point D-03 names for the stdio side) as its outbound
+    server-side decryption points D-03 names, the same set the stdio side
+    decrypts from) as its outbound
     `Authorization` header, and nowhere else. `bearer_token=None` builds a
     client with no `Authorization` header at all -- a remote plugin with no
     secret config value is a real, supported shape (D-16's plain key/value

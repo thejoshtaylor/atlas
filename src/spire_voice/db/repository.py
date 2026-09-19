@@ -920,7 +920,8 @@ class PluginRepository(Protocol):
     any of those checks themselves. Every `PluginConfigValue` this
     protocol's write members accept or return already carries either a
     plain `value` or an already-encrypted `(ciphertext, key_version)` pair
-    -- decryption happens at exactly one point, `PluginManager`'s own
+    -- decryption happens only server-side, at the three points D-03
+    names (IN-04), chief among them `PluginManager`'s own
     child-spawn path (D-03), never in this module or in `routes/plugins.py`.
 
     Structurally satisfied by `PostgresPluginRepository` (real) and
@@ -977,6 +978,15 @@ class PluginRepository(Protocol):
         else (Task 2's own instruction). The caller is responsible for
         having already 404'd on an unknown `plugin_id` before calling
         this."""
+        ...
+
+    async def set_timeout_ms(self, plugin_id: int, timeout_ms: int) -> Plugin:
+        """Set this plugin's own per-call deadline and return the updated
+        row -- changes nothing else, the same narrow shape `set_enabled`
+        above has. D-06 calls `timeout_ms` admin-editable; IN-04 (code
+        review) found it was write-once at install, with no route able to
+        change it afterwards. The caller validates it is positive and has
+        already 404'd on an unknown `plugin_id`."""
         ...
 
     async def set_config_values(

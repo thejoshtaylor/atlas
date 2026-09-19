@@ -153,8 +153,9 @@ async def _ha_plugin_connection_info(
     live in the database now, seeded by `alembic/versions/
     0008_plugin_tables.py`, the same single source of truth `PluginManager`
     itself reads to spawn the child this route is probing the reachability
-    of. `HA_TOKEN` is decrypted here, the same single point D-03 already
-    names for `PluginManager`'s own spawn path -- never returned in this
+    of. `HA_TOKEN` is decrypted here -- the third of the three server-side
+    points D-03 names (IN-04), beside the two on `PluginManager`'s own
+    spawn path -- never returned in this
     route's own response body (`check_hub_step`'s own `WizardStepStatus`
     carries only `checked_at`/`entity_count`, unchanged by this plan).
     Returns `("", "")` when no `ha` plugin row exists at all.

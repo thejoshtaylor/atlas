@@ -161,3 +161,16 @@ describe("AppShell.tsx -- a Plugins navigation entry exists at admin level", () 
     expect(SHELL_SOURCE).toMatch(/\{ to: "\/plugins", label: "Plugins", minimumRole: "admin" \}/)
   })
 })
+
+describe("PluginEditorRoute -- IN-04: the per-plugin deadline is editable after install", () => {
+  test("the edit screen renders its own Timeout (ms) field, with the contract's helper text", () => {
+    expect(SOURCE).toMatch(/id="plugin-timeout-edit"/)
+    expect(SOURCE).toMatch(
+      /How long one tool call may run before it fails alone, without ending the turn\./,
+    )
+  })
+
+  test("saving the configuration sends the timeout with it, rather than loading a value it cannot save", () => {
+    expect(SOURCE).toMatch(/values: draftConfigValuesToInput\(configValues\),\s*\n\s*timeout_ms: timeoutMs,/)
+  })
+})

@@ -1123,6 +1123,17 @@ class PostgresPluginRepository:
             await session.refresh(row)
             return _plugin_from_row(row)
 
+    async def set_timeout_ms(self, plugin_id: int, timeout_ms: int) -> Plugin:
+        async with self._sessionmaker() as session:
+            row = await session.get(PluginRow, plugin_id)
+            if row is None:
+                raise ValueError(f"plugin {plugin_id} does not exist")
+            row.timeout_ms = timeout_ms
+            row.updated_at = _to_naive_utc(datetime.now(timezone.utc))
+            await session.commit()
+            await session.refresh(row)
+            return _plugin_from_row(row)
+
     async def set_config_values(
         self, plugin_id: int, values: Sequence[PluginConfigValue]
     ) -> list[PluginConfigValue]:

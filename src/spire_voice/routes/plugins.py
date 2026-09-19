@@ -257,9 +257,16 @@ class SetEnabledRequest(BaseModel):
 
 
 class SaveConfigRequest(BaseModel):
+    """IN-04 (code review): `timeout_ms` is optional here because D-06
+    calls the per-plugin deadline admin-editable and no route could change
+    it after install -- the editor loaded the value into its draft and had
+    nowhere to send it. Omitted means "leave it alone", so every caller
+    written before this field existed keeps its exact behaviour."""
+
     model_config = ConfigDict(extra="forbid")
 
     values: dict[str, ConfigValueInput] = Field(default_factory=dict)
+    timeout_ms: "int | None" = None
 
 
 class PluginToolResponse(BaseModel):
@@ -733,6 +740,8 @@ async def save_plugin_config(
         raise _unknown_plugin_error(plugin_id)
 
     _check_no_reserved_config_keys(payload.values)
+    if payload.timeout_ms is not None and payload.timeout_ms <= 0:
+        raise _invalid_timeout_error(payload.timeout_ms)
 
     security = request.app.state.config.security
     # WR-05 (code review): the stored rows are what decide which keys are
@@ -747,10 +756,14 @@ async def save_plugin_config(
         [*to_write, *(value for value in stored if value.key not in written_keys)],
     )
     await plugin_repo.set_config_values(plugin_id, to_write)
+    if payload.timeout_ms is not None and payload.timeout_ms != plugin.timeout_ms:
+        plugin = await plugin_repo.set_timeout_ms(plugin_id, payload.timeout_ms)
 
     # Only an enabled plugin has anything running to reconcile -- a
     # disabled row's configuration is saved for whenever it is next
-    # enabled, with nothing live to restart in the meantime.
+    # enabled, with nothing live to restart in the meantime. The restart
+    # is what applies a changed `timeout_ms` too: `plugins/host.py` reads
+    # it off the row when it builds the host (IN-04).
     if plugin.enabled:
         await _reconcile_live_state(request, plugin)
     return await _to_plugin_response(request, plugin)

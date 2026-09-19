@@ -142,11 +142,19 @@ export const setPluginEnabledMutationOptions: UseMutationOptions<Plugin, unknown
 export interface SavePluginConfigInput {
   pluginId: number
   values: Record<string, ConfigValueInput>
+  // IN-04 (code review): D-06 calls the per-plugin deadline
+  // admin-editable, and until this field existed no route could change it
+  // after install -- the editor loaded `timeout_ms` into its draft and had
+  // nowhere to send it. Optional: omitted means "leave it alone".
+  timeout_ms?: number
 }
 
 export const savePluginConfigMutationOptions: UseMutationOptions<Plugin, unknown, SavePluginConfigInput> = {
-  mutationFn: ({ pluginId, values }) =>
-    apiFetch<Plugin>(`/api/plugins/${pluginId}/config`, { method: "PUT", body: { values } }),
+  mutationFn: ({ pluginId, values, timeout_ms }) =>
+    apiFetch<Plugin>(`/api/plugins/${pluginId}/config`, {
+      method: "PUT",
+      body: timeout_ms === undefined ? { values } : { values, timeout_ms },
+    }),
   onSuccess: (plugin) => {
     void queryClient.invalidateQueries({ queryKey: PLUGINS_QUERY_KEY })
     queryClient.setQueryData(pluginQueryKey(plugin.id), plugin)

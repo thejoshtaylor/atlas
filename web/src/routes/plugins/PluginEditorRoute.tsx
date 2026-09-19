@@ -199,6 +199,7 @@ export function PluginEditorRoute() {
       const result = await saveConfig.mutateAsync({
         pluginId: screen.plugin.id,
         values: draftConfigValuesToInput(configValues),
+        timeout_ms: timeoutMs,
       })
       loadPlugin(result)
     } catch {
@@ -560,6 +561,24 @@ export function PluginEditorRoute() {
                 Add key
               </Button>
             </div>
+          </div>
+
+          {/* IN-04 (code review): D-06's per-plugin deadline is
+              admin-editable, and this field is what makes that true after
+              install -- the draft already loaded the stored value and had
+              nowhere to send it. Saved, and applied, by the same "Save
+              configuration" write that restarts the plugin. */}
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="plugin-timeout-edit">Timeout (ms)</Label>
+            <Input
+              id="plugin-timeout-edit"
+              type="number"
+              value={timeoutMs}
+              onChange={(event) => setTimeoutMs(Number(event.target.value))}
+            />
+            <p className="text-label text-muted-foreground">
+              How long one tool call may run before it fails alone, without ending the turn.
+            </p>
           </div>
 
           {saveConfigError ? <p className="text-body text-destructive">{saveConfigError}</p> : null}
