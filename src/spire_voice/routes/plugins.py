@@ -46,7 +46,7 @@ from spire_voice.crypto.credentials import encrypt_credential
 from spire_voice.db.repository import Plugin, PluginAlreadyExistsError, PluginConfigValue, PluginRepository
 from spire_voice.plugins.catalog import DEFAULT_CATALOG_PATH, find_entry, load_catalog
 from spire_voice.plugins.host import module_for_stdio_args, validate_remote_url
-from spire_voice.plugins.manager import REMOTE_AUTH_KEY
+from spire_voice.plugins.manager import REMOTE_AUTH_KEY, RESERVED_ENV_KEYS
 
 router = APIRouter(tags=["plugins"])
 
@@ -131,6 +131,26 @@ def _secret_flag_conflict_error(key: str, stored_secret: bool) -> HTTPException:
             "it is secret; remove the key and add it again to change that"
         ),
     )
+
+
+def _reserved_config_key_error(keys: Sequence[str]) -> HTTPException:
+    """WR-08 (code review): `PYTHONPATH` and `SPIRE_SAFETY` are written by
+    this process, not by a plugin's configuration -- the first decides
+    where the child imports `spire_mcp.safety` from, the second carries
+    the house policy the enforcing child applies to itself."""
+    return HTTPException(
+        status_code=400,
+        detail=(
+            f"configuration key(s) {sorted(keys)!r} are reserved -- this process decides "
+            f"{sorted(RESERVED_ENV_KEYS)!r} for every plugin child, and a plugin cannot set them"
+        ),
+    )
+
+
+def _check_no_reserved_config_keys(submitted: "dict[str, ConfigValueInput]") -> None:
+    reserved = set(submitted) & RESERVED_ENV_KEYS
+    if reserved:
+        raise _reserved_config_key_error(reserved)
 
 
 def _ambiguous_remote_credential_error(keys: Sequence[str]) -> HTTPException:
@@ -597,6 +617,8 @@ async def install_plugin(
     if payload.timeout_ms <= 0:
         raise _invalid_timeout_error(payload.timeout_ms)
 
+    _check_no_reserved_config_keys(payload.config_values)
+
     existing_slugs = {p.slug for p in await plugin_repo.list_plugins()}
 
     if payload.catalog_entry is not None:
@@ -687,6 +709,8 @@ async def save_plugin_config(
     plugin = await plugin_repo.get_plugin(plugin_id)
     if plugin is None:
         raise _unknown_plugin_error(plugin_id)
+
+    _check_no_reserved_config_keys(payload.values)
 
     security = request.app.state.config.security
     # WR-05 (code review): the stored rows are what decide which keys are

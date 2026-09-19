@@ -1171,3 +1171,53 @@ def test_installing_a_url_plugin_with_two_unnamed_secrets_is_refused_by_name(
         },
     )
     assert named.status_code == 201, named.text
+
+
+def test_a_reserved_configuration_key_is_refused_at_install_and_at_save(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """WR-08 (code review): `PYTHONPATH` decides where a plugin child
+    imports `spire_mcp` -- `spire_mcp.safety` included -- and
+    `SPIRE_SAFETY` carries the house policy the enforcing child applies to
+    itself. Neither is a plugin's to set, so neither write boundary
+    accepts one; `_env_from_config_values` writes both after the
+    configuration loop as the backstop."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    ha = Plugin(
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        url=None, enabled=False, builtin=True, enforces_policy=True, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[ha])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    saved = client.put(
+        "/api/plugins/1/config",
+        json={"values": {"PYTHONPATH": {"value": "/tmp/a-directory-an-admin-can-write"}}},
+    )
+    assert saved.status_code == 400, saved.text
+    assert "PYTHONPATH" in saved.json()["detail"]
+    assert plugin_repo.config_values.get(1, []) == []
+
+    installed = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Sneaky",
+            "transport": "command",
+            "command": "-m example_module",
+            "config_values": {"SPIRE_SAFETY": {"value": '{"mode": "allow_all"}'}},
+        },
+    )
+    assert installed.status_code == 400, installed.text
+    assert "SPIRE_SAFETY" in installed.json()["detail"]
+    assert list(plugin_repo.plugins) == [1], "nothing is installed when the write is refused"

@@ -91,6 +91,21 @@ SafetyBlockProvider = Callable[[], Awaitable["dict | None"]]
 # artefact of the order a `SELECT` with no `ORDER BY` returned.
 REMOTE_AUTH_KEY = "AUTH_TOKEN"
 
+# WR-08 (code review): the two environment variables a plugin's own
+# configuration may never write, because this process writes them and the
+# child's own trust boundary is built out of them. `PYTHONPATH` decides
+# where the child imports `spire_mcp` -- including `spire_mcp.safety` --
+# from, and `SPIRE_SAFETY` carries the house policy the enforcing child
+# applies to itself. A config key named either one is refused at the write
+# boundary (`routes/plugins.py`) and cannot win at the build boundary
+# below, where both are written after the configuration loop rather than
+# before it. An admin may already choose the module a *new* plugin runs
+# (T-06-25, accepted) -- the builtin `enforces_policy` row is a different
+# guarantee, and pointing its `PYTHONPATH` at a writable directory holding
+# a `spire_mcp/safety.py` would have let an admin-supplied policy module
+# replace the one in-child boundary this system has.
+RESERVED_ENV_KEYS = frozenset({"PYTHONPATH", "SPIRE_SAFETY"})
+
 
 @dataclass
 class RunningPlugin:
@@ -983,8 +998,22 @@ def _env_from_config_values(
     it can start with nothing there, rather than this module refusing to
     even try.
     """
-    env: dict[str, str] = {"PYTHONPATH": str(mcp_root)}
+    env: dict[str, str] = {}
     for value in config_values:
+        if value.key in RESERVED_ENV_KEYS:
+            # WR-08 (code review): never, and never silently. This loop
+            # used to run *after* `PYTHONPATH` was written, so a config key
+            # by that name replaced this repository's own `mcp/` root and
+            # decided where the child imports `spire_mcp.safety` from --
+            # for the policy-enforcing row, that is the one in-child
+            # boundary this system has. `SPIRE_SAFETY` was already safe by
+            # accident (written after the loop); both are deliberate now.
+            logger.warning(
+                "plugin configuration key %r is reserved and was not passed to the child -- "
+                "this process decides it",
+                value.key,
+            )
+            continue
         if value.secret:
             if value.ciphertext is None:
                 env[value.key] = ""
@@ -997,6 +1026,9 @@ def _env_from_config_values(
             env[value.key] = decrypt_credential(value.ciphertext, value.key_version, security)
         else:
             env[value.key] = value.value or ""
+    # Written after the loop, both of them, so neither can be shadowed by a
+    # configuration value regardless of what reached this function (WR-08).
+    env["PYTHONPATH"] = str(mcp_root)
     if safety_block is not None:
         env["SPIRE_SAFETY"] = json.dumps(safety_block)
     return env

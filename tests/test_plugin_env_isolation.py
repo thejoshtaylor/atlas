@@ -295,3 +295,55 @@ async def test_the_decrypted_secret_reaches_the_child_and_nothing_a_repository_r
     assert env["HA_TOKEN"] == plaintext, (
         "the manager's own spawn path must be the point the decrypted value actually reaches"
     )
+
+
+def test_a_config_key_cannot_replace_the_pythonpath_the_child_imports_safety_from():
+    """WR-08 (code review): the environment started as
+    `{"PYTHONPATH": str(mcp_root)}` and the configuration loop ran *after*
+    it, so a config key literally named `PYTHONPATH` replaced this
+    repository's own `mcp/` root. For the Home Assistant row --
+    `enforces_policy=True`, and an admin can edit its configuration freely
+    -- a `PYTHONPATH` pointing at a writable directory holding a
+    `spire_mcp/safety.py` made the enforcing child import a policy module
+    of the admin's choosing, defeating the one in-child boundary this
+    system has. `SPIRE_SAFETY` was already safe, but only by accident of
+    being written after the loop; both are deliberate now, and the write
+    routes refuse either key outright (`tests/test_plugin_routes.py`).
+    """
+    ha = _ha_plugin(plugin_id=1)
+    repo = conftest.FakePluginRepository(
+        plugins=[ha],
+        config_values={
+            ha.id: [
+                PluginConfigValue(
+                    key="HA_URL", secret=False, value="http://ha.invalid:8123",
+                    ciphertext=None, key_version=None,
+                ),
+                PluginConfigValue(
+                    key="PYTHONPATH", secret=False, value="/tmp/a-directory-an-admin-can-write",
+                    ciphertext=None, key_version=None,
+                ),
+                PluginConfigValue(
+                    key="SPIRE_SAFETY", secret=False, value='{"mode": "allow_all"}',
+                    ciphertext=None, key_version=None,
+                ),
+            ],
+        },
+    )
+
+    async def _no_policy():
+        return None
+
+    async def _build():
+        manager = PluginManager(
+            repo, mcp_root=_MCP_ROOT, security=SecurityConfig(), safety_block_provider=_no_policy
+        )
+        return await manager._build_env(ha, safety_block={"mode": "deny", "rules": []})
+
+    env = asyncio.run(_build())
+
+    assert env["PYTHONPATH"] == str(_MCP_ROOT), (
+        "a plugin's own configuration decided where its child imports spire_mcp.safety from"
+    )
+    assert env["SPIRE_SAFETY"] == json.dumps({"mode": "deny", "rules": []})
+    assert env["HA_URL"] == "http://ha.invalid:8123", "every other key is unaffected"
