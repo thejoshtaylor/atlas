@@ -105,7 +105,15 @@ _EXPECTED_STATE_ATTRS = [
     "tier_brains",
     "brain",
     "tts",
-    "tool_host",
+    # Plan 06-02 (D-07): `tool_host` -- the policy-enforcing plugin's own
+    # running host -- now has a legitimate `None`, the same way the
+    # weather host's own attribute never appeared in this list: a
+    # degraded Home Assistant boots the assistant anyway, so this
+    # attribute joins that same carve-out rather than staying in the
+    # always-non-`None` list below. `plugin_manager` (next) is the
+    # attribute that actually is always present, regardless of which
+    # plugins started.
+    #
     # Plan 04-03 (D-13), generalized by plan 06-01 (D-04): the lookup
     # every `run_turn` call site actually passes -- always present (one
     # plugin, or several), built by `PluginManager` regardless of which
@@ -335,18 +343,17 @@ async def _fake_start_plugin_host(plugin: Plugin, **kwargs: object) -> object:
     raise AssertionError(f"_fake_start_plugin_host: unexpected plugin slug {plugin.slug!r}")
 
 
-async def _fake_start_plugin_host_weather_fails(plugin: Plugin, **kwargs: object) -> object:
-    """Like `_fake_start_plugin_host`, but the `weather` plugin raises --
-    used by the one test below documenting this plan's own, temporary
-    posture (a plugin start failure currently propagates and stops the
-    boot; the non-blocking guarantee T-04-16 established for weather
-    specifically lands for every plugin in plan 06-02, per Task 1's own
-    action text)."""
+async def _fake_start_plugin_host_ha_fails(plugin: Plugin, **kwargs: object) -> object:
+    """Like `_fake_start_plugin_host`, but the `ha` plugin raises -- D-07's
+    own explicit reversal (plan 06-02): the policy-enforcing plugin gets no
+    special treatment, so a Home Assistant that will not start must leave
+    a booted application whose other plugin still answers, the same as any
+    other plugin's own start failure."""
     if plugin.slug == "ha":
-        return _FakeToolHost()
+        raise RuntimeError("simulated Home Assistant startup failure")
     if plugin.slug == "weather":
-        raise RuntimeError("simulated weather child startup failure")
-    raise AssertionError(f"_fake_start_plugin_host_weather_fails: unexpected slug {plugin.slug!r}")
+        return _FakeWeatherToolHost()
+    raise AssertionError(f"_fake_start_plugin_host_ha_fails: unexpected slug {plugin.slug!r}")
 
 
 async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voice_id: str, sink: object) -> dict:
@@ -633,22 +640,23 @@ def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_l
         assert "weather_current" in tool_names
 
 
-def test_a_plugin_that_fails_to_start_currently_stops_the_boot_pending_06_02(
+def test_a_home_assistant_that_refuses_to_start_leaves_a_booted_application_whose_other_plugin_still_answers(
     tmp_path, monkeypatch
 ):
-    """T-04-16's non-blocking-startup guarantee (D-07: "no plugin blocks
-    startup, Home Assistant included") is deferred to plan 06-02 -- Task
-    1's own action text: "this task's start_all() may let a start failure
-    propagate for now only in the sense that it does not yet classify it
-    as degraded." This documents the current, temporary posture rather
-    than silently losing coverage of the seam a weather-specific test
-    used to hold (see WINDOWS.md): once 06-02 lands, replace this with a
-    test asserting the non-blocking behavior again, for every plugin, not
-    only weather.
+    """D-07's own explicit reversal (plan 06-02): Home Assistant failing to
+    start is one of the ordinary cases `PluginManager.start_all()` handles,
+    not an exception to them. Replaces
+    `test_a_plugin_that_fails_to_start_currently_stops_the_boot_pending_06_02`
+    (see WINDOWS.md/06-01-SUMMARY.md's own "Known Stubs" entry for the
+    posture this test now closes out) with the guarantee this plan
+    actually ships: the boot completes, `tool_host` is `None` (the
+    same carve-out `_EXPECTED_STATE_ATTRS` above documents), and the
+    weather plugin -- an entirely separate plugin -- still answers through
+    the merged lookup.
     """
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(
-        plugin_manager_module, "start_plugin_host", _fake_start_plugin_host_weather_fails
+        plugin_manager_module, "start_plugin_host", _fake_start_plugin_host_ha_fails
     )
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
@@ -658,9 +666,17 @@ def test_a_plugin_that_fails_to_start_currently_stops_the_boot_pending_06_02(
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
-    with pytest.raises(RuntimeError, match="simulated weather child startup failure"):
-        with TestClient(app_module.app):
-            pass
+    with TestClient(app_module.app) as client:
+        response = client.get("/transport")
+        assert response.status_code == 200
+
+        assert app_module.app.state.tool_host is None
+        weather_host = app_module.app.state.plugin_manager.tool_host_for("weather")
+        assert weather_host is not None
+
+        tool_names = {entry["function"]["name"] for entry in app_module.app.state.tools_schema}
+        assert "weather_current" in tool_names
+        assert "ha_list_entities" not in tool_names
 
 
 def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypatch):

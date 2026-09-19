@@ -1225,6 +1225,83 @@ class WorkflowConfig:
 
 
 @dataclass(frozen=True)
+class PluginsConfig:
+    """The `plugins:` block (D-07, D-05, plan 06-02): the two constants
+    06-CONTEXT.md leaves to Claude's Discretion -- the uniform, non-blocking
+    startup deadline every plugin's `start()` races against, and the
+    bounded exponential backoff `PluginManager`'s ping watchdog uses when
+    respawning a plugin whose child has died.
+
+    `startup_deadline_s` bounds `PluginManager.start_all()`'s per-plugin
+    wait (D-07): a plugin whose `start()` has not returned by the time this
+    many seconds pass is marked degraded and the boot continues -- Home
+    Assistant included, no exception for the policy-enforcing plugin. Ten
+    seconds is generous for a stdio child's own process spawn plus MCP
+    `initialize()` handshake on a CPU-only host, comfortably wider than any
+    plausible cold start, while still bounding how long a genuinely wedged
+    child can hold the boot open. A slower host (one already busy running a
+    local model alongside these children) is the deployment that would
+    raise this value.
+
+    `respawn_backoff_min_s`/`respawn_backoff_max_s` bound the ping
+    watchdog's exponential backoff between respawn attempts once a plugin
+    is found dead (D-05, T-06-11): the first retry waits
+    `respawn_backoff_min_s`, and each further failed attempt doubles the
+    wait up to `respawn_backoff_max_s`, so a plugin stuck crash-looping
+    never busy-loops restarting it -- the same reasoning
+    `SpeakerConfig.respawn_backoff_s` already states for the ffmpeg
+    supervisor, generalized to a bounded range since a fixed backoff would
+    either restart too eagerly right after a crash or too slowly once a
+    transient blip has passed.
+    """
+
+    startup_deadline_s: float = 10.0
+    respawn_backoff_min_s: float = 1.0
+    respawn_backoff_max_s: float = 30.0
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "PluginsConfig":
+        raw = raw or {}
+        startup_deadline_s = raw.get("startup_deadline_s", cls.startup_deadline_s)
+        if (
+            isinstance(startup_deadline_s, bool)
+            or not isinstance(startup_deadline_s, (int, float))
+            or startup_deadline_s <= 0
+        ):
+            raise ConfigError(
+                f"plugins.startup_deadline_s must be a positive number, got "
+                f"{startup_deadline_s!r} -- this bounds how long a plugin's start may run "
+                "before the boot continues without it (D-07)"
+            )
+        respawn_backoff_min_s = raw.get("respawn_backoff_min_s", cls.respawn_backoff_min_s)
+        if (
+            isinstance(respawn_backoff_min_s, bool)
+            or not isinstance(respawn_backoff_min_s, (int, float))
+            or respawn_backoff_min_s <= 0
+        ):
+            raise ConfigError(
+                f"plugins.respawn_backoff_min_s must be a positive number, got "
+                f"{respawn_backoff_min_s!r} -- a zero or negative backoff turns a crash-"
+                "looping plugin's respawn into a busy loop"
+            )
+        respawn_backoff_max_s = raw.get("respawn_backoff_max_s", cls.respawn_backoff_max_s)
+        if (
+            isinstance(respawn_backoff_max_s, bool)
+            or not isinstance(respawn_backoff_max_s, (int, float))
+            or respawn_backoff_max_s < respawn_backoff_min_s
+        ):
+            raise ConfigError(
+                f"plugins.respawn_backoff_max_s must be a number >= respawn_backoff_min_s "
+                f"({respawn_backoff_min_s!r}), got {respawn_backoff_max_s!r}"
+            )
+        return cls(
+            startup_deadline_s=float(startup_deadline_s),
+            respawn_backoff_min_s=float(respawn_backoff_min_s),
+            respawn_backoff_max_s=float(respawn_backoff_max_s),
+        )
+
+
+@dataclass(frozen=True)
 class Config:
     """The top-level configuration: one section per subsystem.
 
@@ -1290,6 +1367,7 @@ class Config:
     database: DatabaseConfig
     security: SecurityConfig
     workflow: WorkflowConfig
+    plugins: PluginsConfig
 
     @classmethod
     def from_config(
@@ -1322,6 +1400,7 @@ class Config:
             database=DatabaseConfig.from_config(raw.get("database")),
             security=SecurityConfig.from_config(raw.get("security")),
             workflow=WorkflowConfig.from_config(raw.get("workflow")),
+            plugins=PluginsConfig.from_config(raw.get("plugins")),
         )
 
 

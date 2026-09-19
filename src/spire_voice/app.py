@@ -701,6 +701,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         mcp_root=MCP_ROOT,
         security=security_config,
         safety_block_provider=_current_safety_block,
+        plugins_config=config.plugins,
     )
     await plugin_manager.start_all()
     app.state.plugin_manager = plugin_manager

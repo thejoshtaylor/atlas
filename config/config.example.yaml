@@ -432,6 +432,24 @@ tts:
 # startup error naming the key (Config.from_config), the same way safety:
 # and macros: already are (D-11, D-09).
 
+plugins:
+  # D-07: every enabled plugin -- Home Assistant included, no exception --
+  # starts concurrently, behind this one deadline. A plugin whose start has
+  # not finished when this many seconds pass is marked degraded and logged
+  # by name; the assistant boots anyway with that plugin's tools absent.
+  # Raise this on a slower host (a Raspberry Pi, or one already busy
+  # running a local model alongside these children) where a stdio child's
+  # own process spawn and MCP handshake legitimately take longer.
+  startup_deadline_s: 10
+
+  # D-05: once a plugin's own ping watchdog notices its child has died, the
+  # supervisor respawns it on exponential backoff between these two
+  # bounds -- the first retry waits respawn_backoff_min_s, and each further
+  # failed attempt doubles the wait up to respawn_backoff_max_s, so a
+  # plugin stuck in a crash loop never busy-loops restarting it.
+  respawn_backoff_min_s: 1
+  respawn_backoff_max_s: 30
+
 debug:
   # One directory per interaction, holding the audio, every event with an
   # arrival timestamp, and a merged timeline. This is the raw material for
