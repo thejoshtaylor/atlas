@@ -30,6 +30,7 @@ provable without tripping over it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ from spire_voice.crypto.credentials import encrypt_credential
 from spire_voice.db.repository import Plugin, PluginConfigValue
 from spire_voice.mcp_client import McpToolHost, UnknownToolError
 from spire_voice.plugins import manager as manager_module
-from spire_voice.plugins.manager import PluginManager
+from spire_voice.plugins.manager import PluginManager, PluginState
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
@@ -68,6 +69,7 @@ def _plugin(
     enabled: bool = True,
     builtin: bool = True,
     enforces_policy: bool = False,
+    timeout_ms: int = 5000,
 ) -> Plugin:
     now = datetime.now(timezone.utc)
     return Plugin(
@@ -80,7 +82,7 @@ def _plugin(
         enabled=enabled,
         builtin=builtin,
         enforces_policy=enforces_policy,
-        timeout_ms=5000,
+        timeout_ms=timeout_ms,
         created_at=now,
         updated_at=now,
         created_by_user_id=None,
@@ -325,9 +327,20 @@ async def test_respawning_the_enforcing_plugin_carries_the_new_safety_block(
     block the first child was started with -- proven against the captured
     environment `respawn()` actually built, not merely that `respawn()`
     ran without raising.
+
+    Goes through `PluginManager.request_respawn`, not
+    `McpToolHost.respawn()` directly: the host's stack is entered inside
+    that plugin's own persistent lifecycle task (`PluginManager.
+    start_all`'s own docstring), and the installed `mcp`/`anyio` SDK
+    requires that same task to be the one that later replaces it. A small
+    `timeout_ms` keeps this plugin's ping-watchdog interval short, so the
+    request is serviced promptly rather than waiting out a five-second
+    default.
     """
     security = SecurityConfig()
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    ha_plugin = _plugin(
+        1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True, timeout_ms=300
+    )
     repo = fake_plugin_repository(
         plugins=[ha_plugin],
         config_values={
@@ -364,7 +377,7 @@ async def test_respawning_the_enforcing_plugin_carries_the_new_safety_block(
             "mode": "allow_all_except_denylist",
             "deny_entities": ["switch.example_b"],
         }
-        await manager.enforcing_host.respawn(second_block)
+        await manager.request_respawn(ha_plugin.id, second_block)
 
         assert len(captured_envs) == 2, "respawn must spawn exactly one replacement child"
         assert json.loads(captured_envs[1]["SPIRE_SAFETY"]) == second_block
@@ -408,5 +421,122 @@ async def test_rebuild_never_mutates_the_previous_lookup_or_schema_in_place(fake
         assert manager.tool_host_lookup is not old_lookup
         assert manager.tools_schema is not old_schema
         assert manager.tools_schema == old_schema
+    finally:
+        await manager.stop_all()
+
+
+class _FakeCrashableHost:
+    """A minimal fake host whose `ping()` can be told to fail on demand --
+    standing in for a real spawned child only for this module's own D-05
+    watchdog/rebuild test, which needs to control exactly when a "crash"
+    is noticed without a real subprocess or any wall-clock wait."""
+
+    def __init__(self, tool_name: str) -> None:
+        self.tools = [Tool(name=tool_name, description="", inputSchema={"type": "object", "properties": {}})]
+        self.ping_should_fail = False
+        self.aclose_count = 0
+
+    async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+        return SimpleNamespace(is_error=False, content=[])
+
+    async def ping(self) -> None:
+        if self.ping_should_fail:
+            raise RuntimeError("simulated: plugin ping failed -- child appears dead")
+
+    async def aclose(self) -> None:
+        self.aclose_count += 1
+
+
+class _StepGate:
+    """Stands in for `PluginManager`'s injected `sleep` -- each call
+    blocks until the test calls `release()` exactly once, so the test
+    drives the watchdog loop's own timing deterministically, with no real
+    time passing and no standard-library timed-delay call anywhere in
+    this test. `wait_until_entered()` (an `asyncio.Event`, never a sleep)
+    lets the test know the watchdog task has actually reached this point
+    before changing anything the next step depends on.
+    """
+
+    def __init__(self) -> None:
+        self._entered = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def __call__(self, _seconds: float) -> None:
+        self._entered.set()
+        await self._release.wait()
+        self._release.clear()
+
+    async def wait_until_entered(self) -> None:
+        # Clears `_entered` itself, synchronously, the instant this
+        # returns -- so a second call in a row genuinely waits for the
+        # *next* entry rather than observing the same still-set flag
+        # from the entry this call just consumed (the watchdog task's own
+        # `__call__` has not necessarily been scheduled again yet to
+        # clear it itself).
+        await self._entered.wait()
+        self._entered.clear()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+async def test_a_rebuild_the_watchdog_triggers_mid_turn_leaves_that_turns_own_objects_unchanged(
+    fake_plugin_repository, monkeypatch
+):
+    """D-08, proven against D-05's own real trigger rather than a bare
+    `rebuild()` call: a turn captures `tools_schema`/`tool_host_lookup` at
+    its own start (`run_turn`'s own contract, verified in 06-RESEARCH.md's
+    Orchestrator Addendum) -- a plugin crash-and-respawn cycle the ping
+    watchdog drives entirely on its own, mid-"turn", must never change
+    what that turn was already handed. Uses a fake host (`_FakeCrashableHost`)
+    and an injected `_StepGate` so the crash/respawn cycle is fully
+    deterministic and needs no real subprocess or wall-clock wait.
+    """
+    host = _FakeCrashableHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha_plugin], config_values={})
+    manager = PluginManager(
+        repo,
+        mcp_root=_MCP_ROOT,
+        security=SecurityConfig(),
+        safety_block_provider=_no_policy,
+        sleep=gate,
+    )
+    try:
+        await manager.start_all()
+
+        # "Start a turn": capture exactly what `run_turn` would be handed
+        # at this instant, per `app.py`'s own call sites.
+        turns_schema = manager.tools_schema
+        turns_lookup = manager.tool_host_lookup
+        assert {entry["function"]["name"] for entry in turns_schema} == {"ha_list_entities"}
+
+        # The watchdog crashes and respawns this plugin entirely in the
+        # background, with no turn or caller driving it.
+        await gate.wait_until_entered()  # ping-interval sleep
+        host.ping_should_fail = True
+        gate.release()
+
+        await gate.wait_until_entered()  # backoff sleep, plugin now CRASHED_RETRYING
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING
+        gate.release()  # respawn attempt runs and succeeds (start_plugin_host above)
+
+        await gate.wait_until_entered()  # ping-interval sleep, running again
+        assert manager.state_for("ha") is PluginState.RUNNING
+
+        # The turn's own captured objects are exactly what they were --
+        # same objects, same content -- even though the manager has moved
+        # on to a new schema/lookup built from the recovered plugin.
+        assert manager.tool_host_lookup is not turns_lookup
+        assert manager.tools_schema is not turns_schema
+        assert {entry["function"]["name"] for entry in turns_schema} == {"ha_list_entities"}
+        assert {entry["function"]["name"] for entry in manager.tools_schema} == {"ha_list_entities"}
     finally:
         await manager.stop_all()

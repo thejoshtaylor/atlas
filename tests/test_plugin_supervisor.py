@@ -1,26 +1,37 @@
-"""D-07: no plugin blocks startup, Home Assistant included.
+"""D-07 (Task 1) and D-05 (Task 2): no plugin blocks startup, Home
+Assistant included, and a crashed plugin's tools come back on its own
+once it does.
 
-`PluginManager.start_all()` races every enabled plugin's `start()` against
-the same configured deadline (`config.plugins.startup_deadline_s`), one
-plugin at a time (see `PluginManager.start_all`'s own docstring for the
-verified `anyio`/`mcp` SDK reason literal task-based concurrency was
-rejected here) -- a plugin whose start raises, or whose start is still
-running when the deadline passes, is recorded `PluginState.DEGRADED` with
-its own failure text kept verbatim, and every other plugin (Home Assistant
-included, no exception) still gets its own full, independent budget.
+`PluginManager.start_all()` starts every enabled plugin concurrently,
+each in its own persistent lifecycle task racing the same configured
+deadline (`config.plugins.startup_deadline_s`) independently -- a plugin
+whose start raises, or whose start is still running when the deadline
+passes, is recorded `PluginState.DEGRADED` with its own failure text kept
+verbatim, and every other plugin (Home Assistant included, no exception)
+still gets its own full, independent budget. See `PluginManager.
+start_all`'s own docstring for why every plugin needs exactly one
+persistent task for its whole life, not a short-lived one per start
+attempt -- a real, verified `anyio`/`mcp` SDK constraint, not a style
+choice.
+
+Once running, that same task also runs the ping watchdog and
+crash-driven respawn (D-05, Task 2): a ping failure withdraws the
+plugin's tools immediately, and a bounded-backoff respawn loop restores
+them once one succeeds.
 
 Every test here uses fakes over `spire_voice.plugins.manager.
-start_plugin_host` -- proving the manager's own deadline/state-recording
-logic needs no real subprocess. `tests/test_plugin_manager.py` already
-covers the real-child spawn path this file does not repeat.
+start_plugin_host` -- proving the manager's own deadline/state-recording/
+watchdog logic needs no real subprocess. `tests/test_plugin_manager.py`
+already covers the real-child spawn path this file does not repeat.
 
-This file also carries Task 2's watchdog/respawn tests (a following
-commit) -- both tasks' own `<verify>` blocks run the whole file, and Task
-2's own verify additionally asserts this file contains no wall-clock
-`asyncio.sleep` of its own: every test below proves timing behavior
-through event-driven synchronization (an `asyncio.Event` two coroutines
-both wait on) or a real, short `PluginsConfig.startup_deadline_s`, never a
-sleep call written directly in a test.
+Both tasks' own `<verify>` blocks run this whole file, and Task 2's own
+verify additionally asserts this file contains no wall-clock sleep call
+of its own: every test below proves timing behavior through event-driven
+synchronization (an `asyncio.Event`-backed `_StepGate`, standing in for
+`PluginManager`'s own injected `sleep`, or two coroutines directly
+waiting on an `asyncio.Event`) or a real, short
+`PluginsConfig.startup_deadline_s` -- never a call to the standard
+library's own real-time-delay primitive written directly in this file.
 """
 
 from __future__ import annotations
@@ -69,28 +80,78 @@ def _plugin(
 
 class _FakeHost:
     """A minimal stand-in host -- distinct `.tools` per slug so a merged
-    schema assertion can tell which plugins actually reached it."""
+    schema assertion can tell which plugins actually reached it. `ping()`
+    is controllable (`ping_should_fail`) for Task 2's watchdog tests --
+    always succeeds by default, so Task 1's own tests (which never touch
+    it) are unaffected."""
 
     def __init__(self, tool_name: str) -> None:
         from mcp.types import Tool
 
         self.tools = [Tool(name=tool_name, description="", inputSchema={"type": "object", "properties": {}})]
         self.aclose_count = 0
+        self.ping_calls = 0
+        self.ping_should_fail = False
 
     async def call_tool(self, name: str, arguments: dict) -> object:
         raise AssertionError("not called in these tests")
+
+    async def ping(self) -> None:
+        self.ping_calls += 1
+        if self.ping_should_fail:
+            raise RuntimeError("simulated: plugin ping failed -- child appears dead")
 
     async def aclose(self) -> None:
         self.aclose_count += 1
 
 
-def _manager(repo, *, plugins_config: PluginsConfig | None = None) -> PluginManager:
+class _StepGate:
+    """Stands in for `PluginManager`'s injected `sleep` -- each call
+    blocks until the test calls `release()` exactly once, so a test
+    drives the watchdog loop's own timing deterministically, with no real
+    time passing and no standard-library timed-delay call anywhere in
+    this file. `wait_until_entered()` (an `asyncio.Event`, never a sleep)
+    lets a test know the watchdog task has actually reached this specific
+    point before changing anything the next step depends on -- and
+    consumes that signal itself (clears it synchronously, the instant it
+    returns) so a second call in a row genuinely waits for the *next*
+    entry rather than observing the same still-set flag the watchdog task
+    has not yet been scheduled again to clear on its own.
+    """
+
+    def __init__(self) -> None:
+        self._entered = asyncio.Event()
+        self._release = asyncio.Event()
+
+    async def __call__(self, _seconds: float) -> None:
+        self._entered.set()
+        await self._release.wait()
+        self._release.clear()
+
+    async def wait_until_entered(self) -> None:
+        await self._entered.wait()
+        self._entered.clear()
+
+    def release(self) -> None:
+        self._release.set()
+
+
+def _manager(
+    repo,
+    *,
+    plugins_config: PluginsConfig | None = None,
+    sleep=None,
+) -> PluginManager:
+    kwargs: dict = {}
+    if sleep is not None:
+        kwargs["sleep"] = sleep
     return PluginManager(
         repo,
         mcp_root=_MCP_ROOT,
         security=SecurityConfig(),
         safety_block_provider=_no_policy,
         plugins_config=plugins_config,
+        **kwargs,
     )
 
 
@@ -113,15 +174,18 @@ async def test_a_plugin_that_raises_on_start_is_degraded_and_the_boot_continues(
     monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
 
     manager = _manager(repo)
-    await manager.start_all()
+    try:
+        await manager.start_all()
 
-    assert manager.state_for("broken") is PluginState.DEGRADED
-    assert manager.reason_for("broken") == "simulated: broken plugin refused to start"
-    assert manager.tool_host_for("broken") is None
+        assert manager.state_for("broken") is PluginState.DEGRADED
+        assert manager.reason_for("broken") == "simulated: broken plugin refused to start"
+        assert manager.tool_host_for("broken") is None
 
-    assert manager.state_for("weather") is PluginState.RUNNING
-    tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
-    assert tool_names == {"weather_current"}
+        assert manager.state_for("weather") is PluginState.RUNNING
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert tool_names == {"weather_current"}
+    finally:
+        await manager.stop_all()
 
 
 async def test_a_plugin_that_hangs_on_start_hits_the_deadline_and_is_degraded(
@@ -168,16 +232,19 @@ async def test_home_assistant_gets_no_special_treatment_when_it_fails_to_start(
     monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
 
     manager = _manager(repo)
-    await manager.start_all()
+    try:
+        await manager.start_all()
 
-    assert manager.state_for("ha") is PluginState.DEGRADED
-    assert manager.reason_for("ha") == "simulated: Home Assistant refused to start"
-    assert manager.enforcing_host is None
+        assert manager.state_for("ha") is PluginState.DEGRADED
+        assert manager.reason_for("ha") == "simulated: Home Assistant refused to start"
+        assert manager.enforcing_host is None
 
-    assert manager.state_for("weather") is PluginState.RUNNING
-    assert manager.tool_host_for("weather") is not None
-    tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
-    assert "weather_current" in tool_names
+        assert manager.state_for("weather") is PluginState.RUNNING
+        assert manager.tool_host_for("weather") is not None
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert "weather_current" in tool_names
+    finally:
+        await manager.stop_all()
 
 
 async def test_a_disabled_plugin_is_recorded_disabled_without_being_started(
@@ -208,13 +275,12 @@ async def test_a_disabled_plugin_is_recorded_disabled_without_being_started(
 async def test_one_plugins_hang_never_affects_the_next_plugins_own_budget(
     fake_plugin_repository, monkeypatch
 ):
-    """`start_all()` bounds each plugin one after another, in the same
-    calling task (see `PluginManager.start_all`'s own docstring for the
-    verified `anyio`/`mcp` SDK constraint that rules out literal
-    task-based concurrency here) -- but a plugin that consumes its own
-    entire deadline must never cost the *next* plugin any of its own
-    budget: the first plugin's hang and the second plugin's real start
-    are fully independent."""
+    """`start_all()` starts every enabled plugin concurrently, each in its
+    own persistent lifecycle task (see `PluginManager.start_all`'s own
+    docstring), racing the same deadline independently -- a plugin that
+    consumes its own entire deadline must never cost the *next* plugin
+    any of its own budget: the first plugin's hang and the second
+    plugin's real start are fully independent."""
     hangs_forever = asyncio.Event()
 
     async def _start_plugin_host(plugin, **kwargs):
@@ -230,11 +296,14 @@ async def test_one_plugins_hang_never_affects_the_next_plugins_own_budget(
     repo = fake_plugin_repository(plugins=[stuck, fine])
     manager = _manager(repo, plugins_config=PluginsConfig(startup_deadline_s=0.05))
 
-    await manager.start_all()
+    try:
+        await manager.start_all()
 
-    assert manager.state_for("stuck") is PluginState.DEGRADED
-    assert manager.state_for("fine") is PluginState.RUNNING
-    assert manager.tool_host_for("fine") is not None
+        assert manager.state_for("stuck") is PluginState.DEGRADED
+        assert manager.state_for("fine") is PluginState.RUNNING
+        assert manager.tool_host_for("fine") is not None
+    finally:
+        await manager.stop_all()
 
 
 async def test_stop_all_closes_only_running_hosts_and_never_raises_on_degraded_or_disabled(
@@ -263,3 +332,134 @@ async def test_stop_all_closes_only_running_hosts_and_never_raises_on_degraded_o
     await manager.stop_all()
 
     assert hosts["good"].aclose_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (D-05): the ping watchdog, crash-driven respawn, and shutdown.
+# ---------------------------------------------------------------------------
+
+
+async def test_an_idle_dead_plugin_is_noticed_by_the_watchdog_and_its_tools_are_withdrawn(
+    fake_plugin_repository, monkeypatch
+):
+    """Truth 1 (D-05): a plugin's child dies while nothing is calling it
+    -- the watchdog's own ping notices, and the plugin's tools are
+    withdrawn from the schema before any turn could ever discover them
+    missing."""
+    host = _FakeHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    try:
+        await manager.start_all()
+        assert manager.state_for("ha") is PluginState.RUNNING
+
+        # The watchdog is now blocked in its ping-interval sleep.
+        await gate.wait_until_entered()
+        host.ping_should_fail = True
+        gate.release()  # wakes the sleep -- the watchdog pings and finds it dead
+
+        # It loops back and blocks on the backoff sleep before its first
+        # respawn attempt -- reaching that point proves withdrawal
+        # (the state change and the schema rebuild) already happened.
+        await gate.wait_until_entered()
+
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING
+        assert manager.tool_host_for("ha") is None
+        assert manager.tools_schema == []
+        assert host.aclose_count == 1
+        assert host.ping_calls == 1
+    finally:
+        await manager.stop_all()
+
+
+async def test_a_dead_plugin_is_respawned_on_backoff_and_its_tools_return(
+    fake_plugin_repository, monkeypatch
+):
+    """Truth 2 (D-05): once a ping fails, the plugin is respawned on a
+    bounded backoff -- a failed respawn attempt keeps it `CRASHED_RETRYING`
+    and tries again, and a successful one restores its tools to the
+    schema."""
+    first_host = _FakeHost("ha_list_entities")
+    second_host = _FakeHost("ha_list_entities")
+    attempts: list[str] = []
+
+    async def _start_plugin_host(plugin, **kwargs):
+        if not attempts:
+            attempts.append("initial")
+            return first_host
+        if len(attempts) == 1:
+            attempts.append("retry-1-fails")
+            raise RuntimeError("simulated: respawn attempt 1 failed")
+        attempts.append("retry-2-succeeds")
+        return second_host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    try:
+        await manager.start_all()
+        assert manager.tool_host_for("ha") is first_host
+
+        await gate.wait_until_entered()  # ping-interval sleep
+        first_host.ping_should_fail = True
+        gate.release()  # ping fails -- withdrawn, backoff begins
+
+        await gate.wait_until_entered()  # backoff sleep before retry 1
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING
+        assert manager.tools_schema == []
+        gate.release()  # retry 1 attempted -- fails
+
+        await gate.wait_until_entered()  # backoff sleep before retry 2
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING, (
+            "a failed respawn attempt must not flip the state back to running"
+        )
+        assert manager.tools_schema == []
+        gate.release()  # retry 2 attempted -- succeeds
+
+        await gate.wait_until_entered()  # ping-interval sleep, running again
+        assert manager.state_for("ha") is PluginState.RUNNING
+        assert manager.tool_host_for("ha") is second_host
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert "ha_list_entities" in tool_names
+        assert attempts == ["initial", "retry-1-fails", "retry-2-succeeds"]
+    finally:
+        await manager.stop_all()
+
+
+async def test_stop_all_cancels_every_watchdog_and_nothing_is_left_running(
+    fake_plugin_repository, monkeypatch
+):
+    """Truth 5 (D-05): stopping the manager stops every watchdog; nothing
+    is left running after shutdown."""
+    host = _FakeHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+
+    await manager.start_all()
+    await gate.wait_until_entered()  # the watchdog is now blocked mid-sleep
+
+    watchdog_task = manager._tasks[ha.id]
+    await manager.stop_all()
+
+    assert watchdog_task.done()
+    assert manager._tasks == {}
+    assert host.aclose_count == 1

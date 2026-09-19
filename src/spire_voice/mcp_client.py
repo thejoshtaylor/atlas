@@ -27,8 +27,8 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import AsyncExitStack
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -300,6 +300,53 @@ class McpToolHost:
         result = await self.session.list_tools()
         self.tools = result.tools
 
+    @asynccontextmanager
+    async def _as_reader(self) -> "AsyncIterator[ClientSession]":
+        """Admit the caller as a reader under the readers-writer gate
+        `respawn()` is the writer of, and yield the live session to call
+        through -- shared by `call_tool()` and `ping()` (plan 06-02, D-05)
+        so a lightweight liveness probe can never race a `respawn()`'s
+        stack swap either, the identical discipline `call_tool()` always
+        used before this method existed.
+
+        Task 3 (plan 04-01): this is the reader half of a readers-writer
+        pair with `respawn()`. Waits on `_readers_admitted` -- cleared from
+        the instant a `respawn()` call begins, not only while it holds
+        exclusive access, so this blocks from that same instant. Once
+        admitted, this re-checks `_writer_waiting` before registering:
+        `_readers_admitted` can be set again by a `respawn()` finishing at
+        the same moment this call's `wait()` was already resolving on the
+        OLD `set()` from before that same `respawn()` started, so a bare
+        `wait()` return is not, by itself, proof no writer is active.
+        Snapshotting `self.session` and incrementing `_in_flight` both
+        happen in the same synchronous stretch as that re-check -- no
+        `await` in between -- so a `respawn()` reading `_in_flight`
+        afterwards never observes a half-registered call. The actual round
+        trip runs OUTSIDE that stretch (inside the caller's own `async
+        with` body), so two or more concurrent readers genuinely overlap
+        rather than serializing behind each other. Deregisters in a
+        `finally`, so a reader cancelled mid-flight still decrements the
+        count and cannot wedge a later `respawn()` waiting on it to reach
+        zero.
+        """
+        while True:
+            await self._readers_admitted.wait()
+            if self._writer_waiting:
+                # A writer started (and cleared the event) in the gap
+                # between this `wait()` resolving and this check -- loop
+                # back and wait again rather than proceeding on stale
+                # admission.
+                continue
+            session = self.session
+            if session is None:
+                raise RuntimeError("McpToolHost call made before start()")
+            self._in_flight += 1
+            break
+        try:
+            yield session
+        finally:
+            self._in_flight -= 1
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call one tool and return the SDK's own `CallToolResult` unchanged.
 
@@ -312,41 +359,26 @@ class McpToolHost:
         `is_error` and `content[0].text` straight off this return value, so
         the reason crosses this boundary unchanged, not paraphrased.
 
-        Task 3 (plan 04-01): this is the reader half of a readers-writer pair
-        with `respawn()`. Waits on `_readers_admitted` -- cleared from the
-        instant a `respawn()` call begins, not only while it holds exclusive
-        access, so this blocks from that same instant. Once admitted, this
-        re-checks `_writer_waiting` before registering: `_readers_admitted`
-        can be set again by a `respawn()` finishing at the same moment this
-        call's `wait()` was already resolving on the OLD `set()` from before
-        that same `respawn()` started, so a bare `wait()` return is not, by
-        itself, proof no writer is active. Snapshotting `self.session` and
-        incrementing `_in_flight` both happen in the same synchronous
-        stretch as that re-check -- no `await` in between -- so a `respawn()`
-        reading `_in_flight` afterwards never observes a half-registered
-        call. The actual stdio round trip is awaited OUTSIDE that stretch,
-        so two or more concurrent `call_tool()` calls genuinely overlap
-        rather than serializing behind each other. Deregisters in a
-        `finally`, so a call cancelled mid-flight still decrements the count
-        and cannot wedge a later `respawn()` waiting on it to reach zero.
+        Reader half of the readers-writer pair with `respawn()` -- see
+        `_as_reader`'s own docstring for the full discipline this shares
+        with `ping()`.
         """
-        while True:
-            await self._readers_admitted.wait()
-            if self._writer_waiting:
-                # A writer started (and cleared the event) in the gap
-                # between this `wait()` resolving and this check -- loop
-                # back and wait again rather than proceeding on stale
-                # admission.
-                continue
-            session = self.session
-            if session is None:
-                raise RuntimeError("McpToolHost.call_tool called before start()")
-            self._in_flight += 1
-            break
-        try:
+        async with self._as_reader() as session:
             return await session.call_tool(name, arguments)
-        finally:
-            self._in_flight -= 1
+
+    async def ping(self) -> None:
+        """Cheap liveness probe (plan 06-02, D-05): the ping watchdog's own
+        detection mechanism for a plugin that has died with no call
+        pending against it -- `06-RESEARCH.md` Pattern 3 verified the
+        installed SDK resolves every already-in-flight/newly-attempted
+        `call_tool` automatically on child death, but nothing pushes that
+        fact to a caller not currently calling. Raises whatever
+        `session.send_ping()` raises (an `MCPError` on a dead session) --
+        the watchdog interprets any raise as "this plugin is dead," never
+        this method's job to classify.
+        """
+        async with self._as_reader() as session:
+            await session.send_ping()
 
     async def aclose(self) -> None:
         await self._stack.aclose()
