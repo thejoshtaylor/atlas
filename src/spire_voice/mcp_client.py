@@ -28,7 +28,7 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack
-from typing import Any, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -39,6 +39,14 @@ from mcp.types import Tool
 # plan. A second `McpToolHost` instance (the weather server, D-13) passes
 # both explicitly instead of subclassing.
 _DEFAULT_CHILD_MODULE = "spire_mcp.ha"
+
+# Plan 06-01 (D-01 .. D-04): the shape a caller supplies to have
+# `respawn()` rebuild a fresh environment on every call, rather than
+# repeating the mapping the first child was started with. Async because
+# the plugin manager's own factory reads a plugin's config values (and
+# decrypts a secret one) from a repository -- both `await`-requiring
+# operations `start()`/`respawn()` are already inside.
+EnvFactory = Callable[["dict | None"], Awaitable[Mapping[str, str]]]
 
 
 def _default_ha_env(
@@ -121,16 +129,27 @@ class McpToolHost:
         self._ha_token: str | None = None
         self._mcp_root: str | os.PathLike[str] | None = None
         self._child_module: str = _DEFAULT_CHILD_MODULE
-        # `None` (the default, and every caller that predates this plan)
+        # `None` (the default, and every caller that predates plan 06-01)
         # means `respawn()` rebuilds today's literal Home Assistant
         # environment fresh from `_ha_url`/`_ha_token`/`_mcp_root` and
         # whatever new `safety_block` it was given. A caller that passed
-        # `env=` explicitly to `start()` gets exactly that mapping, every
-        # time -- no `HA_URL`, no `HA_TOKEN`, no `SPIRE_SAFETY`, nothing
-        # merged in from anywhere (SAFE-09); `respawn()` is not exercised
-        # against such a host by this plan, but repeats this mapping
-        # unchanged if it ever is.
+        # `env=` explicitly to `start()` (with no `env_factory=`) gets
+        # exactly that mapping repeated, every time -- no `HA_URL`, no
+        # `HA_TOKEN`, no `SPIRE_SAFETY`, nothing merged in from anywhere
+        # (SAFE-09); the weather child never respawns, so this path is
+        # never exercised against it, but repeats the mapping unchanged if
+        # it ever is.
         self._env_override: dict[str, str] | None = None
+        # Plan 06-01 (D-01 .. D-04): when a caller supplies an
+        # `env_factory`, `respawn()` calls it fresh with the new
+        # `safety_block` instead of repeating `_env_override` -- this is
+        # what lets a plugin's respawn carry a genuinely new environment
+        # (a config value an admin just changed, or a new safety block for
+        # the enforcing plugin) rather than the one the first child was
+        # started with. `None` (every caller that predates this plan)
+        # leaves `_env_override`/the default Home Assistant build as the
+        # only two paths, unchanged.
+        self._env_factory: "EnvFactory | None" = None
 
     async def start(
         self,
@@ -141,6 +160,7 @@ class McpToolHost:
         *,
         child_module: str = _DEFAULT_CHILD_MODULE,
         env: "Mapping[str, str] | None" = None,
+        env_factory: "EnvFactory | None" = None,
     ) -> None:
         """Spawn the tool server. `safety_block` is the raw `safety:` config.
 
@@ -152,6 +172,13 @@ class McpToolHost:
         instance for the weather server passes both, and gets none of the
         Home Assistant keys (SAFE-09): `env`, when given, is used exactly as
         given, with nothing merged in from `ha_url`/`ha_token`/`safety_block`.
+
+        `env_factory` (plan 06-01, D-01 .. D-04) takes precedence over
+        `env` when both are given: this call awaits it once, with
+        `safety_block`, to build the initial environment, and `respawn()`
+        awaits it again on every later call -- the hook that lets a
+        plugin's environment be rebuilt fresh (a changed config value, a
+        new safety block) rather than replayed from this call's own `env`.
 
         The child is the process that actually calls Home Assistant, so for
         the default (Home Assistant) child it is the process whose `Policy`
@@ -172,7 +199,13 @@ class McpToolHost:
         self._mcp_root = mcp_root
         self._child_module = child_module
         self._env_override = dict(env) if env is not None else None
-        resolved_env = dict(env) if env is not None else _default_ha_env(ha_url, ha_token, mcp_root, safety_block)
+        self._env_factory = env_factory
+        if env_factory is not None:
+            resolved_env = dict(await env_factory(safety_block))
+        elif env is not None:
+            resolved_env = dict(env)
+        else:
+            resolved_env = _default_ha_env(ha_url, ha_token, mcp_root, safety_block)
         await self._spawn(child_module, resolved_env)
 
     async def respawn(self, safety_block: dict | None) -> None:
@@ -186,9 +219,14 @@ class McpToolHost:
         `_ha_url`/`_ha_token`/`_mcp_root` and this call's own `safety_block`
         -- a respawn's whole point is a *different* policy -- so only the
         policy differs between the old child and the new one. A host started
-        with an explicit `env=` repeats that mapping unchanged; this plan
-        does not exercise that combination, since the weather server (D-13)
-        never respawns.
+        with an explicit `env=` (and no `env_factory=`) repeats that mapping
+        unchanged; this plan does not exercise that combination, since the
+        weather server (D-13) never respawns. A host started with
+        `env_factory=` (plan 06-01) instead awaits it fresh, with this
+        call's own `safety_block` -- the hook a plugin's manager uses to
+        rebuild a genuinely new environment (a changed config value, a new
+        safety block for the enforcing plugin) rather than repeating the
+        mapping the first child was started with.
 
         Task 3 (plan 04-01): this is now the writer half of a readers-writer
         pair with `call_tool()`. `_writer_waiting` is set the instant this
@@ -212,11 +250,12 @@ class McpToolHost:
         if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
             raise RuntimeError("McpToolHost.respawn called before start()")
         async with self._respawn_lock:
-            resolved_env = (
-                dict(self._env_override)
-                if self._env_override is not None
-                else _default_ha_env(self._ha_url, self._ha_token, self._mcp_root, safety_block)
-            )
+            if self._env_factory is not None:
+                resolved_env = dict(await self._env_factory(safety_block))
+            elif self._env_override is not None:
+                resolved_env = dict(self._env_override)
+            else:
+                resolved_env = _default_ha_env(self._ha_url, self._ha_token, self._mcp_root, safety_block)
             # Both statements below run synchronously, with no `await`
             # between them -- no reader can observe one without the other
             # (this class's own docstring). From this instant, `call_tool`'s

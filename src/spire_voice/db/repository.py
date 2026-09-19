@@ -845,3 +845,76 @@ class WorkflowRepository(Protocol):
         changes its steps) rather than from `now`. Same row lock, same
         status refusal, and the same two exceptions as `append_steps`."""
         ...
+
+
+@dataclass(frozen=True)
+class PluginConfigValue:
+    """One key/value pair of a plugin's own configuration (D-03, D-16) --
+    a plain value object, never an ORM row, matching every other
+    repository in this module.
+
+    Carries either `value` (a plain, non-secret value) or `(ciphertext,
+    key_version)` (a secret one) -- never a decrypted string. This is
+    what makes a repository return value safe to serialize into a
+    response body with nothing to leak (D-03, the write-only property
+    PROV-04 established): the plugin-child spawn path
+    (`spire_voice.plugins.host`) is the one place `ciphertext` is ever
+    decrypted.
+    """
+
+    key: str
+    secret: bool
+    value: str | None
+    ciphertext: bytes | None
+    key_version: int | None
+
+
+@dataclass(frozen=True)
+class Plugin:
+    """One plugin row, as a plain value object (D-01, D-04, PLUG-09) --
+    the same reason `Macro`/`PolicyRule` above are plain value objects
+    rather than ORM rows: a caller outside `src/spire_voice/db/` has no
+    reason to hold a SQLAlchemy-mapped instance open past its session.
+    """
+
+    id: int
+    slug: str
+    display_name: str
+    transport: str
+    args: tuple[str, ...]
+    url: str | None
+    enabled: bool
+    builtin: bool
+    enforces_policy: bool
+    timeout_ms: int
+    created_at: datetime
+    updated_at: datetime
+    created_by_user_id: int | None
+
+
+class PluginRepository(Protocol):
+    """What plugin storage must answer -- the read surface
+    `PluginManager` (`spire_voice.plugins.manager`) actually uses (D-01,
+    D-04). The write half (install/enable/disable/configure) lands in the
+    plan that owns `routes/plugins.py`; this protocol carries no method
+    with no caller yet.
+
+    Structurally satisfied by `PostgresPluginRepository` (real) and
+    `FakePluginRepository` (`tests/conftest.py`), the same
+    dependency-injection-over-subclassing convention every other
+    repository in this module already uses.
+    """
+
+    async def list_plugins(self) -> Sequence[Plugin]:
+        """Every plugin row, enabled and not -- `PluginManager.start_all()`
+        is the one caller that filters on `enabled` itself; this method
+        returns the whole table."""
+        ...
+
+    async def get_config_values(self, plugin_id: int) -> Sequence[PluginConfigValue]:
+        """Every config value belonging to `plugin_id`, in no particular
+        order beyond what the database returns -- the child's environment
+        is built key by key from this list (`spire_voice.plugins.host`),
+        so order does not matter the way `MacroActionRow.position` does
+        for a macro's actions."""
+        ...

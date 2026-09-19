@@ -47,6 +47,7 @@ from spire_voice.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
     PostgresMacroRepository,
+    PostgresPluginRepository,
     PostgresPolicyRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
@@ -55,10 +56,12 @@ from spire_voice.db.postgres import (
 from spire_voice.db.repository import (
     CredentialRepository,
     MacroRepository,
+    PluginRepository,
     SettingsRepository,
     WorkflowRepository,
 )
-from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
+from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
+from spire_voice.plugins.manager import PluginManager
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tier_reply import FILLER_TEXT
@@ -222,7 +225,7 @@ def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ())
     return "\n".join(lines)
 
 
-def _make_state_fetch(tool_host: McpToolHost) -> Callable[[], Any]:
+def _make_state_fetch(tool_host: "McpToolHost | None") -> Callable[[], Any]:
     """Build the per-turn `state_fetch` factory `run_turn` awaits
     concurrently with the operator still speaking (D-15).
 
@@ -231,9 +234,18 @@ def _make_state_fetch(tool_host: McpToolHost) -> Callable[[], Any]:
     is deliberate here, not an oversight: a question about a denied entity
     is exactly the case that must keep working. Reuses `_tool_result_json`
     rather than re-implementing the MCP payload walk a second time.
+
+    Plan 06-01: `tool_host` is `None` when the plugin that enforces the
+    house policy (`app.state.tool_host`, `PluginManager.enforcing_host`)
+    is disabled or failed to start -- an absent host returns an empty
+    entity list rather than raising an attribute error, the same
+    "unknown reads as nothing known" posture `_state_message` already
+    gives an empty `states` mapping.
     """
 
     async def _fetch() -> list[dict[str, Any]]:
+        if tool_host is None:
+            return []
         result = await tool_host.call_tool("ha_list_entities", {})
         entities = _tool_result_json(result)
         return entities if isinstance(entities, list) else []
@@ -340,6 +352,9 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         "settings_repo": PostgresSettingsRepository(sessionmaker),
         # Plan 04-05 (D-09): macros live here now, not on `Config`.
         "macro_repo": PostgresMacroRepository(sessionmaker),
+        # Plan 06-01 (D-01, D-04): plugins live here now -- the table
+        # `PluginManager` reads instead of `Config.mcp_servers`.
+        "plugin_repo": PostgresPluginRepository(sessionmaker),
         # Plan 05-01: scheduled workflow runs and steps (D-01 .. D-04).
         "workflow_repo": PostgresWorkflowRepository(
             sessionmaker,
@@ -597,6 +612,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     credential_repo = repositories["credential_repo"]
     settings_repo: SettingsRepository = repositories["settings_repo"]
     macro_repo: MacroRepository = repositories["macro_repo"]
+    plugin_repo: PluginRepository = repositories["plugin_repo"]
     workflow_repo: WorkflowRepository = repositories["workflow_repo"]
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
@@ -650,64 +666,46 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         resolved_model = await tier.brain.resolve_model()
         logger.info("resolved brain tier %d model: %s", tier.index, resolved_model)
 
-    tool_host = McpToolHost()
-    ha_config = config.mcp_servers.get("ha")
-    ha_env = ha_config.env if ha_config else {}
-    # The database is the policy's source of truth now (SAFE-05, D-11):
-    # the block handed to the child is derived from the repository, not
-    # from a `Config` field -- `lifespan` never constructs a `Policy`
-    # object and serializes that; it builds the same JSON-shaped dict
-    # `Policy.from_config` already expects, one parser on both sides.
-    safety_block = safety_block_from_policy(await policy_repo.load_policy())
-    await tool_host.start(
-        ha_url=ha_env.get("HA_URL", ""),
-        ha_token=resolved_ha_token,
+    # Plan 06-01 (D-01, D-04, PLUG-09): `PluginManager` is the only thing
+    # in this process that spawns an MCP host -- Home Assistant and
+    # weather are both ordinary rows in the `plugins` table now (seeded by
+    # `alembic/versions/0008_plugin_tables.py`), reached through the same
+    # loop as any plugin an admin installs later. `lifespan` itself
+    # constructs no MCP host and names no child module.
+    #
+    # `_current_safety_block` is the one place this process ever derives
+    # the JSON-shaped block `Policy.from_config` expects from the policy
+    # repository -- never a `Policy` object constructed here and
+    # serialized, matching this file's own pre-existing rule (SAFE-05,
+    # D-11). `PluginManager` calls this fresh for the plugin that
+    # `enforces_policy` (Home Assistant, seeded true) on every start and
+    # every future respawn, so a policy write that lands between two
+    # starts is never served a stale block.
+    async def _current_safety_block() -> "dict | None":
+        return safety_block_from_policy(await policy_repo.load_policy())
+
+    plugin_manager = PluginManager(
+        plugin_repo,
         mcp_root=MCP_ROOT,
-        safety_block=safety_block,
+        security=security_config,
+        safety_block_provider=_current_safety_block,
     )
-    app.state.tool_host = tool_host
+    await plugin_manager.start_all()
+    app.state.plugin_manager = plugin_manager
+    # `app.state.tool_host` keeps its pre-existing meaning but gains a
+    # definition (T-04-13's two named readers, `routes/policy.py`'s
+    # respawn and `_make_state_fetch` below, both still read it by name):
+    # the running host of the plugin that enforces the house policy,
+    # reassigned by the manager on every swap. `None` when that plugin is
+    # disabled or failed to start -- both readers below tolerate that.
+    app.state.tool_host = plugin_manager.enforcing_host
     # Kept on app.state so plan 03-07's write routes can compare a would-be
     # new block against the one the running child was actually spawned
-    # with, before deciding whether a respawn is needed.
-    app.state.safety_block = safety_block
-
-    # D-13 (phase 4): a second, independent `McpToolHost` for the weather
-    # child, spawned only if `mcp.servers.weather` is configured, with an
-    # environment built literally from that block plus `PYTHONPATH` --
-    # nothing merged in from `ha_url`/`ha_token`/`safety_block` (SAFE-09:
-    # this child holds no Home Assistant credential and no provider key).
-    # `app.state.tool_host` stays pointed at the Home Assistant host,
-    # unchanged (T-04-13): the policy editor's respawn
-    # (`routes/policy.py`) and `_make_state_fetch` both read that
-    # attribute by name, and repointing it at a multi-host object would
-    # break both.
-    weather_tool_host: McpToolHost | None = None
-    weather_config = config.mcp_servers.get("weather")
-    if weather_config is not None:
-        candidate_weather_host = McpToolHost()
-        try:
-            await candidate_weather_host.start(
-                ha_url="",
-                ha_token="",
-                mcp_root=MCP_ROOT,
-                child_module="spire_mcp.weather",
-                env={**weather_config.env, "PYTHONPATH": str(MCP_ROOT)},
-            )
-        except Exception:
-            # T-04-16: a weather child that will not start must not take
-            # the whole application down with it -- the opposite posture
-            # from the Home Assistant child above, whose `start()` failure
-            # propagates uncaught. A house working without a forecast is a
-            # better outcome than a house that will not boot because a
-            # public weather API was unreachable at start. Logged by name;
-            # the lookup below carries just the Home Assistant host.
-            logger.exception(
-                "weather MCP child failed to start -- continuing with the "
-                "Home Assistant tools only"
-            )
-        else:
-            weather_tool_host = candidate_weather_host
-    app.state.weather_tool_host = weather_tool_host
+    # with, before deciding whether a respawn is needed. `None` when no
+    # plugin is currently enforcing the policy at all.
+    app.state.safety_block = (
+        await _current_safety_block() if plugin_manager.enforcing_host is not None else None
+    )
 
     # Plan 05-01 (D-08): the in-process `schedule_workflow` tool host --
     # in-process, not a spawned child, because it holds `workflow_repo`,
@@ -720,24 +718,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # The lookup the turn controller actually calls through (all three
     # `run_turn` call sites below pass this, never `app.state.tool_host`
-    # directly): the Home Assistant child, the weather child (if
-    # configured), and the in-process workflow host, in a fixed order, so
-    # the model sees every host's tools and a call reaches whichever one
-    # advertised it. Built fresh from already-started hosts -- reads no
-    # configuration of its own (`McpToolHostLookup`'s own docstring).
-    lookup_hosts: list[McpToolHost] = [tool_host]
-    if weather_tool_host is not None:
-        lookup_hosts.append(weather_tool_host)
-    lookup_hosts.append(workflow_tool_host)
-    app.state.tool_host_lookup = McpToolHostLookup(lookup_hosts)
-    app.state.tools_schema = (
-        mcp_tools_to_openai_tools(tool_host.tools)
-        + (mcp_tools_to_openai_tools(weather_tool_host.tools) if weather_tool_host is not None else [])
-        + mcp_tools_to_openai_tools(workflow_tool_host.tools)
+    # directly): every running plugin's own host, plus the in-process
+    # workflow host, in a fixed order, so the model sees every host's
+    # tools and a call reaches whichever one advertised it. Built fresh
+    # from already-started hosts -- reads no configuration of its own
+    # (`McpToolHostLookup`'s own docstring). `plugin_manager.tools_schema`
+    # is the merged schema `rebuild()` already computed over the same
+    # plugin hosts; only the workflow host's own tools are appended here.
+    app.state.tool_host_lookup = McpToolHostLookup([*plugin_manager.hosts, workflow_tool_host])
+    app.state.tools_schema = plugin_manager.tools_schema + mcp_tools_to_openai_tools(
+        workflow_tool_host.tools
     )
 
-    entities_result = await tool_host.call_tool("ha_list_entities", {})
-    entities = _tool_result_json(entities_result)
+    # Plan 06-01 (D-07's own posture, extended in a following plan): the
+    # Home Assistant plugin may not be running at all (disabled, or not
+    # yet spawned successfully) -- this must tolerate that tool not
+    # existing and build the prompt from an empty entity list rather than
+    # raising, since a degraded Home Assistant is meant to be a survivable
+    # boot. Reads through the merged lookup, not a single named host,
+    # since that is the one object guaranteed to exist regardless of which
+    # plugins are actually running.
+    try:
+        entities_result = await app.state.tool_host_lookup.call_tool("ha_list_entities", {})
+        entities = _tool_result_json(entities_result)
+    except UnknownToolError:
+        entities = []
     app.state.catalog_prompt = _catalog_prompt(entities if isinstance(entities, list) else [])
 
     # Plan 04-05 (D-09): macros live in the database now, not on `config`.
@@ -966,8 +971,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # non-cancellation exception used to re-raise it, aborting every
     # cleanup call below (`camera_source.close()`, `ffmpeg_supervisor.
     # stop()`, `retention_scheduler.stop()`, `speaker_writer.close()`,
-    # `tool_host.aclose()`) and leaving the ffmpeg child, the MCP child,
-    # and the FIFO's open handle behind uncleanly on process exit.
+    # `plugin_manager.stop_all()`) and leaving the ffmpeg child, every MCP
+    # child, and the FIFO's open handle behind uncleanly on process exit.
     for task in app.state.source_runner_tasks:
         task.cancel()
     await asyncio.gather(*app.state.source_runner_tasks, return_exceptions=True)
@@ -978,9 +983,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await workflow_scheduler.stop()
     await speaker_http_client.aclose()
     await speaker_writer.close()
-    await tool_host.aclose()
-    if weather_tool_host is not None:
-        await weather_tool_host.aclose()
+    # Plan 06-01: the manager owns every plugin child's teardown now --
+    # one call, not a per-host `aclose()` for however many plugins happen
+    # to be running.
+    await plugin_manager.stop_all()
     await db_engine.dispose()
 
 

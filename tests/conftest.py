@@ -25,6 +25,8 @@ from spire_voice.db.repository import (
     Invite,
     Macro,
     MacroAction,
+    Plugin,
+    PluginConfigValue,
     PolicyRule,
     RefreshToken,
     Setting,
@@ -584,6 +586,45 @@ def fake_macro_repository():
     """Factory: `fake_macro_repository(macros=[...])` builds a scripted
     `FakeMacroRepository`."""
     return FakeMacroRepository
+
+
+class FakePluginRepository:
+    """An in-memory `PluginRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation D-04's "the suite runs with no
+    Postgres reachable" requires, the direct sibling of
+    `FakeMacroRepository` above. Read-only, matching the real Protocol's
+    own read-only surface this plan builds (the write half lands in the
+    plan that owns `routes/plugins.py`).
+
+    Constructed with a starting list of plugins (each a `Plugin`) and a
+    mapping of `plugin_id -> [PluginConfigValue, ...]` -- a test builds
+    both directly from the same dataclasses the real repository returns,
+    so a test asserting on either exercises the same contract regardless
+    of which repository backs it.
+    """
+
+    def __init__(
+        self,
+        plugins: Sequence[Plugin] = (),
+        config_values: dict[int, Sequence[PluginConfigValue]] | None = None,
+    ) -> None:
+        self.plugins: dict[int, Plugin] = {plugin.id: plugin for plugin in plugins}
+        self.config_values: dict[int, list[PluginConfigValue]] = {
+            plugin_id: list(values) for plugin_id, values in (config_values or {}).items()
+        }
+
+    async def list_plugins(self) -> list[Plugin]:
+        return list(self.plugins.values())
+
+    async def get_config_values(self, plugin_id: int) -> list[PluginConfigValue]:
+        return list(self.config_values.get(plugin_id, ()))
+
+
+@pytest.fixture
+def fake_plugin_repository():
+    """Factory: `fake_plugin_repository(plugins=[...], config_values={...})`
+    builds a scripted `FakePluginRepository`."""
+    return FakePluginRepository
 
 
 _FAKE_WORKFLOW_CLAIMABLE_RUN_STATUSES = ("pending", "firing")

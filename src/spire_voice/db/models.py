@@ -429,3 +429,70 @@ class ProviderCredentialRow(Base):
     updated_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )
+
+
+class PluginRow(Base):
+    """One plugin: a row an admin manages in the webapp, and the one thing
+    `PluginManager` (`spire_voice.plugins.manager`) ever spawns a child
+    from (D-01, D-04, PLUG-09).
+
+    `builtin` blocks deletion and nothing else -- Home Assistant and
+    weather are seeded `builtin=True`; a plugin an admin installs later is
+    `builtin=False`. `transport` is `"stdio"` for every row this plan
+    seeds (D-02); `args` is the stdio child's `["-m", "<module>"]` list,
+    mirroring `spire_voice.config.McpServerConfig.args`'s own refusal of a
+    `command` key -- the interpreter is never configurable. `url` stays
+    unused until the remote transport lands. `enforces_policy` is what
+    lets the house denylist reach exactly one child (Home Assistant, seeded
+    true) with no per-slug branch anywhere that reads this table, and no
+    route in this phase ever writes it. `created_by_user_id` is `NULL` for
+    a seeded row, matching `MacroRow`'s own seeded-row convention.
+    """
+
+    __tablename__ = "plugins"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slug: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(Text, nullable=False)
+    args: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    builtin: Mapped[bool] = mapped_column(nullable=False, default=False)
+    enforces_policy: Mapped[bool] = mapped_column(nullable=False, default=False)
+    timeout_ms: Mapped[int] = mapped_column(nullable=False, default=5000)
+    created_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+
+
+class PluginConfigValueRow(Base):
+    """One key/value pair of a plugin's own configuration (D-03, D-16).
+
+    The either-plaintext-or-ciphertext split, gated by this row's own
+    `secret` flag, is the one genuinely new column shape this table adds
+    -- built from `MacroActionRow`'s CASCADE-child shape and
+    `ProviderCredentialRow`'s ciphertext columns rather than a third
+    pattern. `value` is populated only when `secret` is false;
+    `ciphertext`/`key_version` are populated only when it is true, and are
+    exactly what `spire_voice.crypto.credentials.encrypt_credential`
+    returns -- nothing in this table, nor in any repository built on it,
+    ever holds a decrypted secret value. `ondelete="CASCADE"` matches
+    `MacroActionRow.macro_id`'s own convention: deleting a plugin removes
+    its own config values in the same statement.
+    """
+
+    __tablename__ = "plugin_config_values"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plugin_id: Mapped[int] = mapped_column(
+        ForeignKey("plugins.id", ondelete="CASCADE"), nullable=False
+    )
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    secret: Mapped[bool] = mapped_column(nullable=False, default=False)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    key_version: Mapped[int | None] = mapped_column(nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)

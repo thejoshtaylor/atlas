@@ -26,6 +26,8 @@ from spire_voice.db.models import (
     MacroActionRow,
     MacroAliasRow,
     MacroRow,
+    PluginConfigValueRow,
+    PluginRow,
     PolicyRuleRow,
     ProviderCredentialRow,
     RefreshTokenRow,
@@ -42,6 +44,8 @@ from spire_voice.db.repository import (
     Invite,
     Macro,
     MacroAction,
+    Plugin,
+    PluginConfigValue,
     PolicyRule,
     RefreshToken,
     Setting,
@@ -980,6 +984,66 @@ class PostgresMacroRepository:
             # actions and aliases together in one statement, not three.
             await session.delete(row)
             await session.commit()
+
+
+def _plugin_from_row(row: PluginRow) -> Plugin:
+    return Plugin(
+        id=row.id,
+        slug=row.slug,
+        display_name=row.display_name,
+        transport=row.transport,
+        args=tuple(row.args or []),
+        url=row.url,
+        enabled=row.enabled,
+        builtin=row.builtin,
+        enforces_policy=row.enforces_policy,
+        timeout_ms=row.timeout_ms,
+        created_at=_to_aware_utc(row.created_at),
+        updated_at=_to_aware_utc(row.updated_at),
+        created_by_user_id=row.created_by_user_id,
+    )
+
+
+def _plugin_config_value_from_row(row: PluginConfigValueRow) -> PluginConfigValue:
+    return PluginConfigValue(
+        key=row.key,
+        secret=row.secret,
+        value=row.value,
+        ciphertext=row.ciphertext,
+        key_version=row.key_version,
+    )
+
+
+class PostgresPluginRepository:
+    """`PluginRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.PluginRepository` (a
+    `typing.Protocol`) -- there is no base class to inherit from, matching
+    every other `Postgres*Repository` class in this module. Read-only
+    (D-01, this plan's own instruction): the write half lands in the plan
+    that owns `routes/plugins.py`.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def list_plugins(self) -> list[Plugin]:
+        async with self._sessionmaker() as session:
+            rows = (
+                await session.execute(select(PluginRow).order_by(PluginRow.id))
+            ).scalars().all()
+            return [_plugin_from_row(row) for row in rows]
+
+    async def get_config_values(self, plugin_id: int) -> list[PluginConfigValue]:
+        async with self._sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    select(PluginConfigValueRow).where(
+                        PluginConfigValueRow.plugin_id == plugin_id
+                    )
+                )
+            ).scalars().all()
+            return [_plugin_config_value_from_row(row) for row in rows]
 
 
 # The run statuses a step's own run must carry for that step to be
