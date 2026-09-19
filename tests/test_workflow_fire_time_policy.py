@@ -241,6 +241,23 @@ def _build_policy_app(security, account_repo, policy_repo, tool_host) -> FastAPI
     app.state.account_repo = account_repo
     app.state.policy_repo = policy_repo
     app.state.tool_host = tool_host
+
+    # Phase 6 moved `routes/policy.py` off `app.state.tool_host.respawn(...)`
+    # and onto `app.state.plugin_manager.request_policy_respawn(...)`, because
+    # a plugin's host is now owned by one persistent lifecycle task and the
+    # `mcp` stdio transport binds its `anyio` cancel scope to the task that
+    # entered it. This test drives a REAL spawned child, so the stand-in below
+    # performs a real `respawn()` on that real host -- it only supplies the
+    # entry point the route now calls, and changes nothing this test asserts
+    # about the policy actually reaching the child.
+    class _ManagerStandingInForRespawn:
+        def __init__(self, host) -> None:
+            self._host = host
+
+        async def request_policy_respawn(self, safety_block) -> None:
+            await self._host.respawn(safety_block)
+
+    app.state.plugin_manager = _ManagerStandingInForRespawn(tool_host)
     app.state.safety_block = None
     app.include_router(policy_router)
     return app

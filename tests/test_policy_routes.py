@@ -42,12 +42,35 @@ REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
 MCP_ROOT = REPO_ROOT / "mcp"
 
 
+class _ManagerStandingInForRespawn:
+    """Stands in for `PluginManager` at the one method `routes/policy.py`
+    calls, `request_policy_respawn`, and forwards to the `tool_host` fake
+    the test supplied.
+
+    Phase 6 moved the route off `app.state.tool_host.respawn(...)` and onto
+    `app.state.plugin_manager.request_policy_respawn(...)`, because each
+    plugin's host is now owned by one persistent lifecycle task and the
+    `mcp` stdio transport binds its `anyio` cancel scope to the task that
+    entered it -- a respawn driven from a request task raises. This adapter
+    keeps every existing assertion in this file pointed at the same
+    recording/slow/failing fakes, so they now exercise the real call path
+    rather than one the route no longer takes.
+    """
+
+    def __init__(self, tool_host) -> None:
+        self._tool_host = tool_host
+
+    async def request_policy_respawn(self, safety_block) -> None:
+        await self._tool_host.respawn(safety_block)
+
+
 def _build_policy_app(security, account_repo, policy_repo, tool_host) -> FastAPI:
     app = FastAPI()
     app.state.config = SimpleNamespace(security=security)
     app.state.account_repo = account_repo
     app.state.policy_repo = policy_repo
     app.state.tool_host = tool_host
+    app.state.plugin_manager = _ManagerStandingInForRespawn(tool_host)
     app.state.safety_block = None
     app.include_router(policy_router)
     return app
@@ -132,6 +155,66 @@ def test_adding_a_rule_respawns_the_tool_child_with_the_new_policy(
     assert "switch.example_new_denied" in block["deny_entities"], (
         "the block the child was respawned with does not contain the new rule -- "
         f"got {block!r}"
+    )
+
+
+def test_the_route_respawns_through_the_manager_never_the_host_directly(
+    monkeypatch, fake_account_repository, fake_policy_repository
+):
+    """A policy write must reach the enforcing child through
+    `PluginManager.request_policy_respawn`, never through
+    `app.state.tool_host.respawn(...)`.
+
+    This is not a style preference. Since Phase 6 each plugin's host is
+    owned by one persistent lifecycle task, and the installed `mcp` stdio
+    transport binds its `anyio` cancel scope to whichever task entered it,
+    so a respawn driven from this request's own task raises `RuntimeError:
+    Attempted to exit cancel scope in a different task than it was entered
+    in` -- every policy write in the webapp would fail. The host below
+    fails the test loudly if the route ever reaches it directly again.
+    """
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    policy_repo = fake_policy_repository()
+
+    class _HostThatMustNotBeCalled:
+        async def respawn(self, safety_block) -> None:
+            raise AssertionError(
+                "routes/policy.py called McpToolHost.respawn() directly -- it must go "
+                "through PluginManager.request_policy_respawn() so the plugin's own "
+                "lifecycle task performs the respawn"
+            )
+
+    class _RecordingManager:
+        def __init__(self) -> None:
+            self.blocks: list[dict] = []
+
+        async def request_policy_respawn(self, safety_block) -> None:
+            self.blocks.append(safety_block)
+
+    manager = _RecordingManager()
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+
+    app = _build_policy_app(security, account_repo, policy_repo, _HostThatMustNotBeCalled())
+    app.state.plugin_manager = manager
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/policy/rules",
+        json={"kind": "deny_entity", "value": "switch.example_manager_path", "note": None},
+    )
+    assert response.status_code == 201, response.text
+
+    assert len(manager.blocks) == 1, (
+        "the write must request exactly one respawn through the plugin manager -- "
+        f"got {len(manager.blocks)}"
+    )
+    assert "switch.example_manager_path" in manager.blocks[0]["deny_entities"], (
+        "the block handed to the manager does not carry the new rule -- "
+        f"got {manager.blocks[0]!r}"
     )
 
 

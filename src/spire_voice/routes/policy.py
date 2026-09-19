@@ -209,12 +209,23 @@ async def _respawn_with_current_policy(request: Request) -> None:
     """Rebuild the policy from the repository and respawn the enforcing
     child with it -- called after every successful write, and awaited
     before the route returns, which is the only thing that makes the
-    webapp's Live badge honest (this plan's own key link)."""
+    webapp's Live badge honest (this plan's own key link).
+
+    The respawn is requested through `PluginManager`, never by calling
+    `McpToolHost.respawn()` on `app.state.tool_host` directly. Since Phase
+    6 every plugin's host is owned by one persistent lifecycle task, and
+    the installed `mcp` stdio transport binds its `anyio` cancel scope to
+    the task that entered it -- a respawn driven from this request's own
+    task raises `RuntimeError: Attempted to exit cancel scope in a
+    different task than it was entered in`, which would fail every policy
+    write in the webapp. `request_policy_respawn` hands the work to the
+    task that owns the child; see its docstring.
+    """
     policy_repo: PolicyRepository = request.app.state.policy_repo
     policy = await policy_repo.load_policy()
     block = safety_block_from_policy(policy)
     try:
-        await request.app.state.tool_host.respawn(block)
+        await request.app.state.plugin_manager.request_policy_respawn(block)
     except Exception as exc:  # noqa: BLE001 -- any respawn failure is reported the same way
         raise _respawn_failed_error() from exc
     request.app.state.safety_block = block

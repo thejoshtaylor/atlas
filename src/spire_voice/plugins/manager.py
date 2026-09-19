@@ -223,10 +223,9 @@ class PluginManager:
         existing "a write that cannot take live effect is a failed write"
         rule. Serviced on that plugin's own watchdog loop (`_run_
         watchdog`), so this can take up to one ping interval to be picked
-        up -- `routes/policy.py`'s own call site still calls
-        `host.respawn()` directly today, predating this method; wiring it
-        through here instead is a known gap this plan does not close (out
-        of this plan's own file list), flagged in this plan's SUMMARY.
+        up. `routes/policy.py` reaches this through
+        `request_policy_respawn`, which finds the enforcing row itself so
+        the route never handles a plugin id.
         """
         running = self._plugins.get(plugin_id)
         if running is None or running.state is not PluginState.RUNNING:
@@ -234,6 +233,38 @@ class PluginManager:
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_respawn[plugin_id] = (safety_block, future)
         await future
+
+    async def request_policy_respawn(self, safety_block: "dict | None") -> None:
+        """Respawn whichever running plugin enforces the house policy,
+        carrying `safety_block` -- the one entry point `routes/policy.py`
+        uses after a successful policy write.
+
+        This exists so the route never has to learn a plugin id, and never
+        reaches `McpToolHost.respawn()` directly. The direct call is not
+        merely untidy here, it is broken: this manager gives every plugin
+        one persistent lifecycle task that owns its host, and the
+        installed `mcp==2.2.0` stdio transport binds its `anyio` cancel
+        scope to whichever task entered it -- so a respawn driven from a
+        request-handling task raises `RuntimeError: Attempted to exit
+        cancel scope in a different task than it was entered in`, and
+        every policy write in the webapp fails. Routing through
+        `request_respawn` hands the work to the owning task, which is the
+        only task allowed to do it.
+
+        Raises `RuntimeError` when no running plugin enforces the policy
+        (it is disabled, degraded, or not yet started). That is the same
+        posture `routes/policy.py` already takes toward a respawn that
+        cannot happen: a write whose new policy cannot reach the enforcing
+        process is a failed write, never a silent success.
+        """
+        for plugin_id, running in self._plugins.items():
+            if running.plugin.enforces_policy and running.state is PluginState.RUNNING:
+                await self.request_respawn(plugin_id, safety_block)
+                return
+        raise RuntimeError(
+            "no running plugin enforces the house policy -- cannot deliver the new "
+            "policy to an enforcing process"
+        )
 
     async def start_all(self) -> None:
         """Start every enabled plugin row concurrently, each bounded by
