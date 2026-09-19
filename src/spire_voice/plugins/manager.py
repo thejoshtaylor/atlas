@@ -422,7 +422,22 @@ class PluginManager:
                 assert current.host is not None
                 try:
                     await current.host.ping()
-                except Exception as exc:  # noqa: BLE001 -- any ping failure means "dead"
+                except BaseException as exc:  # noqa: BLE001 -- see below for why BaseException
+                    # Plan 06-03: verified directly against the installed SDK -- a
+                    # remote connection's own internal task group can surface a
+                    # bare `asyncio.CancelledError` (not an `MCPError`) for a
+                    # request in flight when the connection dies out from under
+                    # it (its background GET-stream reconnect loop failing is
+                    # what triggers this). `self._stopping` is set before
+                    # `stop_all()` ever calls `task.cancel()` on this lifecycle
+                    # task, so a `CancelledError` seen while it is still `False`
+                    # is this plugin's connection dying, not a real shutdown --
+                    # anything else (a genuine `Exception`, or a `CancelledError`
+                    # seen while `self._stopping` is `True`) is handled below;
+                    # a real shutdown-driven cancellation is re-raised, exactly
+                    # as it would be with no `except` here at all.
+                    if isinstance(exc, asyncio.CancelledError) and self._stopping:
+                        raise
                     logger.warning(
                         "plugin %r ping failed (%s) -- withdrawing its tools and "
                         "scheduling a respawn",
@@ -467,6 +482,14 @@ class PluginManager:
         safety_block = (
             await self._safety_block_provider() if plugin.enforces_policy else None
         )
+        if plugin.transport == "remote":
+            bearer_token = await self._remote_bearer_token(plugin)
+            return await start_plugin_host(
+                plugin,
+                mcp_root=self._mcp_root,
+                safety_block=safety_block,
+                bearer_token=bearer_token,
+            )
         env = await self._build_env(plugin, safety_block=safety_block)
         env_factory = self._make_env_factory(plugin) if plugin.enforces_policy else None
         return await start_plugin_host(
@@ -476,6 +499,27 @@ class PluginManager:
             env=env,
             env_factory=env_factory,
         )
+
+    async def _remote_bearer_token(self, plugin: Plugin) -> "str | None":
+        """`plugin`'s own secret config value, decrypted at exactly this
+        point (D-03) -- building the connection, the same single point
+        `_build_env` decrypts one for the stdio side -- and nowhere else;
+        `start_plugin_host` never sees ciphertext, only this already-
+        decrypted value. A remote plugin declares at most one secret
+        config value (D-16's plain key/value shape, no OAuth flow in
+        scope); `None` when it declares none, which is a real, supported
+        shape and not an error -- a remote plugin can have no credential
+        at all."""
+        config_values = await self._repository.get_config_values(plugin.id)
+        for value in config_values:
+            if value.secret:
+                if value.ciphertext is None or value.key_version is None:
+                    raise RuntimeError(
+                        f"plugin config value {value.key!r} is marked secret but has "
+                        "no ciphertext -- a secret value must always be encrypted at rest"
+                    )
+                return decrypt_credential(value.ciphertext, value.key_version, self._security)
+        return None
 
     async def _build_env(self, plugin: Plugin, *, safety_block: "dict | None") -> dict[str, str]:
         """The literal, key-by-key environment `plugin`'s child gets

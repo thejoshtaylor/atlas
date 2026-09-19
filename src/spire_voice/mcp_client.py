@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -48,6 +49,8 @@ from mcp_types.jsonrpc import REQUEST_TIMEOUT
 
 if TYPE_CHECKING:
     import httpx2
+
+logger = logging.getLogger("spire_voice.mcp_client")
 
 # The child `start()` spawns when a caller supplies neither `child_module`
 # nor `env` -- today's Home Assistant child, unchanged from before this
@@ -528,7 +531,28 @@ class McpToolHost:
             await session.send_ping()
 
     async def aclose(self) -> None:
-        await self._stack.aclose()
+        """Tear this host down for good -- whatever it currently holds
+        open, stdio child or remote connection.
+
+        Plan 06-03: never lets the teardown itself become a fresh failure.
+        Verified directly against the installed SDK: a remote connection's
+        own background reconnect logic (a GET-stream retry, scheduled
+        after the server already stopped answering) can still be mid-
+        attempt, in a task this stack does not own, when a caller here is
+        discarding an already-dead host -- exactly the shape of failure a
+        watchdog's crash-driven close (`plugins/manager.py::_run_watchdog`)
+        must survive to record the plugin `CRASHED_RETRYING` rather than
+        crash its own lifecycle task. The point of closing an already-dead
+        host is to discard it, not to report a second failure on the way
+        out; a caller that needs to know whether the underlying connection
+        was ever healthy already has that answer from the call that
+        detected it was dead (`ping()`/`call_tool()`), not from this
+        method.
+        """
+        try:
+            await self._stack.aclose()
+        except Exception:
+            logger.warning("McpToolHost.aclose() failed to tear down cleanly", exc_info=True)
 
 
 class UnknownToolError(Exception):
