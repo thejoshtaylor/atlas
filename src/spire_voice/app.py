@@ -13,7 +13,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
@@ -70,7 +70,6 @@ from spire_voice.providers import registry as provider_registry
 from spire_voice.providers.boot import ProviderSlotStatus, resolve_slot
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
-from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.routes import register_routers
 from spire_voice.routes.wizard import resolve_audio_source
 from spire_voice.session.recorder import SessionRecorder
@@ -394,7 +393,7 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         "plugin_repo": PostgresPluginRepository(sessionmaker),
         # Plan 07-01 (D-01, D-03): which named provider each slot is
         # currently pointed at -- the table `resolve_slot` reads instead
-        # of a hardcoded `XaiStt`/`XaiBrain`/`XaiTts` construction.
+        # of a hardcoded provider-class construction.
         "provider_selection_repo": PostgresProviderSelectionRepository(sessionmaker),
         # Plan 05-01: scheduled workflow runs and steps (D-01 .. D-04).
         "workflow_repo": PostgresWorkflowRepository(
@@ -701,14 +700,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `resolved_ha_token` was assigned here and never used by anything,
     # which is how the orphaned `ha_token` credential row went unnoticed.
     #
-    # Plan 07-01 (D-01, D-02, D-03): the speech-to-text slot's provider is
-    # read from `provider_selection_repo` once, here, at the same point
-    # its credential is already resolved above -- never re-read per
-    # request. `resolve_slot` is generic; `provider_registry.build_stt` is
-    # what actually knows the name-to-factory mapping (T-07-01). A
-    # degraded slot (D-04) leaves `app.state.stt` `None` and the boot
-    # continues; `app.state.provider_slots` is what `routes/providers.py`
-    # reads live, never a value copied off this local variable.
+    # Plan 07-01 (D-01, D-02, D-03), plan 07-02: all three provider slots'
+    # providers are read from `provider_selection_repo` once, here, at the
+    # same point their credentials are already resolved above -- never
+    # re-read per request. `resolve_slot` is generic; `provider_registry.
+    # build_stt`/`build_tts`/`build_brain` are what actually know each
+    # slot's name-to-factory mapping (T-07-01). A degraded slot (D-04)
+    # leaves its `app.state` attribute `None` (or, for `tier_brains`, an
+    # empty tuple -- see below) and the boot continues, one slot at a
+    # time, independently of the other two. `app.state.provider_slots` is
+    # what `routes/providers.py` reads live, never a value copied off
+    # these local variables.
     stt_status, stt_client = await resolve_slot(
         "stt",
         provider_selection_repo,
@@ -723,14 +725,57 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if stt_status.state == "degraded":
         logger.warning("provider slot 'stt' is degraded: %s", stt_status.reason)
     app.state.stt = stt_client
-    app.state.provider_slots: "dict[str, ProviderSlotStatus]" = {"stt": stt_status}
-    tier_brains = brain_race.build_tiers(replace(config.brain, api_key=resolved_brain_key))
+
+    # The text-to-speech entry declares itself batch (D-05): `is_batch`
+    # is how `resolve_slot` learns to wrap the built client in
+    # `BatchTtsAdapter` before handing it back -- the one wrap site
+    # (D-07), never a second one inside `registry.py` or `tts_xai.py`.
+    tts_status, tts_client = await resolve_slot(
+        "tts",
+        provider_selection_repo,
+        "xai",
+        provider_registry.build_tts,
+        config.tts,
+        resolved_tts_key,
+        is_batch=lambda name: provider_registry.TTS_REGISTRY[name].batch,
+    )
+    logger.info(
+        "provider slot 'tts' resolved to %r (%s)", tts_status.selected, tts_status.state
+    )
+    if tts_status.state == "degraded":
+        logger.warning("provider slot 'tts' is degraded: %s", tts_status.reason)
+    app.state.tts = tts_client
+
+    brain_status, tier_brains_result = await resolve_slot(
+        "brain",
+        provider_selection_repo,
+        "xai",
+        provider_registry.build_brain,
+        config.brain,
+        resolved_brain_key,
+    )
+    logger.info(
+        "provider slot 'brain' resolved to %r (%s)", brain_status.selected, brain_status.state
+    )
+    if brain_status.state == "degraded":
+        logger.warning("provider slot 'brain' is degraded: %s", brain_status.reason)
+    # A degraded brain slot resolves to `None` (`resolve_slot`'s own
+    # generic shape); normalized to `()` here so the `resolve_model()`
+    # loop below, and any other `tier_brains` consumer, stays a plain
+    # "iterate what is there" loop with no `None`-check of its own.
+    tier_brains = tier_brains_result or ()
     app.state.tier_brains = tier_brains
     # Nothing else in this file reads `app.state.brain` today, but it stays
     # pointed at the top tier's `XaiBrain` so any future reader keeps seeing
-    # the one that actually reaches Home Assistant.
-    app.state.brain = tier_brains[-1].brain
-    app.state.tts = XaiTts(replace(config.tts, api_key=resolved_tts_key))
+    # the one that actually reaches Home Assistant. `None` when the brain
+    # slot is degraded -- there is no top tier to point at.
+    app.state.brain = tier_brains[-1].brain if tier_brains else None
+
+    app.state.provider_slots: "dict[str, ProviderSlotStatus]" = {
+        "stt": stt_status,
+        "tts": tts_status,
+        "brain": brain_status,
+    }
 
     for tier in tier_brains:
         resolved_model = await tier.brain.resolve_model()
@@ -877,15 +922,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # a broken startup should stop the process, not start it
     # half-configured with a filler (or macro-reply) path that will fall
     # over on the first turn.
+    #
+    # Plan 07-02: a degraded tts slot (D-04, missing credential) leaves
+    # `app.state.tts` `None` -- there is no client to precache through,
+    # and this must not crash the boot the same way a degraded stt or
+    # brain slot does not. The other two slots' own startup work above is
+    # already independent of this one, so skipping only this step is
+    # enough; `filler_cache` stays an honest empty dict rather than a
+    # half-populated one.
     filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in seeded_macros)]
-    app.state.filler_cache = await precache_all(
-        app.state.tts,
-        Path(config.tts.cache_dir),
-        filler_phrases,
-        config.tts.voice_id,
-        app.state.tts.browser_sink(),
-    )
-    logger.info("precached %d phrases", len(app.state.filler_cache))
+    if app.state.tts is not None:
+        app.state.filler_cache = await precache_all(
+            app.state.tts,
+            Path(config.tts.cache_dir),
+            filler_phrases,
+            config.tts.voice_id,
+            app.state.tts.browser_sink(),
+        )
+        logger.info("precached %d phrases", len(app.state.filler_cache))
+    else:
+        app.state.filler_cache = {}
+        logger.warning(
+            "provider slot 'tts' is degraded -- skipping the startup precache for %d phrase(s)",
+            len(filler_phrases),
+        )
 
     # Background WebRTC turns (see `webrtc_offer` below) run detached from
     # the HTTP request that started them -- this set is what keeps asyncio

@@ -21,11 +21,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from spire_voice.config import BrainConfig, ConfigError, SttConfig, TtsConfig
-from spire_voice.providers.base import BrainProvider, SttProvider, TtsProvider
+from spire_voice.providers.base import SttProvider, TtsProvider
 from spire_voice.providers.boot import ProviderUnavailable
-from spire_voice.providers.brain_xai import XaiBrain
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tts_xai import XaiTts
+from spire_voice.turn import brain_race
 
 __all__ = [
     "ConfigError",
@@ -51,9 +51,11 @@ class ProviderEntry:
     single-config-argument shape every provider implementation in this
     codebase already takes (`XaiStt(config)`, `XaiTts(config)`), with the
     resolved credential threaded in via `dataclasses.replace` rather than a
-    second constructor parameter. `batch` is `False` for every entry this
-    plan ships; plan 07-02's `BatchTtsAdapter` is what a batch-shaped entry
-    (Piper, xAI TTS) sets it for (D-05, D-08).
+    second constructor parameter. `batch` (plan 07-02, D-05, D-08) is
+    `True` only for xAI's text-to-speech entry today -- the one slot
+    that cannot stream. `boot.py::resolve_slot` reads it to decide
+    whether to wrap the built client in `BatchTtsAdapter`; the wrap
+    itself never happens here or inside a provider module.
     """
 
     name: str
@@ -81,7 +83,11 @@ TTS_REGISTRY: "dict[str, ProviderEntry]" = {
         label="xAI",
         build=lambda config, api_key: XaiTts(replace(config, api_key=api_key)),
         requires_credential=True,
-        batch=False,
+        # D-05: xAI's text-to-speech is a single REST call, not a stream --
+        # `boot.py::resolve_slot` reads this field to decide whether to
+        # wrap the built client in `BatchTtsAdapter`. The wrap happens
+        # there, not here: this entry only states the fact.
+        batch=True,
         licence_note=None,
     ),
 }
@@ -90,7 +96,12 @@ BRAIN_REGISTRY: "dict[str, ProviderEntry]" = {
     "xai": ProviderEntry(
         name="xai",
         label="xAI",
-        build=lambda config, api_key: XaiBrain(replace(config, api_key=api_key)),
+        # `brain_race.build_tiers` is the factory itself, not `XaiBrain`
+        # directly -- it builds the whole tier tuple `app.py` needs
+        # (one shared `instructor` client, one `TierBrain` per configured
+        # model), keeping that function's existing shape rather than
+        # threading extra arguments through it.
+        build=lambda config, api_key: brain_race.build_tiers(replace(config, api_key=api_key)),
         requires_credential=True,
         batch=False,
         licence_note=None,
@@ -152,7 +163,10 @@ def build_tts(name: str, config: TtsConfig, api_key: str) -> TtsProvider:
     return _build(TTS_REGISTRY, _SLOT_DISPLAY_NAMES["tts"], name, config, api_key)
 
 
-def build_brain(name: str, config: BrainConfig, api_key: str) -> BrainProvider:
+def build_brain(name: str, config: BrainConfig, api_key: str) -> "tuple[Any, ...]":
+    """Returns the tier tuple `brain_race.build_tiers` produces, not a
+    single `BrainProvider` -- the language-model slot is a race across
+    tiers (D-05, `turn/brain_race.py`), never one client."""
     return _build(BRAIN_REGISTRY, _SLOT_DISPLAY_NAMES["brain"], name, config, api_key)
 
 

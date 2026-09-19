@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from spire_voice.db.repository import ProviderSelectionRepository
+from spire_voice.providers import batch_tts_adapter
 
 
 class ProviderUnavailable(Exception):
@@ -44,9 +45,9 @@ class ProviderSlotStatus:
     `"degraded"` -- a closed two-member set, never a boolean pair.
     `reason` is `None` for a running slot and the builder's own message,
     unchanged, for a degraded one. `wrapped` mirrors the built client's own
-    `wrapped` attribute when it declares one (D-08's `BatchTtsAdapter`,
-    plan 07-02) and is `False` for a client with no such attribute --
-    every provider this plan ships.
+    `wrapped` attribute when it declares one (plan 07-02's batch-to-
+    streaming wrap, `is_batch` below) and is `False` for a client with no
+    such attribute.
     """
 
     slot: str
@@ -64,6 +65,8 @@ async def resolve_slot(
     builder: "Callable[[str, Any, str], Any]",
     config: Any,
     api_key: str,
+    *,
+    is_batch: "Callable[[str], bool] | None" = None,
 ) -> "tuple[ProviderSlotStatus, Any | None]":
     """Read `slot`'s stored choice (or fall back to `default_name` when no
     row exists yet), build a client through `builder`, and return
@@ -78,6 +81,16 @@ async def resolve_slot(
     (an unrecognized provider name, for instance) propagates uncaught and
     stops the boot -- running a provider nobody chose is worse than not
     starting (T-07-05).
+
+    `is_batch` (plan 07-02, D-05, D-07, D-08), given, is called with the
+    resolved name after a successful build; when it answers `True`, the
+    built client is wrapped in the batch-to-streaming adapter
+    (`providers/batch_tts_adapter.py`) before it is returned, and
+    `wrapped` reports `True`. This is the one place that wrap ever
+    happens -- never inside `registry.py`, never inside a provider
+    module. Omitted (every caller that predates it, and every slot whose
+    registry never marks an entry batch), `wrapped` falls back to reading
+    the built client's own `wrapped` attribute, unchanged from before.
     """
     selection = await repo.get_selection(slot)
     selected = selection.provider_name if selection is not None else default_name
@@ -97,6 +110,12 @@ async def resolve_slot(
             None,
         )
 
+    if is_batch is not None and is_batch(selected):
+        client = batch_tts_adapter.BatchTtsAdapter(client)
+        wrapped = True
+    else:
+        wrapped = bool(getattr(client, "wrapped", False))
+
     return (
         ProviderSlotStatus(
             slot=slot,
@@ -104,7 +123,7 @@ async def resolve_slot(
             active=selected,
             state="running",
             reason=None,
-            wrapped=bool(getattr(client, "wrapped", False)),
+            wrapped=wrapped,
         ),
         client,
     )

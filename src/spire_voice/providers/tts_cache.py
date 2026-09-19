@@ -28,8 +28,8 @@ import hashlib
 from pathlib import Path
 from typing import AsyncIterator, Mapping
 
-from spire_voice.providers.base import TtsError
-from spire_voice.providers.tts_xai import SinkFormat, XaiTts
+from spire_voice.providers.base import TtsError, TtsProvider
+from spire_voice.providers.tts_xai import SinkFormat
 
 # Matches tts_xai.py's own chunk size, so a cached-audio consumer sees the
 # same chunk granularity a live synthesis call would have produced.
@@ -65,7 +65,7 @@ async def _one_delta(text: str) -> AsyncIterator[str]:
 
 
 async def precache_all(
-    tts: XaiTts,
+    tts: TtsProvider,
     cache_dir: Path,
     texts: list[str],
     voice_id: str,
@@ -79,6 +79,17 @@ async def precache_all(
     REST cost for a phrase that has not changed. Returns a `dict[str, bytes]`
     keyed by the phrase text itself, which is exactly the shape `get_cached`
     and `CachedTts` consume.
+
+    `tts` is typed on the streaming `TtsProvider` protocol (plan 07-02),
+    not a concrete provider class -- this function calls only
+    `synthesize()` with a `sink` keyword, which every provider this
+    process ever hands it (a raw streaming client, or a
+    `BatchTtsAdapter`) already satisfies. `lifespan` (`app.py`) passes
+    the exact same wrapped object it assigns to `app.state.tts`, never a
+    second, separately-built one: this is what lets D-08's measured
+    figure be populated at boot by the first phrase this call actually
+    synthesizes, and stay honestly unset when every phrase was already on
+    disk.
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
