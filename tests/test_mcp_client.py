@@ -221,7 +221,9 @@ class _BlockingSession:
         self.arrived: list[str] = []
         self._gates: dict[str, asyncio.Event] = {}
 
-    async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+    async def call_tool(
+        self, name: str, arguments: dict, read_timeout_seconds: float | None = None
+    ) -> SimpleNamespace:
         call_id = arguments["call_id"]
         self.arrived.append(call_id)
         gate = self._gates.setdefault(call_id, asyncio.Event())

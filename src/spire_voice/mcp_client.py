@@ -32,7 +32,9 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from mcp.types import Tool
+from mcp.shared.exceptions import MCPError
+from mcp.types import CallToolResult, TextContent, Tool
+from mcp_types.jsonrpc import REQUEST_TIMEOUT
 
 # The child `start()` spawns when a caller supplies neither `child_module`
 # nor `env` -- today's Home Assistant child, unchanged from before this
@@ -150,6 +152,16 @@ class McpToolHost:
         # leaves `_env_override`/the default Home Assistant build as the
         # only two paths, unchanged.
         self._env_factory: "EnvFactory | None" = None
+        # Plan 06-02 (D-06, PLUG-06): this host's own per-call deadline,
+        # in seconds -- passed straight through to `ClientSession.
+        # call_tool`'s own `read_timeout_seconds` parameter (`call_tool`'s
+        # own docstring). `None` (the default, and every caller that
+        # predates this plan) means no deadline, matching `read_timeout_
+        # seconds`'s own default -- unchanged behavior for every existing
+        # caller. Set once, at `start()`, from the plugin's own
+        # `timeout_ms`; a respawn keeps using the same value, since a
+        # plugin's configured deadline does not change across a respawn.
+        self._timeout_s: float | None = None
 
     async def start(
         self,
@@ -161,8 +173,16 @@ class McpToolHost:
         child_module: str = _DEFAULT_CHILD_MODULE,
         env: "Mapping[str, str] | None" = None,
         env_factory: "EnvFactory | None" = None,
+        timeout_s: float | None = None,
     ) -> None:
         """Spawn the tool server. `safety_block` is the raw `safety:` config.
+
+        `timeout_s` (plan 06-02, D-06) is this host's own per-call
+        deadline in seconds -- `plugins/host.py` passes `plugin.timeout_ms
+        / 1000` here, so a local Home Assistant call and a remote weather
+        API never share one (D-06's own rejection of a single global
+        timeout). `None` (every caller that predates this plan) means no
+        deadline, unchanged.
 
         `child_module` and `env` both default to exactly today's Home
         Assistant child and its literal environment (Task 3, plan 04-01), so
@@ -200,6 +220,7 @@ class McpToolHost:
         self._child_module = child_module
         self._env_override = dict(env) if env is not None else None
         self._env_factory = env_factory
+        self._timeout_s = timeout_s
         if env_factory is not None:
             resolved_env = dict(await env_factory(safety_block))
         elif env is not None:
@@ -359,12 +380,42 @@ class McpToolHost:
         `is_error` and `content[0].text` straight off this return value, so
         the reason crosses this boundary unchanged, not paraphrased.
 
+        Plan 06-02 (D-06, PLUG-06): `self._timeout_s` is passed straight to
+        the SDK's own `read_timeout_seconds` parameter -- no
+        `asyncio.wait_for` wrapper. `06-RESEARCH.md` Pattern 2 read this
+        directly from the installed SDK: the read-wait is wrapped in
+        `anyio.fail_after`, a courtesy `notifications/cancelled` is sent to
+        the peer on timeout, the waiter is unconditionally deregistered in
+        a `finally` on every exit path, and a late response that arrives
+        after the deadline finds no waiter, is logged, and is dropped --
+        the session is never desynchronized or torn down by a timeout. A
+        wrapper here would duplicate that and could race the SDK's own
+        cleanup. Only the SDK's own `REQUEST_TIMEOUT` code is converted to
+        the same `CallToolResult(is_error=True, ...)` shape a `Denied`
+        already crosses this boundary with; any other `MCPError` (a real
+        protocol error) still surfaces, never quietly relabelled as a
+        timeout.
+
         Reader half of the readers-writer pair with `respawn()` -- see
         `_as_reader`'s own docstring for the full discipline this shares
         with `ping()`.
         """
         async with self._as_reader() as session:
-            return await session.call_tool(name, arguments)
+            try:
+                return await session.call_tool(name, arguments, read_timeout_seconds=self._timeout_s)
+            except MCPError as exc:
+                if exc.code != REQUEST_TIMEOUT:
+                    raise
+                timeout_ms = int((self._timeout_s or 0.0) * 1000)
+                return CallToolResult(
+                    is_error=True,
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=f"{name} did not respond within {timeout_ms}ms",
+                        )
+                    ],
+                )
 
     async def ping(self) -> None:
         """Cheap liveness probe (plan 06-02, D-05): the ping watchdog's own

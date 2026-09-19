@@ -6,6 +6,15 @@ environment (the config-value read, the secret decryption) is
 one place holding the repository and the security config both -- this
 module only turns an already-built environment (or an `env_factory` that
 builds one) into a real spawned child.
+
+Plan 06-02 (D-06, PLUG-06): this is also the one place `plugin.timeout_ms`
+turns into `McpToolHost`'s own `timeout_s` -- read from the plugin's own
+row, in milliseconds, so a local Home Assistant call and a remote weather
+API never share one deadline (D-06's own rejection of a single global
+timeout). `McpToolHost.call_tool` passes this value straight through to
+the SDK's own `read_timeout_seconds` parameter on every call this plugin's
+host makes -- no wrapper, no second place a deadline could drift from
+this one.
 """
 
 from __future__ import annotations
@@ -59,5 +68,6 @@ async def start_plugin_host(
         child_module=module,
         env=env,
         env_factory=env_factory,
+        timeout_s=plugin.timeout_ms / 1000.0,
     )
     return host
