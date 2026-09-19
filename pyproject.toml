@@ -58,6 +58,13 @@ dependencies = [
     "PyJWT>=2.13,<3",
     "pwdlib[argon2]>=0.3,<0.4",
     "cryptography>=50,<51",
+    # Human-approved 2026-09-19 after 07-RESEARCH.md's Package Legitimacy Audit
+    # returned [SUS] (unknown-downloads metadata gap, not a content red flag) --
+    # operator confirmed the PyPI project page and github.com/SYSTRAN/faster-whisper
+    # before this install ran (07-03-PLAN.md Task 1, gate="blocking-human", never
+    # auto-approved). D-09 names this unconditionally -- it is a default
+    # dependency, not an extra.
+    "faster-whisper>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +72,15 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
+# Human-approved 2026-09-19 after 07-RESEARCH.md's Package Legitimacy Audit
+# returned [SUS] (too-new + unknown-downloads metadata gaps, not a content red
+# flag) -- operator confirmed the PyPI project page and its source repository,
+# github.com/OHF-Voice/piper1-gpl, before this install ran (07-03-PLAN.md
+# Task 1, gate="blocking-human", never auto-approved). Distribution name is
+# `piper-tts`; the repository is named `piper1-gpl` but that name does not
+# resolve as an installable distribution. D-10: GPL-3.0-or-later licence,
+# optional per D-10 -- never a default dependency.
+piper = ["piper-tts>=1.8,<2"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
