@@ -615,3 +615,98 @@ async def test_a_plugin_that_dies_with_a_respawn_pending_fails_that_request(
         assert host.respawn_blocks == []
     finally:
         await manager.stop_all()
+
+
+class _FakeMcpToolHost:
+    """Stands in for `McpToolHost` at exactly the surface
+    `plugins/host.py::start_plugin_host` touches -- WR-02 (code review).
+
+    `start()` blocks until this test releases it, which is what a real
+    plugin whose child has spawned but whose `initialize()`/`list_tools()`
+    handshake never answers does. `aclose_count` is the whole point: the
+    real host has a live child (or a live HTTP client and session) by that
+    point, so whether anything ever closed it is the difference between a
+    failed start and an orphaned process.
+    """
+
+    def __init__(self) -> None:
+        self.tools: list = []
+        self.session = None
+        self.started = asyncio.Event()
+        self.aclose_count = 0
+
+    async def start(self, *args: object, **kwargs: object) -> None:
+        self.started.set()
+        await asyncio.Event().wait()  # never returns: the deadline must win
+
+    async def aclose(self) -> None:
+        self.aclose_count += 1
+
+
+async def test_a_start_that_misses_the_deadline_closes_the_host_it_already_opened(
+    fake_plugin_repository, monkeypatch
+):
+    """WR-02 (code review): `PluginManager` races every start against its
+    own startup deadline, and the cancellation lands *inside*
+    `McpToolHost.start()` -- after the transport context was entered and
+    the child spawned. The partially started host is a local inside
+    `start_plugin_host`; it was never returned, never recorded in
+    `_plugins`, and so never reached by `_plugin_lifecycle`'s `finally`,
+    which closes `self._plugins[id].host` (still `None` at that point).
+    The child kept running until the parent process exited, and every
+    "Retry now" tap on a slow plugin added another orphan.
+
+    Uses the real `start_plugin_host` -- the code under test -- with a
+    fake `McpToolHost`, since the claim is about who closes the host, not
+    about what a real child does.
+    """
+    from spire_voice.plugins import host as host_module
+
+    fake_host = _FakeMcpToolHost()
+    monkeypatch.setattr(host_module, "McpToolHost", lambda: fake_host)
+
+    slow = _plugin(1, "slow")
+    repo = fake_plugin_repository(plugins=[slow])
+    manager = _manager(repo, plugins_config=PluginsConfig(startup_deadline_s=0.05))
+
+    await manager.start_all()
+
+    assert manager.state_for("slow") is PluginState.DEGRADED
+    assert fake_host.started.is_set(), "the fake host's start was never even reached"
+    assert fake_host.aclose_count == 1, (
+        "the host that missed the startup deadline was never closed -- its child "
+        "is orphaned for the life of the process (the WR-02 defect)"
+    )
+
+    await manager.stop_all()
+    assert fake_host.aclose_count == 1
+
+
+async def test_a_start_that_raises_after_the_child_spawned_closes_the_host(
+    fake_plugin_repository, monkeypatch
+):
+    """The same window, reached the other way: `_spawn` succeeded and the
+    session handshake then raised. Whoever built the host closes it."""
+    from spire_voice.plugins import host as host_module
+
+    class _RaisingHost(_FakeMcpToolHost):
+        async def start(self, *args: object, **kwargs: object) -> None:
+            self.started.set()
+            raise RuntimeError("simulated: the child spawned, then the handshake failed")
+
+    fake_host = _RaisingHost()
+    monkeypatch.setattr(host_module, "McpToolHost", lambda: fake_host)
+
+    broken = _plugin(1, "broken")
+    repo = fake_plugin_repository(plugins=[broken])
+    manager = _manager(repo)
+
+    await manager.start_all()
+
+    assert manager.state_for("broken") is PluginState.DEGRADED
+    assert manager.reason_for("broken") == (
+        "simulated: the child spawned, then the handshake failed"
+    )
+    assert fake_host.aclose_count == 1
+
+    await manager.stop_all()

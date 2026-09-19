@@ -35,8 +35,9 @@ here.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from ipaddress import ip_address
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, AsyncIterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from mcp.shared._httpx_utils import create_mcp_http_client
@@ -141,27 +142,58 @@ async def start_plugin_host(
             headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}
             return create_mcp_http_client(headers=headers)
 
-        await host.start(
-            "",
-            "",
-            mcp_root=mcp_root,
-            safety_block=safety_block,
-            transport="remote",
-            url=url,
-            http_client_factory=_http_client_factory,
-            timeout_s=timeout_s,
-        )
+        async with _closed_if_it_never_starts(host):
+            await host.start(
+                "",
+                "",
+                mcp_root=mcp_root,
+                safety_block=safety_block,
+                transport="remote",
+                url=url,
+                http_client_factory=_http_client_factory,
+                timeout_s=timeout_s,
+            )
         return host
 
     module = module_for_stdio_args(plugin.slug, plugin.args)
-    await host.start(
-        ha_url="",
-        ha_token="",
-        mcp_root=mcp_root,
-        safety_block=safety_block,
-        child_module=module,
-        env=env,
-        env_factory=env_factory,
-        timeout_s=timeout_s,
-    )
+    async with _closed_if_it_never_starts(host):
+        await host.start(
+            ha_url="",
+            ha_token="",
+            mcp_root=mcp_root,
+            safety_block=safety_block,
+            child_module=module,
+            env=env,
+            env_factory=env_factory,
+            timeout_s=timeout_s,
+        )
     return host
+
+
+@asynccontextmanager
+async def _closed_if_it_never_starts(host: McpToolHost) -> "AsyncIterator[None]":
+    """Close `host` if the start it is about to attempt does not finish --
+    WR-02 (code review).
+
+    `McpToolHost.start()` enters the transport's own context (spawning the
+    stdio child, or opening the remote client and session) well before it
+    returns: the child is running by the time `session.initialize()` and
+    `list_tools()` are awaited. A start that is cancelled at
+    `PluginManager`'s own startup deadline, or that raises anywhere after
+    `_spawn` partially succeeded, therefore leaves a live child (or a live
+    `httpx2.AsyncClient` plus an open session) attached to a host object
+    that is never returned, never recorded in `PluginManager._plugins`,
+    and so never reached by `_plugin_lifecycle`'s own `finally`. Nothing
+    reaped it until the parent process exited -- one orphaned child per
+    attempt, and every "Retry now" tap on a slow plugin added another.
+
+    Whoever built the host closes it if it is not handed on. `BaseException`
+    deliberately, not `Exception`: `CancelledError` is the deadline case,
+    which is the one that actually happens. `aclose()` never raises
+    (its own docstring), so the original failure is what propagates.
+    """
+    try:
+        yield
+    except BaseException:
+        await host.aclose()
+        raise
