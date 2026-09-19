@@ -115,6 +115,23 @@ def _slug_conflict_error(reason: str) -> HTTPException:
     return HTTPException(status_code=409, detail=reason)
 
 
+def _secret_flag_conflict_error(key: str, stored_secret: bool) -> HTTPException:
+    """WR-05 (code review): a save may change a configuration value, never
+    reclassify one. Refused by name rather than silently honoured, so an
+    admin who really does want a key to change kind deletes it and adds it
+    again deliberately."""
+    stored = "secret" if stored_secret else "plain"
+    submitted = "plain" if stored_secret else "secret"
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"configuration key {key!r} is stored as a {stored} value and this request "
+            f"submits it as a {submitted} one -- a save changes a value, never whether "
+            "it is secret; remove the key and add it again to change that"
+        ),
+    )
+
+
 def _reconcile_failed_error() -> HTTPException:
     """The plugin row is already committed by the time this is raised
     (`routes/policy.py`'s own `_respawn_failed_error` docstring states the
@@ -346,10 +363,54 @@ def _catalog_install_config_values(
 
 
 def _custom_install_config_values(submitted: "dict[str, ConfigValueInput]", security) -> "list[PluginConfigValue]":
+    """The install path only: nothing is stored for this plugin yet, so the
+    request is the only source of a key's kind. A *save* against an
+    existing plugin goes through `_saved_config_values` below instead --
+    there the stored row is the authority, never the request."""
     prepare = _make_prepare_config_value(security)
     values: "list[PluginConfigValue]" = []
     for key, given in submitted.items():
         prepared = prepare(key, given)
+        if prepared is not None:
+            values.append(prepared)
+    return values
+
+
+def _saved_config_values(
+    submitted: "dict[str, ConfigValueInput]",
+    stored: "Sequence[PluginConfigValue]",
+    security,
+) -> "list[PluginConfigValue]":
+    """WR-05 (code review): whether a key is secret is decided by the row
+    that already exists, never by the request.
+
+    `set_config_values` overwrites `secret`/`value`/`ciphertext` wholesale,
+    and this route used to take `secret` straight off the request body. A
+    request naming an existing secret key with `"secret": false` therefore
+    replaced the encrypted row with a plaintext one -- and
+    `_to_config_value_response` then returned that value in every later
+    `GET /api/plugins` and `GET /api/plugins/{id}`, including into the
+    browser's query cache. It is not a read primitive (the value has to be
+    supplied), but it silently defeats encryption at rest for the house's
+    Home Assistant token and turns a write-only field into a readable one
+    -- exactly the property D-03/PROV-04/T-06-27 name.
+
+    A contradicting request is refused by name rather than coerced: an
+    admin who meant to change a key's kind does it deliberately, by
+    removing the key and adding it again. A key with no stored row is a
+    genuinely new one (06-UI-SPEC.md's own "Add configuration key ... and
+    any plugin's extra keys" row), and there the request is the only
+    source there is.
+    """
+    prepare = _make_prepare_config_value(security)
+    stored_by_key = {value.key: value for value in stored}
+    values: "list[PluginConfigValue]" = []
+    for key, given in submitted.items():
+        prior = stored_by_key.get(key)
+        if prior is not None and prior.secret != given.secret:
+            raise _secret_flag_conflict_error(key, prior.secret)
+        secret = prior.secret if prior is not None else given.secret
+        prepared = prepare(key, ConfigValueInput(value=given.value, secret=secret))
         if prepared is not None:
             values.append(prepared)
     return values
@@ -594,7 +655,10 @@ async def save_plugin_config(
         raise _unknown_plugin_error(plugin_id)
 
     security = request.app.state.config.security
-    to_write = _custom_install_config_values(payload.values, security)
+    # WR-05 (code review): the stored rows are what decide which keys are
+    # secret, so they are read before anything is encrypted or written.
+    stored = await plugin_repo.get_config_values(plugin_id)
+    to_write = _saved_config_values(payload.values, stored, security)
     await plugin_repo.set_config_values(plugin_id, to_write)
 
     # Only an enabled plugin has anything running to reconcile -- a

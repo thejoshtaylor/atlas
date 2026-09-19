@@ -969,3 +969,158 @@ def test_reinstalling_a_deleted_plugin_under_the_same_name_is_reported_as_runnin
 
         # The manager keeps no state for a row that no longer exists.
         assert list(manager._plugins) == [body["id"]]
+
+
+def test_a_save_cannot_rewrite_a_stored_secret_as_a_plaintext_row(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """WR-05 (code review): the route took `secret` straight off the
+    request body and `set_config_values` overwrites `secret`/`value`/
+    `ciphertext` wholesale, so a request naming an existing secret key
+    with `"secret": false` replaced the encrypted row with a plaintext one
+    -- and every later `GET /api/plugins` then returned that value, into
+    the browser's query cache included. The value has to be supplied, so
+    it is not a read primitive; it is worse in kind than that, because it
+    silently defeats encryption at rest for the house's Home Assistant
+    token and turns a write-only field into a readable one (D-03,
+    PROV-04, T-06-27).
+
+    The stored row is the authority now, and a request that contradicts it
+    is refused by name rather than coerced.
+    """
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.crypto.credentials import encrypt_credential
+    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    ha = Plugin(
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        url=None, enabled=False, builtin=True, enforces_policy=True, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    ciphertext, key_version = encrypt_credential("a-plainly-fictional-hub-token", security)
+    plugin_repo = fake_plugin_repository(
+        plugins=[ha],
+        config_values={
+            1: [
+                PluginConfigValue(
+                    key="HA_TOKEN", secret=True, value=None,
+                    ciphertext=ciphertext, key_version=key_version,
+                )
+            ]
+        },
+    )
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put(
+        "/api/plugins/1/config",
+        json={"values": {"HA_TOKEN": {"value": "a-plainly-fictional-hub-token", "secret": False}}},
+    )
+    assert response.status_code == 409, response.text
+    assert "HA_TOKEN" in response.json()["detail"]
+
+    [stored] = plugin_repo.config_values[1]
+    assert stored.secret is True, "the stored key was reclassified as a plain value"
+    assert stored.value is None
+    assert stored.ciphertext == ciphertext
+
+    listing = client.get("/api/plugins")
+    assert listing.status_code == 200
+    assert "a-plainly-fictional-hub-token" not in listing.text
+    [entry] = listing.json()[0]["config_values"]
+    assert entry == {"key": "HA_TOKEN", "secret": True, "value": None, "is_set": True}
+
+
+def test_a_save_cannot_reclassify_a_plain_key_as_secret_either(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """The same rule in the other direction -- a save changes a value,
+    never whether it is secret. Reclassifying silently would leave the
+    editor showing a key it can no longer read back, with no record of why."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=False, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(
+        plugins=[plugin],
+        config_values={
+            1: [PluginConfigValue(key="PLAIN_KEY", secret=False, value="v", ciphertext=None, key_version=None)]
+        },
+    )
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put(
+        "/api/plugins/1/config",
+        json={"values": {"PLAIN_KEY": {"value": "w", "secret": True}}},
+    )
+    assert response.status_code == 409, response.text
+    [stored] = plugin_repo.config_values[1]
+    assert stored.secret is False
+    assert stored.value == "v"
+
+
+def test_a_key_the_plugin_does_not_have_yet_is_added_with_the_kind_the_request_names(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """06-UI-SPEC.md's own "Add configuration key (custom/hand-added
+    plugins and any plugin's extra keys)" row: a genuinely new key has no
+    stored classification to defer to, so the request is the only source
+    there is. WR-05's rule is about reclassifying an existing key, not
+    about refusing new ones."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=False, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(
+        plugins=[plugin],
+        config_values={
+            1: [PluginConfigValue(key="PLAIN_KEY", secret=False, value="v", ciphertext=None, key_version=None)]
+        },
+    )
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put(
+        "/api/plugins/1/config",
+        json={
+            "values": {
+                "PLAIN_KEY": {"value": "v", "secret": False},
+                "NEW_SECRET": {"value": "a-plainly-fictional-new-value", "secret": True},
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    by_key = {value.key: value for value in plugin_repo.config_values[1]}
+    assert by_key["NEW_SECRET"].secret is True
+    assert by_key["NEW_SECRET"].ciphertext is not None
+    assert by_key["PLAIN_KEY"].value == "v"
