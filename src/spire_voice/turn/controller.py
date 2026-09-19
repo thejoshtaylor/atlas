@@ -60,6 +60,16 @@ open past the question (D-08; the operator answers by waking the assistant
 again, and VOICE-21 is deliberately out of scope). `turn_outcome` gains its
 own `"needs_clarification"` value, distinct from an ordinary answer, an
 empty reply, and a round cap.
+
+Plan 06-05 (D-11) extends `winner.candidates` to a third kind of value:
+two plugins' own display names, when a spoken command could reach either
+plugin's version of the same capability. Nothing below this comment
+changed to add that case -- `_compose_clarifying_question` already speaks
+whatever `candidates` carries, falling back to the literal string when
+`friendly_names` (built from live entity state) has no entry for it,
+which a plugin's display name never has. Same envelope, same validators,
+same composer; only the meaning of the strings inside `candidates` grew a
+third case.
 """
 
 from __future__ import annotations

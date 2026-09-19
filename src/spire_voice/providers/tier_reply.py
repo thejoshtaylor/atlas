@@ -104,8 +104,9 @@ class TierReply(BaseModel):
         default=False,
         description=(
             "True when a spoken name matches more than one entity in the catalog you were "
-            "given, or when a spoken description matches more than one of the scheduled runs "
-            "you were given, and the operator must be asked which one was meant. A third "
+            "given, when a spoken description matches more than one of the scheduled runs "
+            "you were given, or when the capability requested is published by more than one "
+            "installed plugin, and the operator must be asked which one was meant. A third "
             "outcome, exclusive of `confident` and `needs_tool` -- never guess between "
             "candidates, ask."
         ),
@@ -114,9 +115,12 @@ class TierReply(BaseModel):
         default=(),
         description=(
             "The candidates to name back to the operator when `needs_clarification` is true -- "
-            "every entity id or scheduled run the spoken words could plausibly mean, at least "
-            "two. For a scheduled run, give its own summary exactly as given to you, never its "
-            "id -- the operator never hears an id, and this is what they would recognize."
+            "every entity id, scheduled run, or plugin the spoken words could plausibly mean, "
+            "at least two. For a scheduled run, give its own summary exactly as given to you, "
+            "never its id -- the operator never hears an id, and this is what they would "
+            "recognize. For a capability two plugins both publish, give each plugin's own "
+            "display name, never a prefixed tool name -- the operator never hears a tool name "
+            "and would not recognize one."
         ),
     )
 
@@ -157,7 +161,12 @@ class TierReply(BaseModel):
         # construction" treatment this file already gives
         # confident/needs_tool. A reply that both asks and acts is not a
         # safer middle ground, it is the exact failure this mechanism
-        # exists to close off.
+        # exists to close off. D-10 extended this validator's reach to a
+        # candidate pending run, unchanged; D-11 (plan 06-05) extends it
+        # again to a candidate plugin -- a capability two plugins both
+        # publish is a third candidate *type* on this one mechanism, never
+        # a second mechanism beside it, so nothing below this comment
+        # changed to add it.
         if self.needs_clarification and (self.confident or self.needs_tool):
             raise ValueError(
                 "a TierReply cannot combine needs_clarification with confident or needs_tool -- "
