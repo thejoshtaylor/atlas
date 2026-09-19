@@ -19,6 +19,15 @@ failure surfaces as a namespace-package shadow (`No module named
 'mcp.server'`) rather than an honest "SDK not installed". That import runs
 inside the child, at startup, so no unit test that imports the tool handlers
 directly can see it.
+
+Plan 06-03 (D-02, D-04): `McpToolHost` also wraps a remote MCP server over
+streamable HTTP, an outbound connection this process initiates and owns,
+with no process and no listening socket of its own. The two transports
+share every line of this module except one connect step (`_connect`) --
+the reader gate, the writer's drain, the writer-versus-writer lock, the
+exit-stack teardown, and the tool-list refresh after connect are written
+once and used by both, per this module's own long-standing refusal of a
+second spawn path.
 """
 
 from __future__ import annotations
@@ -28,13 +37,17 @@ import json
 import os
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextContent, Tool
 from mcp_types.jsonrpc import REQUEST_TIMEOUT
+
+if TYPE_CHECKING:
+    import httpx2
 
 # The child `start()` spawns when a caller supplies neither `child_module`
 # nor `env` -- today's Home Assistant child, unchanged from before this
@@ -49,6 +62,16 @@ _DEFAULT_CHILD_MODULE = "spire_mcp.ha"
 # decrypts a secret one) from a repository -- both `await`-requiring
 # operations `start()`/`respawn()` are already inside.
 EnvFactory = Callable[["dict | None"], Awaitable[Mapping[str, str]]]
+
+# Plan 06-03 (D-02, D-04): the one thing that differs between a stdio child
+# and a remote streamable-HTTP server -- what builds the caller-owned
+# `httpx2.AsyncClient` a remote connection sends its request through, called
+# fresh at `start()` and at every `respawn()` (mirroring `EnvFactory`'s own
+# reasoning: a factory, not a single instance, since a respawn tears down
+# and reconnects, never repeats a handle that is already closed). Never
+# awaited -- building the headers is synchronous; only the connection
+# itself is async.
+HttpClientFactory = Callable[[], "httpx2.AsyncClient"]
 
 
 def _default_ha_env(
@@ -162,6 +185,21 @@ class McpToolHost:
         # `timeout_ms`; a respawn keeps using the same value, since a
         # plugin's configured deadline does not change across a respawn.
         self._timeout_s: float | None = None
+        # Plan 06-03 (D-02, D-04): which connect step `_connect` takes --
+        # `"stdio"` (the only value every caller before this plan ever
+        # passes, so every existing test and call site is unaffected) or
+        # `"remote"`. This is the one flag the whole class branches on;
+        # nothing else about `respawn()`/`call_tool()`/`ping()`/`aclose()`
+        # reads it, since everything past the connect step is transport-
+        # agnostic already (D-02's own framing: a `ClientSession` needs
+        # only a read stream and a write stream).
+        self._transport: str = "stdio"
+        # Remote-only (plan 06-03): the server URL, and the factory that
+        # builds a fresh, caller-owned `httpx2.AsyncClient` on every
+        # connect attempt (`start()`, and any future `respawn()`) -- both
+        # `None` for a stdio host, which never reads either.
+        self._url: str | None = None
+        self._http_client_factory: "HttpClientFactory | None" = None
 
     async def start(
         self,
@@ -174,6 +212,9 @@ class McpToolHost:
         env: "Mapping[str, str] | None" = None,
         env_factory: "EnvFactory | None" = None,
         timeout_s: float | None = None,
+        transport: str = "stdio",
+        url: str | None = None,
+        http_client_factory: "HttpClientFactory | None" = None,
     ) -> None:
         """Spawn the tool server. `safety_block` is the raw `safety:` config.
 
@@ -213,6 +254,17 @@ class McpToolHost:
         can make; a policy the operator wrote and the enforcing process never
         received is not, which is why the child refuses to start on a
         malformed block rather than quietly falling back to defaults.
+
+        `transport` (plan 06-03, D-02) is `"stdio"` (the default, and every
+        caller that predates this plan) or `"remote"`. A remote host reads
+        none of `ha_url`/`ha_token`/`mcp_root`/`child_module`/`env`/
+        `env_factory` -- none of them have any meaning for a connection with
+        no process of its own -- and instead requires `url` and
+        `http_client_factory`: the same "caller builds it, this class's own
+        `AsyncExitStack` owns closing it" split `env_factory` already
+        establishes for the stdio side, since the installed SDK's own
+        `streamable_http_client` provably does not close a caller-supplied
+        `httpx2.AsyncClient` itself (`06-RESEARCH.md` Pattern 1).
         """
         self._ha_url = ha_url
         self._ha_token = ha_token
@@ -221,7 +273,12 @@ class McpToolHost:
         self._env_override = dict(env) if env is not None else None
         self._env_factory = env_factory
         self._timeout_s = timeout_s
-        if env_factory is not None:
+        self._transport = transport
+        self._url = url
+        self._http_client_factory = http_client_factory
+        if transport == "remote":
+            resolved_env: Mapping[str, str] = {}
+        elif env_factory is not None:
             resolved_env = dict(await env_factory(safety_block))
         elif env is not None:
             resolved_env = dict(env)
@@ -271,7 +328,10 @@ class McpToolHost:
         if self._ha_url is None or self._ha_token is None or self._mcp_root is None:
             raise RuntimeError("McpToolHost.respawn called before start()")
         async with self._respawn_lock:
-            if self._env_factory is not None:
+            resolved_env: Mapping[str, str]
+            if self._transport == "remote":
+                resolved_env = {}
+            elif self._env_factory is not None:
                 resolved_env = dict(await self._env_factory(safety_block))
             elif self._env_override is not None:
                 resolved_env = dict(self._env_override)
@@ -301,21 +361,57 @@ class McpToolHost:
                 self._readers_admitted.set()
 
     async def _spawn(self, child_module: str, env: Mapping[str, str]) -> None:
-        """The real-subprocess spawn both `start()` and `respawn()` perform --
-        factored out so there is exactly one place that launches a child.
-        Takes the module path and the environment as arguments (Task 3, plan
-        04-01) rather than building either itself: `start()`/`respawn()` are
-        the only two places that decide what a child's environment holds --
-        the literal-not-inherited discipline this module's docstring states
-        -- and two places building an environment, rather than one, is how
-        that discipline drifts.
+        """The one connect step both `start()` and `respawn()` perform --
+        factored out so there is exactly one place that differs between
+        the two transports (plan 06-03, D-02, D-04). A `ClientSession`
+        itself needs only a read stream and a write stream, and both
+        transport context managers below yield exactly that pair
+        (`06-RESEARCH.md` Pattern 1) -- everything before this branch
+        (deciding what environment or connection details to use) and
+        everything after it (the session handshake, the tool-list
+        refresh, and -- outside this method -- the reader gate, the
+        writer's drain, the exit-stack teardown) is shared code, written
+        once, unaffected by which branch ran.
+
+        Stdio (the default, every caller before plan 06-03): unchanged,
+        byte for byte, from before this generalization (Task 3, plan
+        04-01) -- `sys.executable`, never a bare `python3`, and an
+        environment built literally by the caller (`start()`/`respawn()`),
+        never inherited or filtered here. `start()`/`respawn()` are the
+        only two places that decide what a stdio child's environment
+        holds -- the literal-not-inherited discipline this module's
+        docstring states -- and two places building an environment,
+        rather than one, is how that discipline drifts.
+
+        Remote (`self._transport == "remote"`, plan 06-03): the caller-
+        owned `httpx2.AsyncClient` `self._http_client_factory` builds is
+        entered into THIS host's own `AsyncExitStack`, never the
+        transport's -- `streamable_http_client` provably does not enter
+        or exit a client it was handed explicitly (`06-RESEARCH.md`
+        Pattern 1, T-06-15), so leaving that to the transport would leak
+        one client per connect. Building the client itself (the headers,
+        the credential) is deliberately not this method's job -- see
+        `HttpClientFactory`'s own docstring -- so this class stays
+        ignorant of where a bearer token comes from.
         """
-        server_params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", child_module],
-            env=dict(env),
-        )
-        read, write = await self._stack.enter_async_context(stdio_client(server_params))
+        if self._transport == "remote":
+            if self._url is None or self._http_client_factory is None:
+                raise RuntimeError(
+                    "McpToolHost started with transport='remote' but no url/"
+                    "http_client_factory -- both are required for a remote connection"
+                )
+            http_client = self._http_client_factory()
+            await self._stack.enter_async_context(http_client)
+            read, write = await self._stack.enter_async_context(
+                streamable_http_client(self._url, http_client=http_client)
+            )
+        else:
+            server_params = StdioServerParameters(
+                command=sys.executable,
+                args=["-m", child_module],
+                env=dict(env),
+            )
+            read, write = await self._stack.enter_async_context(stdio_client(server_params))
         self.session = await self._stack.enter_async_context(ClientSession(read, write))
         await self.session.initialize()
         result = await self.session.list_tools()
