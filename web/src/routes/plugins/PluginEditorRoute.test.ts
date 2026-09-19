@@ -67,7 +67,14 @@ describe("PluginEditorRoute -- on an existing plugin, the runtime status block l
 
   test("Retry now only renders when showRetry is true, and calls set-enabled true (the live-reconcile primitive)", () => {
     expect(SOURCE).toMatch(/status\.showRetry \? \(/)
-    expect(SOURCE).toMatch(/retryPlugin\.mutateAsync\(\{ pluginId: plugin\.id, enabled: true \}\)/)
+    expect(SOURCE).toMatch(/retryPlugin\.mutate\(\s*\{ pluginId: plugin\.id, enabled: true \}/)
+  })
+
+  // IN-02 (code review): the one control whose entire purpose is a plugin
+  // that is already failing said nothing when the retry failed too.
+  test("a retry that fails again says so, rather than leaving an unhandled rejection", () => {
+    expect(SOURCE).toMatch(/onError: \(\) => setRetryError\(RETRY_FAILED\)/)
+    expect(SOURCE).toMatch(/\{retryError \? <p className="text-body text-destructive">\{retryError\}<\/p> : null\}/)
   })
 })
 

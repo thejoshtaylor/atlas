@@ -42,6 +42,7 @@ import {
   BLANK_DISPLAY_NAME_REASON,
   deriveCatalogPaneState,
   derivePluginEditorState,
+  RETRY_FAILED,
   formatConfigKeyCount,
   remoteConfigCaption,
   saveBlockedByBlankDisplayName,
@@ -136,6 +137,9 @@ export function PluginEditorRoute() {
   const [saveConfigError, setSaveConfigError] = React.useState<string | null>(null)
   const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false)
   const [deleteError, setDeleteError] = React.useState<string | null>(null)
+  // IN-02 (code review): the one control whose whole purpose is a plugin
+  // that is already failing said nothing when the retry failed too.
+  const [retryError, setRetryError] = React.useState<string | null>(null)
 
   const installPlugin = useMutation(installPluginMutationOptions)
   const saveConfig = useMutation(savePluginConfigMutationOptions)
@@ -448,11 +452,18 @@ export function PluginEditorRoute() {
                     variant="outline"
                     className="w-fit"
                     disabled={retryPlugin.isPending}
-                    onClick={() => void retryPlugin.mutateAsync({ pluginId: plugin.id, enabled: true })}
+                    onClick={() => {
+                      setRetryError(null)
+                      retryPlugin.mutate(
+                        { pluginId: plugin.id, enabled: true },
+                        { onError: () => setRetryError(RETRY_FAILED) },
+                      )
+                    }}
                   >
                     Retry now
                   </Button>
                 ) : null}
+                {retryError ? <p className="text-body text-destructive">{retryError}</p> : null}
               </div>
             )
           })()}

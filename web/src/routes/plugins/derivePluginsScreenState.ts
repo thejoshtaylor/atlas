@@ -105,3 +105,14 @@ export function runtimeStatusDisplay(plugin: Pick<Plugin, "state" | "reason">): 
 export function showDeleteControl(plugin: Pick<Plugin, "builtin">): boolean {
   return !plugin.builtin
 }
+
+/** IN-02 (code review): the list row's own write failures, named here
+ * rather than written inline, like every other copywriting line on these
+ * screens. Both controls used to call `mutateAsync`/`mutate` with no
+ * `catch` and no error state at all: a 502 from the server's own "saved,
+ * but the running assistant could not be updated" refusal produced an
+ * unhandled promise rejection in the console and absolutely nothing on
+ * screen -- the admin saw the row simply not change. The editor's own
+ * delete and save paths always did this correctly; these did not. */
+export const ROW_DELETE_FAILED = "Couldn't delete this plugin. Try again."
+export const ROW_ENABLE_FAILED = "Couldn't update this plugin. Try again."

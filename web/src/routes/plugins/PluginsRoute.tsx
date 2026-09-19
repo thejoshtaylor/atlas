@@ -23,6 +23,8 @@ import {
   type Plugin,
 } from "@/lib/plugins"
 import {
+  ROW_DELETE_FAILED,
+  ROW_ENABLE_FAILED,
   collidingToolCount,
   derivePluginsScreenState,
   formatCollisionSummary,
@@ -41,6 +43,8 @@ import {
 
 function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) {
   const [confirmOpen, setConfirmOpen] = React.useState(false)
+  // IN-02 (code review): a failed write says so on the row it failed on.
+  const [rowError, setRowError] = React.useState<string | null>(null)
   const setEnabled = useMutation(setPluginEnabledMutationOptions)
   const remove = useMutation(deletePluginMutationOptions)
   const status = runtimeStatusDisplay(plugin)
@@ -71,7 +75,13 @@ function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) 
           size="sm"
           className="touch-target"
           disabled={rowControlsDisabled}
-          onClick={() => setEnabled.mutate({ pluginId: plugin.id, enabled: !plugin.enabled })}
+          onClick={() => {
+            setRowError(null)
+            setEnabled.mutate(
+              { pluginId: plugin.id, enabled: !plugin.enabled },
+              { onError: () => setRowError(ROW_ENABLE_FAILED) },
+            )
+          }}
         >
           {plugin.enabled ? "Disable" : "Enable"}
         </Button>
@@ -100,7 +110,11 @@ function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) 
                   variant="destructive"
                   onClick={() => {
                     setConfirmOpen(false)
-                    void remove.mutateAsync({ pluginId: plugin.id })
+                    setRowError(null)
+                    remove.mutate(
+                      { pluginId: plugin.id },
+                      { onError: () => setRowError(ROW_DELETE_FAILED) },
+                    )
                   }}
                 >
                   Delete plugin
@@ -110,6 +124,8 @@ function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) 
           </AlertDialog>
         ) : null}
       </div>
+
+      {rowError ? <p className="text-body text-destructive">{rowError}</p> : null}
     </li>
   )
 }

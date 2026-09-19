@@ -127,3 +127,8 @@ export function toolCollisionText(collidesWith: string[]): string | null {
   if (collidesWith.length === 0) return null
   return `Shares this name with ${collidesWith.join(", ")}`
 }
+
+/** IN-02 (code review): "Retry now" called `mutateAsync` with no `catch`,
+ * so a retry that failed again said nothing at all -- on the one control
+ * whose entire purpose is a plugin that is already failing. */
+export const RETRY_FAILED = "Couldn't restart this plugin. Try again."

@@ -38,16 +38,31 @@ describe("PluginsRoute -- a failed load disables the new-plugin action and every
 
 describe("PluginsRoute -- disable/enable act with no confirmation; delete always confirms", () => {
   test("the enable/disable button calls the mutation directly on click, no AlertDialog wraps it", () => {
-    expect(SOURCE).toMatch(
-      /onClick=\{\(\) => setEnabled\.mutate\(\{ pluginId: plugin\.id, enabled: !plugin\.enabled \}\)\}/,
-    )
+    expect(SOURCE).toMatch(/setEnabled\.mutate\(\s*\{ pluginId: plugin\.id, enabled: !plugin\.enabled \}/)
+  })
+
+  // IN-02 (code review): both row writes used to have no error path at
+  // all -- a 502 from the server's own "saved, but the running assistant
+  // could not be updated" refusal produced an unhandled promise rejection
+  // in the console and nothing on screen, so the admin saw the row simply
+  // not change.
+  test("a failed enable/disable names itself on the row", () => {
+    expect(SOURCE).toMatch(/onError: \(\) => setRowError\(ROW_ENABLE_FAILED\)/)
+  })
+
+  test("a failed delete names itself on the row", () => {
+    expect(SOURCE).toMatch(/onError: \(\) => setRowError\(ROW_DELETE_FAILED\)/)
+  })
+
+  test("the row renders whichever of the two failures happened", () => {
+    expect(SOURCE).toMatch(/\{rowError \? <p className="text-body text-destructive">\{rowError\}<\/p> : null\}/)
   })
 
   test("delete is a three-part destructive confirmation with the contract's exact text", () => {
     expect(SOURCE).toMatch(
       /Delete "\$\{plugin\.display_name\}"\? Its tools will no longer reach the assistant, and any macro or workflow step that used one will be flagged as unresolved\./,
     )
-    expect(SOURCE).toMatch(/variant="destructive"[\s\S]{0,300}Delete plugin/)
+    expect(SOURCE).toMatch(/variant="destructive"[\s\S]{0,500}Delete plugin/)
   })
 
   test("the button reads Disable when enabled, Enable when not", () => {
