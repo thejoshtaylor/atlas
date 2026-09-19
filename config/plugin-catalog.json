@@ -1,0 +1,26 @@
+{
+  "entries": [
+    {
+      "name": "Home Assistant",
+      "description": "Control and query devices through a Home Assistant instance on the house network.",
+      "transport": "stdio",
+      "args": ["-m", "spire_mcp.ha"],
+      "url": null,
+      "config_keys": [
+        {"key": "HA_URL", "label": "Home Assistant URL", "secret": false},
+        {"key": "HA_TOKEN", "label": "Home Assistant long-lived access token", "secret": true}
+      ]
+    },
+    {
+      "name": "Weather",
+      "description": "Current conditions and forecast from the Open-Meteo API. No account required.",
+      "transport": "stdio",
+      "args": ["-m", "spire_mcp.weather"],
+      "url": null,
+      "config_keys": [
+        {"key": "WEATHER_LATITUDE", "label": "Latitude", "secret": false},
+        {"key": "WEATHER_LONGITUDE", "label": "Longitude", "secret": false}
+      ]
+    }
+  ]
+}
