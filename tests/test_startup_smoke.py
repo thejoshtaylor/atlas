@@ -1241,8 +1241,10 @@ def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degrad
 
         response = client.get("/api/providers")
         assert response.status_code == 200, response.text
-        [slot] = response.json()["slots"]
-        assert slot["slot"] == "stt"
+        # Plan 07-02: `/api/providers` now serves all three slots, not
+        # just stt -- select it by name rather than assuming it is the
+        # only one in the response.
+        [slot] = [s for s in response.json()["slots"] if s["slot"] == "stt"]
         assert slot["state"] == "degraded"
         assert slot["active"] is None
         assert slot["reason"] == stt_status.reason, "the reason must reach the route byte for byte"

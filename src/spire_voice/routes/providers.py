@@ -8,9 +8,12 @@ live facts fresh at response-build time rather than a stored copy of them
 (`_to_plugin_response`'s own convention, applied here to `selected`/
 `active` instead of `state`/`reason`).
 
-Only the speech-to-text slot is served this plan (Task 1's own scope) --
-`_SERVED_SLOTS` is the one tuple plan 07-02 extends to add text-to-speech
-and the language model, never a second copy of the routes below.
+Plan 07-02: all three slots are served now, in the fixed order
+07-UI-SPEC.md pins -- speech to text, text to speech, language model --
+so the admin's eye lands on the same slot in the same place after every
+restart. `_SERVED_SLOTS` is still the one tuple every route below reads;
+extending it to a fourth slot is a tuple edit, never a second copy of the
+routes.
 """
 
 from __future__ import annotations
@@ -28,17 +31,21 @@ from spire_voice.providers.boot import ProviderSlotStatus
 
 router = APIRouter(tags=["providers"])
 
-# Task 1's own scope: only speech-to-text is wired end to end. Plan 07-02
-# adds `"tts"`/`"brain"` to all three of these dicts -- an argument to the
-# functions below, never a second copy of them.
-_SERVED_SLOTS: "tuple[str, ...]" = ("stt",)
+# The fixed order 07-UI-SPEC.md pins for the /providers screen: speech to
+# text, text to speech, language model. `GET`/`PUT /api/providers` report
+# and accept exactly the slots named here, in this order.
+_SERVED_SLOTS: "tuple[str, ...]" = ("stt", "tts", "brain")
 
 _SLOT_LABELS: "dict[str, str]" = {
     "stt": "Speech to text",
+    "tts": "Text to speech",
+    "brain": "Language model",
 }
 
 _CREDENTIAL_SLOT_FOR: "dict[str, CredentialSlot]" = {
     "stt": CredentialSlot.STT,
+    "tts": CredentialSlot.TTS,
+    "brain": CredentialSlot.BRAIN,
 }
 
 
@@ -85,8 +92,12 @@ class ProviderSlotResponse(BaseModel):
     state: str
     reason: "str | None" = None
     wrapped: bool
-    # `None` this plan -- D-08's own honest synthesis-to-first-chunk
-    # timing, populated once `BatchTtsAdapter` exists (plan 07-02).
+    # D-08's honest synthesis-to-first-chunk timing (plan 07-02): a live
+    # read off the slot's active client at response-build time, never
+    # stored on this response's own source of truth and never persisted.
+    # `None` for an unwrapped slot, for a degraded slot with no client at
+    # all, and for a wrapped slot that has not synthesized anything since
+    # the last restart -- three honest reasons for the same absent value.
     measured_ms: "float | None" = None
     options: list[ProviderOptionResponse]
     # The selection row's own `options` JSON column, renamed on the wire
@@ -141,6 +152,20 @@ async def _option_response(request: Request, slot: str, entry: "registry.Provide
     )
 
 
+def _measured_ms_for(request: Request, slot: str) -> "float | None":
+    """D-08's honest timing, read live off the slot's active client --
+    never a stored copy. `getattr(request.app.state, slot, None)` is the
+    exact attribute `lifespan` assigns each slot's client under
+    (`app.state.stt`/`app.state.tts`/`app.state.brain`); a client with no
+    `last_synthesis_ms` of its own (every unwrapped provider) or no
+    client at all (a degraded slot) both read as `None` here, the same
+    honest absence as a wrapped slot that has synthesized nothing yet."""
+    client = getattr(request.app.state, slot, None)
+    if client is None:
+        return None
+    return getattr(client, "last_synthesis_ms", None)
+
+
 async def _slot_response(request: Request, slot: str, selection, status: "ProviderSlotStatus | None") -> ProviderSlotResponse:
     options = [await _option_response(request, slot, entry) for entry in registry.known_entries(slot)]
     selected = selection.provider_name if selection is not None else ""
@@ -168,7 +193,7 @@ async def _slot_response(request: Request, slot: str, selection, status: "Provid
         state=state,
         reason=reason,
         wrapped=wrapped,
-        measured_ms=None,
+        measured_ms=_measured_ms_for(request, slot),
         options=options,
         settings=settings,
     )
