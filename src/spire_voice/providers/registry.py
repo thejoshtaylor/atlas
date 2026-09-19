@@ -38,6 +38,7 @@ __all__ = [
     "build_brain",
     "known_entries",
     "known_names",
+    "check_registries_non_empty",
 ]
 
 
@@ -165,3 +166,16 @@ def known_names(slot: str) -> "list[str]":
     """The sorted name set for `slot` -- what a route validates a
     submitted `provider_name` against before ever writing it (T-07-02)."""
     return sorted(_REGISTRIES[slot])
+
+
+def check_registries_non_empty() -> None:
+    """Every one of the three registries holds at least one entry --
+    07-UI-SPEC.md's screen has no empty state at all (D-03's boot-time
+    validation is what makes that a fact rather than a hope). Run
+    unconditionally at import, below, so an empty registry is an authoring
+    mistake caught at process start, never a blank screen with no error."""
+    for slot, entries in _REGISTRIES.items():
+        assert entries, f"providers/registry.py: the {slot!r} registry must not be empty"
+
+
+check_registries_non_empty()
