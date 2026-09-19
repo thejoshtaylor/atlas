@@ -246,8 +246,14 @@ class _FakeToolHost:
         self.tools = [
             Tool(name="ha_list_entities", description="List entities.", inputSchema={"type": "object", "properties": {}}),
         ]
+        # WR-01 (code review): which host instance a per-turn state fetch
+        # actually reached, counted per instance -- a restart builds a new
+        # one and closes the old, so "how many calls landed here" is the
+        # only way to tell the two apart from the outside.
+        self.call_count = 0
 
     async def call_tool(self, name: str, arguments: dict) -> object:
+        self.call_count += 1
         return SimpleNamespace(structuredContent=[], content=[])
 
     async def aclose(self) -> None:
@@ -326,6 +332,14 @@ def _weather_plugin_row(*, plugin_id: int = 2) -> Plugin:
         updated_at=now,
         created_by_user_id=None,
     )
+
+
+async def _no_safety_block() -> "dict | None":
+    """`PluginManager`'s own `safety_block_provider` for the one test below
+    that drives a manager directly rather than through `lifespan` -- no
+    policy, since that test is about which host a turn reaches, not about
+    what the child is allowed to do."""
+    return None
 
 
 async def _fake_start_plugin_host(plugin: Plugin, **kwargs: object) -> object:
@@ -1746,3 +1760,61 @@ async def test_current_macros_reads_the_repository_fresh_on_every_call():
     after = await app_module._current_macros(app)
     assert len(after) == 1
     assert after[0].phrase == "example live read macro"
+
+
+async def test_state_fetch_follows_the_enforcing_host_across_a_restart(
+    fake_plugin_repository, monkeypatch
+):
+    """WR-01 (code review): `_make_state_fetch` was handed the enforcing
+    host once, and `app.state.tool_host` -- the attribute it was handed
+    from -- was assigned once at boot, despite a comment claiming the
+    manager reassigned it on every swap. Every crash-driven respawn, every
+    enable and every configuration save builds a *new* `McpToolHost` and
+    closes the previous one, so from the first such change onward every
+    turn called a closed host: live entity state was silently lost (or the
+    turn waited out `timeout_ms` first), with nothing on any screen saying
+    so, and a Home Assistant degraded at boot stayed `None` forever even
+    after the watchdog recovered it.
+
+    The factory now resolves `PluginManager.enforcing_host` at call time --
+    still exactly one read per turn -- so a turn after a restart reaches
+    the host that is actually running.
+    """
+    from spire_voice.config import SecurityConfig
+
+    hosts: list[_FakeToolHost] = []
+
+    async def _start_plugin_host(plugin: Plugin, **kwargs: object) -> object:
+        host = _FakeToolHost()
+        hosts.append(host)
+        return host
+
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _start_plugin_host)
+
+    ha = _ha_plugin_row()
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = plugin_manager_module.PluginManager(
+        repo,
+        mcp_root="/nonexistent/mcp-root",
+        security=SecurityConfig(),
+        safety_block_provider=_no_safety_block,
+    )
+    try:
+        await manager.start_all()
+        # Built once, exactly as a turn builds it, before the restart.
+        state_fetch = app_module._make_state_fetch(manager)
+        assert await state_fetch() == []
+        assert hosts[0].call_count == 1
+
+        await manager.start_one(ha)  # an enable/config save: a brand-new host
+        assert len(hosts) == 2
+        assert hosts[0] is not hosts[1]
+
+        assert await state_fetch() == []
+        assert hosts[1].call_count == 1, (
+            "the per-turn state fetch is still calling the host that was closed "
+            "when the plugin restarted -- this is the WR-01 defect"
+        )
+        assert hosts[0].call_count == 1
+    finally:
+        await manager.stop_all()

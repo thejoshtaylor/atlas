@@ -61,7 +61,7 @@ from spire_voice.db.repository import (
     SettingsRepository,
     WorkflowRepository,
 )
-from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
+from spire_voice.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
 from spire_voice.plugins.manager import PluginManager
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers.stt_xai import XaiStt
@@ -248,7 +248,7 @@ def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ())
     return "\n".join(lines)
 
 
-def _make_state_fetch(tool_host: "McpToolHost | None") -> Callable[[], Any]:
+def _make_state_fetch(plugin_manager: "PluginManager") -> Callable[[], Any]:
     """Build the per-turn `state_fetch` factory `run_turn` awaits
     concurrently with the operator still speaking (D-15).
 
@@ -258,15 +258,26 @@ def _make_state_fetch(tool_host: "McpToolHost | None") -> Callable[[], Any]:
     is exactly the case that must keep working. Reuses `_tool_result_json`
     rather than re-implementing the MCP payload walk a second time.
 
-    Plan 06-01: `tool_host` is `None` when the plugin that enforces the
-    house policy (`app.state.tool_host`, `PluginManager.enforcing_host`)
-    is disabled or failed to start -- an absent host returns an empty
-    entity list rather than raising an attribute error, the same
-    "unknown reads as nothing known" posture `_state_message` already
-    gives an empty `states` mapping.
+    Plan 06-01: the enforcing host is `None` when the plugin that enforces
+    the house policy (`PluginManager.enforcing_host`) is disabled or
+    failed to start -- an absent host returns an empty entity list rather
+    than raising an attribute error, the same "unknown reads as nothing
+    known" posture `_state_message` already gives an empty `states`
+    mapping.
+
+    WR-01 (code review): the host is resolved from the manager here, at
+    call time, rather than being snapshotted when this factory is built.
+    Every crash-driven respawn, enable and configuration save builds a
+    *new* `McpToolHost` and closes the previous one, so a factory holding
+    the host it was built with talks to a closed one from the first such
+    change onward -- every later turn then loses live entity state with no
+    operator-visible signal, and a Home Assistant that was degraded at
+    boot never came back at all. The resolution is still exactly one read
+    per turn, which is what keeps a single turn's own view stable.
     """
 
     async def _fetch() -> list[dict[str, Any]]:
+        tool_host = plugin_manager.enforcing_host
         if tool_host is None:
             return []
         result = await tool_host.call_tool("ha_list_entities", {})
@@ -479,7 +490,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
             macros=await _current_macros(app),
-            state_fetch=_make_state_fetch(app.state.tool_host),
+            state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=session_recorder,
             speech_lock=app.state.speaker_lock,
@@ -1286,7 +1297,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             filler_after_ms=config.brain.filler_after_ms,
             filler_cache=app.state.filler_cache,
             macros=macros,
-            state_fetch=_make_state_fetch(app.state.tool_host),
+            state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=SessionRecorder(config.session, timings),
             workflow_tool_host=app.state.workflow_tool_host,
@@ -1361,7 +1372,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         filler_after_ms=config.brain.filler_after_ms,
         filler_cache=websocket.app.state.filler_cache,
         macros=macros,
-        state_fetch=_make_state_fetch(websocket.app.state.tool_host),
+        state_fetch=_make_state_fetch(websocket.app.state.plugin_manager),
         pending_runs_fetch=_make_pending_runs_fetch(websocket.app.state.workflow_repo),
         session_recorder=SessionRecorder(config.session, timings),
         workflow_tool_host=websocket.app.state.workflow_tool_host,
