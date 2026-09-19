@@ -25,9 +25,23 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
-DEFAULT_CATALOG_PATH = "config/plugin-catalog.json"
+# IN-01 (code review): derived from this file's own location, the same
+# computation `app.py`'s `MCP_ROOT`/`FRONTEND_DIR` use (src/spire_voice/
+# plugins/catalog.py -> plugins -> spire_voice -> src -> repo root), with
+# an environment override for a deployment that mounts the catalog
+# somewhere else. It used to be the relative string
+# `"config/plugin-catalog.json"`, which resolved against the process's
+# current working directory: started from anywhere but the repository
+# root, `GET /api/plugins/catalog` raised `CatalogError` and the plugins
+# screen showed a raw 500 rather than one of this codebase's own named
+# refusals.
+DEFAULT_CATALOG_PATH = os.environ.get(
+    "SPIRE_PLUGIN_CATALOG",
+    str(Path(__file__).resolve().parents[3] / "config" / "plugin-catalog.json"),
+)
 
 # The two transports D-02 ships -- an entry names exactly one of them, and
 # the args-or-url exclusivity below is enforced against this same set.

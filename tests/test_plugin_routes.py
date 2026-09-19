@@ -1221,3 +1221,33 @@ def test_a_reserved_configuration_key_is_refused_at_install_and_at_save(
     assert installed.status_code == 400, installed.text
     assert "SPIRE_SAFETY" in installed.json()["detail"]
     assert list(plugin_repo.plugins) == [1], "nothing is installed when the write is refused"
+
+
+def test_an_unreadable_catalog_is_a_named_refusal_not_a_bare_500(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """IN-01 (code review): `CatalogError` reached the client unhandled, so
+    an image whose `config/` mount does not carry the catalog showed the
+    plugins screen a raw 500 instead of one of this module's own named
+    refusals."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    from spire_voice.routes import plugins as plugins_module
+
+    monkeypatch.setattr(
+        plugins_module, "DEFAULT_CATALOG_PATH", "/nonexistent/plugin-catalog.json"
+    )
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    listed = client.get("/api/plugins/catalog")
+    assert listed.status_code == 503, listed.text
+    assert "/nonexistent/plugin-catalog.json" in listed.json()["detail"]
+
+    installed = client.post("/api/plugins", json={"catalog_entry": "Weather"})
+    assert installed.status_code == 503, installed.text

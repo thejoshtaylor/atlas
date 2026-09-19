@@ -169,3 +169,20 @@ def test_a_malformed_config_key_raises_naming_the_entry(tmp_path):
     )
     with pytest.raises(CatalogError, match="Bad Entry"):
         load_catalog(catalog_path)
+
+
+def test_the_default_catalog_path_does_not_depend_on_the_working_directory(tmp_path, monkeypatch):
+    """IN-01 (code review): `DEFAULT_CATALOG_PATH` was the relative string
+    `"config/plugin-catalog.json"`, resolved against the process's current
+    working directory -- unlike `MCP_ROOT` and `FRONTEND_DIR`, both
+    derived from `__file__`. Started from any directory but the repository
+    root, the catalog route raised `CatalogError`.
+    """
+    import os
+
+    from spire_voice.plugins.catalog import DEFAULT_CATALOG_PATH, load_catalog
+
+    assert os.path.isabs(DEFAULT_CATALOG_PATH)
+
+    monkeypatch.chdir(tmp_path)
+    assert load_catalog(DEFAULT_CATALOG_PATH), "the shipped catalog must load from anywhere"

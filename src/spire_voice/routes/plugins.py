@@ -44,7 +44,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.crypto.credentials import encrypt_credential
 from spire_voice.db.repository import Plugin, PluginAlreadyExistsError, PluginConfigValue, PluginRepository
-from spire_voice.plugins.catalog import DEFAULT_CATALOG_PATH, find_entry, load_catalog
+from spire_voice.plugins.catalog import (
+    DEFAULT_CATALOG_PATH,
+    CatalogError,
+    find_entry,
+    load_catalog,
+)
 from spire_voice.plugins.host import module_for_stdio_args, validate_remote_url
 from spire_voice.plugins.manager import REMOTE_AUTH_KEY, RESERVED_ENV_KEYS
 
@@ -131,6 +136,23 @@ def _secret_flag_conflict_error(key: str, stored_secret: bool) -> HTTPException:
             "it is secret; remove the key and add it again to change that"
         ),
     )
+
+
+def _catalog_unavailable_error(exc: CatalogError) -> HTTPException:
+    """IN-01 (code review): the shipped catalog file could not be read or
+    did not parse. `CatalogError` already names the path it tried; this
+    turns it into one of this module's own named refusals rather than the
+    bare 500 an unhandled exception produced -- an image whose `config/`
+    mount does not carry the catalog is a deployment mistake an operator
+    can act on, and "something went wrong" is not how they find out."""
+    return HTTPException(status_code=503, detail=f"the plugin catalog is unavailable: {exc}")
+
+
+def _load_catalog_or_refuse():
+    try:
+        return load_catalog(DEFAULT_CATALOG_PATH)
+    except CatalogError as exc:
+        raise _catalog_unavailable_error(exc) from exc
 
 
 def _reserved_config_key_error(keys: Sequence[str]) -> HTTPException:
@@ -570,7 +592,7 @@ async def _reconcile_forget(request: Request, plugin: Plugin) -> None:
 async def list_catalog(
     _user: CurrentUser = Depends(require_role(Role.ADMIN)),
 ) -> list[CatalogEntryResponse]:
-    entries = load_catalog(DEFAULT_CATALOG_PATH)
+    entries = _load_catalog_or_refuse()
     return [
         CatalogEntryResponse(
             name=entry.name,
@@ -624,7 +646,7 @@ async def install_plugin(
     if payload.catalog_entry is not None:
         if payload.command is not None or payload.url is not None or payload.transport is not None:
             raise _ambiguous_install_source_error()
-        entries = load_catalog(DEFAULT_CATALOG_PATH)
+        entries = _load_catalog_or_refuse()
         entry = find_entry(entries, payload.catalog_entry)
         if entry is None:
             raise _unknown_catalog_entry_error(payload.catalog_entry)
