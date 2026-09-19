@@ -1193,7 +1193,14 @@ def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degrad
     admin locked out of the very screen that would fix the configuration
     is the worst available outcome. `app.state.stt` is `None`,
     `GET /api/providers` still answers 200, and the reason it names is the
-    one `registry.build_stt` actually raised, unchanged."""
+    one `registry.build_stt` actually raised, unchanged.
+
+    Plan 07-02: `_write_fake_config_with_credential(api_key="")` blanks
+    all three provider credentials at once, so this boot now exercises
+    all three slots degrading simultaneously -- `tier_brains`/`brain`/
+    `tts` must all land on `app.state` as their own honest empty/`None`
+    states rather than crashing the boot (the precache and the
+    `resolve_model()` loop both had to learn to tolerate this)."""
     from spire_voice.auth.tokens import issue_access_token
     from spire_voice.config import SecurityConfig
 
@@ -1219,6 +1226,15 @@ def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degrad
         assert "xAI" in stt_status.reason
         assert "Settings" in stt_status.reason
 
+        assert app_module.app.state.tts is None, "a degraded tts slot must build no client at all"
+        assert app_module.app.state.provider_slots["tts"].state == "degraded"
+        assert app_module.app.state.tier_brains == (), (
+            "a degraded brain slot must leave tier_brains an empty tuple, not None -- "
+            "the resolve_model() loop below must still be safe to run"
+        )
+        assert app_module.app.state.brain is None
+        assert app_module.app.state.provider_slots["brain"].state == "degraded"
+
         security = SecurityConfig()
         token = issue_access_token(user_id=1, role="admin", security=security)
         client.cookies.set(security.cookie_name, token)
@@ -1230,6 +1246,85 @@ def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degrad
         assert slot["state"] == "degraded"
         assert slot["active"] is None
         assert slot["reason"] == stt_status.reason, "the reason must reach the route byte for byte"
+
+
+def test_a_missing_tts_credential_degrades_only_that_slot(tmp_path, monkeypatch):
+    """Task 2's own must-have: a missing credential degrades the
+    text-to-speech slot alone -- speech-to-text and the language model
+    still start, and the startup precache is skipped rather than
+    crashing the boot."""
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config(tmp_path, extra={
+            "tts": {
+                "url": "https://tts.invalid/v1/tts",
+                "api_key": "",
+                "voice_id": "eve",
+                "cache_dir": str(tmp_path / "tts-cache"),
+            },
+        })),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app):
+        assert app_module.app.state.tts is None, "a degraded tts slot must build no client at all"
+        tts_status = app_module.app.state.provider_slots["tts"]
+        assert tts_status.state == "degraded"
+        assert "xAI" in tts_status.reason
+        assert "Settings" in tts_status.reason
+
+        assert app_module.app.state.stt is not None, "stt must still start"
+        assert app_module.app.state.provider_slots["stt"].state == "running"
+        assert app_module.app.state.tier_brains, "the language model must still start"
+        assert app_module.app.state.provider_slots["brain"].state == "running"
+        assert app_module.app.state.filler_cache == {}, (
+            "the startup precache must be skipped, not crash, for a degraded tts slot"
+        )
+
+
+def test_a_missing_brain_credential_degrades_only_that_slot(tmp_path, monkeypatch):
+    """Task 2's own must-have, the language-model half: a missing
+    credential degrades the brain slot alone -- speech-to-text and
+    text-to-speech still start."""
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config(tmp_path, extra={
+            "brain": {
+                "base_url": "https://brain.invalid/v1",
+                "api_key": "",
+                "models": [{"model": "fake-model"}],
+            },
+        })),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app):
+        assert app_module.app.state.tier_brains == ()
+        assert app_module.app.state.brain is None
+        brain_status = app_module.app.state.provider_slots["brain"]
+        assert brain_status.state == "degraded"
+        assert "xAI" in brain_status.reason
+        assert "Settings" in brain_status.reason
+
+        assert app_module.app.state.stt is not None, "stt must still start"
+        assert app_module.app.state.tts is not None, "tts must still start"
+        assert app_module.app.state.provider_slots["tts"].state == "running"
 
 
 def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeypatch, caplog):

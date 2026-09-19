@@ -6,13 +6,22 @@ from __future__ import annotations
 
 import pytest
 
-from spire_voice.config import SttConfig
+from spire_voice.config import BrainConfig, BrainTierConfig, SttConfig, TtsConfig
 from spire_voice.providers import registry
+from spire_voice.providers.batch_tts_adapter import BatchTtsAdapter
 from spire_voice.providers.boot import ProviderSlotStatus, ProviderUnavailable, resolve_slot
 
 
 def _stt_config() -> SttConfig:
     return SttConfig(url="wss://stt.invalid/v1/stt")
+
+
+def _tts_config() -> TtsConfig:
+    return TtsConfig(url="https://tts.invalid/v1/tts")
+
+
+def _brain_config() -> BrainConfig:
+    return BrainConfig(models=(BrainTierConfig(model="fake-model"),))
 
 
 def test_build_stt_builds_the_registered_xai_provider():
@@ -38,6 +47,62 @@ def test_known_entries_returns_every_registered_option_for_the_slot():
     assert [entry.name for entry in entries] == ["xai"]
     assert entries[0].requires_credential is True
     assert entries[0].batch is False
+
+
+def test_build_tts_builds_the_registered_xai_provider():
+    from spire_voice.providers.tts_xai import XaiTts
+
+    client = registry.build_tts("xai", _tts_config(), "test-key")
+
+    assert isinstance(client, XaiTts)
+
+
+def test_tts_entry_declares_itself_batch():
+    """D-05: xAI's text-to-speech is a single REST call -- batch, not
+    streaming -- and the registry entry must say so, since `boot.py::
+    resolve_slot` reads exactly this field to decide whether to wrap."""
+    [entry] = registry.known_entries("tts")
+
+    assert entry.batch is True
+
+
+def test_build_tts_raises_provider_unavailable_when_the_credential_is_missing():
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_tts("xai", _tts_config(), "")
+
+    message = str(excinfo.value)
+    assert "xAI" in message
+    assert "Settings" in message
+
+
+def test_build_brain_builds_the_tier_tuple_build_tiers_produces():
+    """D-01, D-03: the language-model entry's factory is `brain_race.
+    build_tiers` itself, called with the credential-substituted config --
+    not a second, parallel construction of the same tiers."""
+    from spire_voice.turn.brain_race import TierBrain
+
+    tiers = registry.build_brain("xai", _brain_config(), "test-key")
+
+    assert len(tiers) == 1
+    assert isinstance(tiers[0], TierBrain)
+    assert tiers[0].model == "fake-model"
+
+
+def test_build_brain_raises_provider_unavailable_when_the_credential_is_missing():
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_brain("xai", _brain_config(), "")
+
+    message = str(excinfo.value)
+    assert "xAI" in message
+    assert "Settings" in message
+
+
+def test_stt_and_brain_entries_are_not_batch():
+    [stt_entry] = registry.known_entries("stt")
+    [brain_entry] = registry.known_entries("brain")
+
+    assert stt_entry.batch is False
+    assert brain_entry.batch is False
 
 
 def test_known_names_is_sorted():
@@ -120,6 +185,60 @@ async def test_resolve_slot_reports_degraded_when_the_builder_raises_provider_un
     assert status.active is None
     assert status.reason == "xAI needs an API key -- add one in Settings."
     assert client is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_wraps_the_client_when_the_resolved_entry_is_batch():
+    """Task 2's own must-have: resolving the text-to-speech slot returns a
+    client already wrapped, and the status reports `wrapped=True` --
+    `boot.py::resolve_slot` is the one place this wrap happens, never a
+    second wrap inside `registry.py` or `tts_xai.py`."""
+    repo = _FakeSelectionRepo(selection=None)
+
+    status, client = await resolve_slot(
+        "tts",
+        repo,
+        "xai",
+        registry.build_tts,
+        _tts_config(),
+        "test-key",
+        is_batch=lambda name: registry.TTS_REGISTRY[name].batch,
+    )
+
+    assert isinstance(client, BatchTtsAdapter)
+    assert status.wrapped is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_does_not_wrap_when_the_resolved_entry_is_not_batch():
+    repo = _FakeSelectionRepo(selection=None)
+
+    status, client = await resolve_slot(
+        "stt",
+        repo,
+        "xai",
+        registry.build_stt,
+        _stt_config(),
+        "test-key",
+        is_batch=lambda name: registry.STT_REGISTRY[name].batch,
+    )
+
+    assert not isinstance(client, BatchTtsAdapter)
+    assert status.wrapped is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_wrapped_defaults_false_with_no_is_batch_argument():
+    """Every caller that predates `is_batch` (the stt call site) keeps
+    reading `wrapped` off the client itself, unchanged."""
+    repo = _FakeSelectionRepo(selection=_Selection(provider_name="xai"))
+
+    status, client = await resolve_slot(
+        "stt", repo, "xai", registry.build_stt, _stt_config(), "test-key"
+    )
+
+    assert status.wrapped is False
+    assert not isinstance(client, BatchTtsAdapter)
 
 
 @pytest.mark.asyncio
