@@ -653,3 +653,64 @@ async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_read
 
     # Idempotent, like every other migration in this file.
     _run_upgrade_head()
+
+
+@skip_without_postgres
+async def test_a_plugins_config_key_cannot_be_stored_twice(tmp_path, monkeypatch):
+    """IN-03 (06-REVIEW.md): `set_config_values` is a read-then-upsert with
+    no row lock, so without database-level uniqueness two concurrent saves
+    for the same plugin could both miss the existing row and insert
+    duplicates for one key -- after which the child silently received
+    whichever row an unordered `SELECT` returned last. Migration `0010`
+    makes that shape impossible to store, the same way `uq_plugins_slug`
+    already does for the parent table.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    await _reset_schema(_TEST_DB_URL)
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "database": {"url": _TEST_DB_URL},
+        "security": {},
+    }
+    config_path = tmp_path / "config-value-uniqueness-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            plugin_id = (
+                await conn.execute(text("SELECT id FROM plugins WHERE slug = 'ha'"))
+            ).scalar_one()
+            await conn.execute(
+                text(
+                    "INSERT INTO plugin_config_values "
+                    "(plugin_id, key, secret, value, ciphertext, key_version, updated_at) "
+                    "VALUES (:plugin_id, 'A_NEW_KEY', false, 'first', NULL, NULL, now())"
+                ),
+                {"plugin_id": plugin_id},
+            )
+
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO plugin_config_values "
+                        "(plugin_id, key, secret, value, ciphertext, key_version, updated_at) "
+                        "VALUES (:plugin_id, 'A_NEW_KEY', false, 'second', NULL, NULL, now())"
+                    ),
+                    {"plugin_id": plugin_id},
+                )
+    finally:
+        await engine.dispose()

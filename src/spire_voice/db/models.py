@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ForeignKey, LargeBinary, Text
+from sqlalchemy import ForeignKey, LargeBinary, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -482,9 +482,22 @@ class PluginConfigValueRow(Base):
     ever holds a decrypted secret value. `ondelete="CASCADE"` matches
     `MacroActionRow.macro_id`'s own convention: deleting a plugin removes
     its own config values in the same statement.
+
+    IN-03 (code review): `(plugin_id, key)` is unique at the database
+    level (`uq_plugin_config_values_plugin_id_key`, migration 0010).
+    `PostgresPluginRepository.set_config_values` is a read-then-upsert with
+    no row lock, so without it two concurrent saves for the same plugin
+    could both miss an existing row and insert duplicates for one key --
+    after which `_env_from_config_values` silently took whichever the
+    unordered `SELECT` returned last, and the editor showed one of them.
+    The constraint is the authority, exactly as `uq_plugins_slug` is for
+    the parent table.
     """
 
     __tablename__ = "plugin_config_values"
+    __table_args__ = (
+        UniqueConstraint("plugin_id", "key", name="uq_plugin_config_values_plugin_id_key"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     plugin_id: Mapped[int] = mapped_column(
