@@ -43,6 +43,7 @@ import {
   deriveCatalogPaneState,
   derivePluginEditorState,
   formatConfigKeyCount,
+  remoteConfigCaption,
   saveBlockedByBlankDisplayName,
   saveBlockedByMissingCustomSource,
   saveBlockedByNoCatalogSelection,
@@ -482,6 +483,9 @@ export function PluginEditorRoute() {
 
           <div className="flex flex-col gap-2">
             <p className="text-heading font-semibold text-foreground">{formatConfigKeyCount(configKeyEntries.length)}</p>
+            {remoteConfigCaption(plugin.transport) ? (
+              <p className="text-label text-muted-foreground">{remoteConfigCaption(plugin.transport)}</p>
+            ) : null}
             {configKeyEntries.length === 0 ? <p className="text-body text-muted-foreground">No configuration.</p> : null}
             {configKeyEntries.map(([key, draft]) =>
               draft.secret && !draft.editing ? (

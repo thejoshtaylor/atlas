@@ -69,6 +69,20 @@ export function formatConfigKeyCount(count: number): string {
   return `${count} ${count === 1 ? "key" : "keys"}`
 }
 
+/** WR-07 (code review): a URL plugin carries no process and so no
+ * environment -- the only configuration value that reaches it is the one
+ * secret sent as its bearer credential. Every plain key an admin enters
+ * for one is stored and displayed and has no effect at all, which the
+ * editor used to say nothing about. Named here rather than written inline
+ * so this file's own tests can assert the words, like every other
+ * copywriting line on these screens. */
+export const REMOTE_PLAIN_KEYS_UNUSED =
+  "A URL plugin only sends its secret value, as a bearer token. Plain values are stored here but never reach it."
+
+export function remoteConfigCaption(transport: string): string | null {
+  return transport === "remote" ? REMOTE_PLAIN_KEYS_UNUSED : null
+}
+
 /** Install is blocked, with a named reason, until the admin has picked a
  * catalog entry (catalog mode) -- one of the two "neither a command nor a
  * URL" shapes Task 1's own behaviour names, the catalog-mode half. */

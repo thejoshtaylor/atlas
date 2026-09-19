@@ -46,6 +46,7 @@ from spire_voice.crypto.credentials import encrypt_credential
 from spire_voice.db.repository import Plugin, PluginAlreadyExistsError, PluginConfigValue, PluginRepository
 from spire_voice.plugins.catalog import DEFAULT_CATALOG_PATH, find_entry, load_catalog
 from spire_voice.plugins.host import module_for_stdio_args, validate_remote_url
+from spire_voice.plugins.manager import REMOTE_AUTH_KEY
 
 router = APIRouter(tags=["plugins"])
 
@@ -128,6 +129,20 @@ def _secret_flag_conflict_error(key: str, stored_secret: bool) -> HTTPException:
             f"configuration key {key!r} is stored as a {stored} value and this request "
             f"submits it as a {submitted} one -- a save changes a value, never whether "
             "it is secret; remove the key and add it again to change that"
+        ),
+    )
+
+
+def _ambiguous_remote_credential_error(keys: Sequence[str]) -> HTTPException:
+    """WR-07 (code review): a remote plugin sends exactly one bearer
+    credential. Two secret keys with neither named `AUTH_TOKEN` leaves
+    nothing to decide which one is sent, so this refuses the write rather
+    than letting the connection pick by row order."""
+    return HTTPException(
+        status_code=400,
+        detail=(
+            f"a URL plugin sends exactly one credential, and this one declares {sorted(keys)!r} -- "
+            f"name the one to send {REMOTE_AUTH_KEY!r}, or remove the others"
         ),
     )
 
@@ -416,6 +431,23 @@ def _saved_config_values(
     return values
 
 
+def _check_remote_credential_is_unambiguous(
+    transport: str, config_values: "Sequence[PluginConfigValue]"
+) -> None:
+    """WR-07 (code review): refuse a remote plugin that would carry more
+    than one secret and no `AUTH_TOKEN` to say which is sent. Checked at
+    both write boundaries (install and save) against the rows that will
+    exist afterwards -- `PluginManager._remote_bearer_token` refuses the
+    same shape at connect time, so a row written before this check existed
+    is degraded honestly rather than connecting with an arbitrary
+    credential."""
+    if transport != "remote":
+        return
+    secret_keys = [value.key for value in config_values if value.secret]
+    if len(secret_keys) > 1 and REMOTE_AUTH_KEY not in secret_keys:
+        raise _ambiguous_remote_credential_error(secret_keys)
+
+
 async def _to_plugin_response(request: Request, plugin: Plugin) -> PluginResponse:
     plugin_repo: PluginRepository = request.app.state.plugin_repo
     plugin_manager = request.app.state.plugin_manager
@@ -603,6 +635,8 @@ async def install_plugin(
             raise _ambiguous_install_source_error()
         config_values = _custom_install_config_values(payload.config_values, security)
 
+    _check_remote_credential_is_unambiguous(transport, config_values)
+
     slug = _unique_slug(display_name, existing_slugs)
     try:
         plugin = await plugin_repo.create_plugin(
@@ -659,6 +693,13 @@ async def save_plugin_config(
     # secret, so they are read before anything is encrypted or written.
     stored = await plugin_repo.get_config_values(plugin_id)
     to_write = _saved_config_values(payload.values, stored, security)
+    # WR-07: checked against the rows that will exist after this write --
+    # the stored ones this save does not name, plus the ones it does.
+    written_keys = {value.key for value in to_write}
+    _check_remote_credential_is_unambiguous(
+        plugin.transport,
+        [*to_write, *(value for value in stored if value.key not in written_keys)],
+    )
     await plugin_repo.set_config_values(plugin_id, to_write)
 
     # Only an enabled plugin has anything running to reconcile -- a

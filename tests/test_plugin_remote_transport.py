@@ -542,3 +542,76 @@ async def test_a_dead_remote_plugin_recovers_once_a_respawn_attempt_succeeds(
         assert "echo" in tool_names
     finally:
         await manager.stop_all()
+
+
+async def test_two_unnamed_secrets_are_refused_rather_than_sending_an_arbitrary_one(
+    fake_plugin_repository,
+):
+    """WR-07 (code review): `_remote_bearer_token` returned the *first*
+    row with `secret=True and ciphertext is not None`, in whatever order
+    the repository returned rows -- `SELECT ... WHERE plugin_id = ?` with
+    no `ORDER BY`. Nothing stopped an admin from adding a second secret
+    key, so which credential this house sent to a third-party server was
+    effectively arbitrary, and could change between restarts.
+
+    Two secrets with neither named is refused, by name, and the plugin is
+    degraded with that reason rather than connecting with a credential
+    nobody chose.
+    """
+    security = SecurityConfig()
+    plugin = _remote_plugin(1, "two-secrets", url="https://remote.invalid/mcp")
+    repo = fake_plugin_repository(
+        plugins=[plugin],
+        config_values={
+            1: [
+                _secret_value("API_KEY", "a-plainly-fictional-first-value", security),
+                _secret_value("OTHER_KEY", "a-plainly-fictional-second-value", security),
+            ]
+        },
+    )
+    manager = _manager(repo)
+    try:
+        await manager.start_all()
+
+        assert manager.state_for("two-secrets") is PluginState.DEGRADED
+        reason = manager.reason_for("two-secrets")
+        assert "AUTH_TOKEN" in reason
+        assert "API_KEY" in reason and "OTHER_KEY" in reason
+        assert manager.tool_host_for("two-secrets") is None
+    finally:
+        await manager.stop_all()
+
+
+async def test_the_named_auth_key_decides_which_credential_is_sent(fake_plugin_repository):
+    """The other half of WR-07: naming the credential `AUTH_TOKEN` makes
+    the choice a fact the row states, so a plugin may carry another secret
+    for its own configuration without changing what is sent."""
+    test_server = await _start_test_mcp_server()
+    try:
+        security = SecurityConfig()
+        plugin = _remote_plugin(1, "named-secret", url=test_server.url)
+        repo = fake_plugin_repository(
+            plugins=[plugin],
+            config_values={
+                1: [
+                    _secret_value("OTHER_KEY", "a-plainly-fictional-unsent-value", security),
+                    _secret_value("AUTH_TOKEN", "a-plainly-fictional-sent-value", security),
+                ]
+            },
+        )
+        manager = _manager(repo)
+        try:
+            await manager.start_all()
+            assert manager.state_for("named-secret") is PluginState.RUNNING
+
+            await manager.tool_host_lookup.call_tool("echo", {"text": "hi"})
+
+            assert test_server.captured_auth, "no request reached the test server"
+            assert all(
+                auth == "Bearer a-plainly-fictional-sent-value"
+                for auth in test_server.captured_auth
+            )
+        finally:
+            await manager.stop_all()
+    finally:
+        await test_server.stop()

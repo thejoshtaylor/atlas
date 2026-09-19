@@ -9,6 +9,8 @@ import {
   deriveCatalogPaneState,
   derivePluginEditorState,
   formatConfigKeyCount,
+  remoteConfigCaption,
+  REMOTE_PLAIN_KEYS_UNUSED,
   saveBlockedByBlankDisplayName,
   saveBlockedByMissingCustomSource,
   saveBlockedByNoCatalogSelection,
@@ -167,5 +169,16 @@ describe("toolCollisionText -- per-tool collision display in the editor", () => 
   })
   test("joins more than one co-owner", () => {
     expect(toolCollisionText(["Weather", "Custom Forecast"])).toBe("Shares this name with Weather, Custom Forecast")
+  })
+})
+
+describe("remoteConfigCaption -- WR-07: a URL plugin's plain values are stored and unused", () => {
+  test("a URL plugin says so, in the editor, where the keys are entered", () => {
+    expect(remoteConfigCaption("remote")).toBe(REMOTE_PLAIN_KEYS_UNUSED)
+    expect(remoteConfigCaption("remote")).toMatch(/bearer token/)
+  })
+
+  test("a stdio plugin says nothing -- every key it carries reaches its child", () => {
+    expect(remoteConfigCaption("stdio")).toBeNull()
   })
 })

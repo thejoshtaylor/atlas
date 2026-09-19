@@ -82,6 +82,15 @@ class PluginState(str, Enum):
 # starts (or a later respawn) is never served a stale block.
 SafetyBlockProvider = Callable[[], Awaitable["dict | None"]]
 
+# WR-07 (code review): the configuration key a remote plugin's bearer
+# credential is read from, when it declares one by name. A remote plugin
+# carries no process and no environment (D-02), so its one secret is not
+# an environment variable at all -- it is the `Authorization: Bearer`
+# header `plugins/host.py` builds. Naming the key is what makes "which
+# credential does this plugin send" a fact the row states rather than an
+# artefact of the order a `SELECT` with no `ORDER BY` returned.
+REMOTE_AUTH_KEY = "AUTH_TOKEN"
+
 
 @dataclass
 class RunningPlugin:
@@ -741,6 +750,20 @@ class PluginManager:
         shape and not an error -- a remote plugin can have no credential
         at all.
 
+        WR-07 (code review): "at most one" is now enforced rather than
+        assumed. This used to return the *first* row with `secret=True and
+        ciphertext is not None` in whatever order the repository happened
+        to return them (`SELECT ... WHERE plugin_id = ?`, no `ORDER BY`),
+        so a plugin with two secret keys sent an arbitrary one of them --
+        possibly a different one after a restart. `REMOTE_AUTH_KEY` names
+        the credential explicitly when it is present; a single unnamed
+        secret still works, because that is what every install made before
+        this key existed; and two or more, with none of them named, is
+        refused by name so the plugin is recorded degraded with an honest
+        reason rather than connecting with a credential nobody chose.
+        `routes/plugins.py` refuses to write that shape in the first
+        place, so this is the backstop, not the only check.
+
         Plan 06-06: a row declared secret with `ciphertext=None` is a
         *declared but never set* placeholder (`routes/plugins.py`'s own
         install path writes exactly this for a catalog-declared secret key
@@ -751,15 +774,29 @@ class PluginManager:
         side actually requires one) rather than fail here on a shape this
         module invented."""
         config_values = await self._repository.get_config_values(plugin.id)
-        for value in config_values:
-            if value.secret and value.ciphertext is not None:
-                if value.key_version is None:
-                    raise RuntimeError(
-                        f"plugin config value {value.key!r} has ciphertext but no key_version -- "
-                        "a stored secret value must always carry both"
-                    )
-                return decrypt_credential(value.ciphertext, value.key_version, self._security)
-        return None
+        set_secrets = [
+            value for value in config_values if value.secret and value.ciphertext is not None
+        ]
+        if not set_secrets:
+            return None
+        named = [value for value in set_secrets if value.key == REMOTE_AUTH_KEY]
+        if named:
+            chosen = named[0]
+        elif len(set_secrets) == 1:
+            chosen = set_secrets[0]
+        else:
+            raise RuntimeError(
+                f"plugin {plugin.slug!r} has {len(set_secrets)} secret configuration values "
+                f"({sorted(value.key for value in set_secrets)!r}) and none of them is "
+                f"{REMOTE_AUTH_KEY!r} -- a remote plugin sends exactly one bearer credential, "
+                "and this row does not say which"
+            )
+        if chosen.key_version is None:
+            raise RuntimeError(
+                f"plugin config value {chosen.key!r} has ciphertext but no key_version -- "
+                "a stored secret value must always carry both"
+            )
+        return decrypt_credential(chosen.ciphertext, chosen.key_version, self._security)
 
     async def _build_env(self, plugin: Plugin, *, safety_block: "dict | None") -> dict[str, str]:
         """The literal, key-by-key environment `plugin`'s child gets

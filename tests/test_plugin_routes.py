@@ -1124,3 +1124,50 @@ def test_a_key_the_plugin_does_not_have_yet_is_added_with_the_kind_the_request_n
     assert by_key["NEW_SECRET"].secret is True
     assert by_key["NEW_SECRET"].ciphertext is not None
     assert by_key["PLAIN_KEY"].value == "v"
+
+
+def test_installing_a_url_plugin_with_two_unnamed_secrets_is_refused_by_name(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """WR-07 (code review): the remote transport sends exactly one bearer
+    credential, and the install path accepted any number of secret keys --
+    leaving which one this house sends to a third-party server decided by
+    the order a `SELECT` with no `ORDER BY` returned rows."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Remote Thing",
+            "transport": "url",
+            "url": "https://remote.invalid/mcp",
+            "config_values": {
+                "API_KEY": {"value": "a-plainly-fictional-first-value", "secret": True},
+                "OTHER_KEY": {"value": "a-plainly-fictional-second-value", "secret": True},
+            },
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "AUTH_TOKEN" in response.json()["detail"]
+    assert plugin_repo.plugins == {}, "nothing is installed when the write is refused"
+
+    named = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Remote Thing",
+            "transport": "url",
+            "url": "https://remote.invalid/mcp",
+            "config_values": {
+                "AUTH_TOKEN": {"value": "a-plainly-fictional-first-value", "secret": True},
+                "OTHER_KEY": {"value": "a-plainly-fictional-second-value", "secret": True},
+            },
+        },
+    )
+    assert named.status_code == 201, named.text
