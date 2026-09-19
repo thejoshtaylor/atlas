@@ -1,0 +1,668 @@
+"""Plugin authoring over HTTP (D-01 .. D-16, PLUG-03, PLUG-04, PLUG-08).
+
+Every test here builds a small, throwaway `FastAPI()` app carrying only
+`spire_voice.routes.plugins`'s own router -- the same "primitives in
+isolation" shape `tests/test_policy_routes.py` already uses, since this
+file's whole point is the plugin routes themselves, not the rest of the
+application.
+
+Plan 06-06, Task 2's own scope: the repository write half and every named
+refusal, proven here against `FakePluginRepository`. Live-effect proof
+(D-15: install/enable/disable/config-save reaching the running assistant
+before the route returns) is proven against `_FakePluginManagerForRoutes`
+below for this task, and against the real `PluginManager` in Task 3's own
+additional tests in this same file.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from mcp.types import Tool
+
+from spire_voice.auth.tokens import issue_access_token
+from spire_voice.config import SecurityConfig
+from spire_voice.plugins.manager import PluginState
+from spire_voice.routes.plugins import router as plugins_router
+
+_TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
+
+
+class _FakePluginManagerForRoutes:
+    """Stands in for `PluginManager` at exactly the surface
+    `routes/plugins.py` reads/calls -- read methods return whatever a test
+    seeded, `start_one`/`stop_one` record their own calls and optionally
+    raise, matching `tests/test_policy_routes.py`'s own
+    `_ManagerStandingInForRespawn` precedent for the identical reason: the
+    real manager's persistent-lifecycle-task machinery is out of scope for
+    a route-layer test, which only needs to prove the route calls the
+    right method and awaits it."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, PluginState] = {}
+        self.reasons: dict[str, str] = {}
+        self.hosts: dict[str, object] = {}
+        self.owners: dict[str, tuple[str, ...]] = {}
+        self.start_calls: list[int] = []
+        self.stop_calls: list[int] = []
+        self.fail_reconcile = False
+
+    def state_for(self, slug):
+        return self.states.get(slug)
+
+    def reason_for(self, slug):
+        return self.reasons.get(slug)
+
+    def tool_host_for(self, slug):
+        return self.hosts.get(slug)
+
+    def owners_of_bare_name(self, name):
+        return self.owners.get(name, ())
+
+    async def start_one(self, plugin):
+        if self.fail_reconcile:
+            raise RuntimeError("simulated reconcile failure")
+        self.start_calls.append(plugin.id)
+        self.states[plugin.slug] = PluginState.RUNNING
+
+    async def stop_one(self, plugin):
+        if self.fail_reconcile:
+            raise RuntimeError("simulated reconcile failure")
+        self.stop_calls.append(plugin.id)
+        self.states[plugin.slug] = PluginState.DISABLED
+
+
+def _build_plugins_app(security, account_repo, plugin_repo, plugin_manager) -> FastAPI:
+    app = FastAPI()
+    app.state.config = SimpleNamespace(security=security)
+    app.state.account_repo = account_repo
+    app.state.plugin_repo = plugin_repo
+    app.state.plugin_manager = plugin_manager
+    app.include_router(plugins_router)
+    return app
+
+
+def _issue_cookie(security, account_repo, *, role: str):
+    user = asyncio.run(
+        account_repo.create_user(
+            email=f"{role}@example.invalid",
+            display_name=f"A {role.title()}",
+            password_hash="not-checked-by-this-test",
+            role=role,
+        )
+    )
+    return user
+
+
+def _admin_client(app, security, account_repo):
+    admin = _issue_cookie(security, account_repo, role="admin")
+    token = issue_access_token(user_id=admin.id, role="admin", security=security)
+    return TestClient(app, cookies={security.cookie_name: token})
+
+
+def test_listing_plugins_never_returns_a_secret_value(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.crypto.credentials import encrypt_credential
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    ciphertext, key_version = encrypt_credential("a-real-secret-token", security)
+    now = datetime.now(timezone.utc)
+    ha = Plugin(
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        url=None, enabled=True, builtin=True, enforces_policy=True, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(
+        plugins=[ha],
+        config_values={
+            1: [
+                __import__("spire_voice.db.repository", fromlist=["PluginConfigValue"]).PluginConfigValue(
+                    key="HA_TOKEN", secret=True, value=None, ciphertext=ciphertext, key_version=key_version
+                ),
+            ]
+        },
+    )
+    manager = _FakePluginManagerForRoutes()
+    manager.states["ha"] = PluginState.RUNNING
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.get("/api/plugins")
+    assert response.status_code == 200
+    [entry] = response.json()
+    [config_entry] = entry["config_values"]
+    assert config_entry["key"] == "HA_TOKEN"
+    assert config_entry["is_set"] is True
+    assert config_entry["value"] is None
+    assert "a-real-secret-token" not in response.text
+    assert str(ciphertext) not in response.text
+
+
+def test_get_unknown_plugin_is_a_named_404(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.get("/api/plugins/999")
+    assert response.status_code == 404
+    assert "999" in response.json()["detail"]
+
+
+def test_installing_from_the_catalog_creates_a_row_and_reconciles_live(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "catalog_entry": "Weather",
+            "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}},
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["transport"] == "stdio"
+    assert body["args"] == ["-m", "spire_mcp.weather"]
+    assert body["display_name"] == "Weather"
+    assert body["slug"] == "weather"
+    assert body["builtin"] is False
+
+    by_key = {v["key"]: v for v in body["config_values"]}
+    assert by_key["WEATHER_LATITUDE"]["value"] == "51.5"
+    assert by_key["WEATHER_LONGITUDE"]["value"] == ""
+    assert manager.start_calls == [body["id"]]
+
+
+def test_installing_from_the_catalog_with_a_secret_left_blank_is_not_set(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post("/api/plugins", json={"catalog_entry": "Home Assistant"})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    by_key = {v["key"]: v for v in body["config_values"]}
+    assert by_key["HA_TOKEN"]["secret"] is True
+    assert by_key["HA_TOKEN"]["is_set"] is False
+    assert by_key["HA_TOKEN"]["value"] is None
+
+
+def test_installing_from_the_catalog_refuses_an_undeclared_config_key(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={"catalog_entry": "Weather", "config_values": {"NOT_A_REAL_KEY": {"value": "x"}}},
+    )
+    assert response.status_code == 400
+    assert not plugin_repo.plugins
+
+
+def test_installing_an_unknown_catalog_entry_is_refused_by_name(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post("/api/plugins", json={"catalog_entry": "Does Not Exist"})
+    assert response.status_code == 400
+    assert "Does Not Exist" in response.json()["detail"]
+
+
+def test_installing_by_a_hand_entered_command_creates_a_stdio_row(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Example Custom Plugin",
+            "transport": "command",
+            "command": "-m example_custom_module",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["transport"] == "stdio"
+    assert body["args"] == ["-m", "example_custom_module"]
+
+
+def test_a_command_naming_an_interpreter_is_refused(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Bad Plugin",
+            "transport": "command",
+            "command": "python3 -m example_custom_module",
+        },
+    )
+    assert response.status_code == 400
+    assert not plugin_repo.plugins
+
+
+def test_installing_by_a_hand_entered_url_creates_a_remote_row(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Example Remote Plugin",
+            "transport": "url",
+            "url": "https://example.invalid/mcp",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["transport"] == "remote"
+    assert body["url"] == "https://example.invalid/mcp"
+    assert body["args"] == []
+
+
+def test_a_plain_http_url_on_a_non_loopback_host_is_refused(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Example Remote Plugin",
+            "transport": "url",
+            "url": "http://example.invalid/mcp",
+        },
+    )
+    assert response.status_code == 400
+    assert not plugin_repo.plugins
+
+
+def test_installing_with_neither_a_catalog_entry_nor_a_custom_source_is_refused(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post("/api/plugins", json={"display_name": "Nothing Given"})
+    assert response.status_code == 400
+
+
+def test_installing_with_both_a_catalog_entry_and_a_command_is_refused(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={"catalog_entry": "Weather", "transport": "command", "command": "-m x"},
+    )
+    assert response.status_code == 400
+    assert not plugin_repo.plugins
+
+
+def test_a_request_naming_enforces_policy_is_rejected_with_422(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """T-06-28: no route may set the policy-enforcing flag -- enforced
+    structurally, since no request model carries the field at all."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post(
+        "/api/plugins",
+        json={
+            "display_name": "Sneaky Plugin",
+            "transport": "command",
+            "command": "-m example_custom_module",
+            "enforces_policy": True,
+        },
+    )
+    assert response.status_code == 422
+    assert not plugin_repo.plugins
+
+
+def test_enabling_and_disabling_flip_the_row_and_reconcile_live(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=True, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[plugin])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put("/api/plugins/1/enabled", json={"enabled": False})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+    assert manager.stop_calls == [1]
+    assert plugin_repo.plugins[1].enabled is False
+    # Nothing else about the row changed.
+    assert plugin_repo.plugins[1].display_name == "Example"
+
+    response = client.put("/api/plugins/1/enabled", json={"enabled": True})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert manager.start_calls == [1]
+
+
+def test_saving_configuration_writes_plain_and_encrypts_secret(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=True, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[plugin])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put(
+        "/api/plugins/1/config",
+        json={"values": {"PLAIN_KEY": {"value": "plain-value"}, "SECRET_KEY": {"value": "hunter2", "secret": True}}},
+    )
+    assert response.status_code == 200
+    values = plugin_repo.config_values[1]
+    by_key = {v.key: v for v in values}
+    assert by_key["PLAIN_KEY"].value == "plain-value"
+    assert by_key["SECRET_KEY"].secret is True
+    assert by_key["SECRET_KEY"].value is None
+    assert by_key["SECRET_KEY"].ciphertext is not None
+    assert "hunter2" not in response.text
+    assert manager.start_calls == [1]
+
+
+def test_saving_a_blank_secret_leaves_an_already_set_value_alone(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.crypto.credentials import encrypt_credential
+    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=True, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    ciphertext, key_version = encrypt_credential("already-set-secret", security)
+    plugin_repo = fake_plugin_repository(
+        plugins=[plugin],
+        config_values={1: [PluginConfigValue(key="SECRET_KEY", secret=True, value=None, ciphertext=ciphertext, key_version=key_version)]},
+    )
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put("/api/plugins/1/config", json={"values": {"SECRET_KEY": {"value": "", "secret": True}}})
+    assert response.status_code == 200
+    [value] = plugin_repo.config_values[1]
+    assert value.ciphertext == ciphertext, "a blank secret submission must leave the existing value alone"
+
+
+def test_saving_configuration_on_a_disabled_plugin_does_not_reconcile(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=False, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[plugin])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put("/api/plugins/1/config", json={"values": {"KEY": {"value": "v"}}})
+    assert response.status_code == 200
+    assert manager.start_calls == []
+    assert manager.stop_calls == []
+
+
+def test_deleting_a_non_builtin_plugin_removes_it_and_reconciles_live(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1, slug="example", display_name="Example", transport="stdio", args=("-m", "example_module"),
+        url=None, enabled=True, builtin=False, enforces_policy=False, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[plugin])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.delete("/api/plugins/1")
+    assert response.status_code == 204
+    assert 1 not in plugin_repo.plugins
+    assert manager.stop_calls == [1]
+
+
+def test_deleting_a_builtin_plugin_is_refused_by_name_and_it_still_exists(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+
+    from spire_voice.db.repository import Plugin
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    ha = Plugin(
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        url=None, enabled=True, builtin=True, enforces_policy=True, timeout_ms=5000,
+        created_at=now, updated_at=now, created_by_user_id=None,
+    )
+    plugin_repo = fake_plugin_repository(plugins=[ha])
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.delete("/api/plugins/1")
+    assert response.status_code == 400
+    assert "Home Assistant" in response.json()["detail"]
+    assert 1 in plugin_repo.plugins
+    assert manager.stop_calls == []
+
+
+def test_a_reconcile_failure_is_reported_as_a_failed_write(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+    manager.fail_reconcile = True
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.post("/api/plugins", json={"catalog_entry": "Weather"})
+    assert response.status_code == 502
+
+
+def test_every_plugin_route_refuses_an_operator(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    assert client.get("/api/plugins").status_code == 403
+    assert client.get("/api/plugins/1").status_code == 403
+    assert client.post("/api/plugins", json={"catalog_entry": "Weather"}).status_code == 403
+    assert client.put("/api/plugins/1/enabled", json={"enabled": False}).status_code == 403
+    assert client.put("/api/plugins/1/config", json={"values": {}}).status_code == 403
+    assert client.delete("/api/plugins/1").status_code == 403
+
+
+def test_every_plugin_route_refuses_a_viewer(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForRoutes()
+
+    app = _build_plugins_app(security, account_repo, plugin_repo, manager)
+    viewer = _issue_cookie(security, account_repo, role="viewer")
+    token = issue_access_token(user_id=viewer.id, role="viewer", security=security)
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    assert client.get("/api/plugins").status_code == 403
+    assert client.post("/api/plugins", json={"catalog_entry": "Weather"}).status_code == 403

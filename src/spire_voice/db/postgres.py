@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
@@ -45,6 +46,7 @@ from spire_voice.db.repository import (
     Macro,
     MacroAction,
     Plugin,
+    PluginAlreadyExistsError,
     PluginConfigValue,
     PolicyRule,
     RefreshToken,
@@ -1019,9 +1021,13 @@ class PostgresPluginRepository:
 
     Structurally satisfies `spire_voice.db.repository.PluginRepository` (a
     `typing.Protocol`) -- there is no base class to inherit from, matching
-    every other `Postgres*Repository` class in this module. Read-only
-    (D-01, this plan's own instruction): the write half lands in the plan
-    that owns `routes/plugins.py`.
+    every other `Postgres*Repository` class in this module.
+
+    Plan 06-06 adds the write half beside the read surface plan 06-01
+    built: `create_plugin`/`set_enabled`/`set_config_values`/
+    `delete_plugin`. None of the four re-runs a check `routes/plugins.py`
+    has already made -- this class's own "the caller validates, this
+    layer only writes" convention, stated once on the Protocol itself.
     """
 
     def __init__(self, sessionmaker: async_sessionmaker) -> None:
@@ -1034,6 +1040,13 @@ class PostgresPluginRepository:
             ).scalars().all()
             return [_plugin_from_row(row) for row in rows]
 
+    async def get_plugin(self, plugin_id: int) -> Plugin | None:
+        async with self._sessionmaker() as session:
+            row = await session.get(PluginRow, plugin_id)
+            if row is None:
+                return None
+            return _plugin_from_row(row)
+
     async def get_config_values(self, plugin_id: int) -> list[PluginConfigValue]:
         async with self._sessionmaker() as session:
             rows = (
@@ -1044,6 +1057,126 @@ class PostgresPluginRepository:
                 )
             ).scalars().all()
             return [_plugin_config_value_from_row(row) for row in rows]
+
+    async def create_plugin(
+        self,
+        *,
+        slug: str,
+        display_name: str,
+        transport: str,
+        args: Sequence[str],
+        url: str | None,
+        timeout_ms: int,
+        config_values: Sequence[PluginConfigValue],
+        created_by_user_id: int | None,
+    ) -> Plugin:
+        now = _to_naive_utc(datetime.now(timezone.utc))
+        async with self._sessionmaker() as session:
+            row = PluginRow(
+                slug=slug,
+                display_name=display_name,
+                transport=transport,
+                args=list(args),
+                url=url,
+                enabled=True,
+                builtin=False,
+                enforces_policy=False,
+                timeout_ms=timeout_ms,
+                created_at=now,
+                updated_at=now,
+                created_by_user_id=created_by_user_id,
+            )
+            session.add(row)
+            try:
+                await session.flush()
+            except IntegrityError as exc:
+                # The database's own `uq_plugins_slug` constraint is the
+                # actual authority (this class's own docstring) -- a
+                # concurrent install choosing the same slug loses here,
+                # not silently, and never as a bare 500.
+                await session.rollback()
+                raise PluginAlreadyExistsError(slug) from exc
+            for value in config_values:
+                session.add(
+                    PluginConfigValueRow(
+                        plugin_id=row.id,
+                        key=value.key,
+                        secret=value.secret,
+                        value=value.value,
+                        ciphertext=value.ciphertext,
+                        key_version=value.key_version,
+                        updated_at=now,
+                    )
+                )
+            await session.commit()
+            await session.refresh(row)
+            return _plugin_from_row(row)
+
+    async def set_enabled(self, plugin_id: int, enabled: bool) -> Plugin:
+        async with self._sessionmaker() as session:
+            row = await session.get(PluginRow, plugin_id)
+            if row is None:
+                raise ValueError(f"plugin {plugin_id} does not exist")
+            row.enabled = enabled
+            row.updated_at = _to_naive_utc(datetime.now(timezone.utc))
+            await session.commit()
+            await session.refresh(row)
+            return _plugin_from_row(row)
+
+    async def set_config_values(
+        self, plugin_id: int, values: Sequence[PluginConfigValue]
+    ) -> list[PluginConfigValue]:
+        now = _to_naive_utc(datetime.now(timezone.utc))
+        async with self._sessionmaker() as session:
+            existing_rows = (
+                await session.execute(
+                    select(PluginConfigValueRow).where(
+                        PluginConfigValueRow.plugin_id == plugin_id
+                    )
+                )
+            ).scalars().all()
+            existing_by_key = {row.key: row for row in existing_rows}
+            for value in values:
+                existing = existing_by_key.get(value.key)
+                if existing is not None:
+                    existing.secret = value.secret
+                    existing.value = value.value
+                    existing.ciphertext = value.ciphertext
+                    existing.key_version = value.key_version
+                    existing.updated_at = now
+                else:
+                    session.add(
+                        PluginConfigValueRow(
+                            plugin_id=plugin_id,
+                            key=value.key,
+                            secret=value.secret,
+                            value=value.value,
+                            ciphertext=value.ciphertext,
+                            key_version=value.key_version,
+                            updated_at=now,
+                        )
+                    )
+            await session.commit()
+            rows = (
+                await session.execute(
+                    select(PluginConfigValueRow).where(
+                        PluginConfigValueRow.plugin_id == plugin_id
+                    )
+                )
+            ).scalars().all()
+            return [_plugin_config_value_from_row(row) for row in rows]
+
+    async def delete_plugin(self, plugin_id: int) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(PluginRow, plugin_id)
+            if row is None:
+                return
+            # `ondelete="CASCADE"` on `PluginConfigValueRow.plugin_id`
+            # (db/models.py) removes this plugin's own configuration
+            # values in the same statement, matching
+            # `PostgresMacroRepository.delete_macro`'s own convention.
+            await session.delete(row)
+            await session.commit()
 
 
 # The run statuses a step's own run must carry for that step to be

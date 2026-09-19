@@ -12,6 +12,7 @@ from spire_voice.routes.auth import router as auth_router
 from spire_voice.routes.auth import setup_router
 from spire_voice.routes.credentials import router as credentials_router
 from spire_voice.routes.macros import router as macros_router
+from spire_voice.routes.plugins import router as plugins_router
 from spire_voice.routes.policy import router as policy_router
 from spire_voice.routes.wizard import router as wizard_router
 from spire_voice.routes.workflows import router as workflows_router
@@ -26,3 +27,4 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(credentials_router)
     app.include_router(wizard_router)
     app.include_router(workflows_router)
+    app.include_router(plugins_router)

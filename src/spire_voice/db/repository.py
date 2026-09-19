@@ -892,12 +892,36 @@ class Plugin:
     created_by_user_id: int | None
 
 
+class PluginAlreadyExistsError(Exception):
+    """`create_plugin`: `slug` is already taken by another row -- the
+    database's own `uq_plugins_slug` constraint is the actual authority
+    (`PostgresPluginRepository.create_plugin` catches the resulting
+    integrity error and re-raises this), matching `WorkflowRunNotFoundError`'s
+    own "a repository-level exception a route converts to a named refusal"
+    shape rather than letting a raw database error surface as a bare 500."""
+
+    def __init__(self, slug: str) -> None:
+        self.slug = slug
+        super().__init__(f"a plugin with slug {slug!r} already exists")
+
+
 class PluginRepository(Protocol):
-    """What plugin storage must answer -- the read surface
-    `PluginManager` (`spire_voice.plugins.manager`) actually uses (D-01,
-    D-04). The write half (install/enable/disable/configure) lands in the
-    plan that owns `routes/plugins.py`; this protocol carries no method
-    with no caller yet.
+    """What plugin storage must answer: the read surface `PluginManager`
+    (`spire_voice.plugins.manager`) actually uses (D-01, D-04), plus the
+    write half `routes/plugins.py` (plan 06-06) needs for install, enable/
+    disable, configuration edits, and delete.
+
+    "The caller validates, this layer only writes" (`PolicyRepository.
+    add_rule`'s own wording) applies here too: a catalog entry's own
+    declared keys, the args-or-url transport exclusivity, a builtin row's
+    delete refusal, and which submitted config value is actually new
+    ciphertext versus "leave the existing one alone" are all
+    `routes/plugins.py`'s job -- this protocol's own members never re-run
+    any of those checks themselves. Every `PluginConfigValue` this
+    protocol's write members accept or return already carries either a
+    plain `value` or an already-encrypted `(ciphertext, key_version)` pair
+    -- decryption happens at exactly one point, `PluginManager`'s own
+    child-spawn path (D-03), never in this module or in `routes/plugins.py`.
 
     Structurally satisfied by `PostgresPluginRepository` (real) and
     `FakePluginRepository` (`tests/conftest.py`), the same
@@ -911,10 +935,70 @@ class PluginRepository(Protocol):
         returns the whole table."""
         ...
 
+    async def get_plugin(self, plugin_id: int) -> "Plugin | None":
+        """One plugin row by id, or `None` if it does not exist -- the
+        404 `routes/plugins.py` reads to decide "unknown plugin"."""
+        ...
+
     async def get_config_values(self, plugin_id: int) -> Sequence[PluginConfigValue]:
         """Every config value belonging to `plugin_id`, in no particular
         order beyond what the database returns -- the child's environment
         is built key by key from this list (`spire_voice.plugins.host`),
         so order does not matter the way `MacroActionRow.position` does
         for a macro's actions."""
+        ...
+
+    async def create_plugin(
+        self,
+        *,
+        slug: str,
+        display_name: str,
+        transport: str,
+        args: Sequence[str],
+        url: "str | None",
+        timeout_ms: int,
+        config_values: Sequence[PluginConfigValue],
+        created_by_user_id: "int | None",
+    ) -> Plugin:
+        """Insert one plugin row and its initial configuration values
+        together, and return the created row. Always `enabled=True`,
+        `builtin=False`, `enforces_policy=False` -- only the seed migration
+        ever creates a builtin row (D-04), and no route in this phase may
+        ever set the policy-enforcing flag (T-06-28). Raises
+        `PluginAlreadyExistsError` when `slug` collides with an existing
+        row -- the caller is responsible for having already chosen a slug
+        it believes is free; this is the backstop the database's own
+        unique constraint provides, not a second uniqueness check run
+        ahead of the insert."""
+        ...
+
+    async def set_enabled(self, plugin_id: int, enabled: bool) -> Plugin:
+        """Flip `enabled` and return the updated row -- changes nothing
+        else (Task 2's own instruction). The caller is responsible for
+        having already 404'd on an unknown `plugin_id` before calling
+        this."""
+        ...
+
+    async def set_config_values(
+        self, plugin_id: int, values: Sequence[PluginConfigValue]
+    ) -> Sequence[PluginConfigValue]:
+        """Upsert each of `values` by its own `key` -- a key already
+        present is overwritten with the given row exactly as given, a new
+        one is inserted. A key that already exists but is not mentioned in
+        `values` is left completely alone: this method never deletes a
+        config value, and "leave a secret key already set that is
+        submitted blank alone" is implemented by the caller simply
+        omitting that key from `values`, never by this method inspecting
+        what it was asked to skip. Returns every one of this plugin's
+        config values afterward, not merely the ones just written, so a
+        caller never has to reassemble the full set from two calls."""
+        ...
+
+    async def delete_plugin(self, plugin_id: int) -> None:
+        """Delete one plugin row and its configuration values together
+        (`ondelete=CASCADE`, matching `MacroRepository.delete_macro`'s own
+        convention). The caller is responsible for having already refused
+        a builtin row before calling this (D-04) -- this method does not
+        re-check `builtin` itself. A no-op when `plugin_id` does not
+        exist, matching `PolicyRepository.remove_rule`'s own convention."""
         ...

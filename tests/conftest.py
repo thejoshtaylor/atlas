@@ -26,6 +26,7 @@ from spire_voice.db.repository import (
     Macro,
     MacroAction,
     Plugin,
+    PluginAlreadyExistsError,
     PluginConfigValue,
     PolicyRule,
     RefreshToken,
@@ -592,15 +593,20 @@ class FakePluginRepository:
     """An in-memory `PluginRepository` (`spire_voice.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, the direct sibling of
-    `FakeMacroRepository` above. Read-only, matching the real Protocol's
-    own read-only surface this plan builds (the write half lands in the
-    plan that owns `routes/plugins.py`).
+    `FakeMacroRepository` above.
 
     Constructed with a starting list of plugins (each a `Plugin`) and a
     mapping of `plugin_id -> [PluginConfigValue, ...]` -- a test builds
     both directly from the same dataclasses the real repository returns,
     so a test asserting on either exercises the same contract regardless
     of which repository backs it.
+
+    Plan 06-06 adds the write half beside plan 06-01's read-only surface:
+    `create_plugin`/`set_enabled`/`set_config_values`/`delete_plugin`,
+    each a plain-Python mirror of `PostgresPluginRepository`'s own
+    contract -- "the caller validates, this layer only writes" applies
+    here too, so this class re-runs none of `routes/plugins.py`'s own
+    checks.
     """
 
     def __init__(
@@ -612,12 +618,72 @@ class FakePluginRepository:
         self.config_values: dict[int, list[PluginConfigValue]] = {
             plugin_id: list(values) for plugin_id, values in (config_values or {}).items()
         }
+        self._next_id = (max(self.plugins.keys(), default=0)) + 1
 
     async def list_plugins(self) -> list[Plugin]:
         return list(self.plugins.values())
 
+    async def get_plugin(self, plugin_id: int) -> Plugin | None:
+        return self.plugins.get(plugin_id)
+
     async def get_config_values(self, plugin_id: int) -> list[PluginConfigValue]:
         return list(self.config_values.get(plugin_id, ()))
+
+    async def create_plugin(
+        self,
+        *,
+        slug: str,
+        display_name: str,
+        transport: str,
+        args: Sequence[str],
+        url: str | None,
+        timeout_ms: int,
+        config_values: Sequence[PluginConfigValue],
+        created_by_user_id: int | None,
+    ) -> Plugin:
+        if any(plugin.slug == slug for plugin in self.plugins.values()):
+            raise PluginAlreadyExistsError(slug)
+        now = datetime.now(timezone.utc)
+        plugin = Plugin(
+            id=self._next_id,
+            slug=slug,
+            display_name=display_name,
+            transport=transport,
+            args=tuple(args),
+            url=url,
+            enabled=True,
+            builtin=False,
+            enforces_policy=False,
+            timeout_ms=timeout_ms,
+            created_at=now,
+            updated_at=now,
+            created_by_user_id=created_by_user_id,
+        )
+        self._next_id += 1
+        self.plugins[plugin.id] = plugin
+        self.config_values[plugin.id] = list(config_values)
+        return plugin
+
+    async def set_enabled(self, plugin_id: int, enabled: bool) -> Plugin:
+        existing = self.plugins.get(plugin_id)
+        if existing is None:
+            raise ValueError(f"plugin {plugin_id} does not exist")
+        updated = replace(existing, enabled=enabled, updated_at=datetime.now(timezone.utc))
+        self.plugins[plugin_id] = updated
+        return updated
+
+    async def set_config_values(
+        self, plugin_id: int, values: Sequence[PluginConfigValue]
+    ) -> list[PluginConfigValue]:
+        current = {value.key: value for value in self.config_values.get(plugin_id, ())}
+        for value in values:
+            current[value.key] = value
+        self.config_values[plugin_id] = list(current.values())
+        return list(self.config_values[plugin_id])
+
+    async def delete_plugin(self, plugin_id: int) -> None:
+        self.plugins.pop(plugin_id, None)
+        self.config_values.pop(plugin_id, None)
 
 
 @pytest.fixture
