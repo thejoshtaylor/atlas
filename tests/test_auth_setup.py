@@ -90,6 +90,11 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
             # WorkflowScheduler over repositories["workflow_repo"] --
             # same reasoning as macro_repo immediately above.
             "workflow_repo": conftest.FakeWorkflowRepository(),
+            # Plan 07-01: lifespan also resolves the speech-to-text slot's
+            # provider over repositories["provider_selection_repo"]
+            # (resolve_slot) instead of hardcoding XaiStt -- same
+            # reasoning as workflow_repo immediately above.
+            "provider_selection_repo": conftest.FakeProviderSelectionRepository(),
         }
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within

@@ -509,3 +509,34 @@ class PluginConfigValueRow(Base):
     ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     key_version: Mapped[int | None] = mapped_column(nullable=True)
     updated_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+class ProviderSelectionRow(Base):
+    """One provider slot's admin-made choice (D-01, D-03, PROV-01).
+
+    `slot` is one of the three names `spire_voice.providers.registry`
+    knows (`"stt"`, `"tts"`, `"brain"`) -- a route write to any other name
+    is refused before it ever reaches this table, the same defense-in-depth
+    posture `ProviderCredentialRow.slot`'s own docstring states for its own
+    closed set. `provider_name` is a registry key, validated against that
+    slot's own registry by the route before a write, and again at boot by
+    the registry lookup itself (D-03) -- this table never validates its own
+    contents. `options` is a JSON object, empty by default: the home for a
+    slot's own extra settings (the language-model slot's local server URL,
+    plan 07-04), unused by this plan's speech-to-text-only slot.
+
+    Named constraint discipline copied from `PluginRow`'s own
+    `uq_plugins_slug` (`db/models.py:452-455`), not a third shape.
+    """
+
+    __tablename__ = "provider_selections"
+    __table_args__ = (UniqueConstraint("slot", name="uq_provider_selections_slot"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    slot: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_name: Mapped[str] = mapped_column(Text, nullable=False)
+    options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False)
+    updated_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )

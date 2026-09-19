@@ -1012,3 +1012,57 @@ class PluginRepository(Protocol):
         re-check `builtin` itself. A no-op when `plugin_id` does not
         exist, matching `PolicyRepository.remove_rule`'s own convention."""
         ...
+
+
+@dataclass(frozen=True)
+class ProviderSelection:
+    """One row from `provider_selections`, as a plain value object --
+    `slot`/`provider_name`/`options` only, matching `Setting`'s own
+    "no ORM row escapes this module" convention."""
+
+    id: int
+    slot: str
+    provider_name: str
+    options: dict
+    updated_at: datetime
+    updated_by_user_id: int | None
+
+
+class ProviderSelectionRepository(Protocol):
+    """What a provider slot's storage layer must answer (D-01, PROV-01).
+
+    Three members: `get_selection` and `set_selection` are the per-slot
+    read/write pair every `SettingsRepository`-shaped store in this
+    project uses; `list_selections` answers for every slot in one call,
+    because `GET /api/providers` (`routes/providers.py`) reports all three
+    slots in one request, not one round trip per slot.
+
+    Write-boundary discipline, copied verbatim from `SettingsRepository`'s
+    own docstring: the caller validates a submitted `provider_name`
+    against that slot's own registry before ever calling `set_selection`
+    -- this layer only writes what it is given.
+    """
+
+    async def get_selection(self, slot: str) -> "ProviderSelection | None":
+        """The stored row for `slot`, or `None` when nothing has been set
+        for it yet (never expected once the seed migration has run, but
+        not assumed away either -- see `Setting.get_setting`'s own
+        identical caveat)."""
+        ...
+
+    async def set_selection(
+        self,
+        slot: str,
+        provider_name: str,
+        options: dict,
+        *,
+        updated_by_user_id: "int | None",
+        updated_at: datetime,
+    ) -> ProviderSelection:
+        """Insert or replace the one row for `slot` and return it."""
+        ...
+
+    async def list_selections(self) -> "list[ProviderSelection]":
+        """Every `provider_selections` row -- the seeded three, present
+        from the first migration onward."""
+        ...

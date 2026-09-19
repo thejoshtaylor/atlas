@@ -460,6 +460,12 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
         # a `WorkflowScheduler` over `repositories["workflow_repo"]` --
         # same reasoning as `macro_repo` immediately above.
         "workflow_repo": conftest.FakeWorkflowRepository(),
+        # Plan 07-01: `lifespan` now also resolves the speech-to-text
+        # slot's provider through `repositories["provider_selection_repo"]`
+        # (`resolve_slot`) instead of hardcoding `XaiStt` -- omitting it
+        # here would `KeyError` on every boot this fake drives, same
+        # reasoning as `workflow_repo` immediately above.
+        "provider_selection_repo": conftest.FakeProviderSelectionRepository(),
     }
 
 
@@ -1071,6 +1077,7 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
             "macro_repo": conftest.FakeMacroRepository(),
             "plugin_repo": conftest.FakePluginRepository(plugins=[_ha_plugin_row()]),
             "workflow_repo": conftest.FakeWorkflowRepository(),
+            "provider_selection_repo": conftest.FakeProviderSelectionRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))

@@ -714,3 +714,91 @@ async def test_a_plugins_config_key_cannot_be_stored_twice(tmp_path, monkeypatch
                 )
     finally:
         await engine.dispose()
+
+
+async def _fetch_provider_selection_rows(async_url: str) -> list[tuple[str, str]]:
+    """`(slot, provider_name)` for every seeded `provider_selections` row,
+    in id order -- migration `0011`'s own sibling of `_fetch_macro_rows`
+    above."""
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text("SELECT slot, provider_name FROM provider_selections ORDER BY id")
+                )
+            ).fetchall()
+        return [(r.slot, r.provider_name) for r in rows]
+    finally:
+        await engine.dispose()
+
+
+@skip_without_postgres
+async def test_provider_selections_seed_all_three_slots_with_xai_and_are_idempotent(
+    monkeypatch,
+):
+    """Migration 0011 (D-01, D-03, PROV-01): `provider_selections` exists
+    after an upgrade to head from empty, all three slots (`stt`, `tts`,
+    `brain`) are seeded pointing at `"xai"` -- the one entry every registry
+    holds this plan and the only implementation `config.example.yaml` has
+    ever configured -- and running every migration twice is still a no-op
+    the second time, the same idempotency guarantee this file's other
+    migration tests already prove."""
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("HA_URL", "test-value")
+    monkeypatch.setenv("HA_TOKEN", "test-value")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    _run_upgrade_head()
+
+    rows = await _fetch_provider_selection_rows(_TEST_DB_URL)
+    assert rows == [("stt", "xai"), ("tts", "xai"), ("brain", "xai")]
+
+    # Idempotent: a second upgrade to the same head must not error and
+    # must not duplicate a single row.
+    _run_upgrade_head()
+    assert await _fetch_provider_selection_rows(_TEST_DB_URL) == rows
+
+
+@skip_without_postgres
+async def test_provider_selections_slot_is_unique(monkeypatch):
+    """`uq_provider_selections_slot` (migration 0011): a second row for a
+    slot that already has one must be refused at the database level, the
+    same defense-in-depth `uq_plugins_slug` already gives `plugins.slug`."""
+    from sqlalchemy.exc import IntegrityError
+
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("HA_URL", "test-value")
+    monkeypatch.setenv("HA_TOKEN", "test-value")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "INSERT INTO provider_selections "
+                        "(slot, provider_name, options, updated_at) "
+                        "VALUES ('stt', 'xai', '{}', now())"
+                    )
+                )
+    finally:
+        await engine.dispose()

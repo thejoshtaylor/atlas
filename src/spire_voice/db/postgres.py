@@ -31,6 +31,7 @@ from spire_voice.db.models import (
     PluginRow,
     PolicyRuleRow,
     ProviderCredentialRow,
+    ProviderSelectionRow,
     RefreshTokenRow,
     SafetyPolicyRow,
     SettingRow,
@@ -49,6 +50,7 @@ from spire_voice.db.repository import (
     PluginAlreadyExistsError,
     PluginConfigValue,
     PolicyRule,
+    ProviderSelection,
     RefreshToken,
     Setting,
     SetupStep,
@@ -681,6 +683,78 @@ class PostgresSettingsRepository:
             await session.commit()
             await session.refresh(row)
             return _setting_from_row(row)
+
+
+def _provider_selection_from_row(row: ProviderSelectionRow) -> ProviderSelection:
+    return ProviderSelection(
+        id=row.id,
+        slot=row.slot,
+        provider_name=row.provider_name,
+        options=row.options,
+        updated_at=_to_aware_utc(row.updated_at),
+        updated_by_user_id=row.updated_by_user_id,
+    )
+
+
+class PostgresProviderSelectionRepository:
+    """`ProviderSelectionRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.ProviderSelectionRepository`
+    (a `typing.Protocol`) -- built from `PostgresSettingsRepository`'s own
+    read/write body above, reusing `_to_naive_utc`/`_to_aware_utc` rather
+    than re-deriving them (D-01).
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def get_selection(self, slot: str) -> "ProviderSelection | None":
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(ProviderSelectionRow).where(ProviderSelectionRow.slot == slot)
+                )
+            ).scalar_one_or_none()
+            return _provider_selection_from_row(row) if row is not None else None
+
+    async def set_selection(
+        self,
+        slot: str,
+        provider_name: str,
+        options: dict,
+        *,
+        updated_by_user_id: "int | None",
+        updated_at: datetime,
+    ) -> ProviderSelection:
+        naive_updated_at = _to_naive_utc(updated_at)
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(ProviderSelectionRow).where(ProviderSelectionRow.slot == slot)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                row = ProviderSelectionRow(
+                    slot=slot,
+                    provider_name=provider_name,
+                    options=options,
+                    updated_at=naive_updated_at,
+                    updated_by_user_id=updated_by_user_id,
+                )
+                session.add(row)
+            else:
+                row.provider_name = provider_name
+                row.options = options
+                row.updated_at = naive_updated_at
+                row.updated_by_user_id = updated_by_user_id
+            await session.commit()
+            await session.refresh(row)
+            return _provider_selection_from_row(row)
+
+    async def list_selections(self) -> "list[ProviderSelection]":
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(select(ProviderSelectionRow))).scalars().all()
+            return [_provider_selection_from_row(row) for row in rows]
 
 
 def _credential_from_row(row: ProviderCredentialRow) -> Credential:

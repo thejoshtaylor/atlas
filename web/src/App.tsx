@@ -17,6 +17,7 @@ import { MacrosRoute } from "@/routes/macros/MacrosRoute"
 import { PluginEditorRoute } from "@/routes/plugins/PluginEditorRoute"
 import { PluginsRoute } from "@/routes/plugins/PluginsRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
+import { ProvidersRoute } from "@/routes/providers/ProvidersRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
 import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
@@ -76,6 +77,7 @@ function AppRoutes() {
             <Route path="/accounts" element={<AccountsRoute />} />
             <Route path="/settings" element={<SettingsRoute />} />
             <Route path="/plugins" element={<PluginsRoute />} />
+            <Route path="/providers" element={<ProvidersRoute />} />
             <Route path="/plugins/new" element={<PluginEditorRoute />} />
             <Route path="/plugins/:id" element={<PluginEditorRoute />} />
           </Route>

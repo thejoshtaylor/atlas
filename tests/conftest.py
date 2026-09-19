@@ -29,6 +29,7 @@ from spire_voice.db.repository import (
     PluginAlreadyExistsError,
     PluginConfigValue,
     PolicyRule,
+    ProviderSelection,
     RefreshToken,
     Setting,
     SetupStep,
@@ -1293,3 +1294,69 @@ def fake_settings_repository():
     `FakeSettingsRepository` -- every test populates it itself, matching
     `fake_credential_repository`'s own convention."""
     return FakeSettingsRepository
+
+
+class FakeProviderSelectionRepository:
+    """An in-memory `ProviderSelectionRepository`
+    (`spire_voice.db.repository`) -- the Postgres-free implementation
+    D-04 requires, matching every other `Fake*Repository` in this file.
+    Seeds the same three named slots the real migration
+    (`0011_provider_selection.py`) seeds, all pointed at `"xai"`, so a
+    test never has to special-case "a slot nobody has touched yet"
+    between the fake and the real thing.
+    """
+
+    _SLOT_NAMES = ("stt", "tts", "brain")
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self.selections: dict[str, ProviderSelection] = {}
+        for slot in self._SLOT_NAMES:
+            self.selections[slot] = ProviderSelection(
+                id=self._next_id,
+                slot=slot,
+                provider_name="xai",
+                options={},
+                updated_at=datetime.now(timezone.utc),
+                updated_by_user_id=None,
+            )
+            self._next_id += 1
+
+    async def get_selection(self, slot: str) -> "ProviderSelection | None":
+        return self.selections.get(slot)
+
+    async def set_selection(
+        self,
+        slot: str,
+        provider_name: str,
+        options: dict,
+        *,
+        updated_by_user_id: "int | None",
+        updated_at: datetime,
+    ) -> ProviderSelection:
+        existing = self.selections.get(slot)
+        selection_id = existing.id if existing is not None else self._next_id
+        if existing is None:
+            self._next_id += 1
+        selection = ProviderSelection(
+            id=selection_id,
+            slot=slot,
+            provider_name=provider_name,
+            options=options,
+            updated_at=updated_at,
+            updated_by_user_id=updated_by_user_id,
+        )
+        self.selections[slot] = selection
+        return selection
+
+    async def list_selections(self) -> "list[ProviderSelection]":
+        return list(self.selections.values())
+
+
+@pytest.fixture
+def fake_provider_selection_repository():
+    """Factory: `fake_provider_selection_repository()` builds a
+    `FakeProviderSelectionRepository` pre-seeded with all three slots
+    pointed at `"xai"` -- matching `fake_setup_repository`'s own
+    factory-fixture convention."""
+    return FakeProviderSelectionRepository

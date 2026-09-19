@@ -50,6 +50,7 @@ from spire_voice.db.postgres import (
     PostgresMacroRepository,
     PostgresPluginRepository,
     PostgresPolicyRepository,
+    PostgresProviderSelectionRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
     PostgresWorkflowRepository,
@@ -58,13 +59,15 @@ from spire_voice.db.repository import (
     CredentialRepository,
     MacroRepository,
     PluginRepository,
+    ProviderSelectionRepository,
     SettingsRepository,
     WorkflowRepository,
 )
 from spire_voice.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
 from spire_voice.plugins.manager import PluginManager
 from spire_voice.policy_snapshot import safety_block_from_policy
-from spire_voice.providers.stt_xai import XaiStt
+from spire_voice.providers import registry as provider_registry
+from spire_voice.providers.boot import ProviderSlotStatus, resolve_slot
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
 from spire_voice.providers.tts_xai import XaiTts
@@ -389,6 +392,10 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # Plan 06-01 (D-01, D-04): plugins live here now -- the table
         # `PluginManager` reads instead of `Config.mcp_servers`.
         "plugin_repo": PostgresPluginRepository(sessionmaker),
+        # Plan 07-01 (D-01, D-03): which named provider each slot is
+        # currently pointed at -- the table `resolve_slot` reads instead
+        # of a hardcoded `XaiStt`/`XaiBrain`/`XaiTts` construction.
+        "provider_selection_repo": PostgresProviderSelectionRepository(sessionmaker),
         # Plan 05-01: scheduled workflow runs and steps (D-01 .. D-04).
         "workflow_repo": PostgresWorkflowRepository(
             sessionmaker,
@@ -652,6 +659,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     macro_repo: MacroRepository = repositories["macro_repo"]
     plugin_repo: PluginRepository = repositories["plugin_repo"]
     workflow_repo: WorkflowRepository = repositories["workflow_repo"]
+    provider_selection_repo: ProviderSelectionRepository = repositories["provider_selection_repo"]
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
     # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
@@ -692,7 +700,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # is read by `PluginManager` at spawn and by the wizard's hub check;
     # `resolved_ha_token` was assigned here and never used by anything,
     # which is how the orphaned `ha_token` credential row went unnoticed.
-    app.state.stt = XaiStt(replace(config.stt, api_key=resolved_stt_key))
+    #
+    # Plan 07-01 (D-01, D-02, D-03): the speech-to-text slot's provider is
+    # read from `provider_selection_repo` once, here, at the same point
+    # its credential is already resolved above -- never re-read per
+    # request. `resolve_slot` is generic; `provider_registry.build_stt` is
+    # what actually knows the name-to-factory mapping (T-07-01). A
+    # degraded slot (D-04) leaves `app.state.stt` `None` and the boot
+    # continues; `app.state.provider_slots` is what `routes/providers.py`
+    # reads live, never a value copied off this local variable.
+    stt_status, stt_client = await resolve_slot(
+        "stt",
+        provider_selection_repo,
+        "xai",
+        provider_registry.build_stt,
+        config.stt,
+        resolved_stt_key,
+    )
+    logger.info(
+        "provider slot 'stt' resolved to %r (%s)", stt_status.selected, stt_status.state
+    )
+    if stt_status.state == "degraded":
+        logger.warning("provider slot 'stt' is degraded: %s", stt_status.reason)
+    app.state.stt = stt_client
+    app.state.provider_slots: "dict[str, ProviderSlotStatus]" = {"stt": stt_status}
     tier_brains = brain_race.build_tiers(replace(config.brain, api_key=resolved_brain_key))
     app.state.tier_brains = tier_brains
     # Nothing else in this file reads `app.state.brain` today, but it stays
