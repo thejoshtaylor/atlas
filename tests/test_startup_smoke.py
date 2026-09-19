@@ -1185,6 +1185,53 @@ def test_the_application_starts_with_every_credential_slot_unset(tmp_path, monke
             assert entry["source"] == "unset"
 
 
+def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degraded(
+    tmp_path, monkeypatch
+):
+    """D-04, PROV-01 (plan 07-01 Task 2): a selected provider whose
+    credential is missing must boot the whole application anyway -- an
+    admin locked out of the very screen that would fix the configuration
+    is the worst available outcome. `app.state.stt` is `None`,
+    `GET /api/providers` still answers 200, and the reason it names is the
+    one `registry.build_stt` actually raised, unchanged."""
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config_with_credential(tmp_path, api_key="")),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app) as client:
+        assert app_module.app.state.stt is None, "a degraded slot must build no client at all"
+        stt_status = app_module.app.state.provider_slots["stt"]
+        assert stt_status.state == "degraded"
+        assert stt_status.active is None
+        assert "xAI" in stt_status.reason
+        assert "Settings" in stt_status.reason
+
+        security = SecurityConfig()
+        token = issue_access_token(user_id=1, role="admin", security=security)
+        client.cookies.set(security.cookie_name, token)
+
+        response = client.get("/api/providers")
+        assert response.status_code == 200, response.text
+        [slot] = response.json()["slots"]
+        assert slot["slot"] == "stt"
+        assert slot["state"] == "degraded"
+        assert slot["active"] is None
+        assert slot["reason"] == stt_status.reason, "the reason must reach the route byte for byte"
+
+
 def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeypatch, caplog):
     """T-03-43: startup logs the winning source per slot, by name, and no
     log line anywhere carries a credential value."""

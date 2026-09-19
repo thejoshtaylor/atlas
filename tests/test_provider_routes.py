@@ -9,6 +9,7 @@ router, driven against `FakeProviderSelectionRepository` and
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -186,6 +187,50 @@ def test_put_providers_is_admin_only(
 
     response = client.get("/api/providers")
     assert response.status_code == 403
+
+
+def test_get_providers_reports_selected_and_active_diverging_after_a_stored_change(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    """D-02: a row changed after boot must report `selected` as the new
+    stored name and `active` as the name the process actually built its
+    client from at last boot -- the divergence itself is what a "needs
+    restart" badge is built from, and this route must never paper over it
+    by reporting only one of the two facts."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    # The database row now says something the boot never saw -- there is
+    # only one registered "stt" provider today ("xai"), so this simulates
+    # the shape a second registered provider would produce once plan 07-02
+    # adds one, without waiting on that plan to prove the route's own
+    # selected/active honesty.
+    asyncio.run(
+        provider_selection_repo.set_selection(
+            "stt", "a-name-the_boot_never_saw", {}, updated_by_user_id=None, updated_at=datetime.now(timezone.utc)
+        )
+    )
+
+    app = _build_providers_app(
+        security,
+        account_repo,
+        provider_selection_repo,
+        credential_repo,
+        provider_slots={
+            "stt": ProviderSlotStatus(
+                slot="stt", selected="xai", active="xai", state="running", reason=None, wrapped=False
+            )
+        },
+    )
+    client = _admin_client(app, security, account_repo)
+
+    response = client.get("/api/providers")
+    [slot] = response.json()["slots"]
+    assert slot["selected"] == "a-name-the_boot_never_saw", "selected must be a fresh repository read"
+    assert slot["active"] == "xai", "active must be what the process actually built, unchanged by the new row"
 
 
 def test_get_providers_reports_a_degraded_slot_honestly(

@@ -44,6 +44,26 @@ def test_known_names_is_sorted():
     assert registry.known_names("stt") == sorted(registry.known_names("stt"))
 
 
+def test_build_stt_raises_provider_unavailable_when_the_credential_is_missing():
+    """D-04: a registered provider that needs a credential nobody has set
+    must not construct a client at all -- the boot resolver's own degraded
+    path (`resolve_slot`) depends on this raising `ProviderUnavailable`,
+    never on a client silently built with an empty API key."""
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_stt("xai", _stt_config(), "")
+
+    message = str(excinfo.value)
+    assert "xAI" in message
+    assert "Settings" in message
+
+
+def test_build_stt_with_a_credential_present_builds_normally():
+    from spire_voice.providers.stt_xai import XaiStt
+
+    client = registry.build_stt("xai", _stt_config(), "a-real-looking-key")
+    assert isinstance(client, XaiStt)
+
+
 class _FakeSelectionRepo:
     def __init__(self, selection=None) -> None:
         self._selection = selection
