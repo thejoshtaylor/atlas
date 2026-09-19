@@ -44,7 +44,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
-from mcp.types import CallToolResult, TextContent, Tool
+from mcp.types import CallToolResult, EmptyResult, PingRequest, RequestParams, TextContent, Tool
 from mcp_types.jsonrpc import REQUEST_TIMEOUT
 
 if TYPE_CHECKING:
@@ -522,13 +522,37 @@ class McpToolHost:
         pending against it -- `06-RESEARCH.md` Pattern 3 verified the
         installed SDK resolves every already-in-flight/newly-attempted
         `call_tool` automatically on child death, but nothing pushes that
-        fact to a caller not currently calling. Raises whatever
-        `session.send_ping()` raises (an `MCPError` on a dead session) --
-        the watchdog interprets any raise as "this plugin is dead," never
-        this method's job to classify.
+        fact to a caller not currently calling. Raises whatever the ping
+        raises (an `MCPError` on a dead session, or on one that stops
+        answering) -- the watchdog interprets any raise as "this plugin is
+        dead," never this method's job to classify.
+
+        WR-04 (code review): the probe carries this plugin's own
+        `timeout_ms` as the SDK's `request_read_timeout_seconds`, for the
+        same reason `call_tool` above passes it -- and because without it
+        there was no deadline anywhere on this path: not here, and not on
+        the `ClientSession` this class constructs. A child that is alive
+        but wedged (holding the pipe open and answering nothing -- the
+        exact failure `timeout_ms` exists for) never answered the ping and
+        never errored, so the lifecycle task blocked here indefinitely:
+        the plugin stayed `RUNNING` with its tools still offered, no
+        respawn was ever attempted, and the blocked probe -- registered as
+        a reader -- also left any later `respawn()` spinning in its drain
+        loop. The watchdog only ever worked for a child that died
+        outright, because the SDK resolves pending requests on stream
+        close.
+
+        `session.send_ping()` takes no timeout of its own, so this builds
+        the same `PingRequest`/`EmptyResult` pair it does and passes the
+        deadline the SDK already knows how to honour -- never an
+        `asyncio.wait_for` wrapper, per `call_tool`'s own reasoning.
         """
         async with self._as_reader() as session:
-            await session.send_ping()
+            await session.send_request(
+                PingRequest(params=RequestParams(_meta=None)),
+                EmptyResult,
+                request_read_timeout_seconds=self._timeout_s,
+            )
 
     async def aclose(self) -> None:
         """Tear this host down for good -- whatever it currently holds

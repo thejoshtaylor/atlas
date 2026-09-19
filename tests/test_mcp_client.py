@@ -474,3 +474,48 @@ async def test_start_with_an_explicit_module_and_env_produces_exactly_that_envir
     assert "HA_URL" not in env
     assert "HA_TOKEN" not in env
     assert "SPIRE_SAFETY" not in env
+
+
+class _PingRecordingSession:
+    """Records exactly what `McpToolHost.ping()` hands the SDK -- WR-04
+    (code review). The probe's deadline is the whole subject: a ping sent
+    with no `request_read_timeout_seconds`, against a `ClientSession`
+    constructed with no session-level `read_timeout_seconds` either, has
+    no deadline anywhere, and a child that is alive but answering nothing
+    wedges the watchdog that was supposed to notice it."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, float | None]] = []
+
+    async def send_request(self, request, result_type, request_read_timeout_seconds=None, **kwargs):
+        self.requests.append((request.method, request_read_timeout_seconds))
+        from mcp.types import EmptyResult
+
+        return EmptyResult()
+
+    async def send_ping(self):  # pragma: no cover -- must not be used any more
+        raise AssertionError(
+            "ping() must send a request carrying a read timeout, not the SDK's "
+            "own send_ping(), which accepts no deadline"
+        )
+
+
+async def test_the_liveness_probe_carries_the_plugins_own_deadline():
+    """WR-04 (code review): `_ping_interval_s`'s docstring promises a hung
+    plugin is noticed "before it could plausibly still be mid-call", but
+    the probe itself had no deadline of any kind -- so a wedged-but-alive
+    child was never noticed at all, its tools were never withdrawn, no
+    respawn was ever attempted, and the blocked probe (registered as a
+    reader) left any later `respawn()` spinning in its drain loop.
+
+    The deadline is the plugin's own `timeout_ms`, the same value
+    `call_tool` passes, handed to the SDK rather than wrapped in an
+    `asyncio.wait_for` of this codebase's own.
+    """
+    session = _PingRecordingSession()
+    host = _host_with_fake_session(session)
+    host._timeout_s = 2.5
+
+    await host.ping()
+
+    assert session.requests == [("ping", 2.5)]
