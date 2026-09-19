@@ -92,6 +92,10 @@ class _FakeHost:
         self.aclose_count = 0
         self.ping_calls = 0
         self.ping_should_fail = False
+        # CR-02 (code review): every safety block this host was actually
+        # respawned with, in order -- the tests below assert on what
+        # reached the child, not merely on what a caller asked for.
+        self.respawn_blocks: "list[dict | None]" = []
 
     async def call_tool(self, name: str, arguments: dict) -> object:
         raise AssertionError("not called in these tests")
@@ -100,6 +104,9 @@ class _FakeHost:
         self.ping_calls += 1
         if self.ping_should_fail:
             raise RuntimeError("simulated: plugin ping failed -- child appears dead")
+
+    async def respawn(self, safety_block: "dict | None") -> None:
+        self.respawn_blocks.append(safety_block)
 
     async def aclose(self) -> None:
         self.aclose_count += 1
@@ -463,3 +470,148 @@ async def test_stop_all_cancels_every_watchdog_and_nothing_is_left_running(
     assert watchdog_task.done()
     assert manager._tasks == {}
     assert host.aclose_count == 1
+
+
+# --- CR-02 (code review): the policy-respawn handshake is total ----------
+#
+# `request_respawn` stores one pending `(safety_block, future)` per plugin
+# and awaits that future with no timeout, and the only code that ever
+# resolved one is the top of that plugin's own watchdog loop, reached only
+# while the plugin is `RUNNING`. Every sequence that ends, replaces or
+# bypasses that loop therefore has to answer the request instead --
+# otherwise `POST /api/policy/...` awaits forever and the operator gets
+# neither the success nor the `_respawn_failed_error` this codebase's own
+# "a write that cannot take live effect is a failed write" rule promises.
+#
+# Each test below drives one of those sequences and asserts the awaiting
+# caller actually returns. `asyncio.wait_for` bounds the await so a
+# regression fails this suite instead of hanging it; nothing here sleeps.
+
+
+async def _pending_respawn_request(manager, safety_block):
+    """Start a `request_policy_respawn` and return its task, only once the
+    request is genuinely registered as pending.
+
+    Deterministic with no sleep of its own: the event is set as the task's
+    very first statement, and `request_policy_respawn`/`request_respawn`
+    then run synchronously all the way to `await future` -- so by the time
+    this function's own `await` resumes, `_pending_respawn` is populated.
+    """
+    started = asyncio.Event()
+
+    async def _request() -> None:
+        started.set()
+        await manager.request_policy_respawn(safety_block)
+
+    task = asyncio.create_task(_request())
+    await started.wait()
+    assert manager._pending_respawn, "the request never registered as pending"
+    return task
+
+
+async def _running_manager_with_one_enforcing_plugin(fake_plugin_repository, monkeypatch):
+    """One running, policy-enforcing plugin whose watchdog is parked in its
+    ping-interval sleep -- the exact state a policy write finds."""
+    host = _FakeHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    await manager.start_all()
+    await gate.wait_until_entered()
+    return manager, host, gate, ha
+
+
+async def test_a_second_respawn_request_fails_the_first_rather_than_orphaning_it(
+    fake_plugin_repository, monkeypatch
+):
+    """CR-02, path 1: the pending slot holds one request, so a second one
+    overwrote the first and its caller awaited a future nobody would ever
+    resolve. Two policy saves in flight -- or one double-click -- was
+    enough. The displaced caller is now told its write did not land, and
+    the surviving request still reaches the child."""
+    manager, host, gate, _ha = await _running_manager_with_one_enforcing_plugin(
+        fake_plugin_repository, monkeypatch
+    )
+    try:
+        first = await _pending_respawn_request(manager, {"deny": ["light.example_first"]})
+        second = await _pending_respawn_request(manager, {"deny": ["light.example_second"]})
+
+        with pytest.raises(RuntimeError, match="superseded"):
+            await asyncio.wait_for(first, 5.0)
+
+        gate.release()  # the watchdog wakes, pings, and services the survivor
+        await asyncio.wait_for(second, 5.0)
+        assert host.respawn_blocks == [{"deny": ["light.example_second"]}]
+    finally:
+        await manager.stop_all()
+
+
+async def test_disabling_a_plugin_fails_its_pending_respawn_rather_than_orphaning_it(
+    fake_plugin_repository, monkeypatch
+):
+    """CR-02, path 2: a disable, a configuration save or a delete cancels
+    the lifecycle task -- the only task that could ever service the pending
+    request -- and used to neither pop nor reject it."""
+    manager, host, _gate, ha = await _running_manager_with_one_enforcing_plugin(
+        fake_plugin_repository, monkeypatch
+    )
+    try:
+        pending = await _pending_respawn_request(manager, {"deny": ["light.example_kitchen"]})
+
+        await manager.stop_one(ha)
+
+        with pytest.raises(RuntimeError, match="stopped before its respawn"):
+            await asyncio.wait_for(pending, 5.0)
+        assert host.respawn_blocks == []
+    finally:
+        await manager.stop_all()
+
+
+async def test_shutdown_fails_a_pending_respawn_rather_than_orphaning_it(
+    fake_plugin_repository, monkeypatch
+):
+    """CR-02, path 3: `stop_all()` sets `_stopping`, so every watchdog
+    returns without servicing the pending entry -- and `_pending_respawn`
+    was the one piece of state `stop_all` never drained."""
+    manager, host, _gate, _ha = await _running_manager_with_one_enforcing_plugin(
+        fake_plugin_repository, monkeypatch
+    )
+    pending = await _pending_respawn_request(manager, {"deny": ["light.example_kitchen"]})
+
+    await manager.stop_all()
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await asyncio.wait_for(pending, 5.0)
+    assert host.respawn_blocks == []
+
+
+async def test_a_plugin_that_dies_with_a_respawn_pending_fails_that_request(
+    fake_plugin_repository, monkeypatch
+):
+    """CR-02, path 4 (the same defect, reached through D-05's own watchdog):
+    the loop only services a pending request while the plugin is `RUNNING`,
+    so a child that died between the request and the next loop iteration
+    left the caller awaiting a recovery that may never come. The backoff
+    loop does start a new child carrying a freshly read policy block, but
+    that is not this request succeeding -- the write is reported failed."""
+    manager, host, gate, _ha = await _running_manager_with_one_enforcing_plugin(
+        fake_plugin_repository, monkeypatch
+    )
+    try:
+        pending = await _pending_respawn_request(manager, {"deny": ["light.example_kitchen"]})
+
+        host.ping_should_fail = True
+        gate.release()  # the watchdog wakes, pings, and finds the child dead
+
+        with pytest.raises(RuntimeError, match="died before its respawn"):
+            await asyncio.wait_for(pending, 5.0)
+        assert host.respawn_blocks == []
+    finally:
+        await manager.stop_all()

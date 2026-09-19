@@ -299,9 +299,37 @@ class PluginManager:
         running = self._plugins.get(plugin_id)
         if running is None or running.state is not PluginState.RUNNING:
             raise RuntimeError(f"plugin {plugin_id!r} is not currently running -- cannot respawn it")
+        # CR-02 (code review): the slot holds exactly one request, so a
+        # second one displaces the first. The displaced caller is told so,
+        # rather than left awaiting a future nobody will ever resolve --
+        # two policy saves in flight, or one double-click, was enough to
+        # hang a request forever.
+        self._fail_pending_respawn(
+            plugin_id,
+            "superseded by a later respawn request for the same plugin -- "
+            "this write did not reach the enforcing process",
+        )
         future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._pending_respawn[plugin_id] = (safety_block, future)
         await future
+
+    def _fail_pending_respawn(self, plugin_id: int, reason: str) -> None:
+        """Resolve `plugin_id`'s pending respawn request, if it has one, as
+        a failure -- CR-02 (code review).
+
+        `request_respawn` above awaits its future with no timeout, and the
+        only code that ever resolved one was the top of that plugin's own
+        watchdog loop, reached only while the plugin is `RUNNING`. Every
+        path that ends, replaces, or bypasses that loop therefore has to
+        come through here: a second request displacing the first, a
+        disable/config-save/delete cancelling the lifecycle task, the
+        watchdog finding the child dead, and `stop_all()`. A respawn that
+        will not happen is a failed write (`routes/policy.py`'s own rule);
+        it is never a request left hanging with neither answer.
+        """
+        pending = self._pending_respawn.pop(plugin_id, None)
+        if pending is not None and not pending[1].done():
+            pending[1].set_exception(RuntimeError(reason))
 
     async def request_policy_respawn(self, safety_block: "dict | None") -> None:
         """Respawn whichever running plugin enforces the house policy,
@@ -462,12 +490,24 @@ class PluginManager:
         cross-task cancellation `stop_all()` already performs from the
         lifespan's own shutdown task, narrowed to one plugin. The
         cancelled task's own `finally` (`_plugin_lifecycle`) closes
-        whatever host it currently holds, from within that same task."""
+        whatever host it currently holds, from within that same task.
+
+        CR-02 (code review): the task being cancelled is the only task that
+        could ever have serviced this plugin's pending respawn request, so
+        that request is failed here rather than abandoned -- a policy save
+        awaiting a respawn on a plugin an admin disables (or saves
+        configuration for, or deletes) at the same moment used to hang
+        forever."""
         task = self._tasks.pop(plugin_id, None)
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        self._fail_pending_respawn(
+            plugin_id,
+            "the plugin was stopped before its respawn could be performed -- "
+            "this write did not reach the enforcing process",
+        )
 
     async def _plugin_lifecycle(self, plugin: Plugin, ready: "asyncio.Future[None]") -> None:
         """Own `plugin`'s host for its entire life, in exactly one task
@@ -598,6 +638,19 @@ class PluginManager:
                     await current.host.aclose()
                     self._plugins[plugin.id] = RunningPlugin(
                         plugin=plugin, host=None, state=PluginState.CRASHED_RETRYING
+                    )
+                    # CR-02 (code review): this loop only services a
+                    # pending respawn while the plugin is `RUNNING`, and
+                    # the host that request named is now closed. The
+                    # backoff loop below will start a genuinely new child
+                    # carrying a freshly read policy block, but that is not
+                    # this request succeeding -- the caller is told its
+                    # write did not land rather than waiting out however
+                    # long the recovery takes.
+                    self._fail_pending_respawn(
+                        plugin.id,
+                        f"plugin {plugin.slug!r} died before its respawn could be "
+                        "performed -- this write did not reach the enforcing process",
                     )
                     self.rebuild()
                     backoff = self._plugins_config.respawn_backoff_min_s
@@ -826,6 +879,18 @@ class PluginManager:
                 await task
         self._tasks.clear()
         self._plugins.clear()
+        # CR-02 (code review): `_stopping` makes every watchdog loop return
+        # without servicing a pending respawn, so any request still in
+        # flight has to be answered here -- `_pending_respawn` was the one
+        # piece of state this method never drained, and a policy save
+        # racing a shutdown was left awaiting a future nothing would ever
+        # resolve.
+        for plugin_id in list(self._pending_respawn):
+            self._fail_pending_respawn(
+                plugin_id,
+                "the assistant is shutting down -- this write did not reach the "
+                "enforcing process",
+            )
         # Reset for a manager instance that starts again after stopping --
         # no current caller does this, but a later `start_all()`'s own
         # loop checks nothing about `_stopping`, so leaving it `True`
