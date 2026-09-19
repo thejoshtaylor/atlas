@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from spire_voice.config import BrainConfig, ConfigError, SttConfig, TtsConfig
 from spire_voice.providers.base import BrainProvider, SttProvider, TtsProvider
+from spire_voice.providers.boot import ProviderUnavailable
 from spire_voice.providers.brain_xai import XaiBrain
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tts_xai import XaiTts
@@ -122,13 +123,23 @@ def _build(
     raises -- naming the rejected value first and the sorted known set
     second, the exact phrasing `_build_wake_detector` already uses for the
     wake engine. Adding a fourth slot later is a new registry passed to
-    this helper, never a fourth copy of this sequence."""
+    this helper, never a fourth copy of this sequence.
+
+    D-04: a registered entry that needs a credential nobody has set raises
+    `ProviderUnavailable` here, before `entry.build` ever constructs a
+    client with an empty API key -- `resolve_slot` (`boot.py`) is what
+    turns this into a degraded slot rather than a boot failure. The
+    message names the provider's own operator-facing label and where an
+    admin fixes it, the exact phrasing 07-UI-SPEC.md's Copywriting
+    Contract gives as its own example."""
     try:
         entry = registry[name]
     except KeyError:
         raise ConfigError(
             f"{slot_display_name} {name!r} is not registered -- known providers: {sorted(registry)}"
         ) from None
+    if entry.requires_credential and not api_key:
+        raise ProviderUnavailable(f"Missing an API key for {entry.label}. Add one in Settings.")
     return entry.build(config, api_key)
 
 
