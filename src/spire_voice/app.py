@@ -711,51 +711,86 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _current_safety_block() -> "dict | None":
         return safety_block_from_policy(await policy_repo.load_policy())
 
+    # Plan 05-01 (D-08): the in-process `schedule_workflow` tool host --
+    # in-process, not a spawned child, because it holds `workflow_repo`,
+    # not a credential (SAFE-09 has no isolation boundary to cross for a
+    # database connection). `zone` is `_resolved_timezone`, already
+    # resolved above -- the one process-wide reading of the house's own
+    # configured zone, never re-read or re-derived here. Built before the
+    # plugin manager (CR-01 fix) because `_publish_tool_view` below merges
+    # it with every plugin host on every rebuild, including the first one
+    # `start_all()` performs.
+    workflow_tool_host = WorkflowToolHost(workflow_repo, zone=_resolved_timezone)
+    app.state.workflow_tool_host = workflow_tool_host
+
+    # Entities are fetched once, after the plugins are up (below) -- the
+    # cacheable catalog prompt is rebuilt from this snapshot every time
+    # the plugin set changes, so the ownership block and the tool schema
+    # can never describe two different plugin sets (D-10).
+    app.state.entities = []
+
+    def _publish_tool_view() -> None:
+        """Republish the live view the running assistant actually reads --
+        the one place `app.state.tool_host_lookup`/`tools_schema`/
+        `catalog_prompt`/`tool_host` are ever assigned (CR-01, code
+        review).
+
+        Called by `PluginManager.rebuild()` through its `on_rebuild` hook,
+        which is to say: at boot, on an install, an enable, a disable, a
+        delete, a configuration save, a crash-driven tool withdrawal and a
+        recovery. Before this existed, `lifespan` copied the manager's own
+        `hosts`/`tools_schema` onto `app.state` exactly once and nothing
+        ever reassigned them, while every `run_turn` call site read
+        `app.state` -- so D-15 ("install, enable, disable and configuration
+        edits take effect live") and PLUG-05 ("a dead plugin withdraws only
+        its own tools") were both true of the manager and false of the
+        assistant. A turn is still handed a genuinely immutable view
+        (D-08): every attribute below is *reassigned* to a newly built
+        object, never mutated, so a turn already holding the previous
+        lookup and schema keeps exactly those, mid-rebuild or not.
+        """
+        app.state.tool_host_lookup = McpToolHostLookup(
+            [*plugin_manager.hosts, workflow_tool_host]
+        )
+        app.state.tools_schema = plugin_manager.tools_schema + mcp_tools_to_openai_tools(
+            workflow_tool_host.tools
+        )
+        # Plan 06-04 (D-10): the ownership block naming which plugin owns
+        # each collision-prefixed tool -- rebuilt here, on the same swap as
+        # the schema above, so it can never describe a plugin set that
+        # schema does not.
+        app.state.catalog_prompt = _catalog_prompt(
+            app.state.entities, plugin_manager.tool_ownership_prompt
+        )
+        # `app.state.tool_host` keeps its pre-existing meaning (T-04-13):
+        # the running host of the plugin that enforces the house policy,
+        # `None` when that plugin is disabled, degraded, or not yet
+        # started. WR-01 (code review): it is genuinely reassigned on every
+        # swap now, rather than being a boot-time snapshot whose own
+        # comment claimed it was. Every respawn, enable and configuration
+        # save builds a *new* `McpToolHost`; the previous one is closed.
+        app.state.tool_host = plugin_manager.enforcing_host
+
     plugin_manager = PluginManager(
         plugin_repo,
         mcp_root=MCP_ROOT,
         security=security_config,
         safety_block_provider=_current_safety_block,
         plugins_config=config.plugins,
+        on_rebuild=_publish_tool_view,
     )
-    await plugin_manager.start_all()
     app.state.plugin_manager = plugin_manager
-    # `app.state.tool_host` keeps its pre-existing meaning but gains a
-    # definition (T-04-13's two named readers, `routes/policy.py`'s
-    # respawn and `_make_state_fetch` below, both still read it by name):
-    # the running host of the plugin that enforces the house policy,
-    # reassigned by the manager on every swap. `None` when that plugin is
-    # disabled or failed to start -- both readers below tolerate that.
-    app.state.tool_host = plugin_manager.enforcing_host
+    # Publishes an empty view first, so every attribute above exists even
+    # if `start_all()` raises, and then the real one from `start_all()`'s
+    # own closing `rebuild()`.
+    _publish_tool_view()
+    await plugin_manager.start_all()
     # Kept on app.state so plan 03-07's write routes can compare a would-be
     # new block against the one the running child was actually spawned
     # with, before deciding whether a respawn is needed. `None` when no
     # plugin is currently enforcing the policy at all.
     app.state.safety_block = (
         await _current_safety_block() if plugin_manager.enforcing_host is not None else None
-    )
-
-    # Plan 05-01 (D-08): the in-process `schedule_workflow` tool host --
-    # in-process, not a spawned child, because it holds `workflow_repo`,
-    # not a credential (SAFE-09 has no isolation boundary to cross for a
-    # database connection). `zone` is `_resolved_timezone`, already
-    # resolved above -- the one process-wide reading of the house's own
-    # configured zone, never re-read or re-derived here.
-    workflow_tool_host = WorkflowToolHost(workflow_repo, zone=_resolved_timezone)
-    app.state.workflow_tool_host = workflow_tool_host
-
-    # The lookup the turn controller actually calls through (all three
-    # `run_turn` call sites below pass this, never `app.state.tool_host`
-    # directly): every running plugin's own host, plus the in-process
-    # workflow host, in a fixed order, so the model sees every host's
-    # tools and a call reaches whichever one advertised it. Built fresh
-    # from already-started hosts -- reads no configuration of its own
-    # (`McpToolHostLookup`'s own docstring). `plugin_manager.tools_schema`
-    # is the merged schema `rebuild()` already computed over the same
-    # plugin hosts; only the workflow host's own tools are appended here.
-    app.state.tool_host_lookup = McpToolHostLookup([*plugin_manager.hosts, workflow_tool_host])
-    app.state.tools_schema = plugin_manager.tools_schema + mcp_tools_to_openai_tools(
-        workflow_tool_host.tools
     )
 
     # Plan 06-01 (D-07's own posture, extended in a following plan): the
@@ -771,14 +806,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         entities = _tool_result_json(entities_result)
     except UnknownToolError:
         entities = []
-    # Plan 06-04 (D-10): the ownership block naming which plugin owns
-    # each collision-prefixed tool -- `plugin_manager.tool_ownership_prompt`
-    # was rebuilt on the same swap as `plugin_manager.tools_schema` just
-    # above (`PluginManager.rebuild`'s own contract), so this can never
-    # describe a plugin set that schema does not.
-    app.state.catalog_prompt = _catalog_prompt(
-        entities if isinstance(entities, list) else [], plugin_manager.tool_ownership_prompt
-    )
+    app.state.entities = entities if isinstance(entities, list) else []
+    # The entity snapshot is the one input `_publish_tool_view` cannot
+    # produce for itself -- republish now that it exists, so the catalog
+    # prompt carries both the entities and the current ownership block.
+    _publish_tool_view()
 
     # Plan 04-05 (D-09): macros live in the database now, not on `config`.
     # This snapshot exists only for the wiring check

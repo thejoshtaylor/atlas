@@ -553,6 +553,18 @@ class McpToolHost:
             await self._stack.aclose()
         except Exception:
             logger.warning("McpToolHost.aclose() failed to tear down cleanly", exc_info=True)
+        finally:
+            # CR-01 (code review): a closed host must not still look
+            # callable. `self.session` outliving the stack that owns it is
+            # what let a call land on a torn-down session and either raise
+            # from deep inside the SDK or wait out `timeout_ms` -- a turn
+            # spending its whole deadline on a plugin that is provably gone.
+            # `_as_reader` already refuses a `None` session by name, so
+            # clearing it here turns that case into this module's own
+            # stated refusal at the first instruction of the call instead.
+            # `respawn()` does not come through here: it closes and
+            # rebuilds its stack directly and assigns a fresh session.
+            self.session = None
 
 
 class UnknownToolError(Exception):

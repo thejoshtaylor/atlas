@@ -117,11 +117,27 @@ class PluginManager:
         safety_block_provider: SafetyBlockProvider,
         plugins_config: PluginsConfig | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        on_rebuild: "Callable[[], None] | None" = None,
     ) -> None:
         self._repository = repository
         self._mcp_root = mcp_root
         self._security = security
         self._safety_block_provider = safety_block_provider
+        # CR-01 (code review): called at the end of every `rebuild()`, and
+        # only there -- the one hook `lifespan` uses to republish the live
+        # view the running assistant actually reads (`app.state.
+        # tool_host_lookup`/`tools_schema`/`catalog_prompt`/`tool_host`).
+        # Before this existed, `lifespan` copied two of this manager's own
+        # attributes onto `app.state` at boot and nothing ever reassigned
+        # them, so every later rebuild -- an install, an enable, a disable,
+        # a delete, a crash-driven withdrawal, a recovery -- changed what
+        # this manager believed and nothing at all about what the model was
+        # offered. A copy that must be kept in sync was the defect; one
+        # callback fired by the single writer (`rebuild`) is what keeps a
+        # second copy from drifting again. `None` for every caller that has
+        # no second view to publish (every test that drives this manager
+        # directly).
+        self._on_rebuild = on_rebuild
         # `None` (every caller that predates this task) resolves to the
         # declared defaults -- ten second startup deadline, one-to-thirty
         # second respawn backoff -- rather than making every existing
@@ -768,6 +784,15 @@ class PluginManager:
         # plugin set older than what `tool_host_lookup`/`tools_schema`
         # already reflect.
         self._naming_result = naming_result
+        # CR-01 (code review): last, after all five attributes above are
+        # assigned, so the callback can never observe a half-swapped view.
+        # A raise here propagates to whoever triggered the rebuild -- an
+        # install/enable/disable route reports it as a failed write
+        # (`routes/plugins.py::_reconcile_failed_error`), which is the same
+        # posture `lifespan` has always taken toward a tool set it cannot
+        # merge into one unambiguous lookup.
+        if self._on_rebuild is not None:
+            self._on_rebuild()
 
     def _ping_interval_s(self, plugin: Plugin) -> float:
         """The ping watchdog's own poll interval for `plugin` -- well

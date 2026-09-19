@@ -640,6 +640,73 @@ def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_l
         assert "weather_current" in tool_names
 
 
+async def test_stopping_a_plugin_withdraws_its_tools_from_what_the_running_assistant_reads(
+    tmp_path, monkeypatch
+):
+    """CR-01 (code review), D-15, PLUG-05: every assertion this suite made
+    about a live plugin change read `PluginManager`'s own attributes, and
+    the manager was always right. What the assistant reads is
+    `app.state` -- `lifespan` copied the manager's lookup and schema there
+    once at boot, nothing ever reassigned them, and all three `run_turn`
+    call sites plus the workflow executor pass that boot-time snapshot. So
+    an install, a disable, a delete or a crash changed what the manager
+    believed and nothing at all about which tools the model was offered.
+
+    This asserts on the objects the turn path actually reads, not on the
+    manager, and drives the change through the same primitive
+    `PUT /api/plugins/{id}/enabled` calls (`PluginManager.stop_one`). Runs
+    the real `lifespan` directly rather than through `TestClient` so the
+    stop happens on the same event loop the plugins were started on --
+    which is also the only task allowed to touch their hosts.
+    """
+    from spire_voice.mcp_client import UnknownToolError
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories_with_weather)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    def _offered_tool_names() -> set[str]:
+        return {entry["function"]["name"] for entry in app_module.app.state.tools_schema}
+
+    async with app_module.lifespan(app_module.app):
+        state = app_module.app.state
+        assert "weather_current" in _offered_tool_names()
+
+        boot_schema = state.tools_schema
+        boot_lookup = state.tool_host_lookup
+
+        weather = next(
+            plugin for plugin in await state.plugin_repo.list_plugins() if plugin.slug == "weather"
+        )
+        await state.plugin_manager.stop_one(weather)
+
+        assert "weather_current" not in _offered_tool_names(), (
+            "the manager withdrew the plugin's tools and the running assistant was "
+            "never told -- this is the CR-01 defect"
+        )
+        assert "ha_list_entities" in _offered_tool_names(), (
+            "PLUG-05: a stopped plugin withdraws only its own tools"
+        )
+        with pytest.raises(UnknownToolError):
+            await state.tool_host_lookup.call_tool("weather_current", {})
+        # The workflow host is not a plugin and must survive every plugin
+        # rebuild -- it is merged into the same published lookup.
+        assert "schedule_workflow" in _offered_tool_names()
+
+        # D-08: the swap is immutable. A turn that read the schema and the
+        # lookup before the stop still holds exactly the objects it was
+        # handed, tools and all -- it is not mutated out from under it.
+        assert state.tools_schema is not boot_schema
+        assert state.tool_host_lookup is not boot_lookup
+        assert "weather_current" in {entry["function"]["name"] for entry in boot_schema}
+
+
 def test_a_home_assistant_that_refuses_to_start_leaves_a_booted_application_whose_other_plugin_still_answers(
     tmp_path, monkeypatch
 ):
