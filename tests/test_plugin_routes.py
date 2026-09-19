@@ -17,6 +17,8 @@ additional tests in this same file.
 from __future__ import annotations
 
 import asyncio
+import os
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -25,8 +27,16 @@ from mcp.types import Tool
 
 from spire_voice.auth.tokens import issue_access_token
 from spire_voice.config import SecurityConfig
-from spire_voice.plugins.manager import PluginState
+from spire_voice.plugins import manager as manager_module
+from spire_voice.plugins.manager import PluginManager, PluginState
 from spire_voice.routes.plugins import router as plugins_router
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
+
+
+async def _no_policy():
+    return None
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -666,3 +676,236 @@ def test_every_plugin_route_refuses_a_viewer(
 
     assert client.get("/api/plugins").status_code == 403
     assert client.post("/api/plugins", json={"catalog_entry": "Weather"}).status_code == 403
+
+
+# --- Task 3: live effect against the real PluginManager --------------------
+#
+# Every test below spawns the real `spire_mcp.ha`/`spire_mcp.weather` child
+# already shipped in this repository's own `mcp/` directory, the same
+# real-subprocess discipline `tests/test_plugin_manager.py` already uses --
+# proving install/enable/disable/config-save actually reach a real running
+# child through the HTTP layer, not merely that the route calls a method a
+# fake recorded.
+#
+# `TestClient` used as a context manager runs the app's own `lifespan`
+# (FastAPI's own testing docs) -- here, only its shutdown half matters:
+# `manager.stop_all()`, run on the exact same portal loop every request in
+# this `with` block ran on, so every plugin's own lifecycle task (and the
+# real subprocess it owns) is cancelled and awaited cleanly rather than
+# leaked past the end of the test.
+
+
+@contextmanager
+def _real_plugins_client(security, account_repo, plugin_repo):
+    manager = PluginManager(
+        plugin_repo, mcp_root=_MCP_ROOT, security=security, safety_block_provider=_no_policy
+    )
+
+    @asynccontextmanager
+    async def _lifespan(_app):
+        yield
+        await manager.stop_all()
+
+    app = FastAPI(lifespan=_lifespan)
+    app.state.config = SimpleNamespace(security=security)
+    app.state.account_repo = account_repo
+    app.state.plugin_repo = plugin_repo
+    app.state.plugin_manager = manager
+    app.include_router(plugins_router)
+
+    admin = asyncio.run(
+        account_repo.create_user(
+            email="admin@example.invalid", display_name="An Admin",
+            password_hash="not-checked-by-this-test", role="admin",
+        )
+    )
+    token = issue_access_token(user_id=admin.id, role="admin", security=security)
+    with TestClient(app, cookies={security.cookie_name: token}) as client:
+        yield client, manager
+
+
+def test_installing_a_plugin_starts_it_and_its_tools_reach_the_schema_before_returning(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        response = client.post(
+            "/api/plugins",
+            json={
+                "catalog_entry": "Weather",
+                "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}, "WEATHER_LONGITUDE": {"value": "-0.1"}},
+            },
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["state"] == "running"
+        assert {tool["name"] for tool in body["tools"]}
+
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert tool_names, "the newly installed plugin's tools must already be in the schema"
+
+
+def test_disabling_a_plugin_stops_it_and_withdraws_its_tools_before_returning(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        installed = client.post(
+            "/api/plugins",
+            json={
+                "catalog_entry": "Weather",
+                "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}, "WEATHER_LONGITUDE": {"value": "-0.1"}},
+            },
+        ).json()
+        plugin_id = installed["id"]
+        assert manager.tools_schema
+
+        response = client.put(f"/api/plugins/{plugin_id}/enabled", json={"enabled": False})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "disabled"
+        assert body["tools"] == []
+        assert manager.tools_schema == [], "a disabled plugin's tools must already be withdrawn"
+
+
+def test_enabling_a_disabled_plugin_restarts_it_and_restores_its_tools(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        installed = client.post(
+            "/api/plugins",
+            json={
+                "catalog_entry": "Weather",
+                "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}, "WEATHER_LONGITUDE": {"value": "-0.1"}},
+            },
+        ).json()
+        plugin_id = installed["id"]
+        client.put(f"/api/plugins/{plugin_id}/enabled", json={"enabled": False})
+        assert manager.tools_schema == []
+
+        response = client.put(f"/api/plugins/{plugin_id}/enabled", json={"enabled": True})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "running"
+        assert body["tools"]
+        assert manager.tools_schema
+
+
+def test_saving_configuration_restarts_the_plugin_with_the_new_configuration(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """D-15's own worked example: a plugin installed with a blank secret,
+    then configured afterward, must be running under the value just
+    saved -- captured directly from the real child's own spawned
+    environment, the same interception point `tests/test_plugin_manager.py`
+    already uses."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        installed = client.post(
+            "/api/plugins",
+            json={"catalog_entry": "Home Assistant", "config_values": {"HA_URL": {"value": "http://ha.invalid:8123"}}},
+        ).json()
+        plugin_id = installed["id"]
+
+        captured_envs: list[dict] = []
+        real_spawn = manager_module.McpToolHost._spawn
+
+        async def _capturing_spawn(self, child_module, env):
+            captured_envs.append(dict(env))
+            await real_spawn(self, child_module, env)
+
+        monkeypatch.setattr(manager_module.McpToolHost, "_spawn", _capturing_spawn)
+
+        response = client.put(
+            f"/api/plugins/{plugin_id}/config",
+            json={"values": {"HA_TOKEN": {"value": "a-freshly-saved-token", "secret": True}}},
+        )
+        assert response.status_code == 200
+        assert captured_envs, "saving configuration must restart the plugin's own child"
+        assert captured_envs[-1]["HA_TOKEN"] == "a-freshly-saved-token"
+        assert captured_envs[-1]["HA_URL"] == "http://ha.invalid:8123"
+
+
+def test_a_newly_installed_plugin_that_will_not_start_is_still_created_and_reported_degraded(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    async def _always_fails(*args, **kwargs):
+        raise RuntimeError("simulated: this plugin will never start")
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _always_fails)
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        response = client.post(
+            "/api/plugins",
+            json={"display_name": "Never Starts", "transport": "command", "command": "-m spire_mcp.weather"},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        assert body["state"] == "degraded"
+        assert "simulated: this plugin will never start" in body["reason"]
+        assert plugin_repo.plugins  # the row is not lost
+
+
+def test_editing_one_plugins_configuration_leaves_a_second_plugins_session_untouched(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """Task 3's own instruction: prove it -- edit one plugin's
+    configuration and assert a second plugin's session is the same
+    object afterwards."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        ha = client.post(
+            "/api/plugins",
+            json={
+                "catalog_entry": "Home Assistant",
+                "config_values": {
+                    "HA_URL": {"value": "http://ha.invalid:8123"},
+                    "HA_TOKEN": {"value": "t", "secret": True},
+                },
+            },
+        ).json()
+        weather = client.post(
+            "/api/plugins",
+            json={
+                "catalog_entry": "Weather",
+                "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}, "WEATHER_LONGITUDE": {"value": "-0.1"}},
+            },
+        ).json()
+
+        weather_host_before = manager.tool_host_for(weather["slug"])
+        assert weather_host_before is not None
+
+        response = client.put(
+            f"/api/plugins/{ha['id']}/config",
+            json={"values": {"HA_URL": {"value": "http://ha.invalid:9999"}}},
+        )
+        assert response.status_code == 200
+
+        weather_host_after = manager.tool_host_for(weather["slug"])
+        assert weather_host_after is weather_host_before, "editing HA's config must not touch weather's own host"

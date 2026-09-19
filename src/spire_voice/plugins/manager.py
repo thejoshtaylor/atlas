@@ -371,6 +371,88 @@ class PluginManager:
             await asyncio.gather(*ready_futures)
         self.rebuild()
 
+    async def start_one(self, plugin: Plugin) -> None:
+        """Start (or fully restart) `plugin`'s own lifecycle from scratch
+        (plan 06-06, Task 3, D-15) -- the one primitive `routes/plugins.py`
+        calls for an install, an enable, and a configuration edit alike,
+        since all three need `plugin`'s environment or connection rebuilt
+        fresh from its current row and its current configuration values,
+        never a policy-block swap on an existing host (`request_respawn`'s
+        own, narrower job).
+
+        If `plugin.id` already has a running lifecycle task, it is
+        cancelled and awaited first -- exactly `stop_all()`'s own
+        cross-task cancellation shape, safe for the identical reason that
+        method already is: cancelling a task and creating a new one never
+        touches an `anyio` cancel scope from outside the task that entered
+        it, unlike calling `host.respawn()`/`host.aclose()` directly ever
+        would (`request_policy_respawn`'s own docstring). Whatever host
+        that task held is closed inside that task's own `finally`
+        (`_plugin_lifecycle`), before this method's own fresh task is
+        ever created -- so a caller never observes two lifecycle tasks
+        racing over the same plugin id.
+
+        Awaits until the fresh start's own outcome (running or degraded)
+        is settled, then rebuilds the schema -- an install or a
+        configuration edit whose plugin will not start still returns
+        normally: `_plugin_lifecycle`'s own try/except already turns a
+        start failure into a `DEGRADED` row carrying its own reason,
+        never an exception out of this method (D-07's posture, extended
+        here from boot to an on-demand (re)start). The only thing this
+        method itself raises is a caller error -- `plugin.enabled` must
+        be `True`; a disabled row has nothing to start, and a caller
+        wanting the other direction calls `stop_one` instead.
+
+        Scoped entirely to `plugin.id` (Task 3's own "no write touches a
+        plugin other than the one it named"): no other plugin's task,
+        host, or `RunningPlugin` entry is read or written here, only
+        `rebuild()`'s own read of `self._plugins.values()` at the very
+        end -- which never replaces another plugin's own host object,
+        only the views `rebuild()` always recomputes from scratch.
+        """
+        if not plugin.enabled:
+            raise RuntimeError(
+                f"plugin {plugin.slug!r} is not enabled -- start_one is for a plugin that "
+                "should be running; use stop_one to take one down"
+            )
+        await self._stop_task_if_running(plugin.id)
+        self._plugins[plugin.id] = RunningPlugin(plugin=plugin, host=None, state=PluginState.STARTING)
+        ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._tasks[plugin.id] = asyncio.create_task(self._plugin_lifecycle(plugin, ready))
+        await ready
+        self.rebuild()
+
+    async def stop_one(self, plugin: Plugin) -> None:
+        """Stop `plugin`'s own lifecycle task, if it has one, and record
+        it `DISABLED` with no host (plan 06-06, Task 3, D-15, PLUG-05) --
+        the live half of disabling or deleting a plugin: its tools are
+        withdrawn from the schema before this method returns, the same
+        guarantee `_run_watchdog`'s own crash-driven withdrawal already
+        gives a plugin the ping watchdog finds dead.
+
+        Safe to call for a plugin this manager has never started (no task
+        to cancel) -- a caller disabling a plugin that failed to start at
+        all, or deleting one, still ends up with a recorded `DISABLED`
+        entry and a `rebuild()` that reflects it having no host, which is
+        exactly what "no tools right now" needs to be true from the
+        response the caller returns."""
+        await self._stop_task_if_running(plugin.id)
+        self._plugins[plugin.id] = RunningPlugin(plugin=plugin, host=None, state=PluginState.DISABLED)
+        self.rebuild()
+
+    async def _stop_task_if_running(self, plugin_id: int) -> None:
+        """Cancel and await `plugin_id`'s own lifecycle task, if one
+        exists -- shared by `start_one`/`stop_one` above, the identical
+        cross-task cancellation `stop_all()` already performs from the
+        lifespan's own shutdown task, narrowed to one plugin. The
+        cancelled task's own `finally` (`_plugin_lifecycle`) closes
+        whatever host it currently holds, from within that same task."""
+        task = self._tasks.pop(plugin_id, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async def _plugin_lifecycle(self, plugin: Plugin, ready: "asyncio.Future[None]") -> None:
         """Own `plugin`'s host for its entire life, in exactly one task
         (`start_all`'s own docstring explains why this must be one task,
@@ -562,14 +644,24 @@ class PluginManager:
         config value (D-16's plain key/value shape, no OAuth flow in
         scope); `None` when it declares none, which is a real, supported
         shape and not an error -- a remote plugin can have no credential
-        at all."""
+        at all.
+
+        Plan 06-06: a row declared secret with `ciphertext=None` is a
+        *declared but never set* placeholder (`routes/plugins.py`'s own
+        install path writes exactly this for a catalog-declared secret key
+        an admin left blank, D-16) -- not a corrupted row. Treated as "no
+        credential yet," the same as a plugin that declares no secret at
+        all, so an admin can install a plugin before filling in its
+        token and see it start (and fail on ITS OWN terms, if the remote
+        side actually requires one) rather than fail here on a shape this
+        module invented."""
         config_values = await self._repository.get_config_values(plugin.id)
         for value in config_values:
-            if value.secret:
-                if value.ciphertext is None or value.key_version is None:
+            if value.secret and value.ciphertext is not None:
+                if value.key_version is None:
                     raise RuntimeError(
-                        f"plugin config value {value.key!r} is marked secret but has "
-                        "no ciphertext -- a secret value must always be encrypted at rest"
+                        f"plugin config value {value.key!r} has ciphertext but no key_version -- "
+                        "a stored secret value must always carry both"
                     )
                 return decrypt_credential(value.ciphertext, value.key_version, self._security)
         return None
@@ -729,14 +821,25 @@ def _env_from_config_values(
     decrypted through `decrypt_credential` (D-03, the single point this
     codebase ever turns plugin ciphertext back into a usable value), plus
     `PYTHONPATH`, plus the serialized safety block when one is given.
+
+    Plan 06-06: a secret value with `ciphertext=None` is a declared-but-
+    never-set placeholder row (`routes/plugins.py`'s own install path),
+    not a corrupted one -- it reaches the child as an empty string, the
+    same as an unset plain value already does, so an admin can install a
+    plugin before filling in its token and let the CHILD decide whether
+    it can start with nothing there, rather than this module refusing to
+    even try.
     """
     env: dict[str, str] = {"PYTHONPATH": str(mcp_root)}
     for value in config_values:
         if value.secret:
-            if value.ciphertext is None or value.key_version is None:
+            if value.ciphertext is None:
+                env[value.key] = ""
+                continue
+            if value.key_version is None:
                 raise RuntimeError(
-                    f"plugin config value {value.key!r} is marked secret but has "
-                    "no ciphertext -- a secret value must always be encrypted at rest"
+                    f"plugin config value {value.key!r} has ciphertext but no key_version -- "
+                    "a stored secret value must always carry both"
                 )
             env[value.key] = decrypt_credential(value.ciphertext, value.key_version, security)
         else:
