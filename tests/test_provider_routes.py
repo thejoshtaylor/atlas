@@ -163,6 +163,51 @@ def test_put_providers_saves_a_new_choice_and_a_reload_finds_it_still_chosen(
     assert reloaded_slot["selected"] == "xai"
 
 
+def test_put_providers_refuses_an_unrecognized_provider_name_and_leaves_the_row_unchanged(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    """T-07-02: a save carrying a name no registry key matches is refused,
+    naming the value and the known set, and the stored row is untouched
+    afterwards -- a partial write across a save is the state 07-UI-SPEC.md's
+    probe addendum explicitly refuses to render."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    app = _build_providers_app(security, account_repo, provider_selection_repo, credential_repo)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put(
+        "/api/providers", json={"slots": {"stt": {"provider_name": "not-a-real-provider"}}}
+    )
+    assert response.status_code == 400
+    assert "not-a-real-provider" in response.json()["detail"]
+    assert "xai" in response.json()["detail"]
+
+    reload_response = client.get("/api/providers")
+    [slot] = reload_response.json()["slots"]
+    assert slot["selected"] == "xai", "the stored row must be unchanged after a refused save"
+
+
+def test_put_providers_refuses_an_unknown_slot(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    app = _build_providers_app(security, account_repo, provider_selection_repo, credential_repo)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.put("/api/providers", json={"slots": {"tts": {"provider_name": "xai"}}})
+    assert response.status_code == 400
+    assert "tts" in response.json()["detail"]
+
+
 def test_put_providers_is_admin_only(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):

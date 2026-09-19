@@ -130,3 +130,22 @@ async def test_resolve_slot_propagates_any_other_exception_and_stops_the_boot():
         await resolve_slot(
             "stt", repo, "xai", registry.build_stt, _stt_config(), "test-key"
         )
+
+
+def test_every_slot_registry_is_non_empty():
+    """A module-level fact, not merely a test-time one: `07-UI-SPEC.md`'s
+    no-empty-state screen assumption depends on this holding for real --
+    an empty registry is an authoring mistake that would otherwise surface
+    as a blank screen with no error at all."""
+    for slot in ("stt", "tts", "brain"):
+        assert registry.known_names(slot), f"{slot} registry must not be empty"
+
+
+def test_registries_non_empty_check_raises_on_an_empty_registry(monkeypatch):
+    """The self-check itself, proven to actually fire rather than being a
+    no-op that always passes -- monkeypatch one registry empty and confirm
+    the check catches it."""
+    monkeypatch.setitem(registry._REGISTRIES, "stt", {})
+
+    with pytest.raises(AssertionError):
+        registry.check_registries_non_empty()
