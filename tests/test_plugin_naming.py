@@ -183,3 +183,68 @@ def test_constructing_a_lookup_directly_over_two_hosts_sharing_a_name_still_rais
 
     with pytest.raises(AmbiguousToolError):
         McpToolHostLookup([host_a, host_b])
+
+
+# --- Task 3: the model is told who owns what, in the field it reads ------
+
+
+def test_a_prefixed_tools_description_names_its_owner_in_front_of_the_original_text():
+    ha = _plugin("ha", "Home Assistant", ["notify"])
+    weather = _plugin("weather", "Weather", ["notify"])
+
+    result = rename_collisions([ha, weather])
+
+    ha_notify = result.tools_for("ha")[0]
+    weather_notify = result.tools_for("weather")[0]
+    assert ha_notify.offered_description.startswith("[Home Assistant]")
+    assert "notify description" in ha_notify.offered_description
+    assert weather_notify.offered_description.startswith("[Weather]")
+    assert "notify description" in weather_notify.offered_description
+
+
+def test_an_uncontested_tools_description_is_unchanged():
+    weather = _plugin("weather", "Weather", ["forecast"])
+
+    result = rename_collisions([weather])
+
+    tool = result.tools_for("weather")[0]
+    assert tool.offered_description == "forecast description"
+
+
+def test_ownership_prompt_carries_one_line_per_prefixed_tool_and_nothing_for_uncontested_ones():
+    ha = _plugin("ha", "Home Assistant", ["list_entities", "notify"])
+    weather = _plugin("weather", "Weather", ["notify", "forecast"])
+
+    result = rename_collisions([ha, weather])
+
+    assert "list_entities" not in result.ownership_prompt
+    assert "forecast" not in result.ownership_prompt
+    assert f"ha{NAME_SEPARATOR}notify" in result.ownership_prompt
+    assert "Home Assistant" in result.ownership_prompt
+    assert f"weather{NAME_SEPARATOR}notify" in result.ownership_prompt
+    assert "Weather" in result.ownership_prompt
+    # Exactly two lines -- one per prefixed tool, no more.
+    assert len([line for line in result.ownership_prompt.splitlines() if line.strip()]) == 2
+
+
+def test_ownership_prompt_is_empty_when_nothing_collides():
+    plugins = [
+        _plugin("ha", "Home Assistant", ["list_entities"]),
+        _plugin("weather", "Weather", ["forecast"]),
+    ]
+
+    result = rename_collisions(plugins)
+
+    assert result.ownership_prompt == ""
+
+
+def test_two_rebuilds_with_no_plugin_change_produce_the_same_ownership_prompt_bytes():
+    plugins = [
+        _plugin("ha", "Home Assistant", ["list_entities", "notify"]),
+        _plugin("weather", "Weather", ["notify", "forecast"]),
+    ]
+
+    first = rename_collisions(plugins)
+    second = rename_collisions(plugins)
+
+    assert first.ownership_prompt == second.ownership_prompt

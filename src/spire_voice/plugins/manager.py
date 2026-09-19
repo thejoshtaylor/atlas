@@ -167,6 +167,15 @@ class PluginManager:
         # `tool_host_lookup`/`tools_schema`'s own "nothing running yet"
         # starting point.
         self._hosts_view: list[Any] = []
+        # Plan 06-04, Task 3 (D-10): one line per prefixed tool naming the
+        # tool and its owner, for the cacheable system prompt -- rebuilt
+        # on the exact same swap as `tool_host_lookup`/`tools_schema`
+        # below, since a prompt describing a plugin set the schema does
+        # not agree with is how a turn comes to misattribute a tool call.
+        # `""` here and after every rebuild with no collision, so a
+        # deployment with no colliding plugins gets a prompt
+        # byte-identical to one with no ownership block at all.
+        self.tool_ownership_prompt: str = ""
 
     @property
     def hosts(self) -> list[Any]:
@@ -637,6 +646,7 @@ class PluginManager:
         self._hosts_view = hosts
         self.tool_host_lookup = McpToolHostLookup(hosts)
         self.tools_schema = schema
+        self.tool_ownership_prompt = naming_result.ownership_prompt
 
     def _ping_interval_s(self, plugin: Plugin) -> float:
         """The ping watchdog's own poll interval for `plugin` -- well

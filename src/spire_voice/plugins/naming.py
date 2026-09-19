@@ -85,10 +85,10 @@ class RenamedTool:
 
 class NamingResult:
     """The whole pre-pass outcome: each plugin's own renamed tool list, in
-    that plugin's own tool order, plus the two owner lookups the rest of
-    this phase needs (plan 06-04's own `key_links` -- plan 06-05's
-    stored-row flag and plan 06-06's routes both read
-    `owners_of_bare_name`).
+    that plugin's own tool order, the two owner lookups the rest of this
+    phase needs (plan 06-04's own `key_links` -- plan 06-05's stored-row
+    flag and plan 06-06's routes both read `owners_of_bare_name`), and the
+    ownership block (D-10) for the cacheable system prompt.
 
     A plain class, not a `dataclass`, so the two lookup methods below are
     real accessors over private dict state rather than public fields a
@@ -100,10 +100,17 @@ class NamingResult:
         by_plugin: "Mapping[str, tuple[RenamedTool, ...]]",
         owner_of_offered_name: "Mapping[str, str]",
         owners_of_bare_name: "Mapping[str, tuple[str, ...]]",
+        ownership_prompt: str = "",
     ) -> None:
         self._by_plugin = dict(by_plugin)
         self._owner_of_offered_name = dict(owner_of_offered_name)
         self._owners_of_bare_name = dict(owners_of_bare_name)
+        # Plan 06-04, Task 3 (D-10): one line per prefixed tool naming the
+        # tool and its owner -- empty when nothing in this result
+        # collided, so a deployment with no colliding plugins gets a
+        # prompt byte-identical to one built with no ownership block at
+        # all (`06-04-PLAN.md`'s own `<behavior>`).
+        self.ownership_prompt = ownership_prompt
 
     def tools_for(self, slug: str) -> "tuple[RenamedTool, ...]":
         """Every tool `slug` offers post-pre-pass, in its own original
@@ -129,6 +136,17 @@ def rename_collisions(plugins: "Sequence[PluginTools]") -> NamingResult:
     publish, on every one of its owners, as `{slug}{NAME_SEPARATOR}{name}`
     -- every other name (and every uncontested plugin's whole tool list)
     is returned byte-identical to its input.
+
+    Plan 06-04, Task 3 (D-10): a prefixed tool's description is rewritten
+    too, prefixed with the owning plugin's display name -- description is
+    the field a language model actually reads, so this is what actually
+    lets it tell two same-named tools apart, not the naming convention in
+    the offered name it would otherwise have to guess. An uncontested
+    tool's description is returned unchanged, exactly like its name. The
+    same pass also builds `ownership_prompt`: one line per prefixed tool,
+    in the same owner-then-name order as `by_plugin` itself, naming the
+    tool and its owner for the cacheable system prompt -- empty when
+    nothing collided.
     """
     bare_name_counts: "Counter[str]" = Counter()
     owners_of_bare_name: "defaultdict[str, list[str]]" = defaultdict(list)
@@ -144,15 +162,22 @@ def rename_collisions(plugins: "Sequence[PluginTools]") -> NamingResult:
 
     by_plugin: "dict[str, tuple[RenamedTool, ...]]" = {}
     owner_of_offered_name: "dict[str, str]" = {}
+    ownership_lines: list[str] = []
     for plugin in plugins:
         renamed_tools: list[RenamedTool] = []
         for tool in plugin.tools:
             contested = bare_name_counts[tool.name] > 1
-            offered_name = f"{plugin.slug}{NAME_SEPARATOR}{tool.name}" if contested else tool.name
+            if contested:
+                offered_name = f"{plugin.slug}{NAME_SEPARATOR}{tool.name}"
+                offered_description = f"[{plugin.display_name}] {tool.description}"
+                ownership_lines.append(f"- {offered_name} is provided by {plugin.display_name}.")
+            else:
+                offered_name = tool.name
+                offered_description = tool.description
             renamed_tools.append(
                 RenamedTool(
                     offered_name=offered_name,
-                    offered_description=tool.description,
+                    offered_description=offered_description,
                     bare_name=tool.name,
                     owner_slug=plugin.slug,
                     prefixed=contested,
@@ -165,4 +190,5 @@ def rename_collisions(plugins: "Sequence[PluginTools]") -> NamingResult:
         by_plugin=by_plugin,
         owner_of_offered_name=owner_of_offered_name,
         owners_of_bare_name={name: tuple(slugs) for name, slugs in owners_of_bare_name.items()},
+        ownership_prompt="\n".join(ownership_lines),
     )

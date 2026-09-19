@@ -179,7 +179,7 @@ def _resolved_timezone_name() -> str:
     return _current_moment().tzname() or "the local zone"
 
 
-def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
+def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str = "") -> str:
     """Byte-identical across every turn -- the cacheable prefix.
 
     Carries only each known entity's id and friendly name, never a state
@@ -187,6 +187,13 @@ def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
     `brain.cache_system_prompt`'s cached prefix on every turn any entity's
     state changed, defeating the whole split D-14 exists to make. Live
     state lives in `_state_message` instead, rebuilt every turn.
+
+    `tool_ownership_prompt` (plan 06-04, Task 3, D-10) is
+    `PluginManager.tool_ownership_prompt` -- one line per tool name two
+    plugins both publish, naming which plugin owns which prefixed tool.
+    Defaults to `""`, which appends nothing at all: every caller that
+    predates this plan, and every deployment with no colliding plugins,
+    gets a prompt byte-identical to before this parameter existed.
     """
     lines = [
         "You control a home over voice through the tools you are given. "
@@ -195,6 +202,13 @@ def _catalog_prompt(entities: list[dict[str, Any]]) -> str:
     ]
     for entity in entities:
         lines.append(f"- {entity['entity_id']} ({entity['friendly_name']})")
+    if tool_ownership_prompt:
+        lines.append("")
+        lines.append(
+            "Some tool names below are shared by two plugins and are offered to you "
+            "prefixed with their owning plugin, so you can tell them apart:"
+        )
+        lines.append(tool_ownership_prompt)
     return "\n".join(lines)
 
 
@@ -756,7 +770,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         entities = _tool_result_json(entities_result)
     except UnknownToolError:
         entities = []
-    app.state.catalog_prompt = _catalog_prompt(entities if isinstance(entities, list) else [])
+    # Plan 06-04 (D-10): the ownership block naming which plugin owns
+    # each collision-prefixed tool -- `plugin_manager.tool_ownership_prompt`
+    # was rebuilt on the same swap as `plugin_manager.tools_schema` just
+    # above (`PluginManager.rebuild`'s own contract), so this can never
+    # describe a plugin set that schema does not.
+    app.state.catalog_prompt = _catalog_prompt(
+        entities if isinstance(entities, list) else [], plugin_manager.tool_ownership_prompt
+    )
 
     # Plan 04-05 (D-09): macros live in the database now, not on `config`.
     # This snapshot exists only for the wiring check

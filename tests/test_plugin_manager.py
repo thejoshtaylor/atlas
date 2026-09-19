@@ -667,3 +667,43 @@ def test_disabling_one_of_two_colliding_plugins_returns_the_survivor_to_its_bare
 
     tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
     assert tool_names == {"notify"}
+
+
+# --- Plan 06-04, Task 3: the ownership prompt rebuilds on the same swap --
+
+
+def test_tool_ownership_prompt_is_empty_before_any_collision(fake_plugin_repository):
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    ha_host = _FakeToolHost([("list_entities", "list entities")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager.rebuild()
+
+    assert manager.tool_ownership_prompt == ""
+
+
+def test_a_rebuild_that_adds_a_collision_updates_the_ownership_prompt_on_the_same_swap(
+    fake_plugin_repository,
+):
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
+    weather_host = _FakeToolHost([("notify", "Weather's own notify")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager.rebuild()
+    assert manager.tool_ownership_prompt == ""
+
+    # Installing the second, colliding plugin and rebuilding again updates
+    # the schema/lookup and the ownership prompt in the exact same call --
+    # never one without the other.
+    manager._plugins[2] = _running(weather_plugin, weather_host)
+    manager.rebuild()
+
+    assert f"ha{NAME_SEPARATOR}notify" in {
+        entry["function"]["name"] for entry in manager.tools_schema
+    }
+    assert f"ha{NAME_SEPARATOR}notify" in manager.tool_ownership_prompt
+    assert f"weather{NAME_SEPARATOR}notify" in manager.tool_ownership_prompt

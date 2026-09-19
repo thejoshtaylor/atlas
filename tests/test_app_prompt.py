@@ -108,6 +108,41 @@ def test_state_message_on_empty_mapping_is_not_an_empty_string():
     assert "current state" in message.lower()
 
 
+# --- Plan 06-04, Task 3: the ownership block (D-10) ----------------------
+
+
+def test_catalog_prompt_with_no_ownership_block_is_unchanged_from_before_the_parameter_existed():
+    """A deployment with no colliding plugins passes `""` (the default)
+    and must see a prompt byte-identical to one built before this
+    parameter existed at all."""
+    entities = _entities_from_fake_states()
+
+    with_default = _catalog_prompt(entities)
+    with_explicit_empty = _catalog_prompt(entities, "")
+
+    assert with_default == with_explicit_empty
+    assert "ownership" not in with_default.lower()
+
+
+def test_catalog_prompt_carries_the_ownership_block_when_given_one():
+    entities = _entities_from_fake_states()
+    ownership_block = "- weather__notify is provided by Weather."
+
+    prompt = _catalog_prompt(entities, ownership_block)
+
+    assert ownership_block in prompt
+
+
+def test_catalog_prompt_is_byte_identical_across_two_calls_with_the_same_ownership_block():
+    entities = _entities_from_fake_states()
+    ownership_block = "- weather__notify is provided by Weather."
+
+    first = _catalog_prompt(entities, ownership_block)
+    second = _catalog_prompt(entities, ownership_block)
+
+    assert first == second
+
+
 def test_catalog_prompt_carries_no_date_or_time_content():
     """D-01 (phase 4) adds the current date/weekday/time/timezone to
     `_state_message` only -- a volatile value leaking into
