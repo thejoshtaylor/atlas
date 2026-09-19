@@ -145,13 +145,15 @@ def env_value_for_slot(slot: CredentialSlot, config: Config) -> str:
     `config.tts.api_key` for the three provider slots (each read from its
     own config section rather than assumed to share one, even though
     `config.example.yaml` points all three at the same `${XAI_API_KEY}`
-    today), and the Home Assistant child's own declared `HA_TOKEN` env
-    entry for the fourth. An empty string means "no environment value,"
-    never a placeholder this function invents -- this is deliberately
-    reading `config`'s already-expanded fields, not re-reading
-    `os.environ` a second time, so this function's answer and
-    `config.py`'s own `${NAME}` expansion can never disagree about what
-    "the environment" produced.
+    today). An empty string means "no environment value," never a
+    placeholder this function invents -- this is deliberately reading
+    `config`'s already-expanded fields, not re-reading `os.environ` a
+    second time, so this function's answer and `config.py`'s own `${NAME}`
+    expansion can never disagree about what "the environment" produced.
+
+    Plan 06-01 (D-01): the fourth slot, `CredentialSlot.HOME_ASSISTANT`,
+    has no configuration-file source any more -- see that branch's own
+    comment below.
     """
     if slot is CredentialSlot.STT:
         return config.stt.api_key
@@ -160,8 +162,16 @@ def env_value_for_slot(slot: CredentialSlot, config: Config) -> str:
     if slot is CredentialSlot.TTS:
         return config.tts.api_key
     if slot is CredentialSlot.HOME_ASSISTANT:
-        ha_config = config.mcp_servers.get("ha")
-        return ha_config.env.get("HA_TOKEN", "") if ha_config is not None else ""
+        # Plan 06-01 (D-01): `Config.mcp_servers` is retired -- `HA_TOKEN`
+        # lives in `plugin_config_values` now, decrypted only inside
+        # `PluginManager`'s own spawn path (D-03) and the wizard's hub
+        # check (`routes/wizard.py::_ha_plugin_connection_info`), never
+        # read back through `Config`. This slot therefore has no
+        # configuration-file source any more; `GET /api/credentials`
+        # reports it `"database"` when a provider credential row exists
+        # for it, `"unset"` otherwise -- `"environment"` is no longer
+        # reachable for this one slot.
+        return ""
     raise ValueError(f"no environment source mapped for credential slot {slot!r}")
 
 

@@ -38,15 +38,16 @@ from spire_mcp.safety import Policy
 
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.calibration.runner import find_latest_calibration
-from spire_voice.config import Config
+from spire_voice.config import Config, SecurityConfig
 from spire_voice.crypto.credentials import (
     CredentialSlot,
+    decrypt_credential,
     resolve_credential_source,
-    resolve_credential_value,
 )
 from spire_voice.db.repository import (
     AccountRepository,
     CredentialRepository,
+    PluginRepository,
     SettingsRepository,
     SetupRepository,
 )
@@ -141,6 +142,38 @@ class _HubCheckFailed(Exception):
 
 def _hub_check_failed_error(exc: _HubCheckFailed) -> HTTPException:
     return HTTPException(status_code=502, detail=f"{exc.category}: {exc.message}")
+
+
+async def _ha_plugin_connection_info(
+    plugin_repo: PluginRepository, security: SecurityConfig
+) -> tuple[str, str]:
+    """`(base_url, token)` for the Home Assistant plugin -- read from
+    `plugins`/`plugin_config_values` (plan 06-01, D-01), never from
+    `Config.mcp_servers`, which the same plan retires: `HA_URL`/`HA_TOKEN`
+    live in the database now, seeded by `alembic/versions/
+    0008_plugin_tables.py`, the same single source of truth `PluginManager`
+    itself reads to spawn the child this route is probing the reachability
+    of. `HA_TOKEN` is decrypted here, the same single point D-03 already
+    names for `PluginManager`'s own spawn path -- never returned in this
+    route's own response body (`check_hub_step`'s own `WizardStepStatus`
+    carries only `checked_at`/`entity_count`, unchanged by this plan).
+    Returns `("", "")` when no `ha` plugin row exists at all.
+    """
+    plugins = await plugin_repo.list_plugins()
+    ha_plugin = next((plugin for plugin in plugins if plugin.slug == "ha"), None)
+    if ha_plugin is None:
+        return "", ""
+    base_url = ""
+    token = ""
+    for value in await plugin_repo.get_config_values(ha_plugin.id):
+        if value.key == "HA_URL":
+            base_url = value.value or ""
+        elif value.key == "HA_TOKEN":
+            if value.secret and value.ciphertext is not None and value.key_version is not None:
+                token = decrypt_credential(value.ciphertext, value.key_version, security)
+            else:
+                token = value.value or ""
+    return base_url, token
 
 
 async def _probe_home_assistant(base_url: str, token: str, *, client: httpx.AsyncClient) -> int:
@@ -264,12 +297,10 @@ async def check_hub_step(
     request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
 ) -> WizardStepStatus:
     config: Config = request.app.state.config
-    credential_repo: CredentialRepository = request.app.state.credential_repo
+    plugin_repo: PluginRepository = request.app.state.plugin_repo
     setup_repo: SetupRepository = request.app.state.setup_repo
 
-    ha_config = config.mcp_servers.get("ha")
-    base_url = ha_config.env.get("HA_URL", "") if ha_config is not None else ""
-    token, _source = await resolve_credential_value(CredentialSlot.HOME_ASSISTANT, config, credential_repo)
+    base_url, token = await _ha_plugin_connection_info(plugin_repo, config.security)
 
     if not base_url:
         raise _hub_check_failed_error(

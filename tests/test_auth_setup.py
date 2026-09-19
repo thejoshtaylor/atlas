@@ -82,6 +82,10 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
             # rather than from config.macros -- same reasoning as
             # credential_repo/settings_repo above.
             "macro_repo": conftest.FakeMacroRepository(),
+            # Plan 06-01: lifespan also builds a PluginManager over
+            # repositories["plugin_repo"] instead of reading config.
+            # mcp_servers (retired) -- same reasoning as macro_repo above.
+            "plugin_repo": conftest.FakePluginRepository(plugins=[smoke._ha_plugin_row()]),
             # Plan 05-01: lifespan also builds a WorkflowToolHost and a
             # WorkflowScheduler over repositories["workflow_repo"] --
             # same reasoning as macro_repo immediately above.
@@ -93,7 +97,9 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
     # set explicitly (`validate_secret_key_strength`, plan 03-05).
     monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", smoke._FakeToolHost)
+    monkeypatch.setattr(
+        smoke.plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host
+    )
     monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", smoke._fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", smoke._fake_build_engine)

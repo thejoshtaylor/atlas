@@ -421,55 +421,16 @@ tts:
 # (Config.from_config), the same way safety: already is (D-11) and
 # brain.model and gate.require_face were before it.
 
-mcp:
-  # Spoken over stdio to a child process. The tool server is never exposed to
-  # the network and xAI never connects to it -- the model asks for a call, this
-  # pod makes it. That matters: the alternative (xAI's remote MCP) would mean
-  # opening a path from the public internet into the house.
-  servers:
-    ha:
-      # NOT YET CONSUMED. Phase 1 spawns exactly one built-in tool server and
-      # hardcodes how, in McpToolHost.start. This block is the shape Phase 6
-      # reads when a plugin is any MCP server an admin adds; until then it is
-      # declaration, not configuration, and editing it changes nothing.
-      #
-      # `args` carries no interpreter on purpose. The child imports the same
-      # mcp SDK this process does, so it must run under the same interpreter:
-      # McpToolHost.start spawns it with sys.executable. A literal "python3"
-      # here would be whatever PATH resolves first -- outside an activated
-      # virtualenv, the system interpreter, which has no SDK. That failure does
-      # not even announce itself honestly: this repository has its own
-      # top-level mcp/ directory, so `import mcp` finds that namespace package
-      # and the child dies on "No module named 'mcp.server'", taking the whole
-      # application's startup down with it. This config once said "python3".
-      args: ["-m", "spire_mcp.ha"]
-      env:
-        HA_URL: "${HA_URL}"
-        HA_TOKEN: "${HA_TOKEN}"
-
-    weather:
-      # Phase 4 (D-02, D-13, CMD-04): a second, independent MCP child,
-      # spawned with its own environment and its own lock -- no Home
-      # Assistant URL, no token, no provider key. open-meteo needs no
-      # credential at all (D-02), which is why this is the cleanest
-      # possible demonstration of SAFE-09: the environment below carries
-      # only what this child needs to run and locate itself.
-      #
-      # A latitude/longitude pinpoints the physical house -- exactly the
-      # kind of detail this public repository never carries literally
-      # (see this file's own header). Both arrive through the same
-      # ${NAME} env-expansion every other secret in this file uses,
-      # resolved from a Secret in the real deployment. A missing or
-      # unparseable value stops this child from starting rather than
-      # serving a default location (spire_mcp.weather's own
-      # _read_coordinate) -- lifespan logs that failure by name and
-      # continues with the Home Assistant tools only (T-04-16): a house
-      # without a forecast is a better outcome than a house that will not
-      # boot because a public weather API was unreachable at startup.
-      args: ["-m", "spire_mcp.weather"]
-      env:
-        WEATHER_LATITUDE: "${WEATHER_LATITUDE}"
-        WEATHER_LONGITUDE: "${WEATHER_LONGITUDE}"
+# mcp: -- retired (D-01, plan 06-01). This file shipped an mcp: block
+# before this comment existed, so an operator upgrading from before Phase 6
+# still has one in their own, separately-held configuration file. Every MCP
+# server -- Home Assistant and weather included -- is a plugin now, seeded
+# once by the migration (alembic/versions/0008_plugin_tables.py) from
+# whatever mcp: block that file held at the time (HA_TOKEN encrypted at
+# rest). Install, enable, disable, and configure plugins in the webapp's
+# plugins screen from then on -- an mcp: key still present here is a
+# startup error naming the key (Config.from_config), the same way safety:
+# and macros: already are (D-11, D-09).
 
 debug:
   # One directory per interaction, holding the audio, every event with an

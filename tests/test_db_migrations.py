@@ -81,6 +81,10 @@ async def _reset_schema(async_url: str) -> None:
     engine = create_async_engine(async_url)
     async with engine.begin() as conn:
         for table in (
+            # Plan 06-01: 0008 adds these two -- plugin_config_values
+            # first, it holds the foreign key onto plugins.
+            "plugin_config_values",
+            "plugins",
             # Plan 05-01: 0006 adds these two -- workflow_steps first, it
             # holds the foreign key onto workflow_runs.
             "workflow_steps",
@@ -144,6 +148,23 @@ async def _fetch_macro_rows(async_url: str) -> list:
     return macro_rows
 
 
+async def _fetch_plugin_rows(async_url: str) -> list[tuple[str, bool, bool]]:
+    """`(slug, builtin, enforces_policy)` for every seeded `plugins` row,
+    in id order -- migration `0008`'s own sibling of `_fetch_macro_rows`
+    above."""
+    engine = create_async_engine(async_url)
+    try:
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text("SELECT slug, builtin, enforces_policy FROM plugins ORDER BY id")
+                )
+            ).fetchall()
+        return [(r.slug, r.builtin, r.enforces_policy) for r in rows]
+    finally:
+        await engine.dispose()
+
+
 @skip_without_postgres
 async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     """Running every migration twice against the same database, from empty,
@@ -153,19 +174,18 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     is retired), so migration `0005`'s own seed step seeds nothing against
     it -- this test's macro assertion proves the "absent key" case, the
     same way its policy assertion already proves `safety:`'s "absent key"
-    case."""
+    case. Plan 06-01: the same file carries no `mcp:` block either (D-01) --
+    migration `0008` still seeds exactly the two builtin plugin rows
+    unconditionally (this file's own module docstring: "a fresh install
+    reaches a running assistant with no file editing"), which is what the
+    plugin assertion below proves for the "absent key" case."""
     await _reset_schema(_TEST_DB_URL)
     monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
-    monkeypatch.setenv("HA_URL", "test-value")
-    monkeypatch.setenv("HA_TOKEN", "test-value")
-    # Plan 04-03: config.example.yaml's mcp.servers.weather block adds two
-    # more ${...} placeholders this real-file load must expand too.
-    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
-    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -173,6 +193,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     assert first_policy == [(1, "allow_all_except_denylist")]
     assert first_rules == []
     assert await _fetch_macro_rows(_TEST_DB_URL) == []
+    assert await _fetch_plugin_rows(_TEST_DB_URL) == [("ha", True, True), ("weather", True, False)]
 
     # Idempotent: Alembic's own applied-revision bookkeeping means a second
     # upgrade to the same head is a no-op, not a second seed.
@@ -181,6 +202,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     assert second_policy == first_policy
     assert second_rules == first_rules
     assert await _fetch_macro_rows(_TEST_DB_URL) == []
+    assert await _fetch_plugin_rows(_TEST_DB_URL) == [("ha", True, True), ("weather", True, False)]
 
 
 @skip_without_postgres
@@ -344,6 +366,114 @@ async def test_seeded_macros_match_the_config_block_they_came_from(tmp_path: Pat
     assert [
         {"tool": r.tool, "arguments": r.arguments} for r in action_rows
     ] == expected["actions"]
+
+
+@skip_without_postgres
+async def test_seeded_plugins_match_the_mcp_servers_block_they_came_from(
+    tmp_path: Path, monkeypatch
+):
+    """Migration `0008`'s seed step must carry an equivalent-shaped
+    `mcp.servers:` block into the database -- row-for-row equality with
+    the block it seeded from, not merely a non-zero row count, the same
+    discipline `test_seeded_macros_match_the_config_block_they_came_from`
+    above already applies to `macros:` (D-01). Also proves D-03: `HA_TOKEN`
+    is ciphertext at rest, never the plaintext this test wrote to the
+    config file.
+    """
+    await _reset_schema(_TEST_DB_URL)
+
+    ha_token_plaintext = "a-plainly-fictional-migration-seed-test-token"
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {
+                        "HA_URL": "http://ha.invalid:8123",
+                        "HA_TOKEN": ha_token_plaintext,
+                    },
+                },
+                "weather": {
+                    "args": ["-m", "spire_mcp.weather"],
+                    "env": {"WEATHER_LATITUDE": "51.5", "WEATHER_LONGITUDE": "-0.1"},
+                },
+            },
+        },
+        "database": {"url": _TEST_DB_URL},
+        "security": {},
+    }
+    config_path = tmp_path / "plugin-seed-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    _run_upgrade_head()
+
+    async def _fetch_seeded_plugins():
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                plugin_rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT id, slug, display_name, args, builtin, enforces_policy "
+                            "FROM plugins ORDER BY id"
+                        )
+                    )
+                ).fetchall()
+                config_value_rows = {}
+                for row in plugin_rows:
+                    values = (
+                        await conn.execute(
+                            text(
+                                "SELECT key, secret, value, ciphertext, key_version "
+                                "FROM plugin_config_values WHERE plugin_id = :plugin_id"
+                            ),
+                            {"plugin_id": row.id},
+                        )
+                    ).fetchall()
+                    config_value_rows[row.slug] = list(values)
+                return plugin_rows, config_value_rows
+        finally:
+            await engine.dispose()
+
+    plugin_rows, config_value_rows = await _fetch_seeded_plugins()
+
+    by_slug = {row.slug: row for row in plugin_rows}
+    assert set(by_slug) == {"ha", "weather"}
+
+    assert by_slug["ha"].args == ["-m", "spire_mcp.ha"]
+    assert by_slug["ha"].builtin is True
+    assert by_slug["ha"].enforces_policy is True
+    assert by_slug["weather"].args == ["-m", "spire_mcp.weather"]
+    assert by_slug["weather"].builtin is True
+    assert by_slug["weather"].enforces_policy is False
+
+    ha_values = {v.key: v for v in config_value_rows["ha"]}
+    assert ha_values["HA_URL"].secret is False
+    assert ha_values["HA_URL"].value == "http://ha.invalid:8123"
+    assert ha_values["HA_TOKEN"].secret is True
+    assert ha_values["HA_TOKEN"].value is None
+    assert ha_values["HA_TOKEN"].ciphertext is not None
+    # D-03: the plaintext token must never appear verbatim in the stored
+    # ciphertext -- proving this row is genuinely encrypted, not a
+    # base64-shaped no-op.
+    assert ha_token_plaintext.encode("utf-8") not in ha_values["HA_TOKEN"].ciphertext
+
+    weather_values = {v.key: v for v in config_value_rows["weather"]}
+    assert weather_values["WEATHER_LATITUDE"].secret is False
+    assert weather_values["WEATHER_LATITUDE"].value == "51.5"
+    assert weather_values["WEATHER_LONGITUDE"].value == "-0.1"
 
 
 async def _fetch_workflow_step_index_and_constraint_names(async_url: str) -> tuple[set, set]:

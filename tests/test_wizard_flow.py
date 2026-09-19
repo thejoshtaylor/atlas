@@ -37,7 +37,7 @@ from spire_voice.auth.tokens import issue_access_token
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.config import SecurityConfig
 from spire_voice.crypto.credentials import CredentialSlot, encrypt_credential
-from spire_voice.db.repository import Credential
+from spire_voice.db.repository import Plugin, PluginConfigValue
 from spire_voice.routes.auth import router as auth_router, setup_router
 from spire_voice.routes.wizard import router as wizard_router
 import spire_voice.routes.wizard as wizard_module
@@ -47,18 +47,66 @@ _HA_URL = "http://ha.invalid:8123"
 _NO_SUCH_CALIBRATION_DIR = "/tmp/spire-test-no-such-calibration-dir-wizard-flow"
 
 
-def _fake_config(*, ha_url: str = _HA_URL, calibration_dir: str = _NO_SUCH_CALIBRATION_DIR) -> SimpleNamespace:
+def _fake_config(*, calibration_dir: str = _NO_SUCH_CALIBRATION_DIR) -> SimpleNamespace:
     """A `Config`-shaped stand-in carrying only what `routes/wizard.py`'s
     own per-step checkers read: the three provider credential slots'
-    environment fallbacks (empty, matching a fresh install), the Home
-    Assistant server block's `HA_URL`, and the calibration directory."""
+    environment fallbacks (empty, matching a fresh install) and the
+    calibration directory. Plan 06-01: no `mcp_servers` any more -- the
+    hub step reads `HA_URL`/`HA_TOKEN` from a `PluginRepository` now
+    (`_ha_plugin_repo` below), never from `Config`.
+    """
     return SimpleNamespace(
         stt=SimpleNamespace(api_key=""),
         brain=SimpleNamespace(api_key=""),
         tts=SimpleNamespace(api_key=""),
-        mcp_servers={"ha": SimpleNamespace(env={"HA_URL": ha_url})} if ha_url else {},
         calibration=SimpleNamespace(dir=calibration_dir),
     )
+
+
+def _ha_plugin_repo(
+    *,
+    ha_url: str | None = _HA_URL,
+    ha_token: str | None = None,
+    security: SecurityConfig | None = None,
+) -> conftest.FakePluginRepository:
+    """A `PluginRepository` carrying only the `ha` plugin row `routes/
+    wizard.py::_ha_plugin_connection_info` reads (plan 06-01, D-01):
+    `HA_URL` as a plain config value, and `HA_TOKEN` -- when given --
+    encrypted through the real `encrypt_credential` under `security`, the
+    same "a database-stored value is the only path that reaches
+    `decrypt_credential`" shape this file's own pre-06-01 tests already
+    relied on for `CredentialSlot.HOME_ASSISTANT`.
+    """
+    now = datetime.now(timezone.utc)
+    plugin = Plugin(
+        id=1,
+        slug="ha",
+        display_name="Home Assistant",
+        transport="stdio",
+        args=("-m", "spire_mcp.ha"),
+        url=None,
+        enabled=True,
+        builtin=True,
+        enforces_policy=True,
+        timeout_ms=5000,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+    )
+    config_values: list[PluginConfigValue] = []
+    if ha_url:
+        config_values.append(
+            PluginConfigValue(key="HA_URL", secret=False, value=ha_url, ciphertext=None, key_version=None)
+        )
+    if ha_token:
+        assert security is not None, "ha_token given with no security to encrypt it under"
+        ciphertext, key_version = encrypt_credential(ha_token, security)
+        config_values.append(
+            PluginConfigValue(
+                key="HA_TOKEN", secret=True, value=None, ciphertext=ciphertext, key_version=key_version
+            )
+        )
+    return conftest.FakePluginRepository(plugins=[plugin], config_values={1: config_values})
 
 
 def _build_wizard_app(
@@ -69,6 +117,7 @@ def _build_wizard_app(
     settings_repo,
     *,
     config: SimpleNamespace | None = None,
+    plugin_repo: conftest.FakePluginRepository | None = None,
     ha_http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     """The wizard's own routers, plus `auth_router`/`setup_router` (the
@@ -81,6 +130,7 @@ def _build_wizard_app(
     app.state.credential_repo = credential_repo
     app.state.setup_repo = setup_repo
     app.state.settings_repo = settings_repo
+    app.state.plugin_repo = plugin_repo if plugin_repo is not None else _ha_plugin_repo()
     if ha_http_client is not None:
         app.state.ha_http_client = ha_http_client
     app.include_router(auth_router)
@@ -239,7 +289,13 @@ def test_the_wizard_cannot_finish_before_the_microphone_and_speaker_test_runs(mo
 # ---------------------------------------------------------------------
 
 
-def _authed_app(monkeypatch, *, config: SimpleNamespace | None = None, ha_http_client=None):
+def _authed_app(
+    monkeypatch,
+    *,
+    config: SimpleNamespace | None = None,
+    plugin_repo: conftest.FakePluginRepository | None = None,
+    ha_http_client=None,
+):
     monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = conftest.FakeAccountRepository()
@@ -248,7 +304,7 @@ def _authed_app(monkeypatch, *, config: SimpleNamespace | None = None, ha_http_c
     settings_repo = conftest.FakeSettingsRepository()
     app = _build_wizard_app(
         security, account_repo, credential_repo, setup_repo, settings_repo,
-        config=config, ha_http_client=ha_http_client,
+        config=config, plugin_repo=plugin_repo, ha_http_client=ha_http_client,
     )
     client = TestClient(app)
     admin = _create_admin(client)
@@ -304,16 +360,16 @@ def test_the_hub_check_route_never_returns_the_decrypted_home_assistant_token(mo
     # Home Assistant token shape, is the point either way.
     stored_value = "test-key"
 
-    app, client, _security, _admin, credential_repo, _setup_repo, _settings_repo = _authed_app(
-        monkeypatch, config=_fake_config()
-    )
-    ciphertext, key_version = encrypt_credential(stored_value, security)
-    credential_repo.credentials[CredentialSlot.HOME_ASSISTANT.value] = Credential(
-        slot=CredentialSlot.HOME_ASSISTANT.value,
-        ciphertext=ciphertext,
-        key_version=key_version,
-        updated_at=datetime.now(timezone.utc),
-        updated_by_user_id=None,
+    # Plan 06-01: `HA_TOKEN` is a plugin config value now, not a
+    # `CredentialSlot.HOME_ASSISTANT` provider credential -- `_ha_plugin_repo`
+    # is what makes this a genuinely database-stored (encrypted, decrypted
+    # only by `_ha_plugin_connection_info`) token, the same "only a real
+    # ciphertext row reaches decrypt_credential" shape this test's own
+    # docstring already required of the retired mechanism.
+    app, client, _security, _admin, _credential_repo, _setup_repo, _settings_repo = _authed_app(
+        monkeypatch,
+        config=_fake_config(),
+        plugin_repo=_ha_plugin_repo(ha_token=stored_value, security=security),
     )
 
     fake_ha = conftest.FakeHomeAssistant()

@@ -1250,21 +1250,30 @@ class Config:
     reason `safety:` does not -- a turn reads the live database, not a
     startup snapshot this class would otherwise hold stale (D-12).
 
+    Plan 06-01 retires `mcp:` the same way again (D-01, D-04): every MCP
+    server -- Home Assistant and weather included -- is a row in the
+    `plugins` table now, seeded by `alembic/versions/0008_plugin_tables.py`
+    and spawned by `PluginManager`, never by `Config`. `Config` carries no
+    `mcp_servers` field any more; `McpServerConfig` itself stays, because
+    the seed migration parses through it (one parser, not two).
+
     That rejection cannot be unconditional at the point this classmethod
     runs, though: `from_config` has no database connection, so it cannot
     itself tell "the seed migration has already carried this block forward"
     apart from "the seed migration has never run and this boot is the one
-    that must run it." `reject_legacy_safety_key`/`reject_legacy_macros_key`
-    exist for that reason -- `load_config`'s defaults (`True` for both)
-    preserve this classmethod's original, unconditional behaviour for every
-    caller that has no database state to consult (the CLI scripts under
-    `scripts/`, this module's own test suite). `app.py`'s `lifespan` is the
-    one caller that does have that state: it passes `False` for whichever
-    key is present, builds a `Config` regardless, and decides whether to
-    raise itself -- against real Alembic revision history, after migrations
-    have had their one chance to seed -- using `SAFETY_KEY_REJECTED_ERROR`/
-    `MACROS_KEY_REJECTED_ERROR` below so the message an operator sees is
-    identical either way, for either key.
+    that must run it." `reject_legacy_safety_key`/`reject_legacy_macros_key`/
+    `reject_legacy_mcp_key` exist for that reason -- `load_config`'s
+    defaults (`True` for all three) preserve this classmethod's original,
+    unconditional behaviour for every caller that has no database state to
+    consult (the CLI scripts under `scripts/`, this module's own test
+    suite). `app.py`'s `lifespan` is the one caller that does have that
+    state: it passes `False` for whichever key is present, builds a
+    `Config` regardless, and decides whether to raise itself -- against
+    real Alembic revision history, after migrations have had their one
+    chance to seed -- using `SAFETY_KEY_REJECTED_ERROR`/
+    `MACROS_KEY_REJECTED_ERROR`/`MCP_KEY_REJECTED_ERROR` below so the
+    message an operator sees is identical either way, for any of the three
+    keys.
     """
 
     server: ServerConfig
@@ -1278,7 +1287,6 @@ class Config:
     barge_in: BargeInConfig
     session: SessionConfig
     calibration: CalibrationConfig
-    mcp_servers: dict[str, McpServerConfig]
     database: DatabaseConfig
     security: SecurityConfig
     workflow: WorkflowConfig
@@ -1290,13 +1298,15 @@ class Config:
         *,
         reject_legacy_safety_key: bool = True,
         reject_legacy_macros_key: bool = True,
+        reject_legacy_mcp_key: bool = True,
     ) -> "Config":
         raw = raw or {}
         if "safety" in raw and reject_legacy_safety_key:
             raise ConfigError(SAFETY_KEY_REJECTED_ERROR)
         if "macros" in raw and reject_legacy_macros_key:
             raise ConfigError(MACROS_KEY_REJECTED_ERROR)
-        mcp_servers_raw = raw.get("mcp", {}).get("servers", {}) or {}
+        if "mcp" in raw and reject_legacy_mcp_key:
+            raise ConfigError(MCP_KEY_REJECTED_ERROR)
         return cls(
             server=ServerConfig.from_config(raw.get("server")),
             stt=SttConfig.from_config(raw.get("stt")),
@@ -1309,10 +1319,6 @@ class Config:
             barge_in=BargeInConfig.from_config(raw.get("barge_in")),
             session=SessionConfig.from_config(raw.get("debug")),
             calibration=CalibrationConfig.from_config(raw.get("calibration")),
-            mcp_servers={
-                name: McpServerConfig.from_config(server_raw)
-                for name, server_raw in mcp_servers_raw.items()
-            },
             database=DatabaseConfig.from_config(raw.get("database")),
             security=SecurityConfig.from_config(raw.get("security")),
             workflow=WorkflowConfig.from_config(raw.get("workflow")),
@@ -1384,6 +1390,21 @@ MACROS_KEY_REJECTED_ERROR = (
     "macros/macro_actions/macro_aliases tables, or the webapp's macro "
     "editor, for your seeded entries), delete the macros: block from this "
     "file and edit macros in the webapp from then on."
+)
+
+# Plan 06-01's own generalization of the two constants above (D-01, D-16):
+# every MCP server -- Home Assistant and weather included -- is a plugin
+# row now, seeded by the migration named below.
+MCP_KEY_REJECTED_ERROR = (
+    "mcp: no longer exists in the configuration file -- plugins now live "
+    "in the database, seeded from this same file by the migration "
+    "(alembic/versions/0008_plugin_tables.py) the first time this deployment "
+    "started under Phase 6. If this is that first boot, do not remove the "
+    "block until the migration has run once against a reachable database -- "
+    "it is what carries your plugins forward. Once it has run (check the "
+    "plugins/plugin_config_values tables, or the webapp's plugins screen, "
+    "for your seeded entries), delete the mcp: block from this file and "
+    "edit plugins in the webapp from then on."
 )
 
 

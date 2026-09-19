@@ -456,7 +456,7 @@ def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_
     # (`validate_secret_key_strength`, plan 03-05) set explicitly.
     monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", smoke._FakeToolHost)
+    monkeypatch.setattr(smoke.plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", smoke._fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", smoke._fake_build_engine)

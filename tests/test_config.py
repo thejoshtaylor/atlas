@@ -51,14 +51,6 @@ def _minimal_raw_config() -> dict:
             "browser_sample_rate": 24000,
             "optimize_streaming_latency": 2,
         },
-        "mcp": {
-            "servers": {
-                "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
-                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
-                },
-            },
-        },
         "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
     }
 
@@ -321,6 +313,40 @@ def test_macros_key_still_present_is_a_startup_error_naming_it():
     assert "macros" in str(exc.value)
 
 
+def test_mcp_key_still_present_is_a_startup_error_naming_it():
+    """D-01 (plan 06-01): every MCP server used to carry now lives in the
+    `plugins` table, seeded by `alembic/versions/0008_plugin_tables.py` --
+    a config file still carrying the `mcp:` key raises `ConfigError`
+    naming it, the same way `safety:`/`macros:` already do (D-11, D-09)."""
+    from spire_voice.config import Config, ConfigError
+
+    raw = _minimal_raw_config()
+    raw["mcp"] = {
+        "servers": {
+            "ha": {
+                "args": ["-m", "spire_mcp.ha"],
+                "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
+            },
+        },
+    }
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw)
+    assert "mcp" in str(exc.value)
+
+    # An explicitly empty block is still the key being present -- rejected
+    # the same way, matching `test_safety_key_still_present_is_a_startup_
+    # error_naming_it`'s own coverage of that edge case for `safety:`.
+    raw_empty = _minimal_raw_config()
+    raw_empty["mcp"] = {}
+    with pytest.raises(ConfigError) as exc:
+        Config.from_config(raw_empty)
+    assert "mcp" in str(exc.value)
+
+    # No mcp: key at all loads cleanly -- this is the shape every other
+    # test in this file already exercises via _minimal_raw_config().
+    Config.from_config(_minimal_raw_config())
+
+
 def test_macro_alias_matching_its_own_phrase_loads_cleanly_as_one_key():
     from spire_voice.config import MacroConfig
 
@@ -490,15 +516,12 @@ def test_example_config_loads_end_to_end(monkeypatch):
     assert config.database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
     assert config.database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
 
-    # Plan 04-03: the weather child's own server block loads with the two
-    # coordinate placeholders expanded, and carries no Home Assistant
-    # credential (SAFE-09) -- the example file and the parser drifting
-    # apart on this key is the failure this line prevents.
-    weather_server = config.mcp_servers["weather"]
-    assert weather_server.args == ("-m", "spire_mcp.weather")
-    assert weather_server.env == {"WEATHER_LATITUDE": "0.0", "WEATHER_LONGITUDE": "0.0"}
-    assert "HA_TOKEN" not in weather_server.env
-    assert "HA_URL" not in weather_server.env
+    # Plan 06-01: `mcp:` (and `Config.mcp_servers`) is retired -- every MCP
+    # server, weather included, is a plugin row now, seeded by
+    # `alembic/versions/0008_plugin_tables.py` and read back by
+    # `PluginRepository`, not by `Config`. This file's own
+    # `test_mcp_key_still_present_is_a_startup_error_naming_it` covers the
+    # rejection; there is no `Config` field left to assert on here.
 
     assert config.database.run_migrations_at_startup is True
     assert config.security.secret_key_env == "SPIRE_SECRET_KEY"

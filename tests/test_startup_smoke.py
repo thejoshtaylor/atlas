@@ -73,7 +73,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 import conftest
 import spire_voice.app as app_module
-from spire_voice.db.repository import Setting, User
+from spire_voice.db.repository import Plugin, Setting, User
+from spire_voice.plugins import manager as plugin_manager_module
 from spire_voice.transports.base import SourceFormat
 from spire_voice.turn.brain_race import TierBrain
 
@@ -105,13 +106,13 @@ _EXPECTED_STATE_ATTRS = [
     "brain",
     "tts",
     "tool_host",
-    # Plan 04-03 (D-13): the lookup every `run_turn` call site actually
-    # passes -- always present (one host, or two), even when no
-    # `mcp.servers.weather` block is configured at all. `weather_tool_host`
-    # is deliberately NOT in this list: it is a legitimate `None` both
-    # when weather is unconfigured and when its child failed to start
-    # (T-04-16), so "present" cannot mean "non-None" for that one
-    # attribute the way it does for every other resource here.
+    # Plan 04-03 (D-13), generalized by plan 06-01 (D-04): the lookup
+    # every `run_turn` call site actually passes -- always present (one
+    # plugin, or several), built by `PluginManager` regardless of which
+    # plugins are configured. `plugin_manager` itself (below) is what a
+    # test reaches for a specific plugin's own host now (`tool_host_for`);
+    # there is no more one-attribute-per-plugin shape to check here.
+    "plugin_manager",
     "tool_host_lookup",
     "tools_schema",
     "catalog_prompt",
@@ -175,14 +176,11 @@ def _write_fake_config(tmp_path: Path, *, extra: dict | None = None) -> Path:
             "voice_id": "eve",
             "cache_dir": str(tmp_path / "tts-cache"),
         },
-        "mcp": {
-            "servers": {
-                "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
-                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
-                },
-            },
-        },
+        # Plan 06-01: the mcp: key is retired (D-01) -- Config.from_config
+        # now raises if it is present (the same treatment safety:/macros:
+        # already got), so this fixture stops emitting one. Every plugin a
+        # smoke test needs is seeded through `_fake_build_repositories`'s
+        # own `FakePluginRepository`, never through this config file.
         # Plan 03-01: database.url has no default (D-01/D-02) -- a real
         # boot never reaches this far without one, and this smoke test's
         # `lifespan` run is no exception. Never actually connected here:
@@ -218,7 +216,7 @@ def _fake_build_tiers(brain_config: object) -> tuple[TierBrain, ...]:
 
 
 class _FakeToolHost:
-    """Replaces `McpToolHost` outright.
+    """Replaces the real `McpToolHost` a plugin would otherwise spawn.
 
     `FakeHomeAssistant` (`tests/conftest.py`) answers over an in-process
     `httpx.MockTransport`, which cannot intercept a request from a real
@@ -227,15 +225,19 @@ class _FakeToolHost:
     real listening HTTP server standing in for Home Assistant, which is out
     of this plan's scope. This fake proves `lifespan`'s wiring (every
     resource lands on `app.state`) without spawning a process at all.
+
+    Plan 06-01: no longer monkeypatched over `McpToolHost` itself --
+    `lifespan` no longer constructs one directly (`PluginManager` does,
+    inside `plugins.host.start_plugin_host`). The seam this file patches
+    now is `spire_voice.plugins.manager.start_plugin_host` itself (see
+    `_fake_start_plugin_host` below), which returns instances of this
+    class and its siblings.
     """
 
     def __init__(self) -> None:
         self.tools = [
             Tool(name="ha_list_entities", description="List entities.", inputSchema={"type": "object", "properties": {}}),
         ]
-
-    async def start(self, **kwargs: object) -> None:
-        return None
 
     async def call_tool(self, name: str, arguments: dict) -> object:
         return SimpleNamespace(structuredContent=[], content=[])
@@ -246,11 +248,11 @@ class _FakeToolHost:
 
 class _FakeWeatherToolHost:
     """A second, distinctly-tooled twin of `_FakeToolHost` (D-13, plan
-    04-03): its `.tools` list carries a name no HA-shaped fake in this
-    file advertises, so `McpToolHostLookup`'s own ambiguous-name check
-    (T-04-12) has nothing to trip on when both the Home Assistant and
-    weather children in a test are built from fakes defined in this same
-    module.
+    04-03; D-04, plan 06-01): its `.tools` list carries a name no HA-shaped
+    fake in this file advertises, so `McpToolHostLookup`'s own
+    ambiguous-name check (T-04-12) has nothing to trip on when both the
+    Home Assistant and weather plugins in a test are built from fakes
+    defined in this same module.
     """
 
     def __init__(self) -> None:
@@ -262,9 +264,6 @@ class _FakeWeatherToolHost:
             ),
         ]
 
-    async def start(self, **kwargs: object) -> None:
-        return None
-
     async def call_tool(self, name: str, arguments: dict) -> object:
         return SimpleNamespace(structuredContent={}, content=[])
 
@@ -272,79 +271,82 @@ class _FakeWeatherToolHost:
         return None
 
 
-class _FakeRaisingWeatherToolHost:
-    """A weather-shaped fake whose `start()` raises -- proving T-04-16:
-    a weather child that fails to start must not stop the whole
-    application, and the Home Assistant host must still be reachable
-    afterwards.
-    """
+def _ha_plugin_row(*, plugin_id: int = 1) -> Plugin:
+    """The `ha` builtin row every smoke test needs seeded on its
+    `FakePluginRepository` -- `PluginManager.start_all()` reads this the
+    same way it would read a real migration-seeded row (plan 06-01, D-01,
+    D-04). No config values are seeded: this file's own fake
+    `start_plugin_host` (below) ignores whatever environment
+    `PluginManager` builds and returns a canned fake host regardless, so
+    an empty config-value list is enough to exercise the wiring with no
+    `SPIRE_SECRET_KEY` dependency."""
+    now = datetime.now(timezone.utc)
+    return Plugin(
+        id=plugin_id,
+        slug="ha",
+        display_name="Home Assistant",
+        transport="stdio",
+        args=("-m", "spire_mcp.ha"),
+        url=None,
+        enabled=True,
+        builtin=True,
+        enforces_policy=True,
+        timeout_ms=5000,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+    )
 
-    def __init__(self) -> None:
-        self.tools: list[Tool] = []
 
-    async def start(self, **kwargs: object) -> None:
-        raise RuntimeError("simulated weather child startup failure")
+def _weather_plugin_row(*, plugin_id: int = 2) -> Plugin:
+    """The `weather` builtin row a test opts into seeding alongside
+    `_ha_plugin_row` -- D-13/plan 04-03's two-host scenario, generalized
+    to a plugin row (D-04, plan 06-01)."""
+    now = datetime.now(timezone.utc)
+    return Plugin(
+        id=plugin_id,
+        slug="weather",
+        display_name="Weather",
+        transport="stdio",
+        args=("-m", "spire_mcp.weather"),
+        url=None,
+        enabled=True,
+        builtin=True,
+        enforces_policy=False,
+        timeout_ms=5000,
+        created_at=now,
+        updated_at=now,
+        created_by_user_id=None,
+    )
 
-    async def call_tool(self, name: str, arguments: dict) -> object:
-        raise AssertionError("call_tool must never be reached on a host that failed to start")
 
-    async def aclose(self) -> None:
-        return None
-
-
-def _make_two_host_fake_tool_host_factory():
-    """A callable, monkeypatched over `McpToolHost` itself, that hands out
-    an HA-shaped fake on its first call and a weather-shaped fake on
-    every call after -- matching `lifespan`'s own two `McpToolHost()`
-    call order (Home Assistant, then weather, D-13). A bare class cannot
-    do this: both calls construct with no arguments, so only call order
-    can tell them apart.
-    """
-    calls = {"count": 0}
-
-    def _factory(*args: object, **kwargs: object) -> object:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return _FakeToolHost()
+async def _fake_start_plugin_host(plugin: Plugin, **kwargs: object) -> object:
+    """Replaces `spire_voice.plugins.manager.start_plugin_host`: the real
+    one spawns an actual subprocess through `McpToolHost`. Every plugin
+    row this file seeds is either `ha` or `weather`; each gets its own
+    canned fake, keyed by slug -- `PluginManager` itself decides nothing
+    about *which* fake comes back, only that it calls this function
+    identically for every plugin (D-04's "no per-slug branch" carried
+    into this file's own test double)."""
+    if plugin.slug == "ha":
+        return _FakeToolHost()
+    if plugin.slug == "weather":
         return _FakeWeatherToolHost()
-
-    return _factory
-
-
-def _make_failing_weather_tool_host_factory():
-    """Same call-order trick as `_make_two_host_fake_tool_host_factory`,
-    but the second (weather) host is the one whose `start()` raises."""
-    calls = {"count": 0}
-
-    def _factory(*args: object, **kwargs: object) -> object:
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return _FakeToolHost()
-        return _FakeRaisingWeatherToolHost()
-
-    return _factory
+    raise AssertionError(f"_fake_start_plugin_host: unexpected plugin slug {plugin.slug!r}")
 
 
-def _weather_mcp_servers_extra() -> dict:
-    """The `mcp.servers` block `_write_fake_config`'s own `extra` merges
-    in whole (it replaces the top-level `mcp` key outright, not a deep
-    merge) -- repeats the base fixture's `ha` block alongside a `weather`
-    one, matching `config.example.yaml`'s own two-child shape.
-    """
-    return {
-        "mcp": {
-            "servers": {
-                "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
-                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
-                },
-                "weather": {
-                    "args": ["-m", "spire_mcp.weather"],
-                    "env": {"WEATHER_LATITUDE": "0.0", "WEATHER_LONGITUDE": "0.0"},
-                },
-            },
-        },
-    }
+async def _fake_start_plugin_host_weather_fails(plugin: Plugin, **kwargs: object) -> object:
+    """Like `_fake_start_plugin_host`, but the `weather` plugin raises --
+    used by the one test below documenting this plan's own, temporary
+    posture (a plugin start failure currently propagates and stops the
+    boot; the non-blocking guarantee T-04-16 established for weather
+    specifically lands for every plugin in plan 06-02, per Task 1's own
+    action text)."""
+    if plugin.slug == "ha":
+        return _FakeToolHost()
+    if plugin.slug == "weather":
+        raise RuntimeError("simulated weather child startup failure")
+    raise AssertionError(f"_fake_start_plugin_host_weather_fails: unexpected slug {plugin.slug!r}")
 
 
 async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voice_id: str, sink: object) -> dict:
@@ -426,11 +428,29 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
         # here would `KeyError` on every boot this fake drives, the same
         # reasoning `credential_repo`/`settings_repo` were added for above.
         "macro_repo": conftest.FakeMacroRepository(),
+        # Plan 06-01: `lifespan` now also builds a `PluginManager` over
+        # `repositories["plugin_repo"]` instead of reading `config.
+        # mcp_servers` (retired) -- omitting it here would `KeyError` on
+        # every boot this fake drives, same reasoning as `macro_repo`
+        # above. Seeded with the `ha` builtin row only; the two-host test
+        # below seeds its own repository with `weather` added.
+        "plugin_repo": conftest.FakePluginRepository(plugins=[_ha_plugin_row()]),
         # Plan 05-01: `lifespan` now also builds a `WorkflowToolHost` and
         # a `WorkflowScheduler` over `repositories["workflow_repo"]` --
         # same reasoning as `macro_repo` immediately above.
         "workflow_repo": conftest.FakeWorkflowRepository(),
     }
+
+
+def _fake_build_repositories_with_weather(config: object, engine: object) -> dict:
+    """Like `_fake_build_repositories`, but `plugin_repo` also carries the
+    `weather` builtin row -- the two-host wiring tests below need both
+    seeded."""
+    repositories = _fake_build_repositories(config, engine)
+    repositories["plugin_repo"] = conftest.FakePluginRepository(
+        plugins=[_ha_plugin_row(), _weather_plugin_row()]
+    )
+    return repositories
 
 
 class _FakeWakeDetector:
@@ -517,7 +537,7 @@ class _FakeCameraSource:
 
 def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch):
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -554,7 +574,7 @@ def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_appli
         raise RuntimeError("simulated migration failure")
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _raising_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -571,21 +591,20 @@ def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_appli
 def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_lookup(
     tmp_path, monkeypatch
 ):
-    """D-13, T-04-13: a second `McpToolHost` for weather, a small
-    name-to-host lookup over both, `app.state.tool_host` still the exact
-    Home Assistant host object, and the merged tool schema carrying both
-    children's tool names.
+    """D-04 (plan 06-01), T-04-13: both Home Assistant and weather reach
+    the assistant as ordinary plugin rows, spawned through the same
+    `PluginManager` loop, merged into one `McpToolHostLookup`.
+    `app.state.tool_host` stays pointed at the plugin that enforces the
+    house policy (Home Assistant) specifically -- the policy editor's
+    respawn (`routes/policy.py`) and `_make_state_fetch` both still read
+    that attribute by name.
     """
-    monkeypatch.setattr(
-        app_module,
-        "CONFIG_PATH",
-        str(_write_fake_config(tmp_path, extra=_weather_mcp_servers_extra())),
-    )
-    monkeypatch.setattr(app_module, "McpToolHost", _make_two_host_fake_tool_host_factory())
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
-    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories_with_weather)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
@@ -595,14 +614,15 @@ def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_l
         assert response.status_code == 200
 
         ha_host = app_module.app.state.tool_host
-        weather_host = app_module.app.state.weather_tool_host
         lookup = app_module.app.state.tool_host_lookup
+        weather_host = app_module.app.state.plugin_manager.tool_host_for("weather")
 
+        assert ha_host is not None
         assert weather_host is not None
         assert lookup is not None
         # T-04-13: the policy editor's respawn (routes/policy.py) and
         # _make_state_fetch both read app.state.tool_host by name -- it
-        # must still be the exact object the Home Assistant child was
+        # must still be the exact object the Home Assistant plugin was
         # started on, not the lookup and not the weather host.
         assert app_module.app.state.tool_host is ha_host
         assert app_module.app.state.tool_host is not lookup
@@ -613,37 +633,34 @@ def test_lifespan_starts_a_weather_child_alongside_home_assistant_and_builds_a_l
         assert "weather_current" in tool_names
 
 
-def test_a_weather_child_that_fails_to_start_does_not_stop_the_boot(tmp_path, monkeypatch):
-    """T-04-16: a weather child that will not start must not take the
-    whole application down with it -- the opposite posture from the Home
-    Assistant child, whose `start()` failure does propagate. The
-    application still boots, with the Home Assistant tools reachable and
-    no weather host in the lookup.
+def test_a_plugin_that_fails_to_start_currently_stops_the_boot_pending_06_02(
+    tmp_path, monkeypatch
+):
+    """T-04-16's non-blocking-startup guarantee (D-07: "no plugin blocks
+    startup, Home Assistant included") is deferred to plan 06-02 -- Task
+    1's own action text: "this task's start_all() may let a start failure
+    propagate for now only in the sense that it does not yet classify it
+    as degraded." This documents the current, temporary posture rather
+    than silently losing coverage of the seam a weather-specific test
+    used to hold (see WINDOWS.md): once 06-02 lands, replace this with a
+    test asserting the non-blocking behavior again, for every plugin, not
+    only weather.
     """
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(
-        app_module,
-        "CONFIG_PATH",
-        str(_write_fake_config(tmp_path, extra=_weather_mcp_servers_extra())),
+        plugin_manager_module, "start_plugin_host", _fake_start_plugin_host_weather_fails
     )
-    monkeypatch.setattr(app_module, "McpToolHost", _make_failing_weather_tool_host_factory())
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
-    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories_with_weather)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
-    with TestClient(app_module.app) as client:
-        response = client.get("/transport")
-        assert response.status_code == 200
-
-        assert app_module.app.state.weather_tool_host is None
-        assert app_module.app.state.tool_host_lookup is not None
-
-        tool_names = {entry["function"]["name"] for entry in app_module.app.state.tools_schema}
-        assert "ha_list_entities" in tool_names
-        assert "weather_current" not in tool_names
+    with pytest.raises(RuntimeError, match="simulated weather child startup failure"):
+        with TestClient(app_module.app):
+            pass
 
 
 def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypatch):
@@ -657,7 +674,7 @@ def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypa
     `on_reconnect` it actually passed, proving the wiring is a real
     connection between the two supervisors rather than merely present."""
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -708,7 +725,7 @@ def test_camera_runner_is_wired_with_the_configured_gate_and_barge_in_policy(tmp
         "barge_in": {"min_duration_ms": 555},
     }
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -804,7 +821,7 @@ def test_correlation_enabled_with_no_calibration_refuses_to_start(tmp_path, monk
         "calibration": {"dir": str(tmp_path / "calibration")},
     }
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -836,7 +853,7 @@ def test_correlation_enabled_with_a_stale_calibration_refuses_to_start(tmp_path,
         "calibration": {"dir": str(calib_dir)},
     }
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -864,7 +881,7 @@ def test_correlation_enabled_with_a_valid_calibration_wires_the_runner(tmp_path,
         "calibration": {"dir": str(calib_dir)},
     }
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -887,7 +904,7 @@ def test_correlation_disabled_boots_unchanged_and_attaches_no_calibration(tmp_pa
     """The shipped default: no calibration directory even exists, and
     nothing about startup looks at it."""
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -912,7 +929,7 @@ def test_an_unreadable_calibration_with_correlation_off_boots_normally(tmp_path,
 
     extra = {"calibration": {"dir": str(calib_dir)}}
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path, extra=extra)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -955,11 +972,12 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
             "setup_repo": conftest.FakeSetupRepository(),
             "settings_repo": conftest.FakeSettingsRepository(),
             "macro_repo": conftest.FakeMacroRepository(),
+            "plugin_repo": conftest.FakePluginRepository(plugins=[_ha_plugin_row()]),
             "workflow_repo": conftest.FakeWorkflowRepository(),
         }
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -992,14 +1010,20 @@ def test_the_real_boot_answers_create_admin_while_every_other_route_reports_setu
 # --- Plan 03-07 Task 3: credential resolution, through a real boot ---------
 
 
-def _write_fake_config_with_credential(tmp_path: Path, *, api_key: str, ha_token: str) -> Path:
-    """Like `_write_fake_config`, but with every provider credential set
-    to exactly `api_key`/`ha_token` -- `_write_fake_config`'s own base
-    dict already carries `"test-key"`/`"test-token"`, but this file's two
-    new tests below need full control over the value (empty, to prove a
-    clean boot with nothing stored and nothing in the environment; a
-    single known literal, to prove startup logs its source and never its
-    value)."""
+def _write_fake_config_with_credential(tmp_path: Path, *, api_key: str) -> Path:
+    """Like `_write_fake_config`, but with every one of the three
+    AI-provider credentials set to exactly `api_key` -- `_write_fake_config`'s
+    own base dict already carries `"test-key"`, but this file's two tests
+    below need full control over the value (empty, to prove a clean boot
+    with nothing stored and nothing in the environment; a single known
+    literal, to prove startup logs its source and never its value).
+
+    Plan 06-01: no `ha_token` parameter any more -- `CredentialSlot.
+    HOME_ASSISTANT` has no configuration-file source left to set
+    (`Config.mcp_servers` is retired; `HA_TOKEN` lives in
+    `plugin_config_values` now, read only by `PluginManager` and the
+    wizard's own hub check, never by `env_value_for_slot`).
+    """
     extra = {
         "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": api_key},
         "brain": {
@@ -1012,14 +1036,6 @@ def _write_fake_config_with_credential(tmp_path: Path, *, api_key: str, ha_token
             "api_key": api_key,
             "voice_id": "eve",
             "cache_dir": str(tmp_path / "tts-cache"),
-        },
-        "mcp": {
-            "servers": {
-                "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
-                    "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": ha_token},
-                },
-            },
         },
     }
     return _write_fake_config(tmp_path, extra=extra)
@@ -1036,9 +1052,9 @@ def test_the_application_starts_with_every_credential_slot_unset(tmp_path, monke
     monkeypatch.setattr(
         app_module,
         "CONFIG_PATH",
-        str(_write_fake_config_with_credential(tmp_path, api_key="", ha_token="")),
+        str(_write_fake_config_with_credential(tmp_path, api_key="")),
     )
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -1073,9 +1089,9 @@ def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeyp
     monkeypatch.setattr(
         app_module,
         "CONFIG_PATH",
-        str(_write_fake_config_with_credential(tmp_path, api_key=secret_value, ha_token=secret_value)),
+        str(_write_fake_config_with_credential(tmp_path, api_key=secret_value)),
     )
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -1094,7 +1110,15 @@ def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeyp
     )
     for record in resolution_records:
         message = record.getMessage()
-        assert "resolved from environment" in message
+        # Plan 06-01: `CredentialSlot.HOME_ASSISTANT` has no
+        # configuration-file source left (`Config.mcp_servers` is
+        # retired) -- it resolves "unset" regardless of what this test's
+        # own config file carries, unlike the three AI-provider slots
+        # `_write_fake_config_with_credential` actually sets.
+        if "ha_token" in message:
+            assert "resolved from unset" in message
+        else:
+            assert "resolved from environment" in message
         assert secret_value not in message
 
     for record in caplog.records:
@@ -1136,7 +1160,7 @@ def test_the_application_reads_the_stored_audio_source_setting_when_present(
     through a real boot -- not a unit call against `resolve_audio_source`
     alone."""
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -1165,7 +1189,7 @@ def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is
     all -- the shipped default (`camera`) wins, and the resolution is
     reported as coming from the configuration, not the database."""
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
     monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
@@ -1297,7 +1321,7 @@ def test_first_boot_seeds_a_legacy_safety_block_through_the_real_lifespan_and_th
     # docstring) -- both must point at the same file for the seed to read
     # the block this test just wrote.
     monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
@@ -1469,7 +1493,7 @@ def test_first_boot_seeds_a_legacy_macros_block_through_the_real_lifespan_and_st
     # point at the same file for the seed to read the block this test just
     # wrote.
     monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
@@ -1510,7 +1534,7 @@ def test_a_second_boot_with_the_legacy_macros_block_still_present_refuses_naming
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
@@ -1558,7 +1582,7 @@ def test_a_first_boot_with_both_legacy_safety_and_macros_keys_present_seeds_both
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
@@ -1611,7 +1635,7 @@ def test_a_boot_with_migrations_disabled_and_a_macros_block_present_refuses(
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setattr(app_module, "McpToolHost", _FakeToolHost)
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)

@@ -32,6 +32,7 @@ from spire_voice.calibration.record import EchoCalibration
 from spire_voice.calibration.runner import find_latest_calibration, run_echo_calibration
 from spire_voice.config import (
     MACROS_KEY_REJECTED_ERROR,
+    MCP_KEY_REJECTED_ERROR,
     SAFETY_KEY_REJECTED_ERROR,
     Config,
     ConfigError,
@@ -134,6 +135,14 @@ _LEGACY_CONFIG_KEYS: tuple[_LegacyConfigKey, ...] = (
         seeded_tables_hint=(
             "macros/macro_actions/macro_aliases tables, or the webapp's macro editor"
         ),
+    ),
+    # Plan 06-01 (D-01): one more tuple entry, not a second copy of the
+    # sequence this tuple drives -- the whole point of this generalization,
+    # stated in its own docstring above.
+    _LegacyConfigKey(
+        name="mcp",
+        rejected_error=MCP_KEY_REJECTED_ERROR,
+        seeded_tables_hint="plugins/plugin_config_values tables, or the webapp's plugins screen",
     ),
 )
 
@@ -574,7 +583,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 raise ConfigError(legacy_key.rejected_error)
 
     config = Config.from_config(
-        raw_config, reject_legacy_safety_key=False, reject_legacy_macros_key=False
+        raw_config,
+        reject_legacy_safety_key=False,
+        reject_legacy_macros_key=False,
+        reject_legacy_mcp_key=False,
     )
     app.state.config = config
 
