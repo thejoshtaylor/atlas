@@ -41,8 +41,14 @@ from typing import Any, Awaitable, Callable, Sequence
 from spire_voice.config import PluginsConfig, SecurityConfig
 from spire_voice.crypto.credentials import decrypt_credential
 from spire_voice.db.repository import Plugin, PluginConfigValue, PluginRepository
-from spire_voice.mcp_client import McpToolHost, McpToolHostLookup, mcp_tools_to_openai_tools
+from spire_voice.mcp_client import (
+    McpToolHost,
+    McpToolHostLookup,
+    RenamedToolHostView,
+    mcp_tools_to_openai_tools,
+)
 from spire_voice.plugins.host import start_plugin_host
+from spire_voice.plugins.naming import PluginTool, PluginTools, rename_collisions
 
 logger = logging.getLogger("spire_voice.plugins.manager")
 
@@ -155,16 +161,31 @@ class PluginManager:
         # sees an unambiguous "nothing running yet" lookup instead.
         self.tool_host_lookup: McpToolHostLookup = McpToolHostLookup([])
         self.tools_schema: list[dict[str, Any]] = []
+        # Plan 06-04 (D-09): the naming-pre-pass view of every currently
+        # running plugin's host, recomputed by `rebuild()` below --
+        # `[]` before the first `rebuild()` call, exactly matching
+        # `tool_host_lookup`/`tools_schema`'s own "nothing running yet"
+        # starting point.
+        self._hosts_view: list[Any] = []
 
     @property
-    def hosts(self) -> list[McpToolHost]:
-        """Every currently-running plugin's own host, in start order --
-        the raw list a caller (`lifespan`) combines with a non-plugin host
-        (the in-process workflow tool host) into one final
+    def hosts(self) -> list[Any]:
+        """Every currently-running plugin's own host, in start order,
+        already passed through `plugins.naming`'s collision-only prefixing
+        pre-pass (D-09) -- the list a caller (`lifespan`) combines with a
+        non-plugin host (the in-process workflow tool host) into one final
         `McpToolHostLookup`, since this manager only knows about plugin
         rows. A disabled or degraded plugin contributes no host here --
-        exactly the tool-withdrawal PLUG-05 asks for."""
-        return [running.host for running in self._plugins.values() if running.host is not None]
+        exactly the tool-withdrawal PLUG-05 asks for.
+
+        Each entry is a `RenamedToolHostView` (`mcp_client.py`), not the
+        bare `McpToolHost` a caller predating plan 06-04 might expect --
+        duck-type compatible with the one shape `McpToolHostLookup` (and
+        any caller combining this list with another host) actually needs:
+        `.tools` and an `async def call_tool(name, arguments)`. Recomputed
+        by `rebuild()` below; `[]` before the first call to it.
+        """
+        return self._hosts_view
 
     @property
     def enforcing_host(self) -> McpToolHost | None:
@@ -556,12 +577,65 @@ class PluginManager:
         swap needs no lock, generation counter, or readers-writer gate of
         its own -- a turn already holding the pre-rebuild list and lookup
         keeps exactly those objects, unaffected by any later call here,
-        including one the ping watchdog below triggers mid-turn."""
-        hosts = self.hosts
-        self.tool_host_lookup = McpToolHostLookup(hosts)
+        including one the ping watchdog below triggers mid-turn.
+
+        Plan 06-04 (D-09, D-10, Pitfall 6): the collision-only prefixing
+        pre-pass (`plugins.naming.rename_collisions`) runs here, before
+        `McpToolHostLookup` is ever constructed -- so the lookup is
+        always handed a name space it can route without guessing, and
+        its own construction-time `AmbiguousToolError` stays exactly the
+        invariant check `06-CONTEXT.md`'s Specific Ideas says to keep,
+        not a boot hazard. Recomputed fresh from `self._plugins` on
+        *every* call, from scratch -- a plugin that stops running between
+        two rebuilds (a crash, a future disable) simply is not in this
+        pass's input the next time, which is what lets a survivor's name
+        return to bare the moment the collision that prefixed it is
+        gone."""
+        running = [
+            (running.plugin, running.host)
+            for running in self._plugins.values()
+            if running.host is not None
+        ]
+        naming_result = rename_collisions(
+            [
+                PluginTools(
+                    slug=plugin.slug,
+                    display_name=plugin.display_name,
+                    tools=tuple(
+                        PluginTool(name=tool.name, description=tool.description or "")
+                        for tool in host.tools
+                    ),
+                )
+                for plugin, host in running
+            ]
+        )
+
+        hosts: list[Any] = []
         schema: list[dict[str, Any]] = []
-        for host in hosts:
-            schema.extend(mcp_tools_to_openai_tools(host.tools))
+        for plugin, host in running:
+            renamed_tools_for_plugin = naming_result.tools_for(plugin.slug)
+            # Feed the converter the already-renamed tools (Pitfall 6):
+            # `mcp_tools_to_openai_tools` decides no names of its own, so
+            # every renamed `Tool` handed to it here is what actually
+            # reaches the schema and, through `RenamedToolHostView`
+            # below, the model.
+            renamed_mcp_tools = [
+                tool.model_copy(
+                    update={
+                        "name": renamed.offered_name,
+                        "description": renamed.offered_description,
+                    }
+                )
+                for tool, renamed in zip(host.tools, renamed_tools_for_plugin)
+            ]
+            bare_name_by_offered_name = {
+                renamed.offered_name: renamed.bare_name for renamed in renamed_tools_for_plugin
+            }
+            hosts.append(RenamedToolHostView(host, renamed_mcp_tools, bare_name_by_offered_name))
+            schema.extend(mcp_tools_to_openai_tools(renamed_mcp_tools))
+
+        self._hosts_view = hosts
+        self.tool_host_lookup = McpToolHostLookup(hosts)
         self.tools_schema = schema
 
     def _ping_interval_s(self, plugin: Plugin) -> float:

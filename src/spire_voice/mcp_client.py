@@ -620,6 +620,44 @@ class McpToolHostLookup:
         return await host.call_tool(name, arguments)
 
 
+class RenamedToolHostView:
+    """Presents one host's tools under the (possibly collision-prefixed)
+    names `plugins.naming`'s pre-pass computed for them (D-09, D-10,
+    PLUG-07), while every call this view forwards still reaches the
+    wrapped host under the bare name it actually advertised -- the
+    plugin never learns it was renamed.
+
+    Duck-type compatible with the single-host shape `McpToolHostLookup`
+    already expects (`.tools`, `.call_tool`) -- `plugins/manager.py::
+    PluginManager.rebuild` builds one of these per running plugin and
+    hands the list straight to `McpToolHostLookup`, unchanged. That
+    lookup's own construction-time `AmbiguousToolError` still means
+    exactly what it always meant: this view (and the pre-pass that built
+    it) is what makes the name space handed to the lookup unambiguous in
+    the first place, not a change to the lookup itself.
+    """
+
+    def __init__(
+        self,
+        host: Any,
+        tools: "Sequence[Tool]",
+        bare_name_by_offered_name: "Mapping[str, str]",
+    ) -> None:
+        self._host = host
+        self.tools = tools
+        self._bare_name_by_offered_name = bare_name_by_offered_name
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Translate `name` back to whatever the wrapped host actually
+        advertised before forwarding -- `name` here is always an offered
+        name (`McpToolHostLookup.call_tool` calls this with the same name
+        it was asked for), and `.get(name, name)` falls back to `name`
+        unchanged for a bare, uncontested tool the pre-pass never
+        renamed."""
+        bare_name = self._bare_name_by_offered_name.get(name, name)
+        return await self._host.call_tool(bare_name, arguments)
+
+
 _MISSING = object()
 
 

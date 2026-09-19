@@ -44,7 +44,8 @@ from spire_voice.crypto.credentials import encrypt_credential
 from spire_voice.db.repository import Plugin, PluginConfigValue
 from spire_voice.mcp_client import McpToolHost, UnknownToolError
 from spire_voice.plugins import manager as manager_module
-from spire_voice.plugins.manager import PluginManager, PluginState
+from spire_voice.plugins.manager import PluginManager, PluginState, RunningPlugin
+from spire_voice.plugins.naming import NAME_SEPARATOR
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
@@ -540,3 +541,129 @@ async def test_a_rebuild_the_watchdog_triggers_mid_turn_leaves_that_turns_own_ob
         assert {entry["function"]["name"] for entry in manager.tools_schema} == {"ha_list_entities"}
     finally:
         await manager.stop_all()
+
+
+# --- Plan 06-04, Task 2: the lookup is handed a name space it can route --
+
+
+class _FakeToolHost:
+    """A minimal fake host advertising a fixed tool list -- standing in
+    for a real spawned child for this module's own collision-prefixing
+    tests, which need two hosts publishing the same bare name with no
+    real subprocess and no dependency on which transport started them
+    (plan 06-04 prefixes tool names from `host.tools` regardless of
+    transport, per `06-03-SUMMARY.md`'s own Next Phase Readiness note)."""
+
+    def __init__(self, tool_specs: "list[tuple[str, str]]") -> None:
+        self.tools = [
+            Tool(name=name, description=description, inputSchema={"type": "object", "properties": {}})
+            for name, description in tool_specs
+        ]
+        self.calls: list[str] = []
+
+    async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+        self.calls.append(name)
+        return SimpleNamespace(is_error=False, content=[], name=name)
+
+
+def _running(plugin: Plugin, host) -> RunningPlugin:
+    return RunningPlugin(plugin=plugin, host=host, state=PluginState.RUNNING)
+
+
+def _bare_manager(fake_plugin_repository) -> PluginManager:
+    """A `PluginManager` with no plugin ever actually started through
+    `start_all()` -- these tests drive `rebuild()` directly over
+    hand-built `RunningPlugin` entries, the same shape `_plugin_lifecycle`
+    would have produced, so they can prove collision-prefixing with no
+    real subprocess at all."""
+    return PluginManager(
+        fake_plugin_repository(plugins=[]),
+        mcp_root=_MCP_ROOT,
+        security=SecurityConfig(),
+        safety_block_provider=_no_policy,
+    )
+
+
+def test_a_second_plugin_publishing_a_name_the_first_already_published_does_not_stop_the_assistant(
+    fake_plugin_repository,
+):
+    """T-06-18: a name collision must be a rename, never a refusal to
+    start -- `rebuild()` itself must not raise, and both tools must reach
+    the schema under distinct, owner-prefixed names."""
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
+    weather_host = _FakeToolHost([("notify", "Weather's own notify")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager._plugins[2] = _running(weather_plugin, weather_host)
+
+    manager.rebuild()  # must not raise AmbiguousToolError
+
+    tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+    assert tool_names == {f"ha{NAME_SEPARATOR}notify", f"weather{NAME_SEPARATOR}notify"}
+
+
+async def test_a_call_naming_a_prefixed_tool_reaches_the_plugin_that_owns_it_and_no_other(
+    fake_plugin_repository,
+):
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
+    weather_host = _FakeToolHost([("notify", "Weather's own notify")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager._plugins[2] = _running(weather_plugin, weather_host)
+    manager.rebuild()
+
+    await manager.tool_host_lookup.call_tool(f"weather{NAME_SEPARATOR}notify", {"text": "hi"})
+
+    # The call reached the weather host, and no other -- and the weather
+    # host itself was handed its own bare name, never the prefixed one it
+    # never advertised.
+    assert weather_host.calls == ["notify"]
+    assert ha_host.calls == []
+
+
+async def test_a_call_naming_a_still_bare_uncontested_tool_reaches_its_one_owner(
+    fake_plugin_repository,
+):
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_host = _FakeToolHost([("list_entities", "list Home Assistant entities")])
+    weather_host = _FakeToolHost([("notify", "Weather's own notify")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager._plugins[2] = _running(weather_plugin, weather_host)
+    manager.rebuild()
+
+    await manager.tool_host_lookup.call_tool("list_entities", {})
+
+    assert ha_host.calls == ["list_entities"]
+
+
+def test_disabling_one_of_two_colliding_plugins_returns_the_survivor_to_its_bare_name(
+    fake_plugin_repository,
+):
+    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
+    weather_host = _FakeToolHost([("notify", "Weather's own notify")])
+
+    manager = _bare_manager(fake_plugin_repository)
+    manager._plugins[1] = _running(ha_plugin, ha_host)
+    manager._plugins[2] = _running(weather_plugin, weather_host)
+    manager.rebuild()
+    assert f"ha{NAME_SEPARATOR}notify" in {entry["function"]["name"] for entry in manager.tools_schema}
+
+    # "Disabling" the weather plugin here means exactly what a future
+    # disable route will do to this manager's own bookkeeping: it stops
+    # being a `RunningPlugin` with a host at all.
+    manager._plugins[2] = RunningPlugin(plugin=weather_plugin, host=None, state=PluginState.DISABLED)
+    manager.rebuild()
+
+    tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+    assert tool_names == {"notify"}

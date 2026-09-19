@@ -9,6 +9,10 @@ per its own module docstring.
 
 from __future__ import annotations
 
+import pytest
+from mcp.types import Tool
+
+from spire_voice.mcp_client import AmbiguousToolError, McpToolHostLookup
 from spire_voice.plugins.naming import (
     NAME_SEPARATOR,
     PluginTool,
@@ -148,3 +152,34 @@ def test_a_plugin_advertising_the_same_bare_name_twice_counts_as_one_owner_not_t
         assert tool.offered_name == "notify"
         assert tool.prefixed is False
     assert result.owners_of_bare_name("notify") == ("solo",)
+
+
+# --- Task 2: the invariant this pre-pass exists in front of, unchanged ----
+
+
+class _RawToolHost:
+    """A bare host exposing only `.tools` -- exactly the shape
+    `McpToolHostLookup.__init__` reads, with no pre-pass run over it.
+    Standing in for `McpToolHost` itself, which this test has no reason
+    to spawn for real."""
+
+    def __init__(self, tool_specs: "list[str]") -> None:
+        self.tools = [
+            Tool(name=name, description="", inputSchema={"type": "object", "properties": {}})
+            for name in tool_specs
+        ]
+
+
+def test_constructing_a_lookup_directly_over_two_hosts_sharing_a_name_still_raises_unchanged():
+    """`McpToolHostLookup`'s own construction-time refusal is the
+    invariant this phase's `06-CONTEXT.md` says to keep, not delete --
+    proven here by skipping this module's own pre-pass entirely and
+    handing the lookup two raw, colliding hosts directly. Collision
+    safety for the real assistant comes from `plugins/manager.py::
+    PluginManager.rebuild` always running the pre-pass first (Pitfall 6),
+    never from a change to this constructor."""
+    host_a = _RawToolHost(["notify"])
+    host_b = _RawToolHost(["notify"])
+
+    with pytest.raises(AmbiguousToolError):
+        McpToolHostLookup([host_a, host_b])
