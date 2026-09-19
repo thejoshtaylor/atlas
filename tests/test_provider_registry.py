@@ -41,12 +41,37 @@ def test_build_stt_raises_naming_the_value_and_the_known_set():
     assert "xai" in message
 
 
+def test_build_stt_builds_the_registered_local_provider_with_no_credential(tmp_path, monkeypatch):
+    """D-04's needs-a-credential gate is opt-in per entry (`requires_credential`)
+    -- the local entry must build with an empty api_key, never raise
+    `ProviderUnavailable` for a "missing" credential it never needed."""
+    from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
+
+    model_dir = tmp_path / "faster-whisper"
+    model_dir.mkdir()
+    config = SttConfig(local_model_dir=str(model_dir))
+    # `registry.build_stt` calls the entry's own `build(config, api_key)`
+    # unmodified, which always goes through the real (module-scope-default)
+    # loader -- substitute `faster_whisper.WhisperModel` itself so no real
+    # model weights need to exist on disk for this test.
+    monkeypatch.setattr("faster_whisper.WhisperModel", lambda *a, **kw: object())
+
+    client = registry.build_stt("faster-whisper", config, "")
+
+    assert isinstance(client, FasterWhisperStt)
+
+
 def test_known_entries_returns_every_registered_option_for_the_slot():
+    """Sorted by name (07-03-PLAN.md Task 2 adds `faster-whisper`
+    alongside `xai`) -- `known_entries` never returns registration order."""
     entries = registry.known_entries("stt")
 
-    assert [entry.name for entry in entries] == ["xai"]
-    assert entries[0].requires_credential is True
-    assert entries[0].batch is False
+    assert [entry.name for entry in entries] == ["faster-whisper", "xai"]
+    by_name = {entry.name: entry for entry in entries}
+    assert by_name["xai"].requires_credential is True
+    assert by_name["xai"].batch is False
+    assert by_name["faster-whisper"].requires_credential is False
+    assert by_name["faster-whisper"].batch is False
 
 
 def test_build_tts_builds_the_registered_xai_provider():
@@ -98,10 +123,10 @@ def test_build_brain_raises_provider_unavailable_when_the_credential_is_missing(
 
 
 def test_stt_and_brain_entries_are_not_batch():
-    [stt_entry] = registry.known_entries("stt")
+    stt_entries = registry.known_entries("stt")
     [brain_entry] = registry.known_entries("brain")
 
-    assert stt_entry.batch is False
+    assert all(entry.batch is False for entry in stt_entries)
     assert brain_entry.batch is False
 
 

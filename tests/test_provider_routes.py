@@ -142,10 +142,14 @@ def test_get_providers_reports_the_stt_slot_with_its_options(
     assert slot["wrapped"] is False
     assert slot["measured_ms"] is None
     assert slot["settings"] == {}
-    [option] = slot["options"]
-    assert option["name"] == "xai"
-    assert option["label"] == "xAI"
-    assert option["requires_credential"] is True
+    # 07-03-PLAN.md Task 2 adds a second stt option (`faster-whisper`,
+    # local) alongside `xai` -- assert on the xai option specifically
+    # rather than assuming the slot has exactly one.
+    options_by_name = {option["name"]: option for option in slot["options"]}
+    assert options_by_name.keys() == {"xai", "faster-whisper"}
+    assert options_by_name["xai"]["label"] == "xAI"
+    assert options_by_name["xai"]["requires_credential"] is True
+    assert options_by_name["faster-whisper"]["requires_credential"] is False
 
 
 def test_get_providers_reports_the_tts_slot_wrapped_with_no_measured_figure_yet(
@@ -243,8 +247,8 @@ def test_get_providers_reports_credential_set_from_the_credential_repository(
     client = _admin_client(app, security, account_repo)
 
     response = client.get("/api/providers")
-    [option] = _slot(response.json(), "stt")["options"]
-    assert option["credential_set"] is True
+    options_by_name = {option["name"]: option for option in _slot(response.json(), "stt")["options"]}
+    assert options_by_name["xai"]["credential_set"] is True
     assert "a-real-secret-token" not in response.text
 
 
@@ -261,8 +265,8 @@ def test_get_providers_reports_credential_unset_when_nothing_is_stored(
     client = _admin_client(app, security, account_repo)
 
     response = client.get("/api/providers")
-    [option] = _slot(response.json(), "stt")["options"]
-    assert option["credential_set"] is False
+    options_by_name = {option["name"]: option for option in _slot(response.json(), "stt")["options"]}
+    assert options_by_name["xai"]["credential_set"] is False
 
 
 def test_get_providers_reports_tts_and_brain_credential_set_from_their_own_slot(

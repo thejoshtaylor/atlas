@@ -23,6 +23,7 @@ from typing import Any, Callable
 from spire_voice.config import BrainConfig, ConfigError, SttConfig, TtsConfig
 from spire_voice.providers.base import SttProvider, TtsProvider
 from spire_voice.providers.boot import ProviderUnavailable
+from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
 from spire_voice.providers.stt_xai import XaiStt
 from spire_voice.providers.tts_xai import XaiTts
 from spire_voice.turn import brain_race
@@ -72,6 +73,18 @@ STT_REGISTRY: "dict[str, ProviderEntry]" = {
         label="xAI",
         build=lambda config, api_key: XaiStt(replace(config, api_key=api_key)),
         requires_credential=True,
+        batch=False,
+        licence_note=None,
+    ),
+    "faster-whisper": ProviderEntry(
+        name="faster-whisper",
+        label="faster-whisper (local)",
+        # No credential to thread through -- `config` is passed unchanged.
+        # `requires_credential=False` is the whole point of the local set
+        # (07-03-PLAN.md Task 2): the needs-a-credential hint must never
+        # appear on this entry.
+        build=lambda config, api_key: FasterWhisperStt(config),
+        requires_credential=False,
         batch=False,
         licence_note=None,
     ),

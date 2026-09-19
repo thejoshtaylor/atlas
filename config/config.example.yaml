@@ -335,6 +335,20 @@ stt:
   # the pipeline open forever.
   max_utterance_s: 15
 
+  # The local speech-to-text option (D-09, D-11): faster-whisper, selected in
+  # the /providers screen rather than here -- these three keys only take
+  # effect when that option is chosen. local_model_dir must already hold a
+  # provisioned faster-whisper model (see docs/runbooks for the fetch step);
+  # nothing in this process ever downloads one at boot, so a missing
+  # directory degrades this slot with the path named, rather than fetching
+  # one. local_model_size documents which size was provisioned there
+  # (display/logging only -- the directory above is what actually loads).
+  # local_compute_type must be one this CPU-only host's ctranslate2 backend
+  # actually supports: int8, int8_float32, or float32.
+  local_model_dir: "/models/faster-whisper"
+  local_model_size: "small"
+  local_compute_type: "int8"
+
 brain:
   base_url: "https://api.x.ai/v1"
   api_key: "${XAI_API_KEY}"

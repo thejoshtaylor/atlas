@@ -121,6 +121,13 @@ class ServerConfig:
         )
 
 
+# The compute types this project's own ctranslate2 backend actually
+# supports on a CPU (RESEARCH.md, 07-03-PLAN.md Task 1: verified live via
+# `ctranslate2.get_supported_compute_types("cpu")` against this project's
+# own Python 3.14 interpreter) -- a closed set, not an arbitrary string.
+_LOCAL_STT_COMPUTE_TYPES = ("int8", "int8_float32", "float32")
+
+
 @dataclass(frozen=True)
 class SttConfig:
     """The `stt:` block, carried under its own config key names.
@@ -128,6 +135,16 @@ class SttConfig:
     Translation to xAI's wire parameter names (`endpointing_ms ->
     endpointing`, etc.) happens in the speech-to-text provider, not here
     -- this class is a typed passthrough of what the config file says.
+
+    `local_model_dir`, `local_model_size`, and `local_compute_type`
+    (Phase 7, D-09, D-11) belong to the local `faster-whisper` entry only
+    -- the xAI entry above ignores all three. `local_model_dir` names a
+    directory a documented provisioning step (plan 07-04) has already
+    populated; D-11 forbids fetching a model at boot, so a missing
+    directory degrades that one slot (`providers/stt_faster_whisper.py`)
+    rather than downloading one. `local_model_size` documents which size
+    was provisioned there for display/logging -- the directory itself,
+    not this name, is what `WhisperModel` actually loads.
     """
 
     url: str = ""
@@ -139,10 +156,20 @@ class SttConfig:
     interim_results: bool = True
     language: str = "en"
     max_utterance_s: int = 15
+    local_model_dir: str = "/models/faster-whisper"
+    local_model_size: str = "small"
+    local_compute_type: str = "int8"
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SttConfig":
         raw = raw or {}
+        local_compute_type = raw.get("local_compute_type", cls.local_compute_type)
+        if local_compute_type not in _LOCAL_STT_COMPUTE_TYPES:
+            raise ConfigError(
+                f"stt.local_compute_type {local_compute_type!r} is not one of "
+                f"{_LOCAL_STT_COMPUTE_TYPES!r} -- these are the compute types this "
+                "CPU-only host's ctranslate2 backend actually supports"
+            )
         return cls(
             url=raw.get("url", cls.url),
             api_key=raw.get("api_key", cls.api_key),
@@ -153,6 +180,9 @@ class SttConfig:
             interim_results=raw.get("interim_results", cls.interim_results),
             language=raw.get("language", cls.language),
             max_utterance_s=raw.get("max_utterance_s", cls.max_utterance_s),
+            local_model_dir=raw.get("local_model_dir", cls.local_model_dir),
+            local_model_size=raw.get("local_model_size", cls.local_model_size),
+            local_compute_type=local_compute_type,
         )
 
 

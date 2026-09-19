@@ -8,7 +8,7 @@ block's own parsing lives in `mcp/spire_mcp/safety.py` and is exercised by
 
 import pytest
 
-from spire_voice.config import Config, ConfigError, ServerConfig, expand_env
+from spire_voice.config import Config, ConfigError, ServerConfig, SttConfig, expand_env
 
 
 def _minimal_raw_config() -> dict:
@@ -97,6 +97,27 @@ def test_server_timezone_rejects_an_unrecognized_name():
     with pytest.raises(ConfigError) as exc_info:
         ServerConfig.from_config({"timezone": "Mars/Olympus_Mons"})
     assert "server.timezone" in str(exc_info.value)
+
+
+def test_stt_local_settings_have_shipped_defaults():
+    """D-09/D-11: the local speech-to-text entry's three keys ship with a
+    default even when the operator never sets them -- the xAI-only config
+    dict `_minimal_raw_config()` uses elsewhere in this file carries none
+    of these three, and loading must not fail on their absence."""
+    config = SttConfig.from_config({"url": "wss://api.x.ai/v1/stt"})
+
+    assert config.local_model_dir == "/models/faster-whisper"
+    assert config.local_model_size == "small"
+    assert config.local_compute_type == "int8"
+
+
+def test_stt_local_compute_type_rejects_an_unsupported_value():
+    with pytest.raises(ConfigError) as exc_info:
+        SttConfig.from_config({"local_compute_type": "float64"})
+    assert "stt.local_compute_type" in str(exc_info.value)
+
+    for compute_type in ("int8", "int8_float32", "float32"):
+        assert SttConfig.from_config({"local_compute_type": compute_type}).local_compute_type == compute_type
 
 
 def test_safety_key_still_present_is_a_startup_error_naming_it():
