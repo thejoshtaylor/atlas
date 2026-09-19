@@ -1,4 +1,4 @@
-"""The xAI streaming text-to-speech client, browser sink format.
+"""The xAI text-to-speech client: one REST call, browser sink format.
 
 Pitfall 4 is the correctness constraint this module exists to close: the
 camera-facing `tts.codec`/`tts.sample_rate` pair is A-law at 8 kHz, and the
@@ -7,12 +7,19 @@ clean failure, which looks like a working-but-garbled pipeline in manual
 testing. The sink format is a parameter, not a hardcoded assumption, so the
 Phase 2 camera sink can request its own codec without either sink assuming
 the other's values.
+
+Plan 07-02 (D-05, D-07): this client knows nothing about chunking or
+timing any more. `synthesize_once()` returns the whole response body;
+`providers/batch_tts_adapter.py::BatchTtsAdapter` is what chunks that
+buffer and satisfies the streaming `TtsProvider` protocol on top of it.
+Two chunking loops -- one here, one in the adapter -- would be the exact
+duplicate D-07 forbids.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -20,9 +27,10 @@ from spire_voice.config import TtsConfig
 from spire_voice.providers.base import TtsError
 
 
-# 20 ms of 16 kHz mono PCM16. Matches the frame size the browser plays and the
-# camera speaker will want, so no consumer has to re-chunk.
-_CHUNK_BYTES = 640
+# 20 ms of 16 kHz mono PCM16. Matches the frame size the browser plays and
+# the camera speaker will want. `BatchTtsAdapter` imports this rather than
+# restating it -- one definition of the chunk size, not two.
+CHUNK_BYTES = 640
 
 
 @dataclass(frozen=True)
@@ -34,7 +42,8 @@ class SinkFormat:
 
 
 class XaiTts:
-    """Streaming text-to-speech over xAI's WebSocket endpoint."""
+    """xAI's text-to-speech endpoint: one REST call, the whole utterance
+    in the response body -- batch, not streaming (D-05)."""
 
     def __init__(self, config: TtsConfig) -> None:
         self._config = config
@@ -59,10 +68,8 @@ class XaiTts:
             "optimize_streaming_latency": self._config.optimize_streaming_latency,
         }
 
-    async def synthesize(
-        self, text_deltas: AsyncIterator[str], sink: SinkFormat | None = None
-    ) -> AsyncIterator[bytes]:
-        """Render `text_deltas` to audio and yield it.
+    async def synthesize_once(self, text: str, sink: SinkFormat | None = None) -> bytes:
+        """Render `text` to audio in one call and return the whole buffer.
 
         VERIFIED AGAINST THE LIVE xAI API, 2026-09-17. This endpoint is REST,
         not a WebSocket:
@@ -87,14 +94,10 @@ class XaiTts:
         cannot start before the whole sentence is rendered. If xAI documents a
         working streaming socket later, this is the one function to change.
 
-        The audio is yielded in chunks rather than as one object so the
-        consumer's contract (an async iterator of bytes) stays identical
-        across a future switch back to a streaming transport.
+        Plan 07-02: no empty-text short circuit and no chunking here any
+        more -- `BatchTtsAdapter` owns both. This method is a plain,
+        unconditional REST call from text to bytes.
         """
-        text = "".join([delta async for delta in text_deltas])
-        if not text.strip():
-            return
-
         sink = sink or self.browser_sink()
         payload = {
             "text": text,
@@ -112,7 +115,4 @@ class XaiTts:
                 raise TtsError(
                     f"xAI TTS returned {response.status_code}: {response.text[:300]}"
                 )
-            audio = response.content
-
-        for start in range(0, len(audio), _CHUNK_BYTES):
-            yield audio[start : start + _CHUNK_BYTES]
+            return response.content

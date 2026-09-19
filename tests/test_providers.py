@@ -281,7 +281,7 @@ async def test_final_transcript_comes_from_speech_final_not_transcript_done():
 
 
 @pytest.mark.asyncio
-async def test_tts_posts_rest_and_yields_audio_not_websocket():
+async def test_tts_synthesize_once_posts_rest_and_returns_the_whole_buffer():
     """xAI TTS is REST. VERIFIED AGAINST THE LIVE API, 2026-09-17.
 
         POST https://api.x.ai/v1/tts
@@ -296,6 +296,10 @@ async def test_tts_posts_rest_and_yields_audio_not_websocket():
     `wss://api.x.ai/v1/tts` does exist but rejected every parameter shape tried
     against it with HTTP 400. Omitting `language` returns a 422 naming the
     missing field, which is how the required shape above was established.
+
+    Plan 07-02: `synthesize_once` takes a plain string and returns a plain
+    buffer -- joining deltas and chunking the response both moved to
+    `BatchTtsAdapter` (`tests/test_batch_tts_adapter.py` covers both).
     """
     import httpx as _httpx
 
@@ -324,31 +328,43 @@ async def test_tts_posts_rest_and_yields_audio_not_websocket():
             {"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}
         ))
 
-        async def deltas():
-            yield "the light "
-            yield "is off"
-
-        chunks = [c async for c in tts.synthesize(deltas())]
+        audio = await tts.synthesize_once("the light is off")
     finally:
         mod.httpx.AsyncClient = real_client
 
     assert captured["url"].startswith("https://"), "TTS is REST, not a websocket"
-    assert captured["body"]["text"] == "the light is off", "deltas must be joined"
+    assert captured["body"]["text"] == "the light is off"
     assert captured["body"]["language"], "language is required; omitting it is a 422"
     assert set(captured["body"]["output_format"]) == {"codec", "sample_rate"}
-    assert b"".join(chunks) == b"\x01\x02" * 1000, "all audio must reach the caller"
-    assert len(chunks) > 1, "audio is chunked so the iterator contract survives"
+    assert audio == b"\x01\x02" * 1000, "the whole response body must reach the caller"
 
 
 @pytest.mark.asyncio
-async def test_tts_skips_the_call_entirely_for_empty_text():
-    """An empty reply must not bill a synthesis request or emit silence."""
+async def test_batch_tts_adapter_skips_the_provider_call_entirely_for_empty_text():
+    """An empty reply must not bill a synthesis request or emit silence.
+
+    Plan 07-02: this short circuit lives on `BatchTtsAdapter` now, not on
+    `XaiTts` -- driven here over the real client so the client's own
+    request-building code stays proven to never fire for empty text, not
+    just the adapter's fake-provider path (`test_batch_tts_adapter.py`
+    covers that same behavior against a fake for the general case)."""
     from spire_voice.config import TtsConfig
+    from spire_voice.providers.batch_tts_adapter import BatchTtsAdapter
     from spire_voice.providers.tts_xai import XaiTts
 
+    calls = []
     tts = XaiTts(TtsConfig.from_config({"url": "https://x.invalid", "api_key": "k"}))
+    real_synthesize_once = tts.synthesize_once
+
+    async def _counting_synthesize_once(text, sink=None):
+        calls.append(text)
+        return await real_synthesize_once(text, sink=sink)
+
+    tts.synthesize_once = _counting_synthesize_once
+    adapter = BatchTtsAdapter(tts)
 
     async def nothing():
         yield "   "
 
-    assert [c async for c in tts.synthesize(nothing())] == []
+    assert [c async for c in adapter.synthesize(nothing())] == []
+    assert calls == [], "the provider must not be called at all for whitespace-only text"
