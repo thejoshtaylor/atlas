@@ -426,10 +426,26 @@ async def _reconcile_live_state(request: Request, plugin: Plugin) -> None:
 async def _reconcile_stop(request: Request, plugin: Plugin) -> None:
     """The disable half of `_reconcile_live_state` -- stops `plugin`'s own
     lifecycle and withdraws its tools before the caller's own route
-    returns (D-15, PLUG-05)."""
+    returns (D-15, PLUG-05). The row still exists and can be enabled
+    again, so the manager keeps a `DISABLED` entry for it; a row that is
+    about to be deleted goes through `_reconcile_forget` instead."""
     plugin_manager = request.app.state.plugin_manager
     try:
         await plugin_manager.stop_one(plugin)
+    except Exception as exc:  # noqa: BLE001 -- any reconcile failure is reported the same way
+        raise _reconcile_failed_error() from exc
+
+
+async def _reconcile_forget(request: Request, plugin: Plugin) -> None:
+    """The delete half (WR-03, code review): stop `plugin` and drop its
+    bookkeeping entry, so the manager holds no state for a row that no
+    longer exists. `_reconcile_stop` would leave a `DISABLED` entry
+    behind, and the manager's readers answer by slug -- a plugin
+    reinstalled under the same display name reuses the same slug and was
+    then reported "Disabled" with no tools while genuinely running."""
+    plugin_manager = request.app.state.plugin_manager
+    try:
+        await plugin_manager.forget(plugin.id)
     except Exception as exc:  # noqa: BLE001 -- any reconcile failure is reported the same way
         raise _reconcile_failed_error() from exc
 
@@ -602,5 +618,5 @@ async def delete_plugin(
     if plugin.builtin:
         raise _builtin_delete_refused_error(plugin.display_name)
 
-    await _reconcile_stop(request, plugin)
+    await _reconcile_forget(request, plugin)
     await plugin_repo.delete_plugin(plugin_id)

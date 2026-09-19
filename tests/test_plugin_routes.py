@@ -58,6 +58,11 @@ class _FakePluginManagerForRoutes:
         self.owners: dict[str, tuple[str, ...]] = {}
         self.start_calls: list[int] = []
         self.stop_calls: list[int] = []
+        # WR-03 (code review): deleting a plugin must drop the manager's
+        # own bookkeeping for it, not merely stop it -- recorded
+        # separately from `stop_calls` so a test can tell the two writes
+        # apart.
+        self.forget_calls: list[int] = []
         self.fail_reconcile = False
 
     def state_for(self, slug):
@@ -83,6 +88,11 @@ class _FakePluginManagerForRoutes:
             raise RuntimeError("simulated reconcile failure")
         self.stop_calls.append(plugin.id)
         self.states[plugin.slug] = PluginState.DISABLED
+
+    async def forget(self, plugin_id):
+        if self.fail_reconcile:
+            raise RuntimeError("simulated reconcile failure")
+        self.forget_calls.append(plugin_id)
 
 
 def _build_plugins_app(security, account_repo, plugin_repo, plugin_manager) -> FastAPI:
@@ -589,7 +599,11 @@ def test_deleting_a_non_builtin_plugin_removes_it_and_reconciles_live(
     response = client.delete("/api/plugins/1")
     assert response.status_code == 204
     assert 1 not in plugin_repo.plugins
-    assert manager.stop_calls == [1]
+    # WR-03 (code review): a delete forgets the row rather than recording
+    # it disabled -- a `DISABLED` entry for a dead id shadows a plugin
+    # later reinstalled under the same display name (and so the same slug).
+    assert manager.forget_calls == [1]
+    assert manager.stop_calls == []
 
 
 def test_deleting_a_builtin_plugin_is_refused_by_name_and_it_still_exists(
@@ -619,6 +633,7 @@ def test_deleting_a_builtin_plugin_is_refused_by_name_and_it_still_exists(
     assert "Home Assistant" in response.json()["detail"]
     assert 1 in plugin_repo.plugins
     assert manager.stop_calls == []
+    assert manager.forget_calls == []
 
 
 def test_a_reconcile_failure_is_reported_as_a_failed_write(
@@ -909,3 +924,48 @@ def test_editing_one_plugins_configuration_leaves_a_second_plugins_session_untou
 
         weather_host_after = manager.tool_host_for(weather["slug"])
         assert weather_host_after is weather_host_before, "editing HA's config must not touch weather's own host"
+
+
+def test_reinstalling_a_deleted_plugin_under_the_same_name_is_reported_as_running(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """WR-03 (code review): `stop_one` recorded a `DISABLED` bookkeeping
+    entry for the deleted row and nothing ever removed one, while slugs
+    are derived from the display name over the *current* rows -- so
+    reinstalling a plugin with the same name reused the same slug under a
+    new id, and `state_for`/`reason_for`/`tool_host_for` (which scan by
+    slug, first match wins, insertion order) all answered for the dead
+    row. `/api/plugins` then reported "Disabled" and "No tools right now"
+    for a plugin that was genuinely running, and offered an Enable button
+    for it. Deleting now forgets the row instead.
+    """
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    plugin_repo = fake_plugin_repository()
+
+    install_body = {
+        "catalog_entry": "Weather",
+        "config_values": {"WEATHER_LATITUDE": {"value": "51.5"}, "WEATHER_LONGITUDE": {"value": "-0.1"}},
+    }
+
+    with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
+        first = client.post("/api/plugins", json=install_body).json()
+        assert client.delete(f"/api/plugins/{first['id']}").status_code == 204
+
+        second = client.post("/api/plugins", json=install_body)
+        assert second.status_code == 201, second.text
+        body = second.json()
+        assert body["id"] != first["id"]
+        assert body["slug"] == first["slug"], "the reinstall must reuse the freed slug"
+        assert body["state"] == "running", (
+            "the reinstalled plugin is running, but the deleted row's stale "
+            "bookkeeping entry answered for its slug first (the WR-03 defect)"
+        )
+        assert body["tools"], "a running plugin's tools are not 'No tools right now'"
+
+        listed = client.get("/api/plugins").json()
+        assert [entry["state"] for entry in listed] == ["running"]
+
+        # The manager keeps no state for a row that no longer exists.
+        assert list(manager._plugins) == [body["id"]]

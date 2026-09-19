@@ -484,6 +484,32 @@ class PluginManager:
         self._plugins[plugin.id] = RunningPlugin(plugin=plugin, host=None, state=PluginState.DISABLED)
         self.rebuild()
 
+    async def forget(self, plugin_id: int) -> None:
+        """Stop `plugin_id` and drop every trace of it -- WR-03 (code
+        review), the live half of *deleting* a plugin, as distinct from
+        disabling one.
+
+        `stop_one` leaves a `DISABLED` bookkeeping entry behind, which is
+        exactly right for a row that still exists and can be enabled
+        again. For a deleted row it is wrong: nothing ever removed an
+        entry from `self._plugins`, slugs are derived from the display
+        name over the *current* rows, and `state_for`/`reason_for`/
+        `tool_host_for` return the first slug match in insertion order --
+        so reinstalling a plugin with the same name got the deleted row's
+        `DISABLED` entry, and `/api/plugins` reported "Disabled" and "No
+        tools right now" for a plugin that was genuinely running. It also
+        meant `self._plugins` grew without bound across installs and
+        deletes.
+
+        Safe to call for a plugin this manager never started, and safe to
+        call twice. Keying the three readers above by slug stays correct
+        because this method is what keeps `self._plugins` holding live
+        rows only, and `uq_plugins_slug` makes a slug unique among those.
+        """
+        await self._stop_task_if_running(plugin_id)
+        self._plugins.pop(plugin_id, None)
+        self.rebuild()
+
     async def _stop_task_if_running(self, plugin_id: int) -> None:
         """Cancel and await `plugin_id`'s own lifecycle task, if one
         exists -- shared by `start_one`/`stop_one` above, the identical
