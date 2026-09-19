@@ -583,6 +583,12 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
             "this is the exact defect shape three of Phase 1's Critical findings shared"
         )
 
+        # Plan 07-02's own plan-level verification: all three provider
+        # slots land in app.state.provider_slots, not just stt.
+        assert set(app_module.app.state.provider_slots) == {"stt", "tts", "brain"}
+        for slot_name, status in app_module.app.state.provider_slots.items():
+            assert status.state == "running", f"{slot_name} unexpectedly degraded: {status.reason}"
+
 
 def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_application(
     tmp_path, monkeypatch
