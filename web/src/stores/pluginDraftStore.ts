@@ -58,6 +58,7 @@ interface PluginDraftState {
 
   setConfigValue: (key: string, value: string) => void
   startEditingSecret: (key: string) => void
+  revertSecretEdit: (key: string) => void
   addConfigKey: (key: string, value: string, secret: boolean) => void
 
   setNewKeyName: (name: string) => void
@@ -140,6 +141,19 @@ export const usePluginDraftStore = create<PluginDraftState>((set) => ({
     set((state) => ({
       configValues: { ...state.configValues, [key]: { ...state.configValues[key]!, value: "", editing: true } },
     })),
+
+  // The failed-secret-save undo (Task 3's own behaviour, SettingsRoute.tsx's
+  // own precedent): a secret key returns to exactly the state it was in
+  // before this edit started -- masked ("Set") if the server already had
+  // one, still the blank unset input if it did not -- never a leftover,
+  // ambiguous draft. Other keys' own edits are untouched, matching the
+  // per-field (not per-form) scope of `SettingsRoute.tsx`'s own recovery.
+  revertSecretEdit: (key) =>
+    set((state) => {
+      const draft = state.configValues[key]
+      if (!draft) return state
+      return { configValues: { ...state.configValues, [key]: { ...draft, value: "", editing: !draft.isSet } } }
+    }),
 
   // A no-op when `key` already has a row -- adding a key this plugin
   // already declares would silently discard whatever draft edit was

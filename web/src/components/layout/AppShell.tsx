@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { to: "/workflows", label: "Scheduled", minimumRole: "operator" },
   { to: "/accounts", label: "Accounts", minimumRole: "admin" },
   { to: "/settings", label: "Settings", minimumRole: "admin" },
+  { to: "/plugins", label: "Plugins", minimumRole: "admin" },
   // The developer microphone page (plan 03-10, D-19) -- a genuine nav
   // entry, not reachable by direct URL alone the way /calibration is
   // (that page is a wizard step first; this one is a standalone

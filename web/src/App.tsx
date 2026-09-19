@@ -14,6 +14,8 @@ import { DevMicRoute } from "@/routes/dev-mic/DevMicRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
 import { MacroEditorRoute } from "@/routes/macros/MacroEditorRoute"
 import { MacrosRoute } from "@/routes/macros/MacrosRoute"
+import { PluginEditorRoute } from "@/routes/plugins/PluginEditorRoute"
+import { PluginsRoute } from "@/routes/plugins/PluginsRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
@@ -73,6 +75,9 @@ function AppRoutes() {
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />
             <Route path="/settings" element={<SettingsRoute />} />
+            <Route path="/plugins" element={<PluginsRoute />} />
+            <Route path="/plugins/new" element={<PluginEditorRoute />} />
+            <Route path="/plugins/:id" element={<PluginEditorRoute />} />
           </Route>
           <Route path="/calibration" element={<CalibrationRoute />} />
         </Route>
