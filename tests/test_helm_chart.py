@@ -15,6 +15,7 @@ has nothing to check in this environment."
 from __future__ import annotations
 
 import base64
+import os
 import re
 import shutil
 import subprocess
@@ -175,3 +176,76 @@ def test_chart_yaml_declares_no_dependencies() -> None:
     plan's own objective."""
     chart_yaml = yaml.safe_load((_CHART_DIR / "Chart.yaml").read_text())
     assert "dependencies" not in chart_yaml
+
+
+@skip_without_helm
+@pytest.mark.parametrize("release", ["spire-key-check-a", "spire-key-check-b"])
+def test_generated_secret_key_passes_the_real_application_validator(release: str) -> None:
+    """Rendered twice (two independent renders, two independently
+    generated keys -- `lookup` always returns nothing during
+    `helm template`, so this cannot exercise the upgrade-preserves-the-key
+    guarantee itself; that is scripts/verify-helm-deploy.sh's job against
+    a real cluster). Both must satisfy auth/tokens.py's own
+    validate_secret_key_strength -- not a reimplementation of its rules,
+    the real function."""
+    from spire_voice.auth.tokens import validate_secret_key_strength
+    from spire_voice.config import SecurityConfig
+
+    docs = _helm_template(release=release)
+    secret = _find_one(docs, "Secret")
+    decoded = base64.b64decode(secret["data"]["SPIRE_SECRET_KEY"]).decode("ascii")
+
+    previous = os.environ.get("SPIRE_SECRET_KEY")
+    os.environ["SPIRE_SECRET_KEY"] = decoded
+    try:
+        validate_secret_key_strength(SecurityConfig())
+    finally:
+        if previous is None:
+            os.environ.pop("SPIRE_SECRET_KEY", None)
+        else:
+            os.environ["SPIRE_SECRET_KEY"] = previous
+
+
+def test_generated_secret_key_is_backed_by_randbytes_not_randalphanum() -> None:
+    """Pitfall 4: an alphanumeric string's decoded length is not its
+    character count -- `randAlphaNum` must never back `SPIRE_SECRET_KEY`,
+    only `randBytes` does."""
+    template_text = (_CHART_DIR / "templates" / "secret.yaml").read_text()
+    secret_key_line = next(
+        line for line in template_text.splitlines() if "$secretKeyField = randBytes" in line
+    )
+    assert "randBytes 32" in secret_key_line
+    assert "randAlphaNum" not in secret_key_line
+
+
+@skip_without_helm
+def test_database_manifests_name_the_official_image_and_publish_no_node_port() -> None:
+    docs = _helm_template()
+    stateful_sets = [d for d in docs if d.get("kind") == "StatefulSet"]
+    assert len(stateful_sets) == 1
+    postgres_sts = stateful_sets[0]
+    images = [
+        c["image"]
+        for c in postgres_sts["spec"]["template"]["spec"]["containers"]
+    ]
+    assert any(image.startswith("postgres:") for image in images)
+
+    services = [d for d in docs if d.get("kind") == "Service"]
+    postgres_services = [
+        s for s in services if "postgres" in s["metadata"]["name"]
+    ]
+    assert postgres_services, "no Postgres Service rendered"
+    for svc in postgres_services:
+        assert svc["spec"].get("type") not in {"NodePort", "LoadBalancer"}
+        for port in svc["spec"].get("ports", []):
+            assert "nodePort" not in port
+
+
+@skip_without_helm
+def test_no_default_database_password_ships_in_the_repository() -> None:
+    """The bundled database's password is generated under the same guard
+    as the application's own secret key -- nothing here is a literal
+    default an operator could leave unchanged."""
+    template_text = (_CHART_DIR / "templates" / "secret.yaml").read_text()
+    assert "changeme" not in template_text.lower()
+    assert "randAlpha 32" in template_text

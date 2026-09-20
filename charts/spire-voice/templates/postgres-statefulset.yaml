@@ -1,0 +1,71 @@
+{{/*
+D-14: plain manifests against the official postgres image, not a
+subchart -- see 07-RESEARCH.md's Pitfall 5. This is more chart-authoring
+work than declaring a subchart dependency, and it is work this project
+can keep patched indefinitely, which the alternative was not.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "spire-voice.postgres.fullname" . }}
+  labels:
+    {{- include "spire-voice.postgres.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "spire-voice.postgres.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "spire-voice.postgres.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spire-voice.postgres.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          env:
+            - name: POSTGRES_USER
+              value: spire
+            - name: POSTGRES_DB
+              value: spire
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "spire-voice.secretName" . }}
+                  key: POSTGRES_PASSWORD
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "spire", "-d", "spire"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "spire", "-d", "spire"]
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          volumeMounts:
+            # postgres:18's own image places data in a major-version-
+            # specific subdirectory it manages itself
+            # (pg_ctlcluster-compatible layout, docker-library/postgres
+            # #1259) -- the mount point is the parent directory, not
+            # .../data directly. The same finding 07-05's Compose
+            # deployment already hit for this exact image.
+            - name: postgres-data
+              mountPath: /var/lib/postgresql
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.postgres.persistence.storageClassName }}
+        storageClassName: {{ .Values.postgres.persistence.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.persistence.size }}

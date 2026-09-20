@@ -19,6 +19,22 @@ spec:
       # user without this chart needing to know its numeric uid.
       securityContext:
         runAsNonRoot: true
+      initContainers:
+        # Waits for the bundled database rather than restarting the whole
+        # pod until it happens to be up -- a StatefulSet's own pod can take
+        # a real moment on first install (a fresh PVC, an initdb run).
+        - name: wait-for-postgres
+          image: {{ .Values.postgres.image }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h {{ include "spire-voice.postgres.fullname" . }} -p 5432 -U spire; do
+                echo "waiting for postgres..."
+                sleep 2
+              done
       containers:
         - name: spire-voice
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
