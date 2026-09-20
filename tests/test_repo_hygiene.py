@@ -170,7 +170,34 @@ _CREDENTIAL_RE = re.compile(
 # and allowlisting it here (rather than narrowing which files get scanned)
 # is what let this check widen to the whole repository without flagging its
 # own test suite's existing, pre-phase convention as a finding.
-_ALLOWED_CREDENTIAL_VALUES = {"test-key"}
+#
+# The eight entries below are historical (deferred-items.md #2, operator
+# decision): an earlier `CredentialSlot` (blob `00dc28b2baec247796b18e4eac
+# cc5c19a1e0c834`, reachable from several commits including `a2a19e2`,
+# `d834023`, `a66ee32`) declared its enum members as `STT_API_KEY =
+# "stt_api_key"`, `BRAIN_API_KEY = "brain_api_key"`, `TTS_API_KEY =
+# "tts_api_key"`, `HA_TOKEN = "ha_token"`, plus a display-name mapping with
+# values `"Speech-to-text API key"`, `"Language model API key"`,
+# `"Text-to-speech API key"`, `"Home Assistant token"`. All eight match
+# `_CREDENTIAL_RE`'s shape (a name containing `api_key`/`token` immediately
+# before `=`) but are Python enum-member identifiers and human-readable UI
+# labels, never a real provider key or house-specific value -- confirmed by
+# the *current* `crypto/credentials.py`'s own docstring, which explains
+# exactly why later member names deliberately avoid this shape. The
+# operator reviewed deferred-items.md #2 and approved allowlisting these
+# eight exact literals; `_CREDENTIAL_RE` itself is unchanged, so a real
+# leaked credential of the same shape is still caught.
+_ALLOWED_CREDENTIAL_VALUES = {
+    "test-key",
+    "stt_api_key",
+    "brain_api_key",
+    "tts_api_key",
+    "ha_token",
+    "Speech-to-text API key",
+    "Language model API key",
+    "Text-to-speech API key",
+    "Home Assistant token",
+}
 
 
 # DEP-05's second clause -- the history, not only the working tree. A real
