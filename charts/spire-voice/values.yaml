@@ -1,0 +1,90 @@
+# Default values for the spire-voice chart.
+#
+# D-15: this chart's whole job is to deliver the project's own
+# config/config.example.yaml (shipped verbatim in files/config.yaml,
+# placeholders intact) and the variables it names -- nothing here
+# re-templates the configuration's contents. A value below either fills
+# one of those ${VAR} placeholders (through the generated Secret) or
+# configures the Kubernetes objects around the application (image,
+# service, ingress, volume sizes).
+
+image:
+  # No default registry is baked in on purpose: a stranger following the
+  # README pushes their own build (or points this at a registry they can
+  # reach) rather than pulling an image this project would have to
+  # maintain and version independently of the chart.
+  repository: spire-voice
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  # Off by default -- an operator turns this on rather than editing a
+  # template, matching the chart-authoring instruction this plan was
+  # given.
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tls: []
+
+persistence:
+  # The two mount points config.example.yaml already names: the data root
+  # (sessions, the TTS cache, calibration) and the model root (the local
+  # provider set, the wake-word model). Both PersistentVolumeClaims --
+  # never emptyDir -- so an upgrade or a rescheduled pod keeps what is on
+  # them.
+  data:
+    size: 5Gi
+    storageClassName: ""
+  models:
+    size: 10Gi
+    storageClassName: ""
+
+resources: {}
+
+config:
+  # This deployment's own values for the two variables plan 07-05 made
+  # environment-supplied (config.example.yaml's bind_host/cookie_secure).
+  #
+  # bind_host: the pod is reached through a Service, never directly --
+  # binding to loopback here would make the application unreachable from
+  # its own Service. This must stay "0.0.0.0" for the chart to work at
+  # all.
+  bindHost: "0.0.0.0"
+  # cookie_secure: true, because this chart assumes an Ingress (or some
+  # other front door) terminates TLS before traffic reaches the Service --
+  # the standard shape for a Kubernetes-fronted deployment. An operator
+  # who is NOT terminating TLS in front of this release must set this to
+  # "false" explicitly; doing so brings back the insecure-cookie/
+  # reachable-bind warning plan 07-07 added at startup (IN-01), which is
+  # the backstop for exactly this case.
+  cookieSecure: "true"
+
+# Provider credentials and camera settings, each an env var
+# config/config.example.yaml's ${VAR} placeholders name. Left blank by
+# default (the credential-missing/degraded-slot posture D-04 already
+# defines) -- an operator sets what they use in their own values file or
+# via --set, never by editing the chart's templates.
+env:
+  xaiApiKey: ""
+  tapoUser: ""
+  tapoPassword: ""
+  speakerEnsureUrl: ""
+
+postgres:
+  # D-14: always bundled, plain manifests against the official image --
+  # never a subchart, and never the vendor image line 07-RESEARCH.md's
+  # Pitfall 5 found unmaintained as a free image since 2025-08-28.
+  image: postgres:18
+  persistence:
+    size: 10Gi
+    storageClassName: ""

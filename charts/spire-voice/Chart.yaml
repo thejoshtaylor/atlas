@@ -1,0 +1,10 @@
+apiVersion: v2
+name: spire-voice
+description: >-
+  A self-hosted voice assistant for the home -- the application, its
+  persistent volumes, its configuration, and a bundled Postgres, deployed
+  together with no external database and no third-party chart.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/thejoshtaylor/spire-voice

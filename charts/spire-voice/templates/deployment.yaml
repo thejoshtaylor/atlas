@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spire-voice.fullname" . }}
+  labels:
+    {{- include "spire-voice.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "spire-voice.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spire-voice.selectorLabels" . | nindent 8 }}
+    spec:
+      # No privileged container and no host mount anywhere in this chart
+      # (T-07-43) -- runAsNonRoot enforces the image's own non-root `spire`
+      # user without this chart needing to know its numeric uid.
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: spire-voice
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+          command: ["python", "-m", "spire_voice.app"]
+          envFrom:
+            # D-15: every variable config/config.example.yaml names arrives
+            # through this one Secret -- Compose supplies the same names
+            # from `.env` instead. Two sources, one loader.
+            - secretRef:
+                name: {{ include "spire-voice.secretName" . }}
+          env:
+            - name: SPIRE_CONFIG
+              value: /etc/spire/config.yaml
+            - name: SPIRE_DATA_DIR
+              value: /data
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          volumeMounts:
+            # The exact mount points config/config.example.yaml already
+            # names (/data for sessions/tts-cache/calibration, /models for
+            # the local provider set and the wake model) -- this chart does
+            # not template the configuration's contents, so the paths here
+            # must match the ones already baked into files/config.yaml.
+            - name: config
+              mountPath: /etc/spire
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: models
+              mountPath: /models
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "spire-voice.fullname" . }}-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "spire-voice.fullname" . }}-data
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "spire-voice.fullname" . }}-models
