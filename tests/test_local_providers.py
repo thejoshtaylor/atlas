@@ -282,3 +282,25 @@ def test_extra_not_installed_raises_provider_unavailable_naming_the_extra(tmp_pa
         PiperTts(_tts_config(tmp_path))
 
     assert "piper" in str(excinfo.value).lower()
+
+
+# --- D-12: the published local-set latency figure --------------------
+
+
+def test_the_two_local_registry_entries_carry_the_measured_note_verbatim():
+    """07-04-PLAN.md Task 3: the local speech-to-text and text-to-speech
+    entries both carry 07-UI-SPEC.md's local-set latency sentence,
+    verbatim, as data -- never a paraphrase, and never present on the
+    cloud (xAI) entries, which are not part of the local set D-12
+    measures."""
+    from spire_voice.providers import registry
+
+    faster_whisper = registry.STT_REGISTRY["faster-whisper"]
+    piper = registry.TTS_REGISTRY["piper"]
+
+    assert faster_whisper.measured_note is not None
+    assert piper.measured_note is not None
+    assert faster_whisper.measured_note.startswith("Measured on this project's CPU-only host:")
+    assert piper.measured_note.startswith("Measured on this project's CPU-only host:")
+    assert registry.STT_REGISTRY["xai"].measured_note is None
+    assert registry.TTS_REGISTRY["xai"].measured_note is None

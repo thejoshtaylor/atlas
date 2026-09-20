@@ -83,5 +83,32 @@ See the repository's `README.md` for this project's own licence.
 
 ## Measured latency
 
-_A measurement of the local set's own speed on this host lands here once
-`scripts/measure_local_providers.py` has run. See `README.md` in the meantime._
+This is a real measurement, not a target. This project's reply-time budget is
+already about seven times over on the cloud path, and the local set is slower
+still. Nothing about the local set is gated on that budget. What is owed here
+is the honest number.
+
+Run this once both models are provisioned:
+
+```bash
+PYTHONPATH=src:mcp .venv/bin/python scripts/measure_local_providers.py
+```
+
+It runs the provisioned Piper voice over a fixed sentence and the provisioned
+faster-whisper model over that same sentence's own synthesized speech, five
+times each, and prints the median, minimum, and maximum wall-clock time per
+stage.
+
+**Measured 2026-09-20, on a 12-core Apple M4 Pro, CPU only, no GPU or other
+accelerator used** (`faster-whisper` "small", int8; Piper "en_US-lessac-medium",
+medium quality; 5 repetitions each):
+
+| Stage | Median | Min | Max |
+|---|---|---|---|
+| Speech to text (`faster-whisper`) | 1238 ms | 1203 ms | 1276 ms |
+| Text to speech (Piper) | 112 ms | 105 ms | 472 ms |
+
+This host is a development machine, not this project's target deployment
+host. A different host will measure differently. Re-run the command above on
+your own deployment host and use that number, not this one, to judge whether
+the local set is fast enough for your use.

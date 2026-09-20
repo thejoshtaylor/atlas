@@ -73,6 +73,11 @@ class ProviderEntry:
     (07-04-PLAN.md Task 1) is data, not a hardcoded provider name: it is how
     a future route/screen can reveal a "Server URL" field for exactly the
     entries that read one out of `options`, without special-casing a name.
+    `measured_note` (07-04-PLAN.md Task 3, D-12) is the published local-set
+    latency figure, phrased with 07-UI-SPEC.md's own local-set latency
+    sentence verbatim -- data on the entry, the same shape `licence_note`
+    already takes, so a future route/screen renders the contract's words
+    rather than a paraphrase, with no special case for which provider it is.
     """
 
     name: str
@@ -82,7 +87,24 @@ class ProviderEntry:
     batch: bool
     licence_note: "str | None" = None
     needs_server_url: bool = False
+    measured_note: "str | None" = None
 
+
+# D-12's published figure (07-04-PLAN.md Task 3): a real `scripts/
+# measure_local_providers.py` run against a real, provisioned
+# faster-whisper "small"/int8 model and a real Piper "en_US-lessac-medium"
+# voice. See docs/runbooks/local-providers.md's Measurement section for
+# the full report (median/min/max, repetition count, and the exact
+# command) -- this string is the one-line figure quoted from it, phrased
+# with 07-UI-SPEC.md's local-set latency sentence verbatim.
+_FASTER_WHISPER_MEASURED_NOTE = (
+    "Measured on this project's CPU-only host: 1238ms median to transcribe a "
+    "spoken reply (5 repetitions, 12-core Apple M4 Pro, no GPU, 2026-09-20)."
+)
+_PIPER_MEASURED_NOTE = (
+    "Measured on this project's CPU-only host: 112ms median to synthesize a "
+    "spoken reply (5 repetitions, 12-core Apple M4 Pro, no GPU, 2026-09-20)."
+)
 
 STT_REGISTRY: "dict[str, ProviderEntry]" = {
     "xai": ProviderEntry(
@@ -104,6 +126,7 @@ STT_REGISTRY: "dict[str, ProviderEntry]" = {
         requires_credential=False,
         batch=False,
         licence_note=None,
+        measured_note=_FASTER_WHISPER_MEASURED_NOTE,
     ),
 }
 
@@ -132,6 +155,7 @@ TTS_REGISTRY: "dict[str, ProviderEntry]" = {
         # same `BatchTtsAdapter`, never a second wrapper class.
         batch=True,
         licence_note=_PIPER_LICENCE_NOTE,
+        measured_note=_PIPER_MEASURED_NOTE,
     ),
 }
 

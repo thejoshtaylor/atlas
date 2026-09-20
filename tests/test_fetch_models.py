@@ -250,19 +250,6 @@ def test_piper_voice_hub_path_raises_naming_a_filename_that_does_not_follow_the_
         fetch_models._piper_voice_hub_path("not-a-recognized-voice-name.onnx")
 
 
-# --- _sha256_from_header -----------------------------------------------
-
-
-def test_sha256_from_header_recognizes_a_hex_digest():
-    digest = "a" * 64
-    assert fetch_models._sha256_from_header(f'"{digest}"') == digest
-
-
-def test_sha256_from_header_returns_none_for_anything_else():
-    assert fetch_models._sha256_from_header(None) is None
-    assert fetch_models._sha256_from_header('"short-etag"') is None
-
-
 # --- main ------------------------------------------------------------------
 
 

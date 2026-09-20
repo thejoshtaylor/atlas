@@ -121,20 +121,6 @@ def resolve_under_root(model_root: Path, dest: Path) -> Path:
     return resolved
 
 
-def _sha256_from_header(header_value: "str | None") -> "str | None":
-    """A sha256 hex digest, when `header_value` looks like one -- Hugging
-    Face publishes this as `ETag`/`X-Linked-ETag` for its LFS-backed model
-    files. Any other shape (a short opaque cache-busting etag, for
-    instance) is an honest "the source published nothing usable here",
-    never coerced into a digest that was not actually offered."""
-    if not header_value:
-        return None
-    candidate = header_value.strip().strip('"')
-    if len(candidate) == 64 and all(c in "0123456789abcdef" for c in candidate.lower()):
-        return candidate.lower()
-    return None
-
-
 def _sha256_of_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as fh:
@@ -148,21 +134,30 @@ def _sha256_of_file(path: Path) -> str:
 
 def default_download(url: str, part_path: Path) -> DownloadReceipt:
     """The real network implementation: stream `url` to `part_path`,
-    reading the declared size/digest off the response itself -- never
-    hardcoded, so an upstream file-layout change cannot silently pass a
-    stale check."""
+    reading the declared size off the response itself -- never hardcoded,
+    so an upstream file-layout change cannot silently pass a stale check.
+
+    Deliberately never derives a digest from `ETag`/`X-Linked-ETag`.
+    Confirmed live against Hugging Face Hub's real `Systran/faster-whisper-small` model
+    file this session: its `ETag` response header (`429ffc84...`) does not
+    equal the sha256 of the bytes actually served (`3e305921...`) -- the
+    Hub's Xet-backed CDN publishes a chunk-store hash under that header
+    name for large files, not a whole-file content digest. Treating it as
+    one would delete a correct download as if it were corrupt, which is
+    worse than not checking a digest at all. The size check below is the
+    verification this script actually performs for a real fetch;
+    `DownloadReceipt.declared_sha256` stays a real, exercised code path
+    for a `Downloader` that gets a digest from a source that publishes one
+    honestly (or a test double)."""
     with httpx.Client(follow_redirects=True, timeout=_REQUEST_TIMEOUT_S) as client:
         with client.stream("GET", url) as response:
             response.raise_for_status()
             declared_size_header = response.headers.get("content-length")
             declared_size = int(declared_size_header) if declared_size_header else None
-            declared_sha256 = _sha256_from_header(
-                response.headers.get("x-linked-etag") or response.headers.get("etag")
-            )
             with part_path.open("wb") as fh:
                 for chunk in response.iter_bytes(_DOWNLOAD_CHUNK_BYTES):
                     fh.write(chunk)
-    return DownloadReceipt(declared_size=declared_size, declared_sha256=declared_sha256)
+    return DownloadReceipt(declared_size=declared_size, declared_sha256=None)
 
 
 def fetch_one(model_file: ModelFile, model_root: Path, download: Downloader) -> FetchResult:
