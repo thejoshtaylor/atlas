@@ -14,6 +14,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "fetch_wake_model.py"
@@ -323,3 +324,60 @@ def test_the_real_default_pins_a_digest_rather_than_trusting_the_download():
     assert len(fetch_wake_model._MODEL_SHA256) == 64
     signature = inspect.signature(fetch_wake_model.main)
     assert signature.parameters["expected_sha256"].default == fetch_wake_model._MODEL_SHA256
+
+
+# --- WR-06 (code review): no raw traceback out of main() ----------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            httpx.HTTPStatusError(
+                "404 Not Found",
+                request=httpx.Request("GET", "https://alphacephei.com/x"),
+                response=httpx.Response(404),
+            ),
+            id="a 404 from the source",
+        ),
+        pytest.param(httpx.ConnectError("connection refused"), id="no network at all"),
+        pytest.param(OSError(28, "No space left on device"), id="a full disk mid-write"),
+    ],
+)
+def test_main_reports_a_download_failure_by_name_rather_than_a_traceback(
+    tmp_path, capsys, error
+):
+    """WR-06, the wake-model half."""
+    model_dir = tmp_path / "models" / "vosk-model-small-en-us-0.15"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_minimal_config_text(model_dir), encoding="utf-8")
+
+    def _download(url, dest):
+        raise error
+
+    exit_code = fetch_wake_model.main(["--config", str(config_path)], download=_download)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "Traceback" not in captured.err
+
+
+def test_main_reports_a_truncated_archive_by_name_rather_than_a_traceback(tmp_path, capsys):
+    """`zipfile.BadZipFile` from a truncated archive -- the wake model is
+    a 40 MB download, so a transfer cut short is the realistic case."""
+    model_dir = tmp_path / "models" / "vosk-model-small-en-us-0.15"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(_minimal_config_text(model_dir), encoding="utf-8")
+
+    def _download(url, dest):
+        dest.write_bytes(b"PK\x03\x04 and then the connection dropped")
+
+    exit_code = fetch_wake_model.main(
+        ["--config", str(config_path)], download=_download, expected_sha256=None
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "Traceback" not in captured.err

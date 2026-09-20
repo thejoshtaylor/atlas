@@ -231,7 +231,11 @@ def main(
         status = fetch_vosk_model(
             model_dir, download=download, expected_sha256=expected_sha256
         )
-    except FetchError as exc:
+    # WR-06 (code review): the same widening `fetch_models.py::main`
+    # carries, plus `zipfile.BadZipFile` -- a truncated or substituted
+    # archive is this script's own version of the same failure, and it
+    # raised straight through the old handler.
+    except (FetchError, httpx.HTTPError, OSError, zipfile.BadZipFile) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

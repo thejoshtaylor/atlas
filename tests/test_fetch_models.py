@@ -13,6 +13,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "fetch_models.py"
@@ -407,3 +408,94 @@ def test_the_pinned_sizes_are_the_two_the_project_actually_names():
     """D-09 names small or base. The refusal message lists these, so a
     silent third entry would make that message wrong."""
     assert fetch_models.pinned_faster_whisper_sizes() == {"small", "base"}
+
+
+# --- WR-06 (code review): no raw traceback out of main() ----------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            httpx.HTTPStatusError(
+                "404 Not Found",
+                request=httpx.Request("GET", "https://huggingface.co/x"),
+                response=httpx.Response(404),
+            ),
+            id="a 404 from the source",
+        ),
+        pytest.param(
+            httpx.ConnectError("connection refused"),
+            id="no network at all",
+        ),
+        pytest.param(
+            OSError(28, "No space left on device"),
+            id="a full disk mid-write",
+        ),
+    ],
+)
+def test_main_reports_a_download_failure_by_name_rather_than_a_traceback(
+    tmp_path, capsys, error
+):
+    """WR-06. `main` caught `FetchError` alone, so everything the real
+    download path can raise came out as a Python stack trace -- while
+    every other failure in this script reports itself by name. The
+    concrete trigger the review names: set `stt.local_model_size` to a
+    plausible value the Hub does not publish and run
+    `scripts/dev-fetch-models.sh`."""
+    models_root = tmp_path / "models"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+stt:
+  local_model_dir: "{models_root / 'faster-whisper'}"
+  local_model_size: "small"
+tts:
+  piper_voice_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx'}"
+  piper_config_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx.json'}"
+brain:
+  models:
+    - model: "fake-model"
+database:
+  url: "postgresql+asyncpg://u:p@localhost/db"
+""",
+        encoding="utf-8",
+    )
+
+    def _download(url, part_path):
+        raise error
+
+    exit_code = fetch_models.main(["--config", str(config_path)], download=_download)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: ")
+    assert "Traceback" not in captured.err
+
+
+def test_main_reports_an_unfetchable_voice_filename_by_name(tmp_path, capsys):
+    """`plan_fetches` raises `FetchError` for a voice filename that does
+    not follow Piper's convention, and it sat outside the old `try` --
+    so the one refusal it owns could not be reported either."""
+    models_root = tmp_path / "models"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+stt:
+  local_model_dir: "{models_root / 'faster-whisper'}"
+tts:
+  piper_voice_path: "{models_root / 'piper' / 'not-a-recognized-voice-name.onnx'}"
+  piper_config_path: "{models_root / 'piper' / 'not-a-recognized-voice-name.onnx.json'}"
+brain:
+  models:
+    - model: "fake-model"
+database:
+  url: "postgresql+asyncpg://u:p@localhost/db"
+""",
+        encoding="utf-8",
+    )
+
+    exit_code = fetch_models.main(["--config", str(config_path)])
+
+    assert exit_code == 1
+    assert "error: " in capsys.readouterr().err

@@ -421,10 +421,21 @@ def main(
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    model_root, model_files = plan_fetches(config.stt, config.tts)
     try:
+        model_root, model_files = plan_fetches(config.stt, config.tts)
         results = fetch_all(model_files, model_root, download, pinned)
-    except FetchError as exc:
+    # WR-06 (code review): `FetchError` alone left every failure the real
+    # download path can actually produce as a raw traceback --
+    # `httpx.HTTPStatusError` from `raise_for_status()` (a 404 on a
+    # model size the Hub does not publish), `httpx.ConnectError` (no
+    # network, which is the normal state of the offline deployment D-11
+    # is written for), and `OSError` from a full disk mid-write. Every
+    # other failure in this script reports by name; these did not.
+    #
+    # `plan_fetches` is inside the try as well: it raises `FetchError`
+    # for a voice filename that does not follow Piper's convention, and
+    # that was the one refusal the old shape could not report either.
+    except (FetchError, httpx.HTTPError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
