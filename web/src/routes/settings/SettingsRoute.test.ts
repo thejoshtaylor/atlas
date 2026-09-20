@@ -5,6 +5,11 @@ import { createSubmitGuard } from "@/lib/submitGuard"
 import { saveCredentialMutationOptions } from "@/lib/credentials"
 import { queryClient } from "@/lib/queryClient"
 
+// `web/` has no rendered-DOM test infrastructure (no Playwright, no
+// @testing-library/*) -- this file asserts the source text carries the
+// wiring 03/07-UI-SPEC.md require. It cannot prove the page actually
+// renders correctly in a browser, the same limitation every prior
+// phase's screen test in this repository carries (five phases now).
 const SOURCE = readFileSync(join(import.meta.dir, "SettingsRoute.tsx"), "utf-8")
 
 describe("SettingsRoute -- content is exactly what the server's listing returns", () => {
@@ -60,6 +65,33 @@ describe("SettingsRoute -- a failed save leaves the field in its prior state", (
 describe("SettingsRoute -- loading never renders as an empty list", () => {
   test("SkeletonList renders while query.status === \"pending\"", () => {
     expect(SOURCE).toMatch(/query\.status === "pending" \? <SkeletonList/)
+  })
+})
+
+describe("SettingsRoute -- the Providers row links out, in Safety policy's exact shape", () => {
+  test("the row reads \"Providers\" and links to /providers", () => {
+    expect(SOURCE).toMatch(/<p className="text-heading font-semibold text-foreground">Providers<\/p>/)
+    expect(SOURCE).toMatch(/<Link to="\/providers"/)
+  })
+
+  test("the badge is present only when some slot needs a restart, absent otherwise -- never a count", () => {
+    expect(SOURCE).toMatch(/providersNeedRestart \? <Badge variant="secondary">Needs restart<\/Badge> : null/)
+    // Not a "{n} slots pending" count line -- nothing else in this
+    // product counts pending things in a summary row (07-UI-SPEC.md).
+    expect(SOURCE).not.toMatch(/slots? pending/)
+  })
+
+  test("the divergence fact is the shared needsRestart function, not a re-derived boolean", () => {
+    expect(SOURCE).toMatch(/from "@\/routes\/providers\/deriveProvidersScreenState"/)
+    expect(SOURCE).toMatch(/providersQuery\.data\?\.slots\.some\(\(slot\) => needsRestart\(slot\)\)/)
+  })
+
+  test("provider selection does not grow a credential section of its own -- the row only links out", () => {
+    // No provider-specific Input/config-value editing on this screen --
+    // a slot's provider and its credential are edited in two different
+    // places (this file's own Providers row vs. CredentialSection).
+    expect(SOURCE).not.toMatch(/provider_name/)
+    expect(SOURCE).not.toMatch(/ProviderSlot/)
   })
 })
 

@@ -3,10 +3,10 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
 // `web/` has no rendered-DOM test infrastructure (no Playwright, no
-// @testing-library/*) -- this asserts the source text carries the wiring
-// 07-UI-SPEC.md requires, the same limitation `PluginsRoute.test.ts`
-// states for itself. It cannot prove the page actually renders correctly
-// in a browser.
+// @testing-library/*) -- this file asserts the source text carries the
+// wiring 07-UI-SPEC.md requires. It cannot prove the page actually
+// renders correctly in a browser, the same limitation every prior
+// phase's screen test in this repository carries (five phases now).
 const SOURCE = readFileSync(join(import.meta.dir, "ProvidersRoute.tsx"), "utf-8")
 
 describe("ProvidersRoute -- loading never renders as an empty page", () => {

@@ -15,6 +15,8 @@ import {
   saveCredentialMutationOptions,
   type CredentialEntry,
 } from "@/lib/credentials"
+import { PROVIDERS_QUERY_KEY, fetchProviders } from "@/lib/providers"
+import { needsRestart } from "@/routes/providers/deriveProvidersScreenState"
 
 // 03-UI-SPEC.md's Focal Point row: "the section headings and their Live
 // / Needs-restart badges -- the badge is the information the screen
@@ -94,6 +96,15 @@ function CredentialSection({ entry }: { entry: CredentialEntry }) {
 
 export function SettingsRoute() {
   const query = useQuery({ queryKey: CREDENTIALS_QUERY_KEY, queryFn: fetchCredentials })
+  // 07-UI-SPEC.md: a provider's choice and its credential are two
+  // different facts edited in two different places -- this row only
+  // links to /providers, it never grows a fourth credential section of
+  // its own. `needsRestart` (deriveProvidersScreenState.ts) is the same
+  // pure per-slot fact the /providers screen itself renders; the badge
+  // here is present/absent for the whole screen, never a count, matching
+  // "Safety policy"'s own binary Live/Needs-restart shape.
+  const providersQuery = useQuery({ queryKey: PROVIDERS_QUERY_KEY, queryFn: fetchProviders })
+  const providersNeedRestart = providersQuery.data?.slots.some((slot) => needsRestart(slot)) ?? false
 
   return (
     <div className="flex flex-col gap-6">
@@ -106,6 +117,16 @@ export function SettingsRoute() {
         <div className="flex items-center gap-2">
           <Badge variant="secondary">Live</Badge>
           <Link to="/policy" className="touch-target flex items-center text-body text-primary underline-offset-4 hover:underline">
+            Edit
+          </Link>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-card p-4">
+        <p className="text-heading font-semibold text-foreground">Providers</p>
+        <div className="flex items-center gap-2">
+          {providersNeedRestart ? <Badge variant="secondary">Needs restart</Badge> : null}
+          <Link to="/providers" className="touch-target flex items-center text-body text-primary underline-offset-4 hover:underline">
             Edit
           </Link>
         </div>
