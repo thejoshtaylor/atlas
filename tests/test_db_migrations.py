@@ -818,3 +818,167 @@ async def test_provider_selections_slot_is_unique(monkeypatch):
                 )
     finally:
         await engine.dispose()
+
+
+@skip_without_postgres
+async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_decrypts(
+    monkeypatch,
+):
+    """DEP-04, T-07-33, T-07-35: the second half of DEP-04 this project has
+    never proven -- that an upgrade over a database an operator already
+    wrote real data into keeps that data. Starts from `0010`, the revision
+    that preceded this phase, writes one row through each of the real
+    repositories an operator's data actually arrives through (a safety
+    policy rule, a stored credential, an account, a plugin configuration
+    value), upgrades to head, and reads every one of them back through the
+    same repositories -- byte-identical, including the timezone handling
+    the repository boundary normalizes. The encrypted credential is
+    checked the concrete way that actually protects an operator: it must
+    still decrypt, with the same key, after the upgrade. `provider_selections`
+    (migration `0011`) must exist and be seeded. A second upgrade to the
+    same head, and a downgrade of `0011` followed by a re-upgrade, must
+    both leave every one of these rows exactly as they were.
+    """
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from spire_voice.config import SecurityConfig
+    from spire_voice.crypto.credentials import decrypt_credential, encrypt_credential
+    from spire_voice.db.engine import get_current_revision, run_migrations
+    from spire_voice.db.postgres import (
+        PostgresAccountRepository,
+        PostgresCredentialRepository,
+        PostgresPluginRepository,
+        PostgresPolicyRepository,
+    )
+    from spire_voice.db.repository import PluginConfigValue
+
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
+    # new ${VAR} placeholders config.example.yaml expands.
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("HA_URL", "test-value")
+    monkeypatch.setenv("HA_TOKEN", "test-value")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    test_secret_key = "test-secret-key-not-a-real-generated-value"
+    monkeypatch.setenv("SPIRE_SECRET_KEY", test_secret_key)
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    migration_url = _migration_url(_TEST_DB_URL)
+
+    # Stand where a real deployment stood immediately before this phase's
+    # own migration existed.
+    _run_upgrade_to("0010")
+    assert get_current_revision(migration_url) == "0010"
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+        security = SecurityConfig()
+
+        policy_repo = PostgresPolicyRepository(sessionmaker)
+        credential_repo = PostgresCredentialRepository(sessionmaker)
+        account_repo = PostgresAccountRepository(sessionmaker)
+        plugin_repo = PostgresPluginRepository(sessionmaker)
+
+        # A safety policy rule, written the way the denylist editor writes one.
+        written_rule = await policy_repo.add_rule(
+            kind="deny_entity",
+            value="switch.example_pre_upgrade_socket",
+            note="written before the 07-07 upgrade",
+            created_by_user_id=None,
+        )
+
+        # A stored, encrypted credential -- the row this task's own
+        # behaviour singles out: surviving structurally but no longer
+        # decrypting is the same loss as not surviving at all.
+        credential_plaintext = "a-plainly-fictional-pre-upgrade-credential"
+        ciphertext, key_version = encrypt_credential(credential_plaintext, security)
+        written_credential = await credential_repo.upsert_credential(
+            "stt_api_key", ciphertext=ciphertext, key_version=key_version, updated_by_user_id=None
+        )
+
+        # An account.
+        written_user = await account_repo.create_user(
+            email="pre-upgrade@example.invalid",
+            display_name="Pre Upgrade Operator",
+            password_hash="not-a-real-hash",
+            role="admin",
+        )
+
+        # A plugin configuration value, on the builtin `ha` row migration
+        # 0008 always seeds.
+        [ha_plugin] = [p for p in await plugin_repo.list_plugins() if p.slug == "ha"]
+        await plugin_repo.set_config_values(
+            ha_plugin.id,
+            [
+                PluginConfigValue(
+                    key="EXAMPLE_PRE_UPGRADE_KEY",
+                    secret=False,
+                    value="pre-upgrade-value",
+                    ciphertext=None,
+                    key_version=None,
+                )
+            ],
+        )
+        written_config_values = {v.key: v for v in await plugin_repo.get_config_values(ha_plugin.id)}
+
+        # The real migration runner `lifespan` calls -- not a fake, not a
+        # second reimplementation of it (the plan's own key link).
+        run_migrations(migration_url)
+        assert get_current_revision(migration_url) == "0011"
+
+        async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
+            reread_rules = {r.id: r for r in await policy_repo.list_rules()}
+            assert reread_rules[written_rule.id] == written_rule
+
+            reread_credential = await credential_repo.get_credential("stt_api_key")
+            assert reread_credential == written_credential
+            assert (
+                decrypt_credential(
+                    reread_credential.ciphertext, reread_credential.key_version, security
+                )
+                == credential_plaintext
+            ), "the credential survived the schema change but no longer decrypts -- the WR-06-shaped loss this task exists to catch"
+
+            reread_user = await account_repo.get_user_by_id(written_user.id)
+            assert reread_user == written_user
+
+            reread_config_values = {
+                v.key: v for v in await plugin_repo.get_config_values(ha_plugin.id)
+            }
+            assert reread_config_values == written_config_values
+
+            return await _fetch_provider_selection_rows(_TEST_DB_URL)
+
+        provider_rows = await _assert_pre_upgrade_rows_intact()
+        assert provider_rows == [("stt", "xai"), ("tts", "xai"), ("brain", "xai")]
+
+        # A second run at head: no-op. The stamped revision is unchanged
+        # and nothing is added, removed, or rewritten -- old data or new.
+        run_migrations(migration_url)
+        assert get_current_revision(migration_url) == "0011"
+        assert await _assert_pre_upgrade_rows_intact() == provider_rows
+
+        # A downgrade of this phase's own migration, and a re-upgrade,
+        # return to the same state -- for the table the migration owns,
+        # and for every row a prior migration's real repository wrote,
+        # which this downgrade has no relationship to at all.
+        cfg = AlembicConfig("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", migration_url)
+        command.downgrade(cfg, "0010")
+        assert get_current_revision(migration_url) == "0010"
+
+        run_migrations(migration_url)
+        assert get_current_revision(migration_url) == "0011"
+        assert await _assert_pre_upgrade_rows_intact() == provider_rows
+    finally:
+        await engine.dispose()
