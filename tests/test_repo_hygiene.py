@@ -274,3 +274,89 @@ def test_calibration_directory_default_location_is_gitignored():
         f"{candidate} is not covered by the repository's ignore rules -- "
         "a calibration record written to the default directory would be trackable by git"
     )
+
+
+# DEP-05's second clause: no entity id or credential-shaped literal survives
+# anywhere in the repository's HISTORY, not only its current working tree.
+# The tests above already prove the working-tree half; a deleted secret is
+# still reachable through git's object store, which is exactly what a
+# working-tree walk can never see.
+@skip_without_git_dir
+def test_repository_history_carries_no_entity_id_or_credential_literal():
+    """A scan over every commit `git rev-list --all` finds reachable, and
+    every blob object `git rev-list --objects --all` finds reachable
+    through any of their trees -- reusing `_ENTITY_ID_RE`/
+    `_ALLOWED_OBJECT_IDS`/`_CREDENTIAL_RE`/`_ALLOWED_CREDENTIAL_VALUES`
+    unchanged, so a change to either convention reaches the working-tree
+    check and this history check at once, never two copies to keep in
+    sync.
+
+    `git rev-list --objects --all` is what closes the second clause:  it
+    walks every reachable commit's own tree as that commit itself looked,
+    not only the current tip's tree, so a blob a later commit deleted is
+    still emitted here as long as some earlier, still-reachable commit's
+    tree names it. Asserts on what it scanned (commit count, blob count)
+    so a scan that silently found nothing to look at fails loudly instead
+    of passing green.
+    """
+    commits_scanned, blob_paths = _iter_reachable_blob_paths()
+    assert commits_scanned, (
+        "git rev-list --all found no reachable commits -- the scan ran against an empty "
+        "or unreadable history, which is a vacuous pass, not a clean one"
+    )
+    assert blob_paths, (
+        "git rev-list --objects --all found no path-bearing objects -- the scan ran "
+        "against nothing"
+    )
+
+    blobs = _batch_read_blobs(set(blob_paths))
+    assert blobs, "git cat-file --batch returned no blob content despite a non-empty object list"
+
+    scanned_text_blobs = 0
+    violations: list[str] = []
+    for blob_sha, content in blobs.items():
+        if len(content) > _MAX_HISTORY_BLOB_BYTES:
+            continue
+        # git's own binary heuristic: a NUL byte in the first 8000 bytes --
+        # restricts this scan to text, the same convention git itself uses
+        # to decide whether to show a diff at all.
+        if b"\x00" in content[:8000]:
+            continue
+        text = content.decode("utf-8", errors="ignore")
+        if not text:
+            continue
+        scanned_text_blobs += 1
+        path = blob_paths[blob_sha]
+
+        for match in _ENTITY_ID_RE.finditer(text):
+            object_id = match.group(2)
+            if object_id.startswith("example_") or object_id in _ALLOWED_OBJECT_IDS:
+                continue
+            commits = _commits_touching_path(path)
+            violations.append(
+                f"{path} (blob {blob_sha}, commit(s) {commits[:3] or ['unknown']}): "
+                f"{match.group(0)} (entity id)"
+            )
+
+        for match in _CREDENTIAL_RE.finditer(text):
+            if match.group(2) in _ALLOWED_CREDENTIAL_VALUES:
+                continue
+            commits = _commits_touching_path(path)
+            violations.append(
+                f"{path} (blob {blob_sha}, commit(s) {commits[:3] or ['unknown']}): "
+                f"{match.group(0)} (credential-shaped literal)"
+            )
+
+    assert scanned_text_blobs > 0, (
+        "found no text content among the scanned history blobs -- the scan ran against "
+        "nothing readable"
+    )
+
+    assert not violations, (
+        f"scanned {len(commits_scanned)} reachable commit(s) and {len(blobs)} unique blob "
+        f"object(s) ({scanned_text_blobs} as text) from the repository's history: found "
+        "entity id or credential-shaped literal(s) outside the invented-object-id "
+        "convention and the existing allowlist this module already enforces on the "
+        "working tree. This is a real finding to report to the operator, not a pattern "
+        f"to weaken, an allowlist to widen, or history to rewrite: {violations}"
+    )
