@@ -175,3 +175,26 @@ def test_compose_app_port_is_bound_to_loopback_only():
     compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
     app_ports = compose["services"]["app"]["ports"]
     assert all(str(p).startswith("127.0.0.1:") for p in app_ports), app_ports
+
+
+# --- WR-07 (code review): the mounted volumes must be writable ----------
+
+
+def test_the_image_pins_the_numeric_uid_and_gid_the_chart_names() -> None:
+    """WR-07. The pod runs as the image's non-root `spire` user and
+    mounts two ReadWriteOnce PVCs at /data and /models. Kubernetes knows
+    nothing about an image's passwd file, so the chart has to name a
+    numeric `fsGroup` to make those volumes writable -- and a number the
+    chart states while the image lets `groupadd --system` pick its own is
+    a drift waiting to happen. This asserts the two agree, from both
+    sides, rather than asserting either one alone.
+    """
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text()
+    assert "--gid 1001 spire" in dockerfile
+    assert "--uid 1001 --gid 1001" in dockerfile
+
+    deployment = (
+        _REPO_ROOT / "charts" / "spire-voice" / "templates" / "deployment.yaml"
+    ).read_text()
+    assert "fsGroup: 1001" in deployment
+    assert "fsGroupChangePolicy: OnRootMismatch" in deployment

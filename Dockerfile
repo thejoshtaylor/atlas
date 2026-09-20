@@ -80,8 +80,16 @@ COPY docs/ ./docs/
 # below (so a filesystem-permission test behaves the way it does on a
 # real deployment, not the way it behaves under a root build user) and
 # the runtime stage.
-RUN groupadd --system spire \
-    && useradd --system --gid spire --home-dir /app --no-create-home spire \
+# WR-07 (code review): the uid and gid are pinned, not left to
+# `groupadd --system`'s own descending search. The Helm chart has to name
+# a numeric `fsGroup` to make the mounted PersistentVolumeClaims writable
+# by this user (Kubernetes knows nothing about an image's passwd file),
+# and a number the chart states while the image picks its own is a drift
+# waiting to happen. 1001 is above Debian's system range, so nothing the
+# base image installs later can collide with it.
+# tests/test_deployment_config.py asserts the chart and this line agree.
+RUN groupadd --system --gid 1001 spire \
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home spire \
     && mkdir -p /data /models \
     && chown -R spire:spire /app /data /models
 

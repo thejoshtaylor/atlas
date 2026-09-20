@@ -427,3 +427,32 @@ def test_every_secret_value_is_coerced_before_it_is_base64_encoded() -> None:
         if "b64enc" not in line or line.lstrip().startswith("#"):
             continue
         assert "toString" in line, f"value reaches b64enc uncoerced: {line.strip()}"
+
+
+@skip_without_helm
+def test_the_pod_sets_an_fsgroup_so_its_volumes_are_writable() -> None:
+    """WR-07, rendered rather than grepped: whatever `fsGroup` the pod
+    declares must not be root's, and every volume the application writes
+    to must actually be one of the claims that `fsGroup` covers."""
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+
+    fs_group = pod_spec["securityContext"].get("fsGroup")
+    assert isinstance(fs_group, int) and fs_group != 0
+
+    container = pod_spec["containers"][0]
+    writable_mounts = {
+        mount["mountPath"]
+        for mount in container["volumeMounts"]
+        if not mount.get("readOnly")
+    }
+    assert {"/data", "/models"} <= writable_mounts
+    claim_backed = {
+        volume["name"]
+        for volume in pod_spec["volumes"]
+        if "persistentVolumeClaim" in volume
+    }
+    for mount in container["volumeMounts"]:
+        if mount["mountPath"] in {"/data", "/models"}:
+            assert mount["name"] in claim_backed

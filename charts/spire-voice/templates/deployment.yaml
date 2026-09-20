@@ -29,8 +29,24 @@ spec:
       # whole chart could not install on any cluster. Every container that
       # does not declare a non-root USER in its own image therefore carries
       # its own securityContext naming the uid to run as.
+      #
+      # WR-07 (code review): `fsGroup` is what makes the two mounted
+      # PersistentVolumeClaims writable by that non-root user. Without it,
+      # ownership of a volume root is whatever the CSI driver creates --
+      # root-owned 0755 on many drivers, this cluster's Longhorn included
+      # -- and the application could not create the session, TTS-cache or
+      # calibration directories under /data, nor could the model fetch
+      # script write into /models. 07-08-PLAN.md's T-07-43 mitigation
+      # asserted "the same ownership on the mounted volumes"; nothing in
+      # the chart established it. The gid is the one the Dockerfile pins
+      # for its `spire` group, so the chart and the image cannot drift.
+      # `OnRootMismatch` means the recursive chown runs only when the
+      # volume root's group is wrong -- not on every pod start, which on a
+      # full models volume would be a real delay for no change.
       securityContext:
         runAsNonRoot: true
+        fsGroup: 1001
+        fsGroupChangePolicy: OnRootMismatch
       initContainers:
         # Waits for the bundled database rather than restarting the whole
         # pod until it happens to be up -- a StatefulSet's own pod can take
