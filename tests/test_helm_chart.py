@@ -330,3 +330,53 @@ def test_the_deploy_verification_script_waits_for_the_pod_it_claims_to_verify() 
             f"{command} does not forward the --wait arguments, so a release that "
             "never becomes ready would be reported as a success"
         )
+
+
+# --- WR-01 (code review): uninstall + reinstall must not destroy data ----
+
+
+@skip_without_helm
+def test_the_secret_outlives_the_release_because_the_database_volume_does() -> None:
+    """WR-01. `helm uninstall` deletes the Secret; Kubernetes never
+    deletes a StatefulSet's `volumeClaimTemplates` PVC. A reinstall then
+    generated a new POSTGRES_PASSWORD, which the surviving already-initdb'd
+    database rejects, and a new SPIRE_SECRET_KEY, which makes every
+    credential row in that same surviving database permanently
+    undecryptable. Both from two documented commands run in order.
+
+    The annotation is what puts the Secret on the same footing as the
+    volume: both survive an uninstall, so a reinstall finds a matched
+    pair. `scripts/verify-helm-deploy.sh` proves the live behaviour;
+    this pins the annotation itself so it cannot quietly disappear.
+    """
+    docs = _helm_template()
+    secret = _find_one(docs, "Secret")
+    annotations = secret["metadata"].get("annotations", {})
+    assert annotations.get("helm.sh/resource-policy") == "keep"
+
+    stateful_set = _find_one(docs, "StatefulSet")
+    claim_templates = stateful_set["spec"]["volumeClaimTemplates"]
+    assert claim_templates, (
+        "the database volume stopped being a volumeClaimTemplate -- if it no "
+        "longer survives an uninstall, the Secret's keep policy is the wrong "
+        "half of a pair and this whole finding needs rethinking"
+    )
+
+
+def test_the_runbook_says_the_secret_and_the_volume_are_deleted_together() -> None:
+    """Helm cannot enforce the pairing -- `helm uninstall` has no way to
+    keep a PVC and a Secret in step -- so the runbook has to state it, and
+    give the recovery. The review's own instruction: if the honest answer
+    is that Helm cannot fully prevent this, say so loudly rather than
+    leaving it to be discovered."""
+    runbook = (_REPO_ROOT / "docs" / "runbooks" / "deploy-helm.md").read_text()
+    assert "helm.sh/resource-policy: keep" in runbook
+    assert "kubectl delete pvc postgres-data-" in runbook
+    assert "kubectl delete secret" in runbook
+
+
+def test_the_deploy_verification_script_runs_the_uninstall_reinstall_path() -> None:
+    script = (_REPO_ROOT / "scripts" / "verify-helm-deploy.sh").read_text()
+    assert "helm uninstall" in script
+    assert "_claim_reinstall_status" in script
+    assert "_secret_key_after_uninstall" in script

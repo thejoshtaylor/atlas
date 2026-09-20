@@ -140,6 +140,51 @@ Migrations run automatically at application startup (DEP-04); the bundled
 database's own data survives an upgrade because it lives on a
 PersistentVolumeClaim, never `emptyDir`.
 
+## Uninstalling, and what a clean reinstall really means
+
+Two things this release creates outlive `helm uninstall`, on purpose, and they
+must be deleted together or not at all:
+
+- the Secret (`<release>-spire-voice-secret`), which carries the generated
+  `SPIRE_SECRET_KEY` and the bundled database's password;
+- the database's PersistentVolumeClaim (`postgres-data-<release>-spire-voice-postgres-0`).
+
+Kubernetes never deletes a StatefulSet's PVC, and this chart marks the Secret
+`helm.sh/resource-policy: keep` so that Helm does not delete it either. Those
+two facts exist together for one reason. The database image reads
+`POSTGRES_PASSWORD` only when its data directory is empty, so a database that
+survives on its PVC keeps the password it was initialized with; and
+`SPIRE_SECRET_KEY` is what every provider credential in that database is
+encrypted with. Delete the Secret while keeping the volume and you get a
+database that rejects the new password and a set of credentials nobody can ever
+decrypt again -- silently, from two ordinary commands run in order.
+
+To uninstall and reinstall the same deployment, keeping your data:
+
+```bash
+helm uninstall spire-voice
+helm install spire-voice charts/spire-voice --set image.repository=... --set image.tag=...
+```
+
+Use the same release name and the same namespace. The reinstall adopts the kept
+Secret and reuses the surviving volume. A different release name gets a
+different Secret and a different volume -- a genuinely new deployment, not this
+one.
+
+To start genuinely fresh, delete both, and accept that every stored credential
+and every signed-in session goes with them:
+
+```bash
+helm uninstall spire-voice
+kubectl delete secret spire-voice-secret
+kubectl delete pvc postgres-data-spire-voice-postgres-0
+```
+
+(Substitute your own release name in all three.) `scripts/verify-helm-deploy.sh`
+runs the uninstall-then-reinstall path for real on every invocation and fails if
+the key does not survive it, or if the surviving database will not accept the
+reinstalled password.
+
 ## Verifying this document is true
 
 `scripts/verify-helm-deploy.sh` is the real proof behind the claims above: it
