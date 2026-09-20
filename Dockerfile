@@ -129,6 +129,22 @@ RUN pip install --no-cache-dir -r /tmp/requirements-no-oww.txt \
 # CI/dev against a live database instead. Everything else -- every import,
 # every unit test across the whole dependency set this image installs --
 # runs for real, right here, at build time.
+#
+# WR-10 (code review): "right here" needs saying precisely, because it
+# was not true before. `runtime` below is `FROM python-base`, not `FROM
+# test`, and BuildKit builds only the stages the target depends on -- so
+# `docker build` and `docker compose build`, which default to the last
+# stage, skipped this one entirely, and nothing in the repository passed
+# `--target test`. The stated proof had never been executed by any
+# command this project ships.
+#
+# `runtime` is deliberately still not `FROM test`: that would put the
+# test suite, `charts/`, and pytest itself into every shipped image, and
+# make an operator's `docker compose up --build` pay for a full test run.
+# Instead, scripts/verify-clean-clone.sh -- the DEP-03 proof, the one
+# command this project points at for "does a fresh clone really work" --
+# builds this stage before it brings the stack up, and fails on it. A
+# test asserts that it still does.
 FROM python-base AS test
 
 # pytest/pytest-asyncio directly, not `-e ".[dev]"` -- the extras syntax
@@ -138,11 +154,21 @@ FROM python-base AS test
 RUN pip install --no-cache-dir pytest pytest-asyncio
 COPY --chown=spire:spire tests/ ./tests/
 # tests/test_deployment_config.py and tests/test_repo_hygiene.py's own
-# DEP-05 extension read these three deployment artifacts directly --
-# never needed by the application itself, so they land only in this
-# stage, not python-base.
+# DEP-05 extension read these deployment artifacts directly -- never
+# needed by the application itself, so they land only in this stage, not
+# python-base.
+#
+# WR-10 (code review): `charts/` and this Dockerfile join that list. The
+# first time this stage was ever actually built, four tests failed for no
+# reason but their inputs being absent -- tests/test_helm_chart.py's
+# three non-Helm assertions (which read the chart's own text and do not
+# skip, because they need no `helm` binary) and
+# tests/test_deployment_config.py's uid/gid agreement check, which reads
+# this file. A test stage that cannot see what the tests read is not the
+# proof this Dockerfile's comment claims it is.
 COPY --chown=spire:spire deploy/ ./deploy/
-COPY --chown=spire:spire docker-compose.yml .env.example ./
+COPY --chown=spire:spire charts/ ./charts/
+COPY --chown=spire:spire docker-compose.yml .env.example Dockerfile ./
 # Non-root, matching the runtime stage: a test asserting that an
 # unwritable directory is actually unwritable is meaningless as root,
 # since root ignores ordinary permission bits.

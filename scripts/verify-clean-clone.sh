@@ -76,6 +76,24 @@ fi
 
 cd "$_TMP_DIR"
 
+# WR-10 (code review): the Dockerfile's `test` stage, built for real.
+#
+# That stage's own comment calls itself "the actual proof" that this
+# project's whole dependency set installs and its suite passes on Python
+# 3.12 (the version D-13 locks, against the 3.14 this project develops
+# on). It had never run: `runtime` is `FROM python-base`, not `FROM
+# test`, BuildKit builds only what the target needs, and nothing in the
+# repository passed `--target test`. Building it here is what makes that
+# comment true -- and this is the right place for it, because a clean
+# clone that cannot pass its own tests on the Python it ships has not
+# reached a running assistant in any sense DEP-03 means.
+echo "# building the image's own test stage (Python 3.12, the version D-13 locks)" >&2
+if ! docker build --target test -t "spire-voice-test:${_RUN_ID}" . >&2; then
+  echo "FATAL: the image's own test stage failed -- this project's dependency set does not install and pass on the Python the image ships" >&2
+  exit 1
+fi
+docker image rm "spire-voice-test:${_RUN_ID}" >/dev/null 2>&1 || true
+
 # docs/runbooks/deploy-compose.md's own wake-word step -- run before the
 # stack comes up, exactly as documented, with no .env file present.
 echo "# provisioning the Vosk wake-word model (docs/runbooks/deploy-compose.md)" >&2

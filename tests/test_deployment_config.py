@@ -269,3 +269,41 @@ def test_the_example_database_url_names_the_port_the_dev_script_actually_uses() 
 
     assert port != "5432", "the dev database must not claim Postgres's own default port"
     assert f"127.0.0.1:{port}/spire" in env_example
+
+
+# --- WR-10 (code review): the test stage is actually built -------------
+
+
+def test_something_this_repository_ships_actually_builds_the_images_test_stage() -> None:
+    """WR-10. The `test` stage calls itself "the actual proof" that this
+    project's dependency set installs and its suite passes on the Python
+    D-13 locks -- and nothing ever built it. `runtime` is `FROM
+    python-base`, not `FROM test`; BuildKit builds only the stages the
+    target needs; `docker build` and `docker compose build` default to
+    the last stage; and no script, runbook or README line passed
+    `--target test`. The first time it was ever built, it failed.
+
+    `scripts/verify-clean-clone.sh` builds it now, and fails on it. This
+    test is what keeps that from being quietly dropped again.
+    """
+    script = (_REPO_ROOT / "scripts" / "verify-clean-clone.sh").read_text(encoding="utf-8")
+    assert "docker build --target test" in script
+
+    build_line = next(
+        line for line in script.splitlines() if "docker build --target test" in line
+    )
+    assert build_line.lstrip().startswith("if ! "), (
+        "the test-stage build must be checked -- an unchecked `docker build` would "
+        "repeat exactly the failure this finding is about"
+    )
+
+
+def test_the_test_stage_can_see_every_artifact_its_tests_read() -> None:
+    """The reason that first build failed: four tests read deployment
+    artifacts the stage did not copy in -- the chart's own templates and
+    this Dockerfile. They are not skip-guarded (they need no `helm`
+    binary), so their inputs being absent is a failure, not a skip."""
+    dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    test_stage = dockerfile.split("AS test", 1)[1].split("AS runtime", 1)[0]
+    for needed in ("charts/", "Dockerfile", "docker-compose.yml", ".env.example", "deploy/"):
+        assert needed in test_stage, f"the test stage does not copy in {needed}"
