@@ -47,11 +47,32 @@ class BatchTtsAdapter:
     `build_session_update()` -- is forwarded to the wrapped provider. The
     adapter does not need to know those methods exist to pass them
     through; it only owns the one method the streaming protocol requires.
+
+    IN-01 (code review): the forwarding used to include
+    `synthesize_once`, which made an adapter satisfy `BatchTts` itself --
+    so `BatchTtsAdapter(BatchTtsAdapter(provider))` type-checked and ran,
+    double-chunking the audio and, worse, leaving the outer wrapper's
+    `last_synthesis_ms` measuring the inner wrapper's full drain rather
+    than the provider call. That is precisely the corruption of the
+    measured figure D-06 exists to rule out, and it would have looked
+    like a slower provider rather than a bug. `boot.py:120` is the only
+    wrap site today, so it could not happen -- but nothing said so.
     """
 
     wrapped = True
 
+    # The methods that define the batch side of this adapter's own
+    # boundary. Forwarding either one would make an adapter indisting-
+    # uishable from the provider it wraps.
+    _NEVER_FORWARDED = frozenset({"synthesize_once", "synthesize"})
+
     def __init__(self, provider: BatchTts, chunk_bytes: int = CHUNK_BYTES) -> None:
+        if isinstance(provider, BatchTtsAdapter):
+            raise TypeError(
+                "BatchTtsAdapter cannot wrap another BatchTtsAdapter: the audio would "
+                "be chunked twice and last_synthesis_ms would measure the inner "
+                "wrapper's drain rather than the provider call (D-06)"
+            )
         self._provider = provider
         self._chunk_bytes = chunk_bytes
         # None until the first real call -- D-08's own honest state for
@@ -59,6 +80,18 @@ class BatchTtsAdapter:
         self.last_synthesis_ms: "float | None" = None
 
     def __getattr__(self, name: str) -> Any:
+        # `__getattr__` runs for `_provider` itself on a half-constructed
+        # instance (one whose `__init__` raised before the assignment), and
+        # forwarding it would recurse until the stack ran out. A plain
+        # AttributeError is what a reader can act on.
+        if name == "_provider":
+            raise AttributeError(name)
+        if name in self._NEVER_FORWARDED:
+            raise AttributeError(
+                f"{name!r} is not forwarded: a BatchTtsAdapter is a streaming "
+                "provider, and answering the batch protocol as well would make it "
+                "legal to wrap one in another"
+            )
         return getattr(self._provider, name)
 
     async def synthesize(

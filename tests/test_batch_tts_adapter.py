@@ -188,3 +188,46 @@ async def test_the_adapter_forwards_unknown_attributes_to_the_wrapped_provider()
     sink = adapter.browser_sink()
 
     assert sink == SinkFormat(codec="pcm", sample_rate=24000)
+
+
+# --- IN-01 (code review): a double wrap must not be legal --------------
+
+
+def test_wrapping_an_adapter_in_another_adapter_is_refused():
+    """IN-01. The blanket `__getattr__` forwarded `synthesize_once`, so an
+    adapter satisfied `BatchTts` itself and a double wrap type-checked and
+    ran. It double-chunks the audio, and the outer wrapper's
+    `last_synthesis_ms` measures the inner wrapper's full drain rather
+    than the provider call -- a corrupted figure that reads as a slow
+    provider, which is the exact failure D-06 exists to rule out.
+
+    `boot.py` is the only wrap site today so this could not happen; the
+    point is that nothing forbade it."""
+    inner = BatchTtsAdapter(_FakeBatchProvider(audio=b"audio"))
+
+    with pytest.raises(TypeError) as excinfo:
+        BatchTtsAdapter(inner)
+
+    assert "BatchTtsAdapter" in str(excinfo.value)
+
+
+def test_an_adapter_does_not_answer_the_batch_protocol_it_consumes():
+    """The property that makes the refusal above unnecessary in the first
+    place: an adapter is a streaming provider, and does not pretend to be
+    a batch one."""
+    adapter = BatchTtsAdapter(_FakeBatchProvider(audio=b"audio"))
+
+    assert hasattr(adapter, "synthesize")
+    with pytest.raises(AttributeError):
+        adapter.synthesize_once
+
+
+def test_a_half_constructed_adapter_raises_attribute_error_not_recursion_error():
+    """`__getattr__` runs for `_provider` on an instance whose `__init__`
+    never assigned it, and forwarding that name recursed until the stack
+    ran out. A reader can act on an AttributeError; a RecursionError
+    names nothing."""
+    orphan = BatchTtsAdapter.__new__(BatchTtsAdapter)
+
+    with pytest.raises(AttributeError):
+        orphan.browser_sink
