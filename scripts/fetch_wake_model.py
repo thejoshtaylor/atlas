@@ -121,6 +121,23 @@ def fetch_vosk_model(
                 "must name a directory whose name matches the archive's own top level"
             )
         model_dir.parent.mkdir(parents=True, exist_ok=True)
+        # WR-04 (code review): `shutil.move` into an EXISTING directory
+        # moves the source *inside* it, so an operator who had already
+        # created the path `config.example.yaml` names -- a natural thing
+        # to do, since the file names it -- got the model one level too
+        # deep (`.../vosk-model-small-en-us-0.15/vosk-model-small-en-us-
+        # 0.15/am/final.mdl`), and this function still returned "fetched".
+        # `VoskWakeDetector` then failed at startup with an opaque Kaldi
+        # error, and the documented remedy could not repair it: the
+        # directory was now non-empty, so a re-run printed "already
+        # present" and changed nothing.
+        #
+        # The guard at the top of this function means an existing
+        # `model_dir` is empty by the time execution reaches here, so
+        # `rmdir` succeeds. If that ever stops being true, `rmdir` raises
+        # rather than quietly nesting -- which is the whole point.
+        if model_dir.is_dir():
+            model_dir.rmdir()
         shutil.move(str(extracted_dir), str(model_dir))
 
     return "fetched"

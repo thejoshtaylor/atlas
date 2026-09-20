@@ -202,3 +202,68 @@ def test_main_returns_nonzero_on_a_missing_config_file(tmp_path, capsys):
 
     assert exit_code == 1
     assert "error" in capsys.readouterr().err
+
+
+# --- WR-04 (code review): a pre-created empty destination -----------------
+
+
+def test_a_pre_created_empty_destination_gets_the_model_at_the_top_not_nested(tmp_path):
+    """WR-04. `shutil.move` into an existing directory moves the source
+    INSIDE it, so an operator who had already created the path
+    `config.example.yaml` names -- a natural thing to do, since the file
+    names it -- ended up with `.../vosk-model-small-en-us-0.15/vosk-model-
+    small-en-us-0.15/am/final.mdl`, while this function reported
+    "fetched". `VoskWakeDetector` then failed at startup with an opaque
+    Kaldi error.
+
+    Worse, the documented remedy could not repair it: the directory was
+    now non-empty, so a re-run reported "already present" and changed
+    nothing. The operator was left with a deployment that would not boot
+    and a script claiming success both times -- and
+    `docs/runbooks/deploy-compose.md` names this script as the fix for
+    "the one way a fresh clone fails to start".
+    """
+    model_dir = tmp_path / "models" / "vosk-model-small-en-us-0.15"
+    model_dir.mkdir(parents=True)
+    assert list(model_dir.iterdir()) == []
+
+    source_zip = tmp_path / "source" / "vosk.zip"
+    _write_zip(
+        source_zip,
+        {
+            "vosk-model-small-en-us-0.15/am/final.mdl": b"model-bytes",
+            "vosk-model-small-en-us-0.15/conf/model.conf": b"conf-bytes",
+        },
+    )
+
+    status = fetch_wake_model.fetch_vosk_model(
+        model_dir, download=_fake_download_from(source_zip)
+    )
+
+    assert status == "fetched"
+    # The exact path `VoskWakeDetector` opens, and the files immediately
+    # under it -- never a directory of the same name one level down.
+    assert (model_dir / "am" / "final.mdl").read_bytes() == b"model-bytes"
+    assert (model_dir / "conf" / "model.conf").read_bytes() == b"conf-bytes"
+    assert not (model_dir / model_dir.name).exists(), "the model was nested one level too deep"
+
+
+def test_a_pre_created_empty_destination_is_reported_as_fetched_and_stays_repairable(tmp_path):
+    """The second half: after the fix, a re-run correctly reports
+    "already-present" because the directory really does hold the model --
+    not because a nested copy happened to make it non-empty."""
+    model_dir = tmp_path / "models" / "vosk-model-small-en-us-0.15"
+    model_dir.mkdir(parents=True)
+    source_zip = tmp_path / "source" / "vosk.zip"
+    _write_zip(source_zip, {"vosk-model-small-en-us-0.15/am/final.mdl": b"model-bytes"})
+
+    fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(source_zip))
+    second = fetch_wake_model.fetch_vosk_model(
+        model_dir,
+        download=lambda url, dest: (_ for _ in ()).throw(
+            AssertionError("must not download a second time")
+        ),
+    )
+
+    assert second == "already-present"
+    assert (model_dir / "am" / "final.mdl").exists()
