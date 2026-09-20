@@ -67,6 +67,16 @@ config:
   # "false" explicitly; doing so brings back the insecure-cookie/
   # reachable-bind warning plan 07-07 added at startup (IN-01), which is
   # the backstop for exactly this case.
+  #
+  # WR-02 (code review): `--set config.cookieSecure=false` works, and so
+  # does `--set-string config.cookieSecure=false`. It did not always:
+  # `--set` infers an unquoted `false` as a real boolean, and the Secret
+  # template's `b64enc` only accepts a string, so the documented remedy
+  # made the render fail. Every value the Secret template encodes is
+  # coerced with `toString` there now, so neither form of --set can
+  # produce a type error. The application still requires the expanded
+  # value to read back as exactly `true` or `false` and refuses anything
+  # else by name (`SecurityConfig.from_config`).
   cookieSecure: "true"
 
 # Provider credentials and camera settings, each an env var

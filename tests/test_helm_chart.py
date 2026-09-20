@@ -380,3 +380,50 @@ def test_the_deploy_verification_script_runs_the_uninstall_reinstall_path() -> N
     assert "helm uninstall" in script
     assert "_claim_reinstall_status" in script
     assert "_secret_key_after_uninstall" in script
+
+
+# --- WR-02 (code review): `--set` infers types, `b64enc` wants strings ---
+
+
+@skip_without_helm
+def test_the_documented_non_tls_remedy_actually_renders() -> None:
+    """WR-02. `values.yaml` tells an operator not terminating TLS to set
+    `cookieSecure` to false explicitly. Doing that the obvious way --
+    `--set config.cookieSecure=false` -- made `helm template` fail with
+    "wrong type for value; expected string; got bool", because `--set`
+    infers an unquoted `false` as a real boolean and `b64enc` only takes
+    a string. The chart's own documented remedy broke the chart.
+
+    Both forms are asserted: an operator who reads the note and uses
+    `--set-string` and one who does not must get the same Secret.
+    """
+    for extra in (
+        ["--set", "config.cookieSecure=false"],
+        ["--set-string", "config.cookieSecure=false"],
+    ):
+        docs = _helm_template(*extra)
+        secret = _find_one(docs, "Secret")
+        decoded = base64.b64decode(secret["data"]["COOKIE_SECURE"]).decode()
+        assert decoded == "false", f"{extra} rendered COOKIE_SECURE as {decoded!r}"
+
+
+@skip_without_helm
+def test_an_all_digit_credential_renders_rather_than_failing_the_type_check() -> None:
+    """The same trap on `.Values.env.*`: an API key that happens to be all
+    digits is inferred as an integer by `--set`, and failed the identical
+    way. A credential's characters are not this chart's business."""
+    docs = _helm_template("--set", "env.xaiApiKey=12345")
+    secret = _find_one(docs, "Secret")
+    assert base64.b64decode(secret["data"]["XAI_API_KEY"]).decode() == "12345"
+
+
+@skip_without_helm
+def test_every_secret_value_is_coerced_before_it_is_base64_encoded() -> None:
+    """The rule, rather than the three cases above: no `b64enc` in the
+    Secret template reads a value that has not been through `toString`
+    first, so a fourth key added later cannot reintroduce this."""
+    template_text = (_CHART_DIR / "templates" / "secret.yaml").read_text()
+    for line in template_text.splitlines():
+        if "b64enc" not in line or line.lstrip().startswith("#"):
+            continue
+        assert "toString" in line, f"value reaches b64enc uncoerced: {line.strip()}"
