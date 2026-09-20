@@ -55,9 +55,9 @@ detect.
 curl -fsS http://127.0.0.1:8080/health
 ```
 
-Then open `http://127.0.0.1:8080` in a browser -- see
-[`docs/runbooks/first-run.md`](first-run.md) for the first-run wizard this
-deployment is meant to greet you with, what it asks, and why.
+Then open `http://127.0.0.1:8080` in a browser -- the first-run wizard greets
+you, since no admin account exists yet. See
+[`docs/runbooks/first-run.md`](first-run.md) for what it asks and why.
 
 ## What this deployment actually does, stated plainly
 

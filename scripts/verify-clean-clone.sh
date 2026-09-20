@@ -128,17 +128,15 @@ fi
 if printf '%s' "$_root_body" | grep -qi "<html"; then
   _served_page_status="confirmed: HTTP $_root_status served an HTML page"
 else
-  # A pre-existing, disclosed defect this script does not fix (out of this
-  # plan's own file scope -- see the deferred-items.md entry named below):
-  # the application-level setup gate (src/spire_voice/auth/dependencies.py)
-  # currently refuses the SPA shell itself, not only the API, so a fresh
-  # deployment's root page answers this same JSON refusal instead of the
-  # first-run wizard. The deployment mechanism this script actually proves
-  # -- the image, the bundled database, the wake model, the health route --
-  # is unaffected; this is a non-fatal warning, not a failed deployment.
-  _served_page_status="NOT an HTML page (HTTP $_root_status): ${_root_body:0:200}"
-  echo "WARNING: $_ROOT_URL did not serve the first-run wizard -- $_served_page_status" >&2
-  echo "WARNING: see .planning/phases/07-provider-choice-and-deployment/deferred-items.md #1" >&2
+  # deferred-items.md #1 (now resolved): the setup gate used to be an
+  # application-level dependency that also refused the SPA shell itself,
+  # so a fresh deployment's root page answered the same JSON refusal
+  # instead of the first-run wizard. The gate now lives on the backend
+  # routes only (never on `app` itself), so this is no longer a disclosed,
+  # non-fatal gap -- a non-HTML root page here is a real regression of
+  # that fix, and this script fails loudly on it rather than warning.
+  echo "FATAL: $_ROOT_URL did not serve the first-run wizard -- NOT an HTML page (HTTP $_root_status): ${_root_body:0:200}" >&2
+  exit 1
 fi
 
 echo ""
