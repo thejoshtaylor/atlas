@@ -2103,3 +2103,114 @@ def test_boot_is_silent_when_cookie_is_secure_even_on_an_any_address_bind(
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     matches = [m for m in warnings if "cookie_secure" in m and "bind_host" in m]
     assert matches == [], f"secure-cookie boot must stay silent, got: {matches}"
+
+
+# --- CR-03 (code review): a degraded slot must refuse a turn, not crash ---
+
+
+def _boot_with_every_slot_degraded(tmp_path, monkeypatch) -> None:
+    """The default clean-clone Compose deployment: `XAI_API_KEY` unset, so
+    `registry._build` raises `ProviderUnavailable` for all three slots and
+    D-04 degrades each of them. `docs/runbooks/deploy-compose.md` tells the
+    operator in so many words that leaving the key unset is fine, which is
+    what makes this the state the first spoken turn actually meets."""
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(_write_fake_config_with_credential(tmp_path, api_key="")),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+
+def test_a_degraded_slot_refuses_a_browser_turn_by_name_instead_of_crashing(
+    tmp_path, monkeypatch
+):
+    """CR-03. Before this fix, `/ws/turn` on a deployment with no
+    credential closed the socket with no message at all: `app.state.stt`
+    was `None`, `run_turn` called `stt.stream(...)` unconditionally, and
+    the `AttributeError` escaped into Starlette's WebSocket handling.
+    `TestClient` re-raises a server-side exception, so this test failed
+    with that exact `AttributeError` before the fix and asserts the
+    refusal after it.
+
+    The reason is the slot's own, byte for byte -- the CMD-07/VOICE-02
+    rule, and the same string the /providers screen shows -- so an
+    operator reading it in the browser can find the row that repeats it.
+    """
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+
+    _boot_with_every_slot_degraded(tmp_path, monkeypatch)
+
+    with TestClient(app_module.app) as client:
+        assert app_module.app.state.stt is None
+        stt_reason = app_module.app.state.provider_slots["stt"].reason
+
+        security = SecurityConfig()
+        client.cookies.set(
+            security.cookie_name,
+            issue_access_token(user_id=1, role="admin", security=security),
+        )
+
+        with client.websocket_connect("/ws/turn") as websocket:
+            event = websocket.receive_json()
+
+    assert event["type"] == "reply.text"
+    assert stt_reason in event["text"], (
+        "the refusal must carry the slot's own reason unchanged, not a paraphrase"
+    )
+    assert "Speech to text" in event["text"], "the refusal must name which slot did not start"
+
+
+def test_a_degraded_slot_logs_the_wake_word_refusal_once_not_once_per_turn(
+    tmp_path, monkeypatch, caplog
+):
+    """The camera path's half of CR-03. `_make_run_turn_for_source`'s
+    callable is what a wake hit runs, and it passed the same `None`s --
+    so every wake word on a degraded deployment produced its own
+    traceback, for as long as the credential stayed unset.
+
+    Two properties, both of which the pre-fix code fails: the turn is
+    refused (no `AttributeError`), and the whole reason is logged once,
+    not once per wake word. A deployment can be woken all day; a log line
+    per wake is a log nobody reads."""
+    _boot_with_every_slot_degraded(tmp_path, monkeypatch)
+
+    class _RecordingSource:
+        def __init__(self) -> None:
+            self.events: list = []
+
+        async def send_event(self, event: dict) -> None:
+            self.events.append(event)
+
+    with TestClient(app_module.app):
+        run_turn_for_source = app_module._make_run_turn_for_source(
+            app_module.app, app_module.app.state.config
+        )
+        first, second, third = _RecordingSource(), _RecordingSource(), _RecordingSource()
+        with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+            asyncio.run(_run_three_turns(run_turn_for_source, first, second, third))
+
+    # Every wake hit is answered, every time -- the refusal is not
+    # rate-limited, only its log line is.
+    for source in (first, second, third):
+        assert [event["type"] for event in source.events] == ["reply.text"]
+        assert "Speech to text" in source.events[0]["text"]
+
+    refusals = [
+        record for record in caplog.records if "refusing every turn" in record.getMessage()
+    ]
+    assert len(refusals) == 1, f"expected exactly one warning, got {len(refusals)}"
+    assert app_module.app.state.provider_slots["stt"].reason in refusals[0].getMessage()
+
+
+async def _run_three_turns(run_turn_for_source, *sources) -> None:
+    for source in sources:
+        await run_turn_for_source(source)

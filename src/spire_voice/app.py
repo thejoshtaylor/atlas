@@ -68,7 +68,11 @@ from spire_voice.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tool
 from spire_voice.plugins.manager import PluginManager
 from spire_voice.policy_snapshot import safety_block_from_policy
 from spire_voice.providers import registry as provider_registry
-from spire_voice.providers.boot import ProviderSlotStatus, resolve_slot
+from spire_voice.providers.boot import (
+    ProviderSlotStatus,
+    degraded_turn_refusal,
+    resolve_slot,
+)
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
 from spire_voice.routes import register_routers
@@ -497,6 +501,33 @@ async def _current_macros(app: FastAPI) -> tuple[Any, ...]:
     return tuple(await macro_repo.list_macros())
 
 
+async def _refuse_turn_if_any_slot_is_degraded(app: FastAPI, source: Any) -> bool:
+    """CR-03 (code review). Answer `True` -- having already told `source`
+    why -- when a degraded provider slot (D-04) makes this turn
+    impossible; `False` when the turn may run.
+
+    Every path in this file that starts a turn asks this first. Before
+    this phase, `app.state.stt`/`app.state.tts` were always a constructed
+    client, so no consumer needed a `None` branch and none had one; D-04
+    made `None` a designed state without teaching anybody downstream.
+    `run_turn` is where the crash landed, but `run_turn` is the wrong
+    place to fix it: its `stt`/`tts` parameters are typed non-optional
+    precisely because a turn is not a thing you can run half of. The
+    refusal belongs at the boundary, where the slot statuses live.
+
+    The reason is emitted as a `reply.text` event and nothing is spoken:
+    on the deployment this actually happens to, the text-to-speech slot is
+    degraded too, so there is no voice to say it with.
+    """
+    refusal = degraded_turn_refusal(getattr(app.state, "provider_slots", None))
+    if refusal is None:
+        return False
+    send_event = getattr(source, "send_event", None)
+    if send_event is not None:
+        await send_event({"type": "reply.text", "text": refusal})
+    return True
+
+
 def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
@@ -506,7 +537,25 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
     `TurnTimings` instance.
     """
 
+    # CR-03: one warning per process for the camera path, not one per wake
+    # word. A degraded deployment can be woken all day; the first line
+    # carries the whole reason, and the rest are debug, so the operator
+    # gets the fact once instead of a log they stop reading.
+    refusal_logged = False
+
     async def _run(source: Any) -> None:
+        nonlocal refusal_logged
+        if await _refuse_turn_if_any_slot_is_degraded(app, source):
+            if refusal_logged:
+                logger.debug("refused a wake-word turn: a provider slot is degraded")
+            else:
+                refusal_logged = True
+                logger.warning(
+                    "refusing every turn until a restart: %s",
+                    degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
+                )
+            return
+
         timings = TurnTimings()
         session_recorder = SessionRecorder(config.session, timings)
         await run_turn(
@@ -1139,6 +1188,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # text). A fresh `TurnTimings()` per call, matching
     # `_make_run_turn_for_source`'s own "never shared across turns" rule.
     async def _scheduled_speak(text: str) -> None:
+        # CR-03 (code review): a degraded text-to-speech slot leaves
+        # `app.state.tts` as `None`, and this closure had no cover of its
+        # own (unlike `routes/macros.py`/`routes/workflows.py`, whose
+        # `browser_sink()` calls sit inside a bare `except Exception`). A
+        # scheduled step that cannot be spoken is logged by name here,
+        # once per firing, rather than raising inside the scheduler.
+        if text not in app.state.filler_cache and app.state.tts is None:
+            logger.warning(
+                "not speaking a scheduled utterance: %s",
+                degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
+            )
+            return
         speaking_tts = (
             CachedTts(app.state.filler_cache) if text in app.state.filler_cache else app.state.tts
         )
@@ -1453,6 +1514,11 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     answer = await create_offer_answer(transport, {"sdp": offer.sdp, "type": offer.type})
 
     config: Config = app.state.config
+    # CR-03 (code review): a degraded slot ends this turn with its own
+    # reason rather than an `AttributeError` out of `run_turn`. The offer
+    # is still answered -- the peer connection exists and has to be closed
+    # cleanly either way -- so the refusal runs inside the turn task, not
+    # in front of it.
     timings = TurnTimings()
     # A live read, not `config.macros` (D-12, T-04-28) -- see
     # `_current_macros`'s own docstring for why this call site reads the
@@ -1474,6 +1540,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     # does.
     task = asyncio.create_task(
         _run_webrtc_turn(
+            app,
             transport,
             app.state.stt,
             app.state.brain,
@@ -1501,7 +1568,9 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     return WebrtcAnswerPayload(**answer)
 
 
-async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any) -> None:
+async def _run_webrtc_turn(
+    app: FastAPI, transport: WebrtcTransport, *args: Any, **kwargs: Any
+) -> None:
     """Run one turn against `transport`, then close its peer connection.
 
     `**kwargs` forwards `run_turn`'s keyword-only `tiers`/`filler_after_ms`/
@@ -1515,8 +1584,13 @@ async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any
     connection is closed when its turn ends" -- the `finally` here is what
     makes that true regardless of whether the turn finished cleanly or
     raised.
+    `app` is the first parameter for one reason: CR-03's degraded-slot
+    refusal has to happen inside the `try`/`finally` below, so a refused
+    turn still closes its peer connection the way a run one does.
     """
     try:
+        if await _refuse_turn_if_any_slot_is_degraded(app, transport):
+            return
         await run_turn(transport, *args, **kwargs)
     finally:
         await transport.close()
@@ -1539,6 +1613,13 @@ async def turn_ws(websocket: WebSocket) -> None:
     """
     await websocket.accept()
     source = WebSocketAudioSource(websocket)
+    # CR-03 (code review): before this, the default clean-clone Compose
+    # deployment (no XAI_API_KEY, so all three slots degrade) closed this
+    # socket with no message at all, on an `AttributeError` escaping into
+    # Starlette's WebSocket handling. Now the operator is told which slot
+    # did not start and why, in the slot's own words.
+    if await _refuse_turn_if_any_slot_is_degraded(websocket.app, source):
+        return
     config: Config = websocket.app.state.config
     timings = TurnTimings()
     # A live read, not `config.macros` (D-12, T-04-28) -- see

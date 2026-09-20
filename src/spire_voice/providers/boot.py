@@ -16,10 +16,26 @@ function, passed a different `builder`/`config`/`api_key` each time.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from spire_voice.db.repository import ProviderSelectionRepository
 from spire_voice.providers import batch_tts_adapter
+
+# One operator-facing name per slot, defined once. `routes/providers.py`
+# renders these on the /providers screen and `app.py` speaks them in the
+# refusal below -- the same words in both places, because an operator who
+# reads "speech to text did not start" in a reply has to be able to find
+# the row that says the same thing.
+SLOT_LABELS: "dict[str, str]" = {
+    "stt": "Speech to text",
+    "tts": "Text to speech",
+    "brain": "Language model",
+}
+
+# The fixed order 07-UI-SPEC.md pins for the /providers screen, reused
+# here so a refusal naming two degraded slots names them in the order the
+# screen shows them.
+SLOT_ORDER: "tuple[str, ...]" = ("stt", "tts", "brain")
 
 
 class ProviderUnavailable(Exception):
@@ -133,3 +149,45 @@ async def resolve_slot(
         ),
         client,
     )
+
+
+def degraded_turn_refusal(
+    slots: "Mapping[str, ProviderSlotStatus] | None",
+) -> "str | None":
+    """The one sentence a turn is refused with when any provider slot is
+    degraded -- or `None` when every slot is running and the turn may
+    proceed.
+
+    CR-03 (code review). D-04 makes a degraded slot a designed state: the
+    process boots, the slot's `app.state` attribute is `None`, and the
+    /providers screen says why. Nothing downstream was ever taught that,
+    though: `run_turn`'s `stt`/`tts` parameters are typed non-optional and
+    `_drain_to_final_transcript` calls `stt.stream(...)` unconditionally,
+    so the first spoken turn on the default clean-clone deployment (no
+    `XAI_API_KEY`, all three slots degraded) raised
+    `AttributeError: 'NoneType' object has no attribute 'stream'` out of
+    the WebSocket handler, with nothing said to the operator at all. The
+    camera wake path raised the same traceback once per wake word.
+
+    A refusal is deliberate where a crash is not: the turn ends with the
+    slot's own reason, unchanged -- never paraphrased, the CMD-07/VOICE-02
+    rule this project keeps everywhere a server reason reaches a person.
+
+    Lives here, beside `ProviderSlotStatus`, rather than in `app.py`: it
+    is a fact about the slot vocabulary, and every one of `app.py`'s four
+    turn-starting paths needs the identical answer.
+    """
+    if not slots:
+        return None
+    degraded = [
+        slots[name]
+        for name in SLOT_ORDER
+        if name in slots and slots[name].state == "degraded"
+    ]
+    if not degraded:
+        return None
+    sentences = [
+        f"{SLOT_LABELS.get(status.slot, status.slot)} is not running. {status.reason}".strip()
+        for status in degraded
+    ]
+    return "I can't run a turn yet. " + " ".join(sentences)

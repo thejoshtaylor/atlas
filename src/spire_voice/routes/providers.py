@@ -27,20 +27,21 @@ from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.crypto.credentials import CredentialSlot, resolve_credential_source
 from spire_voice.db.repository import ProviderSelectionRepository
 from spire_voice.providers import registry
-from spire_voice.providers.boot import ProviderSlotStatus
+from spire_voice.providers.boot import SLOT_LABELS, SLOT_ORDER, ProviderSlotStatus
 
 router = APIRouter(tags=["providers"])
 
 # The fixed order 07-UI-SPEC.md pins for the /providers screen: speech to
 # text, text to speech, language model. `GET`/`PUT /api/providers` report
 # and accept exactly the slots named here, in this order.
-_SERVED_SLOTS: "tuple[str, ...]" = ("stt", "tts", "brain")
+#
+# CR-03 (code review): the order and the labels both live on
+# `providers/boot.py` now, because a refused turn names the same slots in
+# the same words this screen shows. Two copies of "Speech to text" would
+# be two things to keep in step forever.
+_SERVED_SLOTS: "tuple[str, ...]" = SLOT_ORDER
 
-_SLOT_LABELS: "dict[str, str]" = {
-    "stt": "Speech to text",
-    "tts": "Text to speech",
-    "brain": "Language model",
-}
+_SLOT_LABELS: "dict[str, str]" = SLOT_LABELS
 
 _CREDENTIAL_SLOT_FOR: "dict[str, CredentialSlot]" = {
     "stt": CredentialSlot.STT,
