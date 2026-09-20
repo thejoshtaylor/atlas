@@ -308,6 +308,41 @@ def test_get_providers_reports_tts_and_brain_credential_set_from_their_own_slot(
     assert _slot(body, "brain")["options"][0]["credential_set"] is False
 
 
+def test_get_providers_reports_needs_server_url_and_measured_note_from_the_registry(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    """07-06-PLAN.md Task 1: `ProviderEntry.needs_server_url`/`.measured_note`
+    (07-04-PLAN.md) reach the wire unchanged -- the flag the screen uses to
+    reveal a "Server URL" field and the local-set latency caption, from
+    data rather than a hardcoded provider name."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    app = _build_providers_app(security, account_repo, provider_selection_repo, credential_repo)
+    client = _admin_client(app, security, account_repo)
+
+    response = client.get("/api/providers")
+    body = response.json()
+
+    brain_options = {option["name"]: option for option in _slot(body, "brain")["options"]}
+    assert brain_options["xai"]["needs_server_url"] is False
+    assert brain_options["local"]["needs_server_url"] is True
+    assert brain_options["xai"]["measured_note"] is None
+
+    stt_options = {option["name"]: option for option in _slot(body, "stt")["options"]}
+    assert stt_options["xai"]["needs_server_url"] is False
+    assert stt_options["xai"]["measured_note"] is None
+    assert stt_options["faster-whisper"]["measured_note"] is not None
+    assert "Measured on this project's CPU-only host" in stt_options["faster-whisper"]["measured_note"]
+
+    tts_options = {option["name"]: option for option in _slot(body, "tts")["options"]}
+    assert tts_options["piper"]["measured_note"] is not None
+    assert tts_options["piper"]["needs_server_url"] is False
+
+
 def test_put_providers_saves_a_new_choice_and_a_reload_finds_it_still_chosen(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):

@@ -38,6 +38,8 @@ function slot(overrides: Partial<ProviderSlot> = {}): ProviderSlot {
         credential_set: true,
         wrapped: false,
         licence_note: null,
+        needs_server_url: false,
+        measured_note: null,
       },
     ],
     settings: {},
@@ -94,8 +96,26 @@ describe("needsRestartBadge -- the secondary badge plus the honest running-provi
       selected: "xai",
       active: "faster_whisper",
       options: [
-        { name: "xai", label: "xAI", requires_credential: true, credential_set: true, wrapped: false, licence_note: null },
-        { name: "faster_whisper", label: "faster-whisper", requires_credential: false, credential_set: true, wrapped: false, licence_note: null },
+        {
+          name: "xai",
+          label: "xAI",
+          requires_credential: true,
+          credential_set: true,
+          wrapped: false,
+          licence_note: null,
+          needs_server_url: false,
+          measured_note: null,
+        },
+        {
+          name: "faster_whisper",
+          label: "faster-whisper",
+          requires_credential: false,
+          credential_set: true,
+          wrapped: false,
+          licence_note: null,
+          needs_server_url: false,
+          measured_note: null,
+        },
       ],
     })
     expect(needsRestartBadge(withTwoOptions)).toEqual({
@@ -123,10 +143,10 @@ describe("wrappedBadge -- D-06/D-08's honest synthesis-to-first-chunk figure", (
     expect(wrappedBadge(false, null)).toBeNull()
   })
 
-  test("wrapped with no measurement yet omits the number rather than inventing one", () => {
+  test("wrapped with no measurement yet states the honest absence rather than inventing a number", () => {
     expect(wrappedBadge(true, null)).toEqual({
       badge: { badgeVariant: "outline", badgeText: "Wrapped" },
-      caption: null,
+      caption: "Renders the whole reply, then streams it out. No synthesis measured since the last restart.",
     })
   })
 

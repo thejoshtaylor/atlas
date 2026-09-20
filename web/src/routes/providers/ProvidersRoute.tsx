@@ -82,7 +82,7 @@ function SlotCard({
                 <Label htmlFor={optionId}>{option.label}</Label>
               </div>
 
-              {wrapped || option.licence_note || needsCredential ? (
+              {wrapped || option.licence_note || option.measured_note || needsCredential ? (
                 <div className="flex flex-col gap-1 pl-7">
                   {wrapped ? (
                     <Badge variant={wrapped.badge.badgeVariant} className="w-fit">
@@ -90,6 +90,9 @@ function SlotCard({
                     </Badge>
                   ) : null}
                   {wrapped?.caption ? <p className="text-label text-muted-foreground">{wrapped.caption}</p> : null}
+                  {option.measured_note ? (
+                    <p className="text-label text-muted-foreground">{option.measured_note}</p>
+                  ) : null}
                   {option.licence_note ? (
                     <p className="text-label text-muted-foreground">{option.licence_note}</p>
                   ) : null}

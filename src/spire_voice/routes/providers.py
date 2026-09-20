@@ -80,6 +80,13 @@ class ProviderOptionResponse(BaseModel):
     credential_set: bool
     wrapped: bool
     licence_note: "str | None" = None
+    # `ProviderEntry.needs_server_url`/`.measured_note` (07-04-PLAN.md),
+    # carried through unchanged -- data on the entry, never a hardcoded
+    # provider name, so the screen reveals a "Server URL" field or a
+    # local-set latency caption from a flag rather than a name check
+    # (plan 07-06 wires these two fields through for the first time).
+    needs_server_url: bool = False
+    measured_note: "str | None" = None
 
 
 class ProviderSlotResponse(BaseModel):
@@ -149,6 +156,8 @@ async def _option_response(request: Request, slot: str, entry: "registry.Provide
         credential_set=is_set,
         wrapped=entry.batch,
         licence_note=entry.licence_note,
+        needs_server_url=entry.needs_server_url,
+        measured_note=entry.measured_note,
     )
 
 

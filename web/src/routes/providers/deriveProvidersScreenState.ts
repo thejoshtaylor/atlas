@@ -77,16 +77,19 @@ export function degradedBadge(slot: Pick<ProviderSlot, "state" | "reason">): { b
 
 /** The "Wrapped" badge plus the honest synthesis-to-first-chunk figure
  * (D-06, D-08) -- `measuredMs` is `null` until a `BatchTtsAdapter`
- * actually measures one (plan 07-02), so the caption omits the number
- * rather than inventing a first-audio figure the wrapper did not earn.
- * `measuredMs` is a per-slot fact (the currently active provider's own
- * measurement, `ProviderSlot.measured_ms`), not a per-option one -- an
- * option that is not the active provider has never been measured. */
-export function wrappedBadge(wrapped: boolean, measuredMs: number | null): { badge: SlotBadge; caption: string | null } | null {
+ * actually measures one (plan 07-02), so the caption states the honest
+ * absence (07-UI-SPEC.md's plan-07-02 addendum) rather than inventing a
+ * first-audio figure the wrapper did not earn, and never omits the
+ * caption outright: the null case is the honest sibling of the measured
+ * sentence, not silence. `measuredMs` is a per-slot fact (the currently
+ * active provider's own measurement, `ProviderSlot.measured_ms`), not a
+ * per-option one -- an option that is not the active provider has never
+ * been measured. */
+export function wrappedBadge(wrapped: boolean, measuredMs: number | null): { badge: SlotBadge; caption: string } | null {
   if (!wrapped) return null
   const caption =
     measuredMs === null
-      ? null
+      ? "Renders the whole reply, then streams it out. No synthesis measured since the last restart."
       : `Renders the whole reply, then streams it out. Measured: ${Math.round(measuredMs)} ms synthesis-start to first chunk.`
   return { badge: { badgeVariant: "outline", badgeText: "Wrapped" }, caption }
 }

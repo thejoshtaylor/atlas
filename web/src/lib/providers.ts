@@ -16,6 +16,14 @@ export interface ProviderOption {
   credential_set: boolean
   wrapped: boolean
   licence_note: string | null
+  /** `ProviderEntry.needs_server_url` (07-04-PLAN.md) -- the flag, not a
+   * provider name, that reveals the language-model slot's "Server URL"
+   * field for exactly the option that reads one. */
+  needs_server_url: boolean
+  /** `ProviderEntry.measured_note` (D-12) -- the published local-set
+   * latency figure, verbatim, for any local option across all three
+   * slots. `null` for a non-local option. */
+  measured_note: string | null
 }
 
 /** `ProviderSlotResponse`'s exact shape. `selected` is a fresh repository
