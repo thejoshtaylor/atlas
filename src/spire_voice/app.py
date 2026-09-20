@@ -9,6 +9,7 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -101,6 +102,33 @@ MCP_ROOT = Path(__file__).resolve().parents[2] / "mcp"
 # levels up from this file, the same computation `MCP_ROOT` above uses,
 # since `web/` lives at the repo root beside `src/`, not under it.
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "web" / "dist"
+
+# IN-01 (STATE.md, deferred here from Phase 3's code review): the one name
+# every platform's own resolver maps to loopback without a network round
+# trip, checked alongside a literal IP address's own `is_loopback` --
+# never a comparison against "0.0.0.0" or any other single hard-coded
+# spelling of "reachable from the network" (see `_bind_is_loopback` below).
+_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+
+
+def _bind_is_loopback(bind_host: str) -> bool:
+    """Whether `server.bind_host` reaches this process from loopback only
+    -- judged by what the address means, not by comparing it against one
+    hard-coded literal (IN-01). A literal IPv4/IPv6 address is asked
+    directly (`ipaddress.ip_address(...).is_loopback`); `localhost` is the
+    one name resolved the same way on every platform without a network
+    round trip. Anything else -- an any-address bind (`0.0.0.0`, `::`), a
+    named host, or a value this function cannot parse as an address at all
+    -- is judged reachable: warning when the bind turns out to already be
+    loopback is harmless, silently waving through a spelling this function
+    did not recognize is the mistake IN-01 exists to catch.
+    """
+    if bind_host.strip().lower() in _LOOPBACK_HOSTNAMES:
+        return True
+    try:
+        return ipaddress.ip_address(bind_host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -621,6 +649,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reject_legacy_mcp_key=False,
     )
     app.state.config = config
+
+    # IN-01 (STATE.md, deferred here from Phase 3's code review): a
+    # deployment that would send its session cookie without the Secure
+    # flag over a bind a browser somewhere on the network can reach says
+    # so, by name, every time -- a warning, never a refusal (T-07-36): a
+    # deployment behind a reverse proxy that terminates TLS is correct and
+    # common, and this process cannot see the proxy. A loopback development
+    # boot (this project's own shipped default) stays silent -- warning on
+    # it every run would train an operator to stop reading the message.
+    if not config.security.cookie_secure and not _bind_is_loopback(config.server.bind_host):
+        logger.warning(
+            "security.cookie_secure is false and server.bind_host (%s) is "
+            "not loopback -- the session cookie will be sent without the "
+            "Secure flag over a network a browser can reach it on. If a "
+            "reverse proxy terminates TLS in front of this deployment, set "
+            "security.cookie_secure: true; otherwise, keep server.bind_host "
+            "on a loopback address (127.0.0.1).",
+            config.server.bind_host,
+        )
 
     # D-01 (phase 4): resolve the zone `_state_message` reads the current
     # time and date against, and log which one won, by name -- an
