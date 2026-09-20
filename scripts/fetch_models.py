@@ -83,6 +83,12 @@ _PIPER_VOICES_URL_TEMPLATE = "https://huggingface.co/rhasspy/piper-voices/resolv
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _REQUEST_TIMEOUT_S = 120.0
 
+# IN-03 (code review): the independent reference `resolve_under_root`
+# checks against. This is the mount point the Helm chart, the Compose
+# file and config.example.yaml all already name -- stated once, here,
+# rather than derived from the destinations being checked.
+_DEFAULT_MODEL_ROOT = Path("/models")
+
 # WR-05 (code review). The sha256 of every file this script is allowed to
 # write, keyed by the URL it comes from -- keyed by URL rather than by
 # destination, because the URL is what an attacker controls and the
@@ -171,7 +177,18 @@ Downloader = Callable[[str, Path], DownloadReceipt]
 def resolve_under_root(model_root: Path, dest: Path) -> Path:
     """Resolve `dest` and refuse it, naming both paths, if it would land
     outside `model_root` -- the one filesystem risk a fetcher that writes
-    to an operator-controlled mount actually has."""
+    to an operator-controlled mount actually has.
+
+    IN-03 (code review): this is only as strong as where `model_root`
+    comes from. Derived with `os.path.commonpath` over the very
+    destinations it is then used to check, every planned file is under it
+    by construction -- so the guard could fire for a symlink inside the
+    mount but never for a traversal in the plan, much weaker than the
+    module docstring advertised. `plan_fetches` takes the root as a
+    parameter now and `main` passes `--model-root` (default `/models`,
+    the mount point both deployment targets use and the shipped
+    configuration names), so the check has a reference that does not
+    depend on what it is checking."""
     root = model_root.resolve()
     resolved = dest.resolve()
     try:
@@ -347,24 +364,38 @@ def _piper_voice_hub_path(filename: str) -> str:
     return f"{lang}/{locale}/{name}/{quality}/{filename}"
 
 
-def plan_fetches(stt_config: "Any", tts_config: "Any") -> "tuple[Path, list[ModelFile]]":
+def plan_fetches(
+    stt_config: "Any", tts_config: "Any", model_root: "Path | None" = None
+) -> "tuple[Path, list[ModelFile]]":
     """Every model file the local provider set needs, and the root every
-    destination must resolve under -- both derived from configuration,
-    never a second, restated copy of a path `config.py` already owns.
+    destination must resolve under. The destinations come from
+    configuration, never a second, restated copy of a path `config.py`
+    already owns.
 
     Takes `SttConfig`/`TtsConfig` directly (not the whole app `Config`) --
     this function only ever reads those two sections, and a narrower
     signature is what lets Task 2's own tests build just the two small
     dataclasses a fake source needs, with no dependency on every other
     config section's own required fields.
+
+    IN-03 (code review): `model_root` is a parameter. Given, it is an
+    independent reference, and a configured destination that escapes it
+    is refused -- which is what `resolve_under_root`'s own docstring
+    always claimed. Omitted, it falls back to the old `commonpath`
+    derivation over the destinations themselves, which by construction
+    cannot refuse any of them. That fallback is for a caller with no
+    `/models` mount to check against (every test in
+    `tests/test_fetch_models.py`), and it is honestly the weaker of the
+    two.
     """
     stt_dir = Path(stt_config.local_model_dir)
     piper_voice_path = Path(tts_config.piper_voice_path)
     piper_config_path = Path(tts_config.piper_config_path)
 
-    model_root = Path(
-        os.path.commonpath([str(stt_dir), str(piper_voice_path.parent), str(piper_config_path.parent)])
-    )
+    if model_root is None:
+        model_root = Path(
+            os.path.commonpath([str(stt_dir), str(piper_voice_path.parent), str(piper_config_path.parent)])
+        )
 
     faster_whisper_files = [
         ModelFile(
@@ -403,6 +434,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=_DEFAULT_CONFIG_PATH,
         help=f"the application config to read stt.*/tts.* from (default: {_DEFAULT_CONFIG_PATH})",
     )
+    parser.add_argument(
+        "--model-root",
+        default=str(_DEFAULT_MODEL_ROOT),
+        help=(
+            "the directory every destination must resolve under (default: "
+            f"{_DEFAULT_MODEL_ROOT}, the mount point both deployment targets use). "
+            "Pass the directory your own configuration writes into if it is "
+            "elsewhere; pass an empty string to derive it from the destinations, "
+            "which cannot refuse any of them"
+        ),
+    )
     return parser
 
 
@@ -422,7 +464,8 @@ def main(
         return 1
 
     try:
-        model_root, model_files = plan_fetches(config.stt, config.tts)
+        requested_root = Path(args.model_root) if args.model_root else None
+        model_root, model_files = plan_fetches(config.stt, config.tts, requested_root)
         results = fetch_all(model_files, model_root, download, pinned)
     # WR-06 (code review): `FetchError` alone left every failure the real
     # download path can actually produce as a raw traceback --

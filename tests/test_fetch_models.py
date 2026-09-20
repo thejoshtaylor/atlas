@@ -307,8 +307,14 @@ database:
     )
     fake_pins = {f.url: hashlib.sha256(b"fake model bytes").hexdigest() for f in planned}
 
+    # IN-03 (code review): `--model-root` defaults to /models, the mount
+    # point both deployment targets use, and a destination outside it is
+    # now genuinely refused -- so this test, whose destinations are under
+    # tmp_path, has to name its own root. That it must is the finding.
     exit_code = fetch_models.main(
-        ["--config", str(config_path)], download=_download, pinned=fake_pins
+        ["--config", str(config_path), "--model-root", str(models_root)],
+        download=_download,
+        pinned=fake_pins,
     )
 
     out = capsys.readouterr().out
@@ -499,3 +505,65 @@ database:
 
     assert exit_code == 1
     assert "error: " in capsys.readouterr().err
+
+
+# --- IN-03 (code review): a model root that is not derived from the plan --
+
+
+def test_plan_fetches_takes_the_model_root_rather_than_deriving_it(tmp_path):
+    """IN-03. `model_root` used to be `os.path.commonpath` of the very
+    destinations it was then used to check, so every planned file was
+    under it by construction -- the guard could fire for a symlink inside
+    the mount, but never for a traversal in the plan. It was not wrong,
+    just far weaker than the module docstring advertised."""
+    stt_config = SttConfig(local_model_dir=str(tmp_path / "models" / "faster-whisper"))
+    tts_config = TtsConfig(
+        piper_voice_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx.json"),
+    )
+
+    root, _files = fetch_models.plan_fetches(stt_config, tts_config, tmp_path / "elsewhere")
+
+    assert root == tmp_path / "elsewhere"
+
+
+def test_a_configured_destination_outside_the_given_root_is_refused(tmp_path):
+    """The check doing what its docstring always claimed: a configuration
+    whose Piper path points outside the model mount is refused by name,
+    before anything is written. With the derived root this could not
+    happen -- the escaping destination was itself an input to the root."""
+    models_root = tmp_path / "models"
+    models_root.mkdir()
+    stt_config = SttConfig(local_model_dir=str(models_root / "faster-whisper"))
+    tts_config = TtsConfig(
+        piper_voice_path=str(tmp_path / "elsewhere" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(tmp_path / "elsewhere" / "en_US-lessac-medium.onnx.json"),
+    )
+
+    _root, model_files = fetch_models.plan_fetches(stt_config, tts_config, models_root)
+    escaping = next(f for f in model_files if "elsewhere" in str(f.dest))
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models.resolve_under_root(models_root, escaping.dest)
+
+    assert str(models_root.resolve()) in str(excinfo.value)
+
+
+def test_the_default_model_root_is_the_mount_point_both_deployments_use():
+    """Stated once, in the script, rather than derived -- and it has to
+    match what `config.example.yaml` actually names, or the default would
+    refuse the shipped configuration."""
+    import yaml
+
+    assert str(fetch_models._DEFAULT_MODEL_ROOT) == "/models"
+
+    raw = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / "config" / "config.example.yaml").read_text()
+    )
+    _root, planned = fetch_models.plan_fetches(
+        SttConfig.from_config(raw["stt"]),
+        TtsConfig.from_config(raw["tts"]),
+        fetch_models._DEFAULT_MODEL_ROOT,
+    )
+    for model_file in planned:
+        fetch_models.resolve_under_root(fetch_models._DEFAULT_MODEL_ROOT, model_file.dest)
