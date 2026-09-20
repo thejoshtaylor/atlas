@@ -125,15 +125,70 @@ async def test_streaming_16khz_pcm16_frames_reaches_the_model_with_no_decode_ste
 
 
 @pytest.mark.asyncio
-async def test_every_segment_before_the_last_is_partial_and_the_last_is_final(tmp_path):
-    fake_model = _FakeWhisperModel(segment_texts=("turn the", "lights on"))
+async def test_the_final_transcript_carries_every_segment_not_only_the_last(tmp_path):
+    """CR-02 (code review). Two whole instructions, one per segment --
+    the shape `faster_whisper` really returns for anything longer than a
+    sentence, since it cuts a segment at every VAD/timestamp boundary.
+
+    This is deliberately not "turn the" / "lights on": with two fragments
+    of one sentence, dropping the first leaves text that still reads like
+    a command, and the defect hid inside a passing test for exactly that
+    reason. Two independent instructions make a dropped segment a change
+    of meaning -- the thermostat is set and the light is left on -- so a
+    regression here is obvious rather than subtle.
+
+    `turn/controller.py::_drain_to_final_transcript` keeps only the LAST
+    event this stream yields, and the language model, the macro matcher
+    and the session recording all read that one event's text. Whatever
+    the final transcript omits never reaches the assistant at all.
+    """
+    fake_model = _FakeWhisperModel(
+        segment_texts=(" Turn off the kitchen light.", " Then set the thermostat to twenty.")
+    )
     stt = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: fake_model)
 
     events = [
         event async for event in stt.stream(_frames(b"\x00\x00" * 10), SourceFormat("pcm", 16000))
     ]
 
-    assert events == [PartialTranscript(text="turn the"), FinalTranscript(text="lights on")]
+    assert events == [
+        # A partial is a growing prefix of the utterance, which is what a
+        # partial transcript means everywhere else in this codebase.
+        PartialTranscript(text=" Turn off the kitchen light."),
+        FinalTranscript(
+            text=" Turn off the kitchen light. Then set the thermostat to twenty."
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_single_segment_utterance_is_one_final_and_no_partial(tmp_path):
+    """The boundary the prefix rule must not disturb: one segment means
+    one `FinalTranscript` carrying it, and no partial at all."""
+    fake_model = _FakeWhisperModel(segment_texts=("turn the lights on",))
+    stt = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: fake_model)
+
+    events = [
+        event async for event in stt.stream(_frames(b"\x00\x00" * 10), SourceFormat("pcm", 16000))
+    ]
+
+    assert events == [FinalTranscript(text="turn the lights on")]
+
+
+@pytest.mark.asyncio
+async def test_three_segments_yield_two_growing_prefixes_then_the_whole_utterance(tmp_path):
+    fake_model = _FakeWhisperModel(segment_texts=(" one.", " two.", " three."))
+    stt = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: fake_model)
+
+    events = [
+        event async for event in stt.stream(_frames(b"\x00\x00" * 10), SourceFormat("pcm", 16000))
+    ]
+
+    assert events == [
+        PartialTranscript(text=" one."),
+        PartialTranscript(text=" one. two."),
+        FinalTranscript(text=" one. two. three."),
+    ]
 
 
 @pytest.mark.asyncio

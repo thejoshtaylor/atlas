@@ -146,6 +146,25 @@ class FasterWhisperStt:
             yield FinalTranscript(text="")
             return
 
+        # CR-02 (code review): a partial is a growing PREFIX of the
+        # utterance and the final carries the WHOLE utterance -- the
+        # contract `XaiStt` already keeps (its `transcript.done` event
+        # carries the complete text, `stt_xai.py`), and the one
+        # `turn/controller.py` is built on: `_drain_to_final_transcript`
+        # keeps only the last event the stream yields, and every
+        # `PartialTranscript` before it is rendered to the operator and
+        # then discarded.
+        #
+        # `faster_whisper` returns one segment per VAD/timestamp boundary,
+        # so any utterance longer than about a sentence decodes into
+        # several. Yielding each segment's own text alone made the final
+        # transcript the LAST segment only: "Turn off the kitchen light.
+        # Then set the thermostat to twenty." reached the language model
+        # as " Then set the thermostat to twenty.", with the first
+        # instruction silently dropped and the full sentence still shown
+        # on screen by the partials.
+        prefix = ""
         for segment in segments[:-1]:
-            yield PartialTranscript(text=segment.text)
-        yield FinalTranscript(text=segments[-1].text)
+            prefix += segment.text
+            yield PartialTranscript(text=prefix)
+        yield FinalTranscript(text=prefix + segments[-1].text)
