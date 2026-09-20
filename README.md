@@ -87,8 +87,22 @@ report and the command to re-run it on your own host.
 
 ## Deployment
 
-Deployment (Helm chart, Docker Compose file) is documented separately once
-that work lands — this section is a placeholder.
+Two supported ways to run this for real, both with no cloud account required
+for the database and no file to hand-edit for the database or the secret key:
+
+- **Docker Compose** — one command, a bundled Postgres, reachable at
+  `http://127.0.0.1:8080` by default. See
+  [`docs/runbooks/deploy-compose.md`](docs/runbooks/deploy-compose.md).
+- **Helm** — a chart with no third-party dependency, for a Kubernetes cluster
+  you already run. See
+  [`docs/runbooks/deploy-helm.md`](docs/runbooks/deploy-helm.md).
+
+Both runbooks state plainly what port is published and what that protects, how
+the bundled database's password works, how the session/credential-encryption
+key is generated once and must be backed up, and what a Kubernetes deployment
+assumes about TLS. `scripts/verify-clean-clone.sh` proves the Compose runbook's
+own commands work from a real, fresh clone — run it yourself if you want to see
+that proof rather than take the document's word for it.
 
 ## Licence
 
