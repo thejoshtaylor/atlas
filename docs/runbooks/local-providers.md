@@ -43,6 +43,20 @@ names, and prints which files it wrote and which it found already there. Run it
 again at any time. A file already present is left alone, so a second run after an
 interrupted first run costs nothing.
 
+**Every file it writes is checked against a sha256 pinned in
+`scripts/fetch_models.py`.** These are published release artifacts whose bytes do
+not change, and each one is handed straight to a native extension
+(`ctranslate2`, `onnxruntime`) once it lands -- so a file that does not match is
+deleted rather than kept. A consequence worth knowing before you hit it: the
+script fetches only the `faster-whisper` sizes this repository has pinned
+(`small` and `base`). Point `stt.local_model_size` at another size and the
+script refuses by name rather than downloading something it cannot verify; add
+that size's digests to `_PINNED_SHA256`, checked against the source yourself, if
+you want one.
+
+The wake-word model (`scripts/fetch_wake_model.py`, a separate step) is pinned
+the same way, and its archive is verified before it is opened at all.
+
 Nothing else in this project downloads a model. The application never fetches a
 model at boot. If a model file is missing, the matching provider slot on the
 Providers screen shows as degraded, and names the missing file.

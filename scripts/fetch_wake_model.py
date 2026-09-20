@@ -25,11 +25,17 @@ anything is extracted -- a `..`-shaped or absolute entry in a downloaded
 archive is refused by name rather than silently written outside the
 models volume, the same posture `scripts/fetch_models.py::
 resolve_under_root` already holds for its own downloads.
+
+The archive is also checked against a sha256 pinned in this file before
+it is opened at all (WR-05, code review) -- its contents are handed to
+native Kaldi code, and this script previously performed no verification
+of any kind.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import sys
 import tempfile
@@ -47,6 +53,17 @@ _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"
 _MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 _REQUEST_TIMEOUT_S = 300.0
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
+
+# WR-05 (code review). This archive is extracted into the models volume
+# and then handed to native Kaldi code (libvosk), so a compromised mirror
+# or a hijacked upstream account was arbitrary native-code input with
+# nothing in its way -- this script performed no verification at all
+# before, not even a Content-Length check. It is a fixed, published
+# release artifact, so its digest does not change and pinning it costs
+# nothing operationally. Computed from the bytes alphacephei.com actually
+# served, this session; re-derive with `shasum -a 256` on a download of
+# your own rather than trusting this line.
+_MODEL_SHA256 = "30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498"
 
 
 class FetchError(Exception):
@@ -91,14 +108,34 @@ def _safe_member_names(archive: "zipfile.ZipFile", expected_top: str) -> "list[s
     return names
 
 
+def _sha256_of_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(_DOWNLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def fetch_vosk_model(
-    model_dir: Path, *, url: str = _MODEL_URL, download: "Downloader" = default_download
+    model_dir: Path,
+    *,
+    url: str = _MODEL_URL,
+    download: "Downloader" = default_download,
+    expected_sha256: "str | None" = _MODEL_SHA256,
 ) -> str:
     """Provision `model_dir` -- the exact directory `VoskWakeDetector` opens
     (`os.path.isdir(config.model_path)`) -- from `url`. Returns
     "already-present" if `model_dir` already holds files, or "fetched"
     after a real extraction. Idempotent: a re-run after an interrupted run
-    costs nothing, matching `fetch_models.py::fetch_one`'s own posture."""
+    costs nothing, matching `fetch_models.py::fetch_one`'s own posture.
+
+    `expected_sha256` defaults to the digest this repository pins for
+    `_MODEL_URL` and is checked before the archive is opened. A test
+    supplying its own fake archive passes `expected_sha256=None`; no
+    real fetch ever does."""
     if model_dir.is_dir() and any(model_dir.iterdir()):
         return "already-present"
     if model_dir.exists() and not model_dir.is_dir():
@@ -109,6 +146,19 @@ def fetch_vosk_model(
         tmp = Path(tmp_str)
         zip_path = tmp / "vosk-model.zip"
         download(url, zip_path)
+
+        # WR-05 (code review): before anything is opened, let alone
+        # extracted and handed to libvosk. `expected_sha256=None` is for
+        # a test supplying its own fake archive, and is never what a real
+        # fetch passes -- the default is the pinned digest.
+        if expected_sha256 is not None:
+            actual_sha256 = _sha256_of_file(zip_path)
+            if actual_sha256 != expected_sha256:
+                raise FetchError(
+                    f"the downloaded archive's sha256 {actual_sha256} does not match the "
+                    f"digest this repository pins for {url} ({expected_sha256}) -- "
+                    "refusing to extract it"
+                )
 
         with zipfile.ZipFile(zip_path) as archive:
             _safe_member_names(archive, expected_top)
@@ -161,7 +211,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: "list[str] | None" = None, *, download: "Downloader" = default_download) -> int:
+def main(
+    argv: "list[str] | None" = None,
+    *,
+    download: "Downloader" = default_download,
+    expected_sha256: "str | None" = _MODEL_SHA256,
+) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -173,7 +228,9 @@ def main(argv: "list[str] | None" = None, *, download: "Downloader" = default_do
 
     model_dir = Path(config.wake.resolve("camera").vosk.model_path)
     try:
-        status = fetch_vosk_model(model_dir, download=download)
+        status = fetch_vosk_model(
+            model_dir, download=download, expected_sha256=expected_sha256
+        )
     except FetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

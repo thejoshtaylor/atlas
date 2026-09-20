@@ -8,6 +8,7 @@ Loaded by file path, the same way `test_score_wake_engines.py` loads
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -26,6 +27,19 @@ from spire_voice.config import SttConfig, TtsConfig
 
 def _model_file(dest: Path, url: str = "https://example.invalid/f") -> "fetch_models.ModelFile":
     return fetch_models.ModelFile(label="a-file", url=url, dest=dest)
+
+
+def _pinned(*contents: bytes, url: str = "https://example.invalid/f") -> "dict[str, str]":
+    """WR-05 (code review): `fetch_one` refuses a URL with no pinned
+    sha256, so a test with a fake source has to pin its own fake bytes.
+    This is the same injection shape as the `Downloader` seam beside it
+    -- a real call passes nothing and gets the module's own table.
+
+    Several contents may be pinned under one URL only where a test is
+    proving the MISMATCH path; the last one wins, so the expected digest
+    is the first argument and the served bytes are whatever the fake
+    downloader actually writes."""
+    return {url: hashlib.sha256(contents[0]).hexdigest()}
 
 
 # --- resolve_under_root ------------------------------------------------
@@ -96,7 +110,7 @@ def test_fetch_one_downloads_a_missing_file_and_verifies_size(tmp_path):
         part_path.write_bytes(content)
         return fetch_models.DownloadReceipt(declared_size=len(content), declared_sha256=None)
 
-    result = fetch_models.fetch_one(_model_file(dest), root, _download)
+    result = fetch_models.fetch_one(_model_file(dest), root, _download, _pinned(content))
 
     assert result.status == "fetched"
     assert dest.read_bytes() == content
@@ -105,8 +119,6 @@ def test_fetch_one_downloads_a_missing_file_and_verifies_size(tmp_path):
 
 
 def test_fetch_one_verifies_a_declared_digest_when_the_source_publishes_one(tmp_path):
-    import hashlib
-
     root = tmp_path / "models"
     root.mkdir()
     dest = root / "checked.bin"
@@ -117,7 +129,7 @@ def test_fetch_one_verifies_a_declared_digest_when_the_source_publishes_one(tmp_
         part_path.write_bytes(content)
         return fetch_models.DownloadReceipt(declared_size=len(content), declared_sha256=digest)
 
-    result = fetch_models.fetch_one(_model_file(dest), root, _download)
+    result = fetch_models.fetch_one(_model_file(dest), root, _download, _pinned(content))
 
     assert result.status == "fetched"
     assert dest.read_bytes() == content
@@ -133,7 +145,7 @@ def test_fetch_one_deletes_the_partial_file_when_the_size_does_not_match(tmp_pat
         return fetch_models.DownloadReceipt(declared_size=999, declared_sha256=None)
 
     with pytest.raises(fetch_models.FetchError) as excinfo:
-        fetch_models.fetch_one(_model_file(dest), root, _download)
+        fetch_models.fetch_one(_model_file(dest), root, _download, _pinned(b"short"))
 
     assert "999" in str(excinfo.value)
     assert not dest.exists()
@@ -152,7 +164,7 @@ def test_fetch_one_deletes_the_partial_file_when_the_digest_does_not_match(tmp_p
         )
 
     with pytest.raises(fetch_models.FetchError) as excinfo:
-        fetch_models.fetch_one(_model_file(dest), root, _download)
+        fetch_models.fetch_one(_model_file(dest), root, _download, _pinned(b"some bytes"))
 
     assert "0" * 64 in str(excinfo.value)
     assert not dest.exists()
@@ -191,7 +203,7 @@ def test_fetch_all_reports_every_file_present_or_fetched(tmp_path):
         return fetch_models.DownloadReceipt(declared_size=len(b"new content"), declared_sha256=None)
 
     results = fetch_models.fetch_all(
-        [_model_file(already), _model_file(missing)], root, _download
+        [_model_file(already), _model_file(missing)], root, _download, _pinned(b"new content")
     )
 
     by_dest = {result.dest: result.status for result in results}
@@ -280,7 +292,23 @@ database:
         part_path.write_bytes(b"fake model bytes")
         return fetch_models.DownloadReceipt(declared_size=len(b"fake model bytes"), declared_sha256=None)
 
-    exit_code = fetch_models.main(["--config", str(config_path)], download=_download)
+    # Every URL `plan_fetches` derives, pinned to the fake bytes
+    # `_download` writes -- `main` refuses an unpinned URL, which is the
+    # whole point of WR-05's fix.
+    _root, planned = fetch_models.plan_fetches(
+        SttConfig(
+            local_model_dir=str(models_root / "faster-whisper"), local_model_size="small"
+        ),
+        TtsConfig(
+            piper_voice_path=str(models_root / "piper" / "en_US-lessac-medium.onnx"),
+            piper_config_path=str(models_root / "piper" / "en_US-lessac-medium.onnx.json"),
+        ),
+    )
+    fake_pins = {f.url: hashlib.sha256(b"fake model bytes").hexdigest() for f in planned}
+
+    exit_code = fetch_models.main(
+        ["--config", str(config_path)], download=_download, pinned=fake_pins
+    )
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -295,3 +323,87 @@ def test_main_reports_a_config_error_without_a_traceback(tmp_path, capsys):
 
     assert exit_code == 1
     assert "error:" in capsys.readouterr().err
+
+
+# --- WR-05 (code review): a pinned digest, actually checked -------------
+
+
+def test_a_url_with_no_pinned_digest_is_refused_before_anything_is_downloaded(tmp_path):
+    """WR-05. The module docstring claimed "a sha256 digest when the
+    source's own response publishes one", but `default_download` returns
+    `declared_sha256=None` unconditionally and for a good reason, so no
+    digest was ever checked on a real fetch. Every one of these files is
+    handed to a native extension.
+
+    "Download it anyway and skip the check" is how a documented integrity
+    control becomes a comment, so an unpinned URL is refused, and refused
+    before any byte is written."""
+    root = tmp_path / "models"
+    root.mkdir()
+    calls: list[str] = []
+
+    def _download(url, part_path):
+        calls.append(url)
+        return fetch_models.DownloadReceipt(declared_size=None, declared_sha256=None)
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models.fetch_one(
+            _model_file(root / "unpinned.bin", url="https://evil.invalid/model.bin"),
+            root,
+            _download,
+        )
+
+    assert "https://evil.invalid/model.bin" in str(excinfo.value)
+    assert calls == [], "an unpinned URL must not be fetched at all"
+
+
+def test_bytes_that_do_not_match_the_pinned_digest_are_deleted_not_kept(tmp_path):
+    """The substitution case the pin exists for: the source answers, the
+    Content-Length matches, and the bytes are not the ones this
+    repository pinned."""
+    root = tmp_path / "models"
+    root.mkdir()
+    dest = root / "substituted.bin"
+    served = b"bytes a compromised mirror served"
+
+    def _download(url, part_path):
+        part_path.write_bytes(served)
+        return fetch_models.DownloadReceipt(declared_size=len(served), declared_sha256=None)
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models.fetch_one(
+            _model_file(dest), root, _download, _pinned(b"the bytes we actually expect")
+        )
+
+    assert "sha256" in str(excinfo.value)
+    assert not dest.exists()
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
+def test_every_url_the_shipped_configuration_plans_carries_a_pinned_digest():
+    """The pin table and the plan cannot drift: whatever
+    `config.example.yaml`'s own `stt.*`/`tts.*` values make this script
+    fetch must be a URL the table covers, or the shipped configuration
+    itself would be unfetchable."""
+    import yaml
+
+    # Parsed directly rather than through `load_config`, which would
+    # demand every ${VAR} in the file be set in this process's
+    # environment. Only the four local-model paths matter here, and none
+    # of them is a placeholder.
+    raw = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / "config" / "config.example.yaml").read_text()
+    )
+    _root, planned = fetch_models.plan_fetches(
+        SttConfig.from_config(raw["stt"]), TtsConfig.from_config(raw["tts"])
+    )
+
+    assert planned
+    for model_file in planned:
+        assert fetch_models.pinned_sha256(model_file.url), model_file.url
+
+
+def test_the_pinned_sizes_are_the_two_the_project_actually_names():
+    """D-09 names small or base. The refusal message lists these, so a
+    silent third entry would make that message wrong."""
+    assert fetch_models.pinned_faster_whisper_sizes() == {"small", "base"}

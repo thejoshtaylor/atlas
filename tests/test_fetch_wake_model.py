@@ -49,7 +49,7 @@ def test_fetch_vosk_model_skips_a_model_directory_already_present(tmp_path):
     def _download(url, dest_zip):
         raise AssertionError("must not download when the model directory already has content")
 
-    status = fetch_wake_model.fetch_vosk_model(model_dir, download=_download)
+    status = fetch_wake_model.fetch_vosk_model(model_dir, download=_download, expected_sha256=None)
 
     assert status == "already-present"
 
@@ -77,7 +77,7 @@ def test_fetch_vosk_model_extracts_the_expected_top_level_directory(tmp_path):
     )
 
     status = fetch_wake_model.fetch_vosk_model(
-        model_dir, download=_fake_download_from(fake_zip)
+        model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
     )
 
     assert status == "fetched"
@@ -90,12 +90,16 @@ def test_fetch_vosk_model_is_idempotent_after_a_successful_fetch(tmp_path):
     fake_zip = tmp_path / "source" / "vosk-model.zip"
     _write_zip(fake_zip, {"vosk-model-small-en-us-0.15/README": b"content"})
 
-    first = fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(fake_zip))
+    first = fetch_wake_model.fetch_vosk_model(
+        model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
+    )
 
     def _download_must_not_run(url, dest):
         raise AssertionError("a second run must not re-download an already-fetched model")
 
-    second = fetch_wake_model.fetch_vosk_model(model_dir, download=_download_must_not_run)
+    second = fetch_wake_model.fetch_vosk_model(
+        model_dir, download=_download_must_not_run, expected_sha256=None
+    )
 
     assert first == "fetched"
     assert second == "already-present"
@@ -110,7 +114,9 @@ def test_fetch_vosk_model_refuses_an_empty_archive(tmp_path):
     _write_zip(fake_zip, {})
 
     with pytest.raises(fetch_wake_model.FetchError):
-        fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(fake_zip))
+        fetch_wake_model.fetch_vosk_model(
+            model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
+        )
 
 
 def test_fetch_vosk_model_refuses_a_member_outside_the_expected_top_level_directory(tmp_path):
@@ -119,7 +125,9 @@ def test_fetch_vosk_model_refuses_a_member_outside_the_expected_top_level_direct
     _write_zip(fake_zip, {"some-other-model/README": b"wrong top-level directory"})
 
     with pytest.raises(fetch_wake_model.FetchError):
-        fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(fake_zip))
+        fetch_wake_model.fetch_vosk_model(
+            model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
+        )
 
 
 def test_fetch_vosk_model_refuses_a_traversal_member(tmp_path):
@@ -131,7 +139,9 @@ def test_fetch_vosk_model_refuses_a_traversal_member(tmp_path):
     )
 
     with pytest.raises(fetch_wake_model.FetchError):
-        fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(fake_zip))
+        fetch_wake_model.fetch_vosk_model(
+            model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
+        )
 
 
 def test_fetch_vosk_model_refuses_an_absolute_path_member(tmp_path):
@@ -140,7 +150,9 @@ def test_fetch_vosk_model_refuses_an_absolute_path_member(tmp_path):
     _write_zip(fake_zip, {"/etc/passwd": b"escape attempt"})
 
     with pytest.raises(fetch_wake_model.FetchError):
-        fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(fake_zip))
+        fetch_wake_model.fetch_vosk_model(
+            model_dir, download=_fake_download_from(fake_zip), expected_sha256=None
+        )
 
 
 # --- main() ----------------------------------------------------------------
@@ -171,7 +183,9 @@ def test_main_reads_the_model_path_from_the_named_config(tmp_path, capsys):
     _write_zip(fake_zip, {"vosk-model-small-en-us-0.15/README": b"content"})
 
     exit_code = fetch_wake_model.main(
-        ["--config", str(config_path)], download=_fake_download_from(fake_zip)
+        ["--config", str(config_path)],
+        download=_fake_download_from(fake_zip),
+        expected_sha256=None,
     )
 
     assert exit_code == 0
@@ -237,7 +251,7 @@ def test_a_pre_created_empty_destination_gets_the_model_at_the_top_not_nested(tm
     )
 
     status = fetch_wake_model.fetch_vosk_model(
-        model_dir, download=_fake_download_from(source_zip)
+        model_dir, download=_fake_download_from(source_zip), expected_sha256=None
     )
 
     assert status == "fetched"
@@ -257,13 +271,55 @@ def test_a_pre_created_empty_destination_is_reported_as_fetched_and_stays_repair
     source_zip = tmp_path / "source" / "vosk.zip"
     _write_zip(source_zip, {"vosk-model-small-en-us-0.15/am/final.mdl": b"model-bytes"})
 
-    fetch_wake_model.fetch_vosk_model(model_dir, download=_fake_download_from(source_zip))
+    fetch_wake_model.fetch_vosk_model(
+        model_dir, download=_fake_download_from(source_zip), expected_sha256=None
+    )
     second = fetch_wake_model.fetch_vosk_model(
         model_dir,
         download=lambda url, dest: (_ for _ in ()).throw(
             AssertionError("must not download a second time")
         ),
+        expected_sha256=None,
     )
 
     assert second == "already-present"
     assert (model_dir / "am" / "final.mdl").exists()
+
+
+# --- WR-05 (code review): the archive is checked before it is opened -----
+
+
+def test_an_archive_whose_digest_does_not_match_is_refused_before_extraction(tmp_path):
+    """WR-05. This script performed no verification at all -- not even a
+    Content-Length check -- before extracting a ZIP into the models
+    volume and handing it to native Kaldi code. A compromised mirror or a
+    hijacked upstream account was arbitrary native-code input with
+    nothing in its way.
+
+    Refused before `zipfile.ZipFile` opens it, so nothing is extracted
+    and nothing is left on the models volume."""
+    model_dir = tmp_path / "models" / "vosk-model-small-en-us-0.15"
+    fake_zip = tmp_path / "source" / "substituted.zip"
+    _write_zip(fake_zip, {"vosk-model-small-en-us-0.15/am/final.mdl": b"not the real model"})
+
+    with pytest.raises(fetch_wake_model.FetchError) as excinfo:
+        fetch_wake_model.fetch_vosk_model(
+            model_dir,
+            download=_fake_download_from(fake_zip),
+            expected_sha256="0" * 64,
+        )
+
+    assert "sha256" in str(excinfo.value)
+    assert not model_dir.exists(), "nothing may be written when the digest does not match"
+
+
+def test_the_real_default_pins_a_digest_rather_than_trusting_the_download():
+    """The default is the pin, not `None` -- a fetch that forgets to pass
+    `expected_sha256` verifies, rather than skipping the check."""
+    import inspect
+
+    signature = inspect.signature(fetch_wake_model.fetch_vosk_model)
+    assert signature.parameters["expected_sha256"].default == fetch_wake_model._MODEL_SHA256
+    assert len(fetch_wake_model._MODEL_SHA256) == 64
+    signature = inspect.signature(fetch_wake_model.main)
+    assert signature.parameters["expected_sha256"].default == fetch_wake_model._MODEL_SHA256

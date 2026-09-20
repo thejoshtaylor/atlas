@@ -26,12 +26,31 @@ byte is written, and refused by name if it would land outside that root --
 the root is a mount an operator controls, and a traversal out of it is the
 one filesystem risk a fetcher has. A file already present is left alone
 and reported as such (idempotent: a re-run after a partial run costs
-nothing). What was actually written is checked against what the source
-declared (size always, a sha256 digest when the source's own response
-publishes one via `ETag`/`X-Linked-ETag`) before the file is kept; a
-mismatch deletes the partial file rather than leaving a truncated model
-that would fail much later, much less clearly, deep inside `faster_whisper`
-or `piper`.
+nothing).
+
+**What every downloaded file is checked against, exactly** (WR-05, code
+review -- this paragraph previously described an integrity control the
+code deliberately did not perform):
+
+  * A sha256 digest pinned in this file, per file, in `_PINNED_SHA256`
+    below. This is the real control: every destination here is handed to
+    a native extension (ctranslate2, onnxruntime), so a compromised
+    mirror or a hijacked upstream account would otherwise be arbitrary
+    native-code input with nothing in its way. Each of these is a fixed,
+    published release artifact whose digest does not change, so pinning
+    costs nothing operationally. A file with no pinned digest is refused
+    before it is downloaded, not fetched unverified.
+  * The size the source declared in its own `Content-Length`, when it
+    sends one -- kept as the cheap first gate, since it catches a
+    truncated transfer without hashing hundreds of megabytes.
+  * A digest the `Downloader` itself reports, if it reports one.
+    `default_download` never does: see its own docstring for why the
+    Hub's `ETag` is not a whole-file content digest and treating it as
+    one would delete correct downloads.
+
+A mismatch on any of these deletes the partial file rather than leaving a
+truncated or substituted model that would fail much later, much less
+clearly, deep inside `faster_whisper` or `piper`.
 """
 
 from __future__ import annotations
@@ -42,7 +61,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
@@ -63,6 +82,49 @@ _PIPER_VOICES_URL_TEMPLATE = "https://huggingface.co/rhasspy/piper-voices/resolv
 
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _REQUEST_TIMEOUT_S = 120.0
+
+# WR-05 (code review). The sha256 of every file this script is allowed to
+# write, keyed by the URL it comes from -- keyed by URL rather than by
+# destination, because the URL is what an attacker controls and the
+# destination is what this repository controls.
+#
+# Provenance, so a later reader can re-derive rather than trust: the
+# large files are Hugging Face LFS objects, and the Hub's own API
+# publishes their sha256 as `lfs.oid`
+# (`https://huggingface.co/api/models/{repo}/tree/main`) -- that is the
+# digest, not the `ETag`/`xetHash` header, which is a chunk-store hash
+# (see `default_download` below). The small non-LFS files carry only a
+# git blob sha1 in that listing, so their digests here were computed
+# from the bytes the Hub actually served, this session.
+#
+# faster-whisper's file set is per model size, so a size with no pinned
+# digests is refused by name rather than fetched unverified. `small` and
+# `base` are the two sizes 07-CONTEXT.md's D-09 names.
+_PINNED_SHA256: "dict[str, str]" = {
+    # Systran/faster-whisper-small
+    "https://huggingface.co/Systran/faster-whisper-small/resolve/main/config.json":
+        "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828",
+    "https://huggingface.co/Systran/faster-whisper-small/resolve/main/model.bin":
+        "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671",
+    "https://huggingface.co/Systran/faster-whisper-small/resolve/main/tokenizer.json":
+        "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+    "https://huggingface.co/Systran/faster-whisper-small/resolve/main/vocabulary.txt":
+        "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+    # Systran/faster-whisper-base
+    "https://huggingface.co/Systran/faster-whisper-base/resolve/main/config.json":
+        "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
+    "https://huggingface.co/Systran/faster-whisper-base/resolve/main/model.bin":
+        "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+    "https://huggingface.co/Systran/faster-whisper-base/resolve/main/tokenizer.json":
+        "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+    "https://huggingface.co/Systran/faster-whisper-base/resolve/main/vocabulary.txt":
+        "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+    # rhasspy/piper-voices, the shipped default voice
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx":
+        "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json":
+        "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+}
 
 
 class FetchError(Exception):
@@ -160,14 +222,65 @@ def default_download(url: str, part_path: Path) -> DownloadReceipt:
     return DownloadReceipt(declared_size=declared_size, declared_sha256=None)
 
 
-def fetch_one(model_file: ModelFile, model_root: Path, download: Downloader) -> FetchResult:
-    """Fetch one file: refuse an out-of-root destination, skip a file
-    already present, otherwise download to a `.part` sibling, verify it
-    against what the source declared, and rename it into place -- or
-    delete it and raise, never leaving a truncated file behind."""
+def pinned_sha256(url: str, pinned: "Mapping[str, str] | None" = None) -> str:
+    """The sha256 this repository pins for `url`, or a refusal naming the
+    URL (WR-05).
+
+    Refusing an unpinned URL before any byte is written is the whole
+    point: "download it anyway and skip the check" is how a documented
+    integrity control becomes a comment. The one realistic way to reach
+    this is an `stt.local_model_size` naming a size this repository has
+    not pinned, so the message says exactly that.
+
+    `pinned` is the injection seam a test uses to pin its own fake
+    source, the same shape as the `Downloader` seam beside it -- real
+    calls pass nothing and get `_PINNED_SHA256`."""
+    pinned = _PINNED_SHA256 if pinned is None else pinned
+    digest = pinned.get(url)
+    if digest is None:
+        raise FetchError(
+            f"no pinned sha256 for {url} -- this script only fetches files whose "
+            "digest is pinned in scripts/fetch_models.py. If you changed "
+            "stt.local_model_size or tts.piper_voice_path, either set it back to a "
+            f"pinned value ({', '.join(sorted(pinned_faster_whisper_sizes(pinned)))} for "
+            "the model size) or add the new file's digest to _PINNED_SHA256 there, "
+            "verified against the source yourself"
+        )
+    return digest
+
+
+def pinned_faster_whisper_sizes(pinned: "Mapping[str, str] | None" = None) -> "set[str]":
+    """The faster-whisper model sizes `_PINNED_SHA256` covers -- derived
+    from the table rather than restated beside it, so adding a size to
+    the table is the only edit needed."""
+    pinned = _PINNED_SHA256 if pinned is None else pinned
+    prefix = "https://huggingface.co/Systran/faster-whisper-"
+    return {
+        url[len(prefix) :].split("/", 1)[0]
+        for url in pinned
+        if url.startswith(prefix)
+    }
+
+
+def fetch_one(
+    model_file: ModelFile,
+    model_root: Path,
+    download: Downloader,
+    pinned: "Mapping[str, str] | None" = None,
+) -> FetchResult:
+    """Fetch one file: refuse an out-of-root destination or an unpinned
+    URL, skip a file already present, otherwise download to a `.part`
+    sibling, verify it against the pinned digest (and against what the
+    source declared), and rename it into place -- or delete it and raise,
+    never leaving a truncated or substituted file behind."""
     dest = resolve_under_root(model_root, model_file.dest)
     if dest.exists():
         return FetchResult(label=model_file.label, dest=dest, status="already-present")
+
+    # Before the download, not after: an unpinned URL is not fetched at
+    # all, so there is never a moment where unverifiable bytes exist on
+    # this filesystem.
+    expected_sha256 = pinned_sha256(model_file.url, pinned)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     part_path = dest.with_name(dest.name + ".part")
@@ -180,13 +293,19 @@ def fetch_one(model_file: ModelFile, model_root: Path, download: Downloader) -> 
                 f"{receipt.declared_size} -- deleting the partial file rather than keeping "
                 "a truncated model"
             )
-        if receipt.declared_sha256 is not None:
-            actual_sha256 = _sha256_of_file(part_path)
-            if actual_sha256 != receipt.declared_sha256:
-                raise FetchError(
-                    f"{model_file.label}: sha256 {actual_sha256} does not match the source's "
-                    f"declared {receipt.declared_sha256} -- deleting the partial file"
-                )
+        actual_sha256 = _sha256_of_file(part_path)
+        if actual_sha256 != expected_sha256:
+            raise FetchError(
+                f"{model_file.label}: sha256 {actual_sha256} does not match the digest "
+                f"this repository pins for it ({expected_sha256}) -- deleting the "
+                "downloaded file rather than handing unverified bytes to a native "
+                "extension"
+            )
+        if receipt.declared_sha256 is not None and actual_sha256 != receipt.declared_sha256:
+            raise FetchError(
+                f"{model_file.label}: sha256 {actual_sha256} does not match the source's "
+                f"declared {receipt.declared_sha256} -- deleting the partial file"
+            )
     except BaseException:
         part_path.unlink(missing_ok=True)
         raise
@@ -195,9 +314,12 @@ def fetch_one(model_file: ModelFile, model_root: Path, download: Downloader) -> 
 
 
 def fetch_all(
-    model_files: Sequence[ModelFile], model_root: Path, download: Downloader = default_download
+    model_files: Sequence[ModelFile],
+    model_root: Path,
+    download: Downloader = default_download,
+    pinned: "Mapping[str, str] | None" = None,
 ) -> "list[FetchResult]":
-    return [fetch_one(model_file, model_root, download) for model_file in model_files]
+    return [fetch_one(model_file, model_root, download, pinned) for model_file in model_files]
 
 
 def _piper_voice_hub_path(filename: str) -> str:
@@ -284,7 +406,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: "list[str] | None" = None, *, download: Downloader = default_download) -> int:
+def main(
+    argv: "list[str] | None" = None,
+    *,
+    download: Downloader = default_download,
+    pinned: "Mapping[str, str] | None" = None,
+) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -296,7 +423,7 @@ def main(argv: "list[str] | None" = None, *, download: Downloader = default_down
 
     model_root, model_files = plan_fetches(config.stt, config.tts)
     try:
-        results = fetch_all(model_files, model_root, download)
+        results = fetch_all(model_files, model_root, download, pinned)
     except FetchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
