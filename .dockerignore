@@ -1,0 +1,51 @@
+# Keeps the same private material out of the build context that
+# .gitignore keeps out of git -- a secret that reaches a build layer is
+# not removable by a later layer, so exclusion here is the only control.
+
+# GSD planning notes carry entity names, addresses, and other details of
+# one specific house.
+.planning/
+.gsd/
+.claude/
+
+# Version control and local dev state.
+.git/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+# Node/bun. The frontend stage installs its own node_modules inside the
+# image -- copying the host's own (a different OS/arch) would overwrite it.
+node_modules/
+web/node_modules/
+dist/
+web/dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Real configuration and secrets. Only .env.example and
+# config/config.example.yaml belong in the image.
+.env
+.env.*
+!.env.example
+config/config.yaml
+config/*.local.yaml
+
+# Recorded voice sessions and calibration data: audio, transcripts, and
+# timelines of real speech.
+data/
+sessions/
+
+# Models are large binaries, provisioned into a mounted volume at deploy
+# time (scripts/fetch_models.py) -- never baked into the image.
+models/
+
+# A real person's voice naming real things in a real house.
+tests/fixtures/*.wav
+
+.DS_Store

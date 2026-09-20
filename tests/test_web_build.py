@@ -25,12 +25,23 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
 import test_startup_smoke as smoke
 from fastapi.testclient import TestClient
 
 import spire_voice.app as app_module
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The Docker build context deliberately excludes .git (this repository's own
+# .dockerignore, DEP-05's own build-layer exclusion) -- `git ls-files` has
+# nothing to read there, so this check skips rather than reporting a false
+# failure.
+skip_without_git_dir = pytest.mark.skipif(
+    not (_REPO_ROOT / ".git").exists(),
+    reason="no .git directory in this checkout -- the build context excludes it "
+    "by design (see .dockerignore), so there is no tracked-file list to check",
+)
 
 
 def _apply_smoke_monkeypatches(tmp_path: Path, monkeypatch) -> None:
@@ -63,6 +74,7 @@ def _apply_smoke_monkeypatches(tmp_path: Path, monkeypatch) -> None:
 _BUILD_OUTPUT_PREFIX = "web/dist/"
 
 
+@skip_without_git_dir
 def test_the_built_frontend_is_not_tracked_by_git():
     """No file under the frontend's build output directory may be tracked
     by git, regardless of whether a build has run in this environment --

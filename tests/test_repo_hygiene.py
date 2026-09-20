@@ -18,7 +18,21 @@ import subprocess
 import re
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The Docker build context deliberately excludes .git (this repository's own
+# .dockerignore, DEP-05's own build-layer exclusion) -- a check that reads
+# git's own tracked-file list has nothing to read there, and skipping it is
+# the honest outcome rather than a false failure. Every other check in this
+# file walks the filesystem directly (`_iter_repo_files`) and already
+# tolerates a missing git binary through `_drop_gitignored`'s own fallback.
+skip_without_git_dir = pytest.mark.skipif(
+    not (_REPO_ROOT / ".git").exists(),
+    reason="no .git directory in this checkout -- the build context excludes it "
+    "by design (see .dockerignore), so there is no tracked-file list to check",
+)
 
 # Directories that never ship in the public repository (VCS internals, build
 # output, dependency trees, caches, machine-local run state) or that are
@@ -185,6 +199,7 @@ _SESSION_DIR_NAMES = {"data", "sessions"}
 _AUDIO_EXTENSIONS = {".raw", ".alaw"}
 
 
+@skip_without_git_dir
 def test_no_session_path_or_audio_extension_is_tracked_by_git():
     """D-16: the data root is gitignored before the first write, in that
     order -- checked here against what git actually tracks, before this
@@ -211,6 +226,7 @@ def test_no_session_path_or_audio_extension_is_tracked_by_git():
     )
 
 
+@skip_without_git_dir
 def test_calibration_directory_default_location_is_gitignored():
     """T-02-43: `calibration.record.DEFAULT_CALIBRATION_DIR` falls under
     the repository's existing ignore rules, checked directly with
