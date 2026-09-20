@@ -412,3 +412,73 @@ def test_require_setup_complete_exempts_exactly_the_named_paths():
         "/api/wizard/audio-source",
         "/api/wizard/finish",
     }
+
+
+def _dependant_reaches_require_setup_complete(dependant, seen=None) -> bool:
+    """`_dependant_reaches_current_user`'s identical shape, applied to the
+    setup gate instead of the role gate (deferred-items.md #1, Option B)."""
+    if seen is None:
+        seen = set()
+    if id(dependant) in seen:
+        return False
+    seen.add(id(dependant))
+    from spire_voice.auth.dependencies import require_setup_complete as _require_setup_complete
+
+    if dependant.call is _require_setup_complete:
+        return True
+    return any(
+        _dependant_reaches_require_setup_complete(sub, seen) for sub in dependant.dependencies
+    )
+
+
+def test_every_backend_route_carries_the_setup_gate_except_health():
+    """Deferred-items.md #1 (Option B)'s own drift guard: every backend
+    route this application registers must reach `require_setup_complete`
+    in its dependency graph, except `/health` -- the one deliberate, named
+    exception (a health check that only answers behind a gate is not a
+    health check a container orchestrator or load balancer can use).
+
+    The gate is now carried structurally -- `register_routers` (routes/
+    __init__.py) mounts every backend router through one parent whose own
+    constructor `dependencies` carry `require_setup_complete`, and
+    `app.py`'s own `backend_router` does the identical thing for this
+    file's top-level routes -- rather than by `app` itself. This test is
+    what proves that structure actually reaches every registered route,
+    the same "walk the real table, do not sample" discipline
+    `test_every_registered_route_enforces_a_role_or_is_named_exempt` above
+    already applies to the role gate.
+
+    The frontend mount (`app.frontend()`) needs no exemption entry and is
+    not walked here at all: verified directly against the installed
+    `fastapi==0.141.1`'s own source, its routes live in
+    `app.router._low_priority_routes`, never in `app.routes`, so
+    `_flatten_routes` cannot see them structurally. That absence is the
+    property deferred-items.md #1 asked for -- the frontend is exempt
+    because it is not a backend route, never because of a path check a
+    future route could slip past.
+    """
+    import spire_voice.app as app_module
+
+    flat_routes = _flatten_routes(app_module.app.routes)
+
+    ungated: list[str] = []
+    seen_paths: set[str] = set()
+    for route in flat_routes:
+        path = getattr(route, "path", None) or getattr(route, "path_format", None)
+        assert path is not None, f"a route with no discoverable path exists: {route!r}"
+        seen_paths.add(path)
+
+        if path in _FRAMEWORK_PATHS or path == "/health":
+            continue
+
+        dependant = getattr(route, "dependant", None)
+        if dependant is None or not _dependant_reaches_require_setup_complete(dependant):
+            ungated.append(path)
+
+    assert not ungated, (
+        f"the following routes carry no require_setup_complete dependency: {ungated!r} -- "
+        "a backend route must be registered through register_routers "
+        "(routes/__init__.py) or app.py's own backend_router to inherit the "
+        "setup gate structurally; a route added directly to `app` bypasses it"
+    )
+    assert "/health" in seen_paths, "/health is not registered -- the one named exemption above is vacuous"

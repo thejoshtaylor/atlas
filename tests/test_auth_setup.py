@@ -169,12 +169,20 @@ def test_every_other_route_reports_setup_incomplete_until_an_admin_exists(tmp_pa
                 continue
             methods = getattr(route, "methods", None)
             if methods is None:
-                # A WebSocket route (/ws/turn) or a StaticFiles mount --
-                # neither answers a plain client.get() the way an HTTP
-                # route does; the setup gate itself is exercised over
-                # every HTTP route, which is exhaustive enough to prove
-                # the gate is real (a WebSocket connection attempt against
-                # a gated route is exercised separately, below).
+                # A WebSocket route (/ws/turn) -- it does not answer a
+                # plain client.get() the way an HTTP route does; the setup
+                # gate itself is exercised over every HTTP route here, and
+                # separately below against the WebSocket route itself.
+                # The SPA frontend (`app.frontend()`) is never walked by
+                # this loop at all -- verified directly against the
+                # installed `fastapi==0.141.1`'s own source: its routes
+                # live in `app.router._low_priority_routes`, never in
+                # `app.routes`, so `_flatten_routes` above structurally
+                # cannot see them, and this `continue` is not what excuses
+                # deferred-items.md #1's frontend-503 finding.
+                # `test_the_frontend_shell_is_reachable_before_any_admin_exists`
+                # below is the test that actually exercises the frontend
+                # against an empty accounts table.
                 continue
             method = "GET" if "GET" in methods else next(iter(methods))
             response = client.request(method, _fill_path_params(path))
@@ -233,6 +241,82 @@ def test_every_other_route_reports_setup_incomplete_until_an_admin_exists(tmp_pa
         anonymous = TestClient(app_module.app)
         anonymous_response = anonymous.get("/api/wizard")
         assert anonymous_response.status_code == 401, anonymous_response.text
+
+
+def test_the_frontend_shell_is_reachable_before_any_admin_exists(tmp_path, monkeypatch):
+    """Deferred-items.md #1 (Option B): `GET /` and `GET /setup` must serve
+    the built SPA shell -- not the setup gate's 503 -- while `users` is
+    still empty.
+
+    Before this fix, `require_setup_complete` was an application-level
+    dependency and `app.frontend()`'s own routes inherited it
+    (`fastapi.routing._FrontendRouteGroup` captures `self.dependencies` at
+    the moment `app.frontend()` is called, confirmed directly against the
+    installed `fastapi==0.141.1`'s own source) -- so a stranger's very
+    first page load 503'd, and the browser never loaded the JavaScript
+    that could call `/api/auth/create-admin` to clear the gate. The wizard
+    could never appear.
+
+    The setup gate now lives on the backend routers only
+    (`register_routers` in `routes/__init__.py`, and `app.py`'s own
+    `backend_router` for this file's top-level routes) -- never on `app`
+    itself. This test proves the frontend mount is exempt *structurally*,
+    not merely that today's `SETUP_GATE_EXEMPT_PATHS` happens to list the
+    right paths (it does not, and must not: the frontend is not a backend
+    route at all, so it needs no entry in that list).
+
+    Writes a throwaway `index.html` into the real `FRONTEND_DIR` and
+    restores whatever was there beforehand -- the same stash/restore
+    pattern `tests/test_web_build.py` already uses, since the frontend
+    route is bound to that exact absolute path at import time on the one
+    module-level `app` singleton.
+    """
+    import shutil
+
+    frontend_dir = app_module.FRONTEND_DIR
+    backup_dir = frontend_dir.with_name(frontend_dir.name + ".test-backup-setup-gate")
+    preexisting = frontend_dir.exists()
+    if preexisting:
+        frontend_dir.rename(backup_dir)
+    frontend_dir.mkdir(parents=True)
+    marker = "spire-voice-test-setup-gate-frontend-marker"
+    (frontend_dir / "index.html").write_text(
+        f"<!doctype html><title>{marker}</title>", encoding="utf-8"
+    )
+
+    # A real browser's navigation request always carries `Accept: text/html`
+    # -- `fastapi.routing._is_frontend_navigation_request` (verified
+    # directly against the installed `fastapi==0.141.1`'s own source) gates
+    # the SPA's own index.html fallback on exactly that header, so a
+    # generic `Accept: */*` (`TestClient`'s own default) would 404 on
+    # `/setup` regardless of the setup gate -- an artifact of the test
+    # client, not the thing this test exists to prove.
+    navigation_headers = {"accept": "text/html"}
+
+    try:
+        with _boot_with_empty_accounts(tmp_path, monkeypatch) as client:
+            root_response = client.get("/", headers=navigation_headers)
+            assert root_response.status_code == 200, (
+                f"GET / answered {root_response.status_code}, not the SPA shell -- "
+                f"body: {root_response.text!r}"
+            )
+            assert marker in root_response.text
+
+            setup_response = client.get("/setup", headers=navigation_headers)
+            assert setup_response.status_code == 200, (
+                f"GET /setup answered {setup_response.status_code}, not the SPA shell -- "
+                f"body: {setup_response.text!r}"
+            )
+            assert marker in setup_response.text
+
+            # The split must not have widened the gate's own reach -- a real
+            # backend route must still 503 while no user exists.
+            backend_response = client.get("/transport")
+            assert backend_response.status_code == 503, backend_response.text
+    finally:
+        shutil.rmtree(frontend_dir, ignore_errors=True)
+        if preexisting:
+            backup_dir.rename(frontend_dir)
 
 
 def test_turn_surfaces_refuse_an_unauthenticated_caller_once_setup_is_complete(

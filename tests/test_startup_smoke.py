@@ -407,11 +407,13 @@ def _fake_build_repositories(config: object, engine: object) -> dict:
     cover `lifespan`'s repository wiring without a reachable Postgres --
     the same Postgres-free precedent D-04 sets for the rest of the suite.
 
-    Plan 03-05: every route this application registers now sits behind
-    `require_setup_complete` (an application-level dependency reading
-    `app.state.account_repo`), so a test that boots the real app and calls
-    any route at all -- not just one this file's own tests exercise --
-    needs this key present, not only `policy_repo`.
+    Plan 03-05: every backend route this application registers sits behind
+    `require_setup_complete` (a dependency reading `app.state.account_repo`,
+    carried structurally by every backend router rather than by `app`
+    itself as of deferred-items.md #1's Option B fix -- the frontend mount
+    is the one deliberate exception), so a test that boots the real app and
+    calls any backend route at all -- not just one this file's own tests
+    exercise -- needs this key present, not only `policy_repo`.
 
     The `FakeAccountRepository` here is pre-seeded with one fake admin
     account, directly (bypassing the async `create_user`, which this sync

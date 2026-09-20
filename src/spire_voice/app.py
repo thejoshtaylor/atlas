@@ -1212,16 +1212,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await db_engine.dispose()
 
 
-# `require_setup_complete` (WEB-01, D-08) is registered here, as an
-# application-level dependency, rather than repeated on each route below --
-# a route added in a later phase inherits the gate by default this way,
-# which is the whole point: a gate a future route can forget to add is not
-# a gate. `SETUP_GATE_EXEMPT_PATHS` (auth/dependencies.py) is the complete,
-# named exception list; every other route in this process, present or
-# future, is behind it. It is typed on `HTTPConnection`, not `Request`
-# (see that module's own docstring), so it applies uniformly to the
-# WebSocket turn route below as well as every HTTP route.
-app = FastAPI(lifespan=lifespan, dependencies=[Depends(require_setup_complete)])
+# `require_setup_complete` (WEB-01, D-08) used to be registered here as an
+# application-level dependency, which meant `app.frontend()`'s own SPA
+# routes below inherited it too -- FastAPI's own `_FrontendRouteGroup`
+# construction carries `*include_context.dependencies` from the app that
+# mounted it, confirmed directly against the installed
+# `fastapi>=0.141,<0.142`'s source. A fresh deployment's very first page
+# load of `/` or `/setup` then 503'd with "setup incomplete" before the
+# browser ever loaded the JavaScript that could call
+# `/api/auth/create-admin` and clear the gate -- the wizard could never
+# appear (deferred-items.md #1).
+#
+# Option B (the operator's chosen fix) moves the gate off `app` itself and
+# onto the backend routes instead: `register_routers` (routes/__init__.py)
+# mounts every feature router through one parent that carries
+# `require_setup_complete` as its own dependency, and every top-level route
+# in this file carries the identical dependency explicitly (see the comment
+# above this file's own route decorators for why those stay direct
+# declarations rather than a second wrapping router). `app` itself now
+# carries no app-level dependency at all, so the frontend mount below is
+# never subject to the gate by construction, not by a path exemption a
+# future route could slip past. `SETUP_GATE_EXEMPT_PATHS`
+# (auth/dependencies.py) still names the handful of backend paths that
+# must answer before any user exists (create-admin, setup status, the
+# wizard) -- `require_setup_complete` itself still exempts those exact
+# paths, so gating their routers too is a no-op, not a second gate.
+app = FastAPI(lifespan=lifespan)
 register_routers(app)
 # The built single-page application, served at the same origin its own
 # session cookie needs (D-15). `app.frontend()` (verified directly against
@@ -1234,7 +1250,13 @@ register_routers(app)
 # ordering of wrong. `check_dir=False` is explicit, not `"auto"`: a clean
 # clone that has not run `bun run build` yet must still start (the warning
 # above already told the operator why the page will be blank), so this
-# must never raise merely because the directory does not exist yet.
+# must never raise merely because the directory does not exist yet. It is
+# constructed here, with `app.dependencies` still empty at this point in
+# the module (`app = FastAPI(lifespan=lifespan)` above carries none), so
+# `_FrontendRouteGroup` -- which captures `self.dependencies` at the moment
+# `app.frontend()` is called, not lazily -- captures an empty list. It
+# carries no `require_setup_complete` dependency of any kind: the entire
+# point of this section.
 app.frontend("/", directory=str(FRONTEND_DIR), check_dir=False)
 
 
@@ -1248,7 +1270,28 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/transport")
+# Every route below this point is a real backend route -- a control
+# surface, a configuration read, or a turn-starting surface -- so every one
+# of them carries `Depends(require_setup_complete)` explicitly, alongside
+# whatever `require_role(...)` dependency it already needs. This is a
+# per-route dependency, not a router-level one (unlike `register_routers`
+# in routes/__init__.py, which mounts every *feature* router through one
+# parent that carries the gate structurally): nesting one of these routes'
+# `APIWebSocketRoute` (`/ws/turn`, below) inside a wrapping `APIRouter`
+# that then gets `include_router`'d onto `app` hits a real limitation in
+# the installed `fastapi==0.141.1` -- the resulting `_EffectiveRouteContext`
+# for a WebSocket route loses its own `.path` field (verified directly
+# against that version's source this session; `original_route.path` still
+# carries it, but the flattening helpers this project's own tests use do
+# not know to look there), which would silently break the route-enumeration
+# drift guards below. Keeping this file's small, fixed set of top-level
+# routes as direct `@app...` declarations, each with the dependency spelled
+# out, sidesteps that quirk entirely while still making the gate structural
+# where it matters most -- every *feature* router, added far more often
+# than this file's own routes are. A route added below without this
+# dependency is caught by
+# `tests/test_auth_roles.py::test_every_backend_route_carries_the_setup_gate_except_health`.
+@app.get("/transport", dependencies=[Depends(require_setup_complete)])
 async def get_transport() -> dict[str, str]:
     """The one thing the page needs to pick a transport without guessing.
 
@@ -1262,8 +1305,8 @@ async def get_transport() -> dict[str, str]:
     configuration choice (`"websocket"` or `"webrtc"`), never house data,
     and is not itself a control surface -- unlike the calibration and turn
     routes below, calling it cannot make anything in a real home happen.
-    It still sits behind the application-level setup gate above, like
-    every other route not named in `SETUP_GATE_EXEMPT_PATHS`.
+    It still sits behind the setup gate above, like every other route not
+    named in `SETUP_GATE_EXEMPT_PATHS`.
     """
     config: Config = app.state.config
     return {"transport": config.server.transport}
@@ -1314,7 +1357,10 @@ def _calibration_response(calibration: EchoCalibration, now: datetime) -> dict[s
     }
 
 
-@app.get("/calibration/echo-path", dependencies=[Depends(require_role(Role.OPERATOR))])
+@app.get(
+    "/calibration/echo-path",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
 async def get_echo_path_calibration() -> dict[str, Any]:
     """The last stored echo-path calibration and its age, or the
     not-found status when nothing has been measured yet -- the state this
@@ -1335,7 +1381,10 @@ async def get_echo_path_calibration() -> dict[str, Any]:
     return _calibration_response(calibration, datetime.now(timezone.utc))
 
 
-@app.post("/calibration/echo-path/run", dependencies=[Depends(require_role(Role.OPERATOR))])
+@app.post(
+    "/calibration/echo-path/run",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
 async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str, Any]:
     """Run a live echo-path calibration against this process's own
     camera source and speaker writer -- never a second RTSP connection or
@@ -1380,7 +1429,10 @@ class WebrtcAnswerPayload(BaseModel):
     type: str
 
 
-@app.post("/webrtc/offer", dependencies=[Depends(require_role(Role.OPERATOR))])
+@app.post(
+    "/webrtc/offer",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
 async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     """The one stateless request/response the WebRTC path signals over.
 
@@ -1470,7 +1522,10 @@ async def _run_webrtc_turn(transport: WebrtcTransport, *args: Any, **kwargs: Any
         await transport.close()
 
 
-@app.websocket("/ws/turn", dependencies=[Depends(require_role(Role.OPERATOR))])
+@app.websocket(
+    "/ws/turn",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
 async def turn_ws(websocket: WebSocket) -> None:
     """Behind `require_role(Role.OPERATOR)` as of plan 03-05 (T-03-32) --
     the same guarantee `/webrtc/offer` above carries, applied to this
