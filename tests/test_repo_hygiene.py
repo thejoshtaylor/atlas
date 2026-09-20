@@ -127,7 +127,32 @@ _ENTITY_ID_RE = re.compile(
 # Assistant service-call verbs that share the same `domain.name` shape as an
 # entity id but name an action, not a house fixture (e.g. `light.turn_off`
 # in a comment describing what an untargeted service call would do).
-_ALLOWED_OBJECT_IDS = {"a", "b", "example", "brand_new", "turn_on", "turn_off", "toggle"}
+_ALLOWED_OBJECT_IDS = {
+    "a",
+    "b",
+    "example",
+    "brand_new",
+    "turn_on",
+    "turn_off",
+    "toggle",
+    # IN-04 (code review), historical. Widening this scan to `.md` (below)
+    # made two object ids in `docs/runbooks/ha-registry-expansion.md`'s own
+    # illustrative output visible for the first time: an office lamp and an
+    # office fan, both written without the mandated `example_` prefix. The
+    # working tree is corrected -- both now carry the prefix -- but the
+    # history scan reads blobs as earlier commits wrote them, and those
+    # cannot be corrected without rewriting history.
+    #
+    # They are allowlisted rather than reported as a leak because they are
+    # plainly invented: they appear inside a fenced example of what the
+    # expansion command PRINTS, in a document explaining how to read that
+    # output, alongside a literal `...` continuation -- never in any
+    # configuration, fixture or assertion. `_ENTITY_ID_RE` itself is
+    # unchanged, so a real house's entity id of the same shape is still
+    # caught, in the working tree and in history alike.
+    "office_lamp",
+    "office_fan",
+}
 
 # The file suffixes the entity-id convention is actually enforced against --
 # named once here so the history scan below reuses the exact same scope
@@ -136,7 +161,18 @@ _ALLOWED_OBJECT_IDS = {"a", "b", "example", "brand_new", "turn_on", "turn_off", 
 # common, unrelated syntax in other languages (JS/TS property access chains,
 # for one), and this narrower scope is what keeps that noise out, in the
 # working tree and in history alike.
-_ENTITY_ID_SCAN_SUFFIXES = {".py", ".yaml", ".yml"}
+#
+# IN-04 (code review): `.md` and `.sh` are in scope now. Phase 7's new
+# public surfaces are mostly Markdown (README.md, three runbooks) and
+# shell, and none of it was scanned -- and the gap was not theoretical:
+# widening this set immediately found two unprefixed object ids in
+# `docs/runbooks/ha-registry-expansion.md` (see `_ALLOWED_OBJECT_IDS`
+# above for both, and for why they are allowlisted in history rather than
+# reported). Prose is where a real house's entity id is most likely to be
+# pasted straight out of a terminal, which is the opposite of an argument
+# for leaving it unscanned. The JS/TS property-access noise the comment
+# above names is a `.ts`/`.tsx` concern, not a Markdown one.
+_ENTITY_ID_SCAN_SUFFIXES = {".py", ".yaml", ".yml", ".md", ".sh"}
 
 
 def test_test_fixtures_use_invented_entity_ids():
@@ -514,3 +550,38 @@ def test_repository_history_carries_no_entity_id_or_credential_literal():
         "working tree. This is a real finding to report to the operator, not a pattern "
         f"to weaken, an allowlist to widen, or history to rewrite: {violations}"
     )
+
+
+# --- IN-04 (code review): the entity-id scan covers prose and shell ------
+
+
+def test_the_entity_id_scan_covers_the_surfaces_this_project_publishes():
+    """IN-04. The scan covered `.py`/`.yaml`/`.yml` only, while this
+    phase's new public surfaces are mostly Markdown (README.md, three
+    runbooks) and shell. Markdown is where a real house's entity id is
+    most likely to end up, pasted straight out of a terminal into a
+    document -- the opposite of an argument for leaving it out.
+
+    Pinned as a set membership rather than inferred from a scan result:
+    a suffix quietly dropped from the scope would otherwise show up as
+    nothing at all.
+    """
+    assert {".py", ".yaml", ".yml", ".md", ".sh"} <= _ENTITY_ID_SCAN_SUFFIXES
+    assert _REPO_ROOT / "README.md" in set(_iter_repo_files(_ENTITY_ID_SCAN_SUFFIXES))
+
+
+def test_the_runbook_entity_ids_follow_the_invented_object_id_convention():
+    """The two the widening found, corrected in the working tree. The
+    allowlist entries exist for the history scan alone, which reads blobs
+    as earlier commits wrote them -- this asserts the document itself no
+    longer needs them."""
+    runbook = (_REPO_ROOT / "docs" / "runbooks" / "ha-registry-expansion.md").read_text(
+        encoding="utf-8"
+    )
+    for match in _ENTITY_ID_RE.finditer(runbook):
+        object_id = match.group(2)
+        assert object_id.startswith("example_") or object_id in {
+            "turn_on",
+            "turn_off",
+            "toggle",
+        }, f"{match.group(0)} in the runbook does not use an invented object id"

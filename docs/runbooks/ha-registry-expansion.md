@@ -39,8 +39,8 @@ entities: 118
 entities with their own area set: 22
 entities inheriting their area from a device: 63
 area 'office' expands to 7 entities:
-  light.office_lamp
-  switch.office_fan
+  light.example_office_lamp
+  switch.example_office_fan
   ...
 ```
 
