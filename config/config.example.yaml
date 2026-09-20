@@ -425,6 +425,18 @@ tts:
     - "sorry, i didn't catch that"
     - "i can't do that one"
 
+  # The local text-to-speech option (D-09, D-10): Piper, selected in the
+  # /providers screen rather than here -- these two keys only take effect
+  # when that option is chosen. Both must already be provisioned (see
+  # docs/runbooks for the fetch step); nothing in this process ever
+  # downloads either at boot, so a missing file degrades this slot with
+  # the path named. Piper is an optional extra (`pip install
+  # 'spire-voice[piper]'`) and its inference code is GPL-3.0-or-later, not
+  # the MIT licence most of this project uses -- see the README before
+  # redistributing a build that includes it.
+  piper_voice_path: "/models/piper/en_US-lessac-medium.onnx"
+  piper_config_path: "/models/piper/en_US-lessac-medium.onnx.json"
+
 # macros: -- retired (D-09). This file shipped a macros: block before this
 # comment existed, so an operator upgrading from before Phase 4 still has
 # one in their own, separately-held configuration file. Macros now live in

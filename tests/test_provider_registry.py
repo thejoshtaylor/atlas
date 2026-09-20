@@ -83,12 +83,27 @@ def test_build_tts_builds_the_registered_xai_provider():
 
 
 def test_tts_entry_declares_itself_batch():
-    """D-05: xAI's text-to-speech is a single REST call -- batch, not
-    streaming -- and the registry entry must say so, since `boot.py::
-    resolve_slot` reads exactly this field to decide whether to wrap."""
-    [entry] = registry.known_entries("tts")
+    """D-05/D-09: xAI's text-to-speech and the local Piper entry are both
+    a single call, not a stream -- batch -- and both registry entries must
+    say so, since `boot.py::resolve_slot` reads exactly this field to
+    decide whether to wrap."""
+    entries = registry.known_entries("tts")
 
-    assert entry.batch is True
+    assert {entry.name for entry in entries} == {"xai", "piper"}
+    assert all(entry.batch is True for entry in entries)
+
+
+def test_piper_entry_requires_no_credential_and_carries_the_licence_note():
+    """D-10: the local entry's needs-a-credential hint must never appear,
+    and its GPL-3.0 disclosure is data on the entry, not a special case
+    the route or the component would otherwise have to hardcode."""
+    entry = registry.TTS_REGISTRY["piper"]
+
+    assert entry.requires_credential is False
+    assert entry.licence_note is not None
+    assert "GPL-3.0" in entry.licence_note
+    # xAI carries no licence obligation -- only Piper's entry states one.
+    assert registry.TTS_REGISTRY["xai"].licence_note is None
 
 
 def test_build_tts_raises_provider_unavailable_when_the_credential_is_missing():

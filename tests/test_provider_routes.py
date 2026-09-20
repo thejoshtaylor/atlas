@@ -174,8 +174,12 @@ def test_get_providers_reports_the_tts_slot_wrapped_with_no_measured_figure_yet(
     assert slot["label"] == "Text to speech"
     assert slot["wrapped"] is True
     assert slot["measured_ms"] is None
-    [option] = slot["options"]
-    assert option["wrapped"] is True, "the tts registry entry itself declares batch=True"
+    # 07-03-PLAN.md Task 3 adds a second tts option (`piper`, local)
+    # alongside `xai` -- both declare batch=True on their registry entry.
+    assert {option["name"] for option in slot["options"]} == {"xai", "piper"}
+    assert all(option["wrapped"] is True for option in slot["options"]), (
+        "both tts registry entries declare batch=True"
+    )
 
 
 def test_get_providers_reports_a_real_measured_figure_off_the_live_tts_client(

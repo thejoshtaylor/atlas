@@ -25,7 +25,16 @@ from spire_voice.providers.base import SttProvider, TtsProvider
 from spire_voice.providers.boot import ProviderUnavailable
 from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
 from spire_voice.providers.stt_xai import XaiStt
+from spire_voice.providers.tts_piper import PiperTts
 from spire_voice.providers.tts_xai import XaiTts
+
+# 07-UI-SPEC.md's Piper licence line, verbatim -- the registry entry
+# carries the contract's exact string as data, so the screen renders it
+# rather than a component-side paraphrase of it (D-10).
+_PIPER_LICENCE_NOTE = (
+    "Piper is licensed under GPL-3.0, not the MIT licence most of this project "
+    "uses. See the README before you redistribute a build that includes it."
+)
 from spire_voice.turn import brain_race
 
 __all__ = [
@@ -102,6 +111,19 @@ TTS_REGISTRY: "dict[str, ProviderEntry]" = {
         # there, not here: this entry only states the fact.
         batch=True,
         licence_note=None,
+    ),
+    "piper": ProviderEntry(
+        name="piper",
+        label="Piper (local)",
+        # No credential to thread through -- `config` is passed unchanged,
+        # the same shape the local speech-to-text entry uses.
+        build=lambda config, api_key: PiperTts(config),
+        requires_credential=False,
+        # Piper also renders a whole utterance in one call -- batch, like
+        # xAI's REST endpoint -- so `boot.py::resolve_slot` wraps it in the
+        # same `BatchTtsAdapter`, never a second wrapper class.
+        batch=True,
+        licence_note=_PIPER_LICENCE_NOTE,
     ),
 }
 

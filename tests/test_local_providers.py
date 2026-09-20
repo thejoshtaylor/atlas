@@ -11,10 +11,12 @@ import numpy as np
 import pytest
 
 from spire_voice.audio.alaw import pcm16_to_alaw
-from spire_voice.config import SttConfig
+from spire_voice.config import SttConfig, TtsConfig
 from spire_voice.providers.base import FinalTranscript, PartialTranscript, SttError
 from spire_voice.providers.boot import ProviderUnavailable
 from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
+from spire_voice.providers.tts_piper import PiperTts
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.transports.base import SourceFormat
 
 
@@ -152,3 +154,131 @@ async def test_a_raising_model_produces_stt_error_not_silence(tmp_path):
     with pytest.raises(SttError):
         async for _ in stt.stream(_frames(b"\x00\x00" * 10), SourceFormat("pcm", 16000)):
             pass
+
+
+class _FakeAudioChunk:
+    def __init__(self, pcm16: bytes, sample_rate: int) -> None:
+        self.audio_int16_bytes = pcm16
+        self.sample_rate = sample_rate
+
+
+class _FakeVoice:
+    """A `piper.PiperVoice` double: records the text it was asked to
+    render and returns the configured chunks -- matching the real
+    `PiperVoice.synthesize(text) -> Iterable[AudioChunk]` shape confirmed
+    against the real `piper-tts` package in a throwaway virtualenv this
+    session (`AudioChunk.sample_rate`, `AudioChunk.audio_int16_bytes`)."""
+
+    def __init__(self, chunks: "list[_FakeAudioChunk]") -> None:
+        self.chunks = chunks
+        self.received_text: "str | None" = None
+
+    def synthesize(self, text: str, syn_config=None):
+        self.received_text = text
+        return iter(self.chunks)
+
+
+def _tts_config(tmp_path, **overrides) -> TtsConfig:
+    if "piper_voice_path" not in overrides:
+        voice_path = tmp_path / "voice.onnx"
+        voice_path.write_bytes(b"fake-voice-weights")
+        overrides["piper_voice_path"] = str(voice_path)
+    if "piper_config_path" not in overrides:
+        config_path = tmp_path / "voice.onnx.json"
+        config_path.write_text("{}")
+        overrides["piper_config_path"] = str(config_path)
+    return TtsConfig(**overrides)
+
+
+def test_missing_voice_file_raises_provider_unavailable_naming_path_and_step(tmp_path):
+    missing = str(tmp_path / "does-not-exist.onnx")
+    config_path = tmp_path / "voice.onnx.json"
+    config_path.write_text("{}")
+
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        PiperTts(
+            TtsConfig(piper_voice_path=missing, piper_config_path=str(config_path)),
+            load_voice=lambda config: _FakeVoice([]),
+        )
+
+    message = str(excinfo.value)
+    assert missing in message
+    assert "provisioning" in message.lower()
+
+
+def test_missing_voice_config_raises_provider_unavailable_naming_path_and_step(tmp_path):
+    voice_path = tmp_path / "voice.onnx"
+    voice_path.write_bytes(b"fake-voice-weights")
+    missing_config = str(tmp_path / "does-not-exist.onnx.json")
+
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        PiperTts(
+            TtsConfig(piper_voice_path=str(voice_path), piper_config_path=missing_config),
+            load_voice=lambda config: _FakeVoice([]),
+        )
+
+    message = str(excinfo.value)
+    assert missing_config in message
+    assert "provisioning" in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_camera_sink_returns_alaw_at_8khz(tmp_path):
+    pcm16 = (np.arange(2205, dtype=np.int16) - 1000).tobytes()  # 100ms @ 22050 Hz
+    fake_voice = _FakeVoice([_FakeAudioChunk(pcm16, 22050)])
+    tts = PiperTts(_tts_config(tmp_path), load_voice=lambda config: fake_voice)
+
+    audio = await tts.synthesize_once("turn on the lights", sink=SinkFormat(codec="alaw", sample_rate=8000))
+
+    assert fake_voice.received_text == "turn on the lights"
+    # 100ms of audio resampled to 8kHz is exactly 800 samples; A-law is one
+    # byte per sample, so the returned buffer's length alone proves both
+    # the resample and the A-law encode ran.
+    assert len(audio) == 800
+
+
+@pytest.mark.asyncio
+async def test_browser_sink_returns_pcm_at_the_sinks_rate(tmp_path):
+    pcm16 = (np.arange(2205, dtype=np.int16) - 1000).tobytes()  # 100ms @ 22050 Hz
+    fake_voice = _FakeVoice([_FakeAudioChunk(pcm16, 22050)])
+    tts = PiperTts(_tts_config(tmp_path), load_voice=lambda config: fake_voice)
+
+    audio = await tts.synthesize_once("ok", sink=SinkFormat(codec="pcm", sample_rate=24000))
+
+    # 100ms resampled to 24kHz is exactly 2400 samples, 2 bytes each --
+    # still 16-bit PCM, not A-law, since this sink asked for "pcm".
+    assert len(audio) == 2400 * 2
+
+
+@pytest.mark.asyncio
+async def test_sink_is_read_not_assumed_two_calls_two_different_outputs(tmp_path):
+    """The same rendered audio, asked for through two different sinks,
+    must not silently reuse one sink's bytes for the other."""
+    pcm16 = (np.arange(2205, dtype=np.int16) - 1000).tobytes()
+    fake_voice = _FakeVoice([_FakeAudioChunk(pcm16, 22050)])
+    tts = PiperTts(_tts_config(tmp_path), load_voice=lambda config: fake_voice)
+
+    camera_audio = await tts.synthesize_once("hi", sink=SinkFormat(codec="alaw", sample_rate=8000))
+    browser_audio = await tts.synthesize_once("hi", sink=SinkFormat(codec="pcm", sample_rate=24000))
+
+    assert len(camera_audio) != len(browser_audio)
+
+
+def test_no_chunking_method_of_its_own():
+    """D-05/D-07: only `BatchTtsAdapter` chunks a batch provider's output
+    -- this class exposes the single-shot method and nothing that looks
+    like a streaming `synthesize()` of its own."""
+    assert hasattr(PiperTts, "synthesize_once")
+    assert not hasattr(PiperTts, "synthesize")
+
+
+def test_extra_not_installed_raises_provider_unavailable_naming_the_extra(tmp_path):
+    """D-10: `piper-tts` is deliberately absent from this project's own dev
+    virtualenv (07-03-PLAN.md Task 1) -- this exercises the real default
+    loader, not a fake, so this proves the actual `ImportError` this
+    environment produces surfaces as `ProviderUnavailable` rather than
+    stopping the boot."""
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        PiperTts(_tts_config(tmp_path))
+
+    assert "piper" in str(excinfo.value).lower()

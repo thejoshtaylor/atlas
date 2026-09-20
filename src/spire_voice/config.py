@@ -317,6 +317,14 @@ class TtsConfig:
     # unlike brain.models, an absent tts: block should not stop startup.
     cache_dir: str = "/data/tts-cache"
     precache: tuple[str, ...] = ()
+    # The local text-to-speech option (Phase 7, D-09, D-10): Piper. Read
+    # only by the `piper` provider entry -- the xAI entry above ignores
+    # both. Under the same `/models` root the wake-word and local
+    # speech-to-text entries already use. Neither path is fetched at boot
+    # (D-11); a missing file degrades this slot by name
+    # (`providers/tts_piper.py`).
+    piper_voice_path: str = "/models/piper/en_US-lessac-medium.onnx"
+    piper_config_path: str = "/models/piper/en_US-lessac-medium.onnx.json"
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "TtsConfig":
@@ -336,6 +344,8 @@ class TtsConfig:
             request_timeout_s=float(raw.get("request_timeout_s", cls.request_timeout_s)),
             cache_dir=raw.get("cache_dir", cls.cache_dir),
             precache=tuple(raw.get("precache", cls.precache)),
+            piper_voice_path=raw.get("piper_voice_path", cls.piper_voice_path),
+            piper_config_path=raw.get("piper_config_path", cls.piper_config_path),
         )
 
 
