@@ -359,3 +359,91 @@ def test_the_two_local_registry_entries_carry_the_measured_note_verbatim():
     assert piper.measured_note.startswith("Measured on this project's CPU-only host:")
     assert registry.STT_REGISTRY["xai"].measured_note is None
     assert registry.TTS_REGISTRY["xai"].measured_note is None
+
+
+# --- CR-04 (code review): a half-provisioned model must degrade one slot ---
+
+
+def test_a_model_directory_that_exists_but_is_incomplete_degrades_the_slot(tmp_path):
+    """CR-04. This drives the REAL `faster_whisper` loader -- no fake --
+    against an existing but empty model directory, because a fake loader
+    is exactly the thing that cannot prove what the real one raises. The
+    real one raises `RuntimeError: Unable to open file 'model.bin' ...`,
+    which was not a `ProviderUnavailable`, so it propagated out of
+    `resolve_slot` and out of `lifespan` and the process never started.
+
+    Reachable with no exotic input at all: `scripts/fetch_models.py`
+    fetches four files one at a time, and a 404, a reset connection or a
+    full disk between two of them leaves the directory present and
+    incomplete. Per D-02 the admin has already saved
+    `stt = faster-whisper` and restarted -- so a fatal boot here is an
+    admin locked out of the /providers screen that would let them switch
+    back, which is the outcome 07-CONTEXT.md's D-04 names as the worst
+    available one.
+    """
+    empty_model_dir = tmp_path / "half-provisioned"
+    empty_model_dir.mkdir()
+
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        FasterWhisperStt(SttConfig(local_model_dir=str(empty_model_dir)))
+
+    message = str(excinfo.value)
+    assert str(empty_model_dir) in message
+    assert "model.bin" in message, "the loader's own reason must survive into the slot's reason"
+    assert "provisioning" in message.lower()
+
+
+def test_a_loader_failure_reaches_resolve_slot_as_a_degraded_slot_not_a_dead_boot(tmp_path):
+    """The other half of CR-04: the conversion has to happen where
+    `resolve_slot` can see it. `resolve_slot` catches `ProviderUnavailable`
+    and nothing else, on purpose (an unrecognized provider name is a real
+    authoring error and must stop the boot) -- so this asserts the whole
+    path, from a raising loader to a degraded status with a reason, rather
+    than only the exception type."""
+    import asyncio
+
+    from spire_voice.providers.boot import resolve_slot
+
+    class _NoSelectionRepo:
+        async def get_selection(self, slot: str):
+            return None
+
+    def _raising_builder(name, config, api_key, options):
+        return FasterWhisperStt(
+            config, load_model=lambda _config: (_ for _ in ()).throw(RuntimeError("model.bin is truncated"))
+        )
+
+    model_dir = tmp_path / "half-provisioned"
+    model_dir.mkdir()
+
+    status, client = asyncio.run(
+        resolve_slot(
+            "stt",
+            _NoSelectionRepo(),
+            "faster-whisper",
+            _raising_builder,
+            SttConfig(local_model_dir=str(model_dir)),
+            "",
+        )
+    )
+
+    assert client is None
+    assert status.state == "degraded"
+    assert status.active is None
+    assert "model.bin is truncated" in status.reason
+
+
+def test_a_corrupt_piper_voice_degrades_the_slot_rather_than_stopping_the_boot(tmp_path):
+    """The Piper half of CR-04. `_load_piper_voice` already converted a
+    missing `piper` extra; a voice file that exists and is unreadable
+    failed inside the loader instead, with no branch for it here."""
+
+    def _raising_load(config):
+        raise RuntimeError("onnxruntime: Protobuf parsing failed")
+
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        PiperTts(_tts_config(tmp_path), load_voice=_raising_load)
+
+    message = str(excinfo.value)
+    assert "Protobuf parsing failed" in message
+    assert "provisioning" in message.lower()

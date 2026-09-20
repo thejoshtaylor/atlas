@@ -107,7 +107,24 @@ class PiperTts:
                 "Run the model provisioning step to place one there before selecting "
                 "this text-to-speech option."
             )
-        self._voice = load_voice(config)
+        # CR-04 (code review): the same guard `stt_faster_whisper.py`
+        # carries, for the same reason. `_load_piper_voice` already turns
+        # a missing `piper` extra into `ProviderUnavailable`, but a voice
+        # file that exists and is truncated or corrupt (an interrupted
+        # `scripts/fetch_models.py` run) fails inside onnxruntime instead,
+        # with an exception this module had no branch for -- and that
+        # stopped the whole boot rather than degrading this one slot,
+        # which is the admin lockout D-04 exists to prevent.
+        try:
+            self._voice = load_voice(config)
+        except ProviderUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- any load failure degrades this slot
+            raise ProviderUnavailable(
+                f"The Piper voice at {config.piper_voice_path!r} could not be loaded "
+                f"({exc}). Re-run the model provisioning step, or pick another "
+                "text-to-speech option in Settings."
+            ) from exc
 
     def browser_sink(self) -> SinkFormat:
         """The same browser-facing default `XaiTts.browser_sink` states --

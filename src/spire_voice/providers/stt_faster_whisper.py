@@ -111,7 +111,30 @@ class FasterWhisperStt:
                 "model provisioning step to place one there before selecting this "
                 "speech-to-text option."
             )
-        self._model = load_model(config)
+        # CR-04 (code review): the existence check above is not the whole
+        # failure. A directory that exists but is incomplete -- which is
+        # what `scripts/fetch_models.py` leaves behind if a 404, a reset
+        # connection or a full disk lands between its four files -- makes
+        # the real loader raise `RuntimeError: Unable to open file
+        # 'model.bin' ...`. That is not a `ProviderUnavailable`, so it
+        # propagated out of `resolve_slot` and out of `lifespan`, and the
+        # process never started: the admin who had already saved
+        # `stt = faster-whisper` could no longer reach the screen that
+        # would let them pick something else. D-04 exists to prevent
+        # exactly that outcome, and a missing model file is the same class
+        # of problem as the missing credential this module already
+        # degrades on -- not the authoring error (an unrecognized provider
+        # name) `resolve_slot` deliberately refuses to swallow.
+        try:
+            self._model = load_model(config)
+        except ProviderUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- any load failure degrades this slot
+            raise ProviderUnavailable(
+                f"The faster-whisper model at {config.local_model_dir!r} could not be "
+                f"loaded ({exc}). Re-run the model provisioning step, or pick another "
+                "speech-to-text option in Settings."
+            ) from exc
 
     async def stream(
         self, frames: AsyncIterator[bytes], source_format: SourceFormat
