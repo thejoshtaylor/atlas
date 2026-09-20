@@ -249,3 +249,84 @@ def test_no_default_database_password_ships_in_the_repository() -> None:
     template_text = (_CHART_DIR / "templates" / "secret.yaml").read_text()
     assert "changeme" not in template_text.lower()
     assert "randAlpha 32" in template_text
+
+
+# --- CR-01 (code review): the chart could not install at all --------------
+
+
+@skip_without_helm
+def test_every_container_the_pod_runs_can_satisfy_its_own_run_as_non_root() -> None:
+    """The defect this test exists for: the pod-level `runAsNonRoot: true`
+    applies to init containers too, and `postgres:18` (the
+    `wait-for-postgres` init container's image) declares no `USER` at all
+    -- it starts as root and drops privileges inside its own entrypoint.
+    The kubelet refuses such a container before it runs
+    (`Init:CreateContainerConfigError`), so the application pod never
+    started on any cluster.
+
+    `runAsNonRoot` can only refuse an image that would run as root; it
+    cannot choose a uid. So the rule this asserts is: under a pod-level
+    `runAsNonRoot`, any container whose image is not this project's own
+    (the only image in the chart that declares a non-root `USER`) must
+    name the uid it runs as, in its own securityContext.
+    """
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+
+    assert pod_spec["securityContext"]["runAsNonRoot"] is True
+
+    init_containers = pod_spec.get("initContainers", [])
+    assert init_containers, "the wait-for-postgres init container disappeared"
+    for container in init_containers:
+        security_context = container.get("securityContext", {})
+        run_as_user = security_context.get("runAsUser")
+        assert isinstance(run_as_user, int), (
+            f"init container {container['name']!r} runs image {container['image']!r} "
+            "under the pod's runAsNonRoot but names no runAsUser of its own -- the "
+            "kubelet refuses it if that image declares no non-root USER"
+        )
+        assert run_as_user != 0
+        assert security_context.get("runAsNonRoot") is True
+
+
+@skip_without_helm
+def test_the_init_containers_declared_uid_is_the_one_its_image_really_has() -> None:
+    """A uid pinned in a chart is a guess unless something checks it
+    against the image. `postgres:18` creates its `postgres` user as
+    uid/gid 999 (`id postgres` inside the real image). Pinning any other
+    number would still satisfy the kubelet's root check while running
+    `pg_isready` as a user that does not exist in the image's passwd
+    database."""
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    init_containers = deployment["spec"]["template"]["spec"]["initContainers"]
+    postgres_init = [c for c in init_containers if c["image"].startswith("postgres:")]
+    assert postgres_init, "no init container runs the postgres image any more"
+    for container in postgres_init:
+        assert container["securityContext"]["runAsUser"] == 999
+        assert container["securityContext"]["runAsGroup"] == 999
+
+
+def test_the_deploy_verification_script_waits_for_the_pod_it_claims_to_verify() -> None:
+    """The second half of CR-01. The script printed "every attempted claim
+    was proved" against a release whose pod could never start, because its
+    `helm install` carried no `--wait` and nothing else looked at the pod
+    at all. This asserts the two properties that make that impossible:
+    the script watches the application pod's init containers on every run
+    (a claim that needs no registry access, unlike the pod-health claim),
+    and it passes `--wait` to helm whenever it does have a pullable
+    image."""
+    script = (_REPO_ROOT / "scripts" / "verify-helm-deploy.sh").read_text()
+    assert "_wait_for_app_init_containers" in script
+    assert "initContainerStatuses" in script
+    assert "CreateContainerConfigError" in script
+    assert "_HELM_WAIT_ARGS+=(--wait" in script
+    for command in ("helm install", "helm upgrade"):
+        invocation = next(
+            line for line in script.splitlines() if line.lstrip().startswith(f"if ! {command} ")
+        )
+        assert '"${_HELM_WAIT_ARGS[@]}"' in invocation, (
+            f"{command} does not forward the --wait arguments, so a release that "
+            "never becomes ready would be reported as a success"
+        )

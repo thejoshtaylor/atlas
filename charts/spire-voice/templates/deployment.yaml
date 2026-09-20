@@ -17,6 +17,18 @@ spec:
       # No privileged container and no host mount anywhere in this chart
       # (T-07-43) -- runAsNonRoot enforces the image's own non-root `spire`
       # user without this chart needing to know its numeric uid.
+      #
+      # CR-01 (code review): this pod-level context applies to EVERY
+      # container in the pod, init containers included -- so it cannot be
+      # written as though it only describes the application image. The
+      # init container below runs the official `postgres` image, which
+      # declares no USER at all (it starts as root and drops to `postgres`
+      # with gosu inside its own entrypoint), so inheriting a bare
+      # `runAsNonRoot: true` made the kubelet refuse it before it ever ran
+      # ("container has runAsNonRoot and image will run as root") and the
+      # whole chart could not install on any cluster. Every container that
+      # does not declare a non-root USER in its own image therefore carries
+      # its own securityContext naming the uid to run as.
       securityContext:
         runAsNonRoot: true
       initContainers:
@@ -27,6 +39,19 @@ spec:
           image: {{ .Values.postgres.image }}
           securityContext:
             allowPrivilegeEscalation: false
+            # The `postgres` user the official image itself creates and
+            # runs its own server as -- uid/gid 999, confirmed directly
+            # against `postgres:18` (`id postgres` -> `uid=999(postgres)
+            # gid=999(postgres)`). Named here rather than left to the pod's
+            # own `runAsNonRoot`, because that setting can only refuse an
+            # image that declares no user; it cannot choose one. Nothing in
+            # this container touches the database's files -- it only runs
+            # `pg_isready` over the network -- so any non-root uid would
+            # do; this one is the image's own, which keeps the binary's
+            # runtime environment exactly what its packager intended.
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
           command:
             - sh
             - -c

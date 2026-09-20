@@ -143,9 +143,10 @@ PersistentVolumeClaim, never `emptyDir`.
 ## Verifying this document is true
 
 `scripts/verify-helm-deploy.sh` is the real proof behind the claims above: it
-installs this chart into a throwaway namespace it creates, upgrades the
-release, and checks the generated key and a marker row written to the bundled
-database -- both survive, or the script says exactly which claim failed. Run it
+installs this chart into a throwaway namespace it creates, waits for the
+application pod's init containers to run to completion, upgrades the release,
+and checks the generated key and a marker row written to the bundled database
+-- all of it survives, or the script says exactly which claim failed. Run it
 yourself against a cluster you can reach:
 
 ```bash
@@ -155,3 +156,11 @@ yourself against a cluster you can reach:
 Add `--image <your-registry>/spire-voice:<tag> --wait-for-app` to also prove
 the application pod itself becomes healthy; without a pullable image the
 script honestly reports that claim as "not attempted" rather than assuming it.
+That flag also puts `--wait` on the `helm install` and `helm upgrade` calls,
+so a release that never becomes ready fails the helm command itself.
+
+The init-container claim runs on every invocation, with or without an image,
+because it finishes before the application image is ever needed. It is there
+because an earlier version of this chart could not install on any cluster --
+the `wait-for-postgres` init container was refused by the kubelet -- while
+this script still printed "every attempted claim was proved".

@@ -5,18 +5,38 @@
 # against a real cluster. Nothing in this script is a rendered-template
 # assertion -- tests/test_helm_chart.py already covers that ground. This
 # creates a throwaway namespace, installs the chart into it, upgrades the
-# release, and proves (or honestly disproves) three specific claims:
+# release, and proves (or honestly disproves) four specific claims:
 #
-#   1. The generated SPIRE_SECRET_KEY survives the upgrade byte-identical
+#   1. Every container in the application pod is accepted by the kubelet
+#      and every init container runs to completion (CR-01, code review).
+#      This claim is always attempted, because it needs nothing this
+#      cluster may not have: it is satisfied, or refused, before the
+#      application image is ever pulled. It exists because the version of
+#      this script that lacked it printed "every attempted claim was
+#      proved" against a chart whose pod could never start -- its
+#      `wait-for-postgres` init container was refused outright
+#      ("container has runAsNonRoot and image will run as root"), and
+#      nothing here noticed, because `helm install` with no `--wait`
+#      returns success the moment the API server has accepted the
+#      manifests. A verification script that passes on a chart that
+#      cannot deploy is worse than no script at all.
+#   2. The generated SPIRE_SECRET_KEY survives the upgrade byte-identical
 #      (T-07-37 -- the single highest-consequence failure this phase
 #      guards against).
-#   2. A row written to the bundled database before the upgrade is still
+#   3. A row written to the bundled database before the upgrade is still
 #      there after it (the deployment-level form of DEP-04).
-#   3. The application pod itself becomes healthy (only attempted if
+#   4. The application pod itself becomes healthy (only attempted if
 #      --wait-for-app is passed with a pullable image -- this cluster has
 #      no registry path to the application image by default, and this
 #      script must never claim to have proven something the pod that
-#      would have proven it never ran).
+#      would have proven it never ran). When it IS attempted, `helm
+#      install`/`helm upgrade` are run with `--wait` as well, so a release
+#      that never becomes ready fails the helm command itself rather than
+#      being discovered (or missed) further down.
+#
+# Claim 1 and claim 4 are deliberately separate. Claim 4 cannot run on a
+# cluster with no path to the application image; claim 1 can, and the one
+# real deployment defect this phase shipped was inside exactly that gap.
 #
 # The namespace this script creates is always deleted afterwards, in a
 # trap that runs whether the script succeeds or fails -- it never installs
@@ -36,6 +56,10 @@ _IMAGE_TAG=""
 _WAIT_FOR_APP="false"
 _APP_TIMEOUT="180"
 _DB_TIMEOUT="180"
+# Claim 1's own budget. Generous on purpose: the init container it watches
+# waits for a database whose very first start includes an initdb run on a
+# freshly provisioned volume.
+_INIT_TIMEOUT="240"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -110,7 +134,93 @@ if [ -n "$_IMAGE_REPO" ]; then
 fi
 
 _pg_selector="app.kubernetes.io/name=spire-voice-postgres,app.kubernetes.io/instance=$_RELEASE"
+_app_selector="app.kubernetes.io/name=spire-voice,app.kubernetes.io/instance=$_RELEASE"
 _secret_selector="app.kubernetes.io/instance=$_RELEASE"
+
+# The kubelet's own words for "I refused this container before running it".
+# Every one of these is a configuration the chart itself got wrong -- never
+# a property of the cluster this happens to run on -- so each is a claim-1
+# failure, by name. ImagePullBackOff/ErrImagePull are NOT in this set for
+# the application container: that is the registry gap 07-08 disclosed, and
+# claim 1 is scoped to end before the application image is needed.
+_CONTAINER_REFUSAL_REASONS="CreateContainerConfigError CreateContainerError RunContainerError InvalidImageName CrashLoopBackOff"
+
+_app_pod_name() {
+  kubectl get pods -n "$_NAMESPACE" -l "$_app_selector" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+}
+
+_init_container_states() {
+  # One line per init container: "name|waitingReason|terminatedExitCode".
+  # A field the API has not set yet renders empty (kubectl's jsonpath
+  # writer tolerates a missing key by default), so "wait-for-postgres||"
+  # means "created, still running" and "wait-for-postgres||0" means
+  # "finished successfully".
+  kubectl get pods -n "$_NAMESPACE" -l "$_app_selector" -o jsonpath=\
+'{range .items[*].status.initContainerStatuses[*]}{.name}{"|"}{.state.waiting.reason}{"|"}{.state.terminated.exitCode}{"\n"}{end}' \
+    2>/dev/null
+}
+
+_init_containers_settled() {
+  # Echoes one of: "pending" (nothing to judge yet), "completed" (every
+  # init container terminated with exit code 0), or "failed: <detail>".
+  local states line name reason exit_code saw_any="false"
+  states="$(_init_container_states)"
+  [ -z "$states" ] && { echo "pending"; return; }
+  while IFS='|' read -r name reason exit_code; do
+    [ -z "$name" ] && continue
+    saw_any="true"
+    for refusal in $_CONTAINER_REFUSAL_REASONS; do
+      if [ "$reason" = "$refusal" ]; then
+        echo "failed: init container '$name' was refused by the kubelet ($reason)"
+        return
+      fi
+    done
+    case "$reason" in
+      ErrImagePull | ImagePullBackOff | ErrImageNeverPull)
+        echo "failed: init container '$name' could not pull its image ($reason)"
+        return
+        ;;
+    esac
+    if [ -n "$exit_code" ] && [ "$exit_code" != "0" ]; then
+      echo "failed: init container '$name' exited $exit_code"
+      return
+    fi
+    if [ -z "$exit_code" ]; then
+      echo "pending"
+      return
+    fi
+  done <<EOF
+$states
+EOF
+  if [ "$saw_any" = "true" ]; then
+    echo "completed"
+  else
+    echo "pending"
+  fi
+}
+
+_wait_for_app_init_containers() {
+  # Claim 1. Returns 0 when every init container has completed, 1 with a
+  # named reason on stdout otherwise -- including the timeout case, which
+  # is a failure and never a silent pass.
+  local deadline outcome last="no application pod appeared"
+  deadline=$(( $(date +%s) + _INIT_TIMEOUT ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    outcome="$(_init_containers_settled)"
+    case "$outcome" in
+      completed) return 0 ;;
+      failed:*)
+        echo "${outcome#failed: }"
+        return 1
+        ;;
+    esac
+    last="the init containers never finished within ${_INIT_TIMEOUT}s"
+    sleep 3
+  done
+  echo "$last"
+  return 1
+}
 
 _wait_for_postgres() {
   kubectl wait --for=condition=Ready pod \
@@ -139,15 +249,42 @@ _run_psql() {
 
 _MARKER_TOKEN="verify-$$-$(date +%s)"
 
+_claim_init_status="not attempted"
 _claim_key_status="not attempted"
 _claim_db_status="not attempted"
 _claim_app_status="not attempted"
 _any_attempted_claim_failed="false"
 
+# `--wait` only when the application image is actually reachable: without
+# it, helm would (correctly) fail on the disclosed registry gap and no
+# claim below would ever be reached. With it, a release that never becomes
+# ready is the helm command's own failure, which is what --wait-for-app
+# asks for.
+_HELM_WAIT_ARGS=()
+if [ "$_WAIT_FOR_APP" = "true" ]; then
+  _HELM_WAIT_ARGS+=(--wait --timeout "${_APP_TIMEOUT}s")
+fi
+
 echo "# installing $_RELEASE into $_NAMESPACE" >&2
-if ! helm install "$_RELEASE" "$_CHART_DIR" -n "$_NAMESPACE" "${_HELM_SET_ARGS[@]}" >&2; then
+if ! helm install "$_RELEASE" "$_CHART_DIR" -n "$_NAMESPACE" "${_HELM_SET_ARGS[@]}" "${_HELM_WAIT_ARGS[@]}" >&2; then
   echo "FATAL: helm install failed" >&2
   exit 1
+fi
+
+echo "# 0. waiting for the application pod's init containers to complete" >&2
+_init_failure="$(_wait_for_app_init_containers)"
+if [ -z "$_init_failure" ]; then
+  _claim_init_status="proved: every init container in the application pod ran to completion"
+else
+  _claim_init_status="attempted, FAILED: $_init_failure"
+  _any_attempted_claim_failed="true"
+  # Nothing below this point can mean anything if the application pod
+  # cannot get past its init containers -- the chart does not deploy.
+  # Printing the kubelet's own event here is what turns "claim 1 failed"
+  # into something an operator can act on without re-deriving it.
+  kubectl get pods -n "$_NAMESPACE" -l "$_app_selector" >&2 || true
+  kubectl describe pod -n "$_NAMESPACE" -l "$_app_selector" 2>/dev/null \
+    | sed -n '/^Events:/,$p' >&2 || true
 fi
 
 echo "# waiting for the bundled database to become ready" >&2
@@ -181,7 +318,7 @@ else
 fi
 
 echo "# 3. upgrading $_RELEASE" >&2
-if ! helm upgrade "$_RELEASE" "$_CHART_DIR" -n "$_NAMESPACE" "${_HELM_SET_ARGS[@]}" >&2; then
+if ! helm upgrade "$_RELEASE" "$_CHART_DIR" -n "$_NAMESPACE" "${_HELM_SET_ARGS[@]}" "${_HELM_WAIT_ARGS[@]}" >&2; then
   echo "FATAL: helm upgrade failed" >&2
   exit 1
 fi
@@ -236,16 +373,20 @@ echo "cluster:    $_CLUSTER_SERVER (context: $_CONTEXT)"
 echo "namespace:  $_NAMESPACE (deleted after this script exits)"
 echo "release:    $_RELEASE"
 echo ""
-echo "claim 1 (SPIRE_SECRET_KEY survives an upgrade, byte-identical):"
+echo "claim 1 (every container in the application pod is accepted, and its"
+echo "         init containers run to completion):"
+echo "  -> $_claim_init_status"
+echo "claim 2 (SPIRE_SECRET_KEY survives an upgrade, byte-identical):"
 echo "  -> $_claim_key_status"
-echo "claim 2 (a row written before the upgrade is still there after it):"
+echo "claim 3 (a row written before the upgrade is still there after it):"
 echo "  -> $_claim_db_status"
-echo "claim 3 (the application pod itself becomes healthy):"
+echo "claim 4 (the application pod itself becomes healthy):"
 echo "  -> $_claim_app_status"
 echo "================================================================================"
 if [ "$_WAIT_FOR_APP" != "true" ]; then
-  echo "Owed: claim 3 was not attempted this run. Re-run with --image <repo you can"
-  echo "pull from this cluster>:<tag> --wait-for-app to also prove it."
+  echo "Owed: claim 4 was not attempted this run. Re-run with --image <repo you can"
+  echo "pull from this cluster>:<tag> --wait-for-app to also prove it. Claim 1 was"
+  echo "attempted regardless: it ends before the application image is needed."
 fi
 echo ""
 
