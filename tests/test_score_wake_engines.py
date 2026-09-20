@@ -390,6 +390,9 @@ _CONFIG_ENV_VARS = (
     # as the six above.
     "WEATHER_LATITUDE",
     "WEATHER_LONGITUDE",
+    # Phase 7 (D-15): server.bind_host -- a plain string passthrough, same
+    # reasoning as the vars above.
+    "BIND_HOST",
 )
 
 
@@ -403,6 +406,10 @@ def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
     )
+    # Phase 7 (D-15): security.cookie_secure is unquoted in
+    # config.example.yaml, so expansion must produce a real YAML boolean
+    # literal, not an arbitrary string.
+    monkeypatch.setenv("COOKIE_SECURE", "false")
 
 
 def _engine_report(

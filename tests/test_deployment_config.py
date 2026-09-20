@@ -17,15 +17,26 @@ about that.
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
+
+import yaml
 
 from spire_voice.auth.tokens import validate_secret_key_strength
 from spire_voice.config import SecurityConfig
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENTRYPOINT = _REPO_ROOT / "deploy" / "docker-entrypoint.sh"
+_COMPOSE_FILE = _REPO_ROOT / "docker-compose.yml"
+_CONFIG_EXAMPLE = _REPO_ROOT / "config" / "config.example.yaml"
+
+# The same ${NAME} shape config.py::expand_env matches -- kept here as an
+# independent, deliberately duplicated regex (not an import) so this test
+# does not silently stop meaning anything if that module's own pattern
+# ever changes shape.
+_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _run_entrypoint(
@@ -112,3 +123,55 @@ def test_the_script_replaces_itself_rather_than_forking_a_child():
 def test_the_script_fails_fast_on_an_unset_variable_or_a_failed_command():
     text = _ENTRYPOINT.read_text()
     assert "set -euo pipefail" in text
+
+
+# --- Task 3: the Compose file's own variable contract -----------------------
+
+
+def _referenced_config_vars() -> set[str]:
+    """Every `${NAME}` config.example.yaml's own text names, outside a
+    comment line -- the same rule config.py::expand_env applies, so this
+    reads exactly what a real load would try to expand."""
+    text = _CONFIG_EXAMPLE.read_text(encoding="utf-8")
+    names: set[str] = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        names.update(_PLACEHOLDER_RE.findall(line))
+    return names
+
+
+def test_compose_app_environment_names_every_variable_the_example_config_references():
+    """A variable added to config.example.yaml later and forgotten here
+    would silently break a clean-clone Compose start on the first missing
+    variable (config.py::expand_env raises by name, never expands to
+    an empty string) -- this test is what keeps that from being silent."""
+    referenced = _referenced_config_vars()
+    assert referenced, "expected config.example.yaml to reference at least one ${VAR}"
+
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    app_environment = compose["services"]["app"]["environment"]
+
+    missing = referenced - set(app_environment)
+    assert not missing, (
+        "docker-compose.yml's app service environment is missing variable(s) "
+        f"config.example.yaml references: {sorted(missing)}"
+    )
+
+
+def test_compose_database_service_publishes_no_port():
+    """D-14: the bundled database is reachable only on the Compose
+    network -- its default password is bounded by that, not by secrecy of
+    the password itself."""
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    db_service = compose["services"]["db"]
+    assert "ports" not in db_service, "the db service must not publish a port (D-14)"
+
+
+def test_compose_app_port_is_bound_to_loopback_only():
+    """The published port is bound to the host's own loopback address --
+    the control this file's own comments say COOKIE_SECURE=false relies
+    on."""
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    app_ports = compose["services"]["app"]["ports"]
+    assert all(str(p).startswith("127.0.0.1:") for p in app_ports), app_ports

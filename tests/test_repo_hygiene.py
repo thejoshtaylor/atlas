@@ -164,6 +164,34 @@ _CREDENTIAL_RE = re.compile(
 _ALLOWED_CREDENTIAL_VALUES = {"test-key"}
 
 
+# The new artifact classes Phase 7's deployment work introduces (DEP-05):
+# a Compose file, an example dotenv, and an entrypoint script are all new
+# surfaces a real secret could reach that did not exist before this phase.
+_DEPLOYMENT_ARTIFACTS = (
+    _REPO_ROOT / "docker-compose.yml",
+    _REPO_ROOT / ".env.example",
+    _REPO_ROOT / "deploy" / "docker-entrypoint.sh",
+)
+
+
+def test_deployment_artifacts_carry_no_credential_literal():
+    """Same shape as `test_repository_holds_no_credential_literal` below,
+    checked explicitly against the three deployment artifacts this phase
+    adds -- the full-repository scan already covers them once they are
+    tracked, but naming them here makes the DEP-05 coverage explicit
+    rather than incidental."""
+    violations: list[str] = []
+    for path in _DEPLOYMENT_ARTIFACTS:
+        assert path.exists(), f"{path} does not exist"
+        text = path.read_text(encoding="utf-8")
+        for match in _CREDENTIAL_RE.finditer(text):
+            if match.group(2) in _ALLOWED_CREDENTIAL_VALUES:
+                continue
+            violations.append(f"{path.relative_to(_REPO_ROOT)}: {match.group(0)}")
+
+    assert not violations, f"credential-shaped literal found in a deployment artifact: {violations}"
+
+
 def test_repository_holds_no_credential_literal():
     violations: list[str] = []
     for path in _iter_repo_files():

@@ -40,7 +40,17 @@ server:
   # anything that can reach this port can switch real power. Binding to
   # loopback means only this host can reach it; binding wider is a knowing
   # operator decision, not a default.
-  bind_host: "127.0.0.1"
+  #
+  # Phase 7 (D-15): one config file serves the dev harness and both
+  # deployment targets, through this same ${VAR}. The dev harness's own
+  # .env.example ships "127.0.0.1" here, unchanged from before this
+  # placeholder existed. A container deployment ships "0.0.0.0" instead --
+  # a bind address a host process can reach directly is not the same
+  # thing a container's own port-forwarding needs, and Docker cannot
+  # forward a published port to a process bound only to the container's
+  # own loopback interface. Quoted, because expansion happens over raw
+  # text before the YAML parse, and this value must stay a string.
+  bind_host: "${BIND_HOST}"
   port: 8080
 
   # websocket | webrtc -- the D-01 selector. The operator picks one; Phase 3's
@@ -106,10 +116,20 @@ security:
 
   cookie_name: "spire_session"
 
-  # true in any real deployment served over HTTPS. false here because the
-  # example config targets a plain-HTTP dev harness (Phase 1's own posture);
-  # a stranger following the deployment docs sets this true alongside TLS.
-  cookie_secure: false
+  # true in any deployment reachable from more than this one host, over
+  # HTTPS. false here because the example config targets a plain-HTTP dev
+  # harness (Phase 1's own posture); a stranger who terminates TLS in
+  # front of a real deployment sets this true alongside it.
+  #
+  # Phase 7 (D-15): read from ${VAR}, the same mechanism bind_host uses
+  # above. The shipped Docker Compose deployment (docker-compose.yml)
+  # keeps this false even though it also sets bind_host to 0.0.0.0 -- the
+  # published port is bound to the host's own loopback address there, so
+  # the cookie never crosses a real network out of the box, and false
+  # stays an honest default rather than a forgotten one. Unquoted: raw
+  # text substitution runs before the YAML parse, and an unquoted true/
+  # false becomes a real YAML boolean, not the string "true"/"false".
+  cookie_secure: ${COOKIE_SECURE}
 
 camera:
   # The audio source. Read straight from the camera over RTSP rather than from

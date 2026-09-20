@@ -1,0 +1,99 @@
+# The Docker Compose deployment (D-13, D-14, D-15, D-16, DEP-02, DEP-03):
+# one command, from a clean clone, with no file to edit and a bundled
+# database. `.env` is optional -- every variable below has a documented
+# fallback, so a clean clone with no `.env` at all still starts.
+#
+# `wake.engine` (config/config.example.yaml) ships as `vosk`, and a
+# missing Vosk model stops the application at startup by name (this is
+# existing, intentional behaviour from Phase 2, not something this file
+# changes). Provisioning that model, and the local speech/text-to-speech
+# models `scripts/fetch_models.py` handles, is a separate, documented,
+# operator-run step -- see README.md. Nothing in this file downloads
+# anything at boot (D-11).
+
+services:
+  app:
+    build:
+      context: .
+    # deploy/docker-entrypoint.sh (D-16) is Compose's own mechanism for a
+    # first-boot secret key that persists across a restart -- bind-mounted
+    # rather than baked into the image, because the Helm chart (a
+    # different plan) reaches the same guarantee its own way, through a
+    # `lookup`-guarded Kubernetes Secret set before the container ever
+    # starts. One shared image serves both deployment targets; only
+    # Compose needs this particular script.
+    entrypoint: ["/deploy/docker-entrypoint.sh"]
+    command: ["python", "-m", "spire_voice.app"]
+    volumes:
+      - ./deploy/docker-entrypoint.sh:/deploy/docker-entrypoint.sh:ro
+      - spire-data:/data
+      - spire-models:/models
+    ports:
+      # Bound to the host's own loopback address, not every interface.
+      # Nothing off this host can reach the port, so the session cookie
+      # never crosses a real network out of the box -- this is what bounds
+      # COOKIE_SECURE=false below. An operator who widens this (for
+      # example to "0.0.0.0:${SPIRE_PORT:-8080}:8080") must also set
+      # COOKIE_SECURE=true and terminate TLS in front of this port; see
+      # README.md.
+      - "127.0.0.1:${SPIRE_PORT:-8080}:8080"
+    environment:
+      # Every ${VAR} config/config.example.yaml names, each with a
+      # fallback -- expansion raises by name on a variable that is
+      # entirely absent, so a clean clone with no .env would stop on the
+      # first missing one without this block. An empty provider
+      # credential is the unset-credential state the application already
+      # handles (D-04); an absent variable is a startup error.
+      DATABASE_URL: "postgresql+asyncpg://spire:${POSTGRES_PASSWORD:-changeme}@db:5432/spire"
+      # 0.0.0.0, not the config file's own dev default of 127.0.0.1: a
+      # process bound to the container's own loopback interface is not
+      # reachable through Docker's port publishing at all. Reachability
+      # from outside the container is bounded by the host-side port
+      # binding above instead, not by this value.
+      BIND_HOST: "0.0.0.0"
+      COOKIE_SECURE: "false"
+      XAI_API_KEY: "${XAI_API_KEY:-}"
+      TAPO_USER: "${TAPO_USER:-}"
+      TAPO_PASSWORD: "${TAPO_PASSWORD:-}"
+      SPEAKER_ENSURE_URL: "${SPEAKER_ENSURE_URL:-}"
+      # D-16: read by deploy/docker-entrypoint.sh, not by config.py's own
+      # ${VAR} expansion -- an operator-supplied override takes effect
+      # unchanged; left unset, the entrypoint generates and persists one.
+      SPIRE_SECRET_KEY: "${SPIRE_SECRET_KEY:-}"
+      SPIRE_DATA_DIR: /data
+    depends_on:
+      db:
+        condition: service_healthy
+    # No healthcheck: block here -- the image's own HEALTHCHECK
+    # (Dockerfile, on /health) already applies to every container run
+    # from it, Compose included.
+
+  db:
+    # D-14 (operator override): Postgres is always bundled, one supported
+    # topology. Plain image, not a subchart/managed service -- see
+    # 07-RESEARCH.md's own Bitnami-image finding for why.
+    image: postgres:18
+    environment:
+      POSTGRES_USER: spire
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+      POSTGRES_DB: spire
+    # postgres:18's own image places data in a major-version-specific
+    # subdirectory it manages itself (`pg_ctlcluster`-compatible layout,
+    # docker-library/postgres#1259) -- the mount point is the parent
+    # directory, not .../data directly, confirmed against a real
+    # `docker run` of this exact image this session.
+    volumes:
+      - spire-db-data:/var/lib/postgresql
+    # No `ports:` entry at all -- reachable only on the Compose network,
+    # which is what bounds the default password above. An operator who
+    # needs to reach it directly uses `docker compose exec db psql ...`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spire -d spire"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  spire-data:
+  spire-models:
+  spire-db-data:

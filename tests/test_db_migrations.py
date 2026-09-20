@@ -171,6 +171,10 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
+    # new ${VAR} placeholders config.example.yaml expands.
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
@@ -502,6 +506,10 @@ async def test_workflow_tables_upgrade_from_empty_with_index_and_constraint_and_
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
+    # new ${VAR} placeholders config.example.yaml expands.
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("HA_URL", "test-value")
     monkeypatch.setenv("HA_TOKEN", "test-value")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
@@ -750,6 +758,10 @@ async def test_provider_selections_seed_all_three_slots_with_xai_and_are_idempot
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
+    # new ${VAR} placeholders config.example.yaml expands.
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("HA_URL", "test-value")
     monkeypatch.setenv("HA_TOKEN", "test-value")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
@@ -781,6 +793,10 @@ async def test_provider_selections_slot_is_unique(monkeypatch):
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
+    # new ${VAR} placeholders config.example.yaml expands.
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
     monkeypatch.setenv("HA_URL", "test-value")
     monkeypatch.setenv("HA_TOKEN", "test-value")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")

@@ -467,8 +467,16 @@ def test_example_config_loads_end_to_end(monkeypatch):
         "SPEAKER_ENSURE_URL",
         "HA_URL",
         "HA_TOKEN",
+        # Phase 7 (D-15): server.bind_host -- a plain string passthrough,
+        # so "test-value" is as honest a placeholder here as it is above.
+        "BIND_HOST",
     ):
         monkeypatch.setenv(name, "test-value")
+    # security.cookie_secure is unquoted in config.example.yaml, so
+    # expansion must produce a real YAML boolean literal here, not an
+    # arbitrary string -- "false" keeps the assertion below (cookie_secure
+    # is False) true, matching this file's own shipped default.
+    monkeypatch.setenv("COOKIE_SECURE", "false")
     # Plan 04-03: mcp.servers.weather's two placeholders -- a coordinate,
     # not an arbitrary string, since spire_mcp.weather parses these as
     # floats (never exercised by this test, which only loads Config, but
