@@ -305,5 +305,12 @@ def test_the_test_stage_can_see_every_artifact_its_tests_read() -> None:
     binary), so their inputs being absent is a failure, not a skip."""
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     test_stage = dockerfile.split("AS test", 1)[1].split("AS runtime", 1)[0]
-    for needed in ("charts/", "Dockerfile", "docker-compose.yml", ".env.example", "deploy/"):
+    for needed in (
+        "charts/",
+        "Dockerfile",
+        "README.md",
+        "docker-compose.yml",
+        ".env.example",
+        "deploy/",
+    ):
         assert needed in test_stage, f"the test stage does not copy in {needed}"

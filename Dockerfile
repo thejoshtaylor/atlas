@@ -168,7 +168,12 @@ COPY --chown=spire:spire tests/ ./tests/
 # proof this Dockerfile's comment claims it is.
 COPY --chown=spire:spire deploy/ ./deploy/
 COPY --chown=spire:spire charts/ ./charts/
-COPY --chown=spire:spire docker-compose.yml .env.example Dockerfile ./
+# README.md joins them for the same reason: tests/test_repo_hygiene.py's
+# entity-id scan now covers Markdown (IN-04), and
+# tests/test_local_providers.py checks that the published local-set
+# latency figure states what it was measured against (IN-05). Both read
+# this file by path.
+COPY --chown=spire:spire docker-compose.yml .env.example Dockerfile README.md ./
 # Non-root, matching the runtime stage: a test asserting that an
 # unwritable directory is actually unwritable is meaningless as root,
 # since root ignores ordinary permission bits.
