@@ -326,9 +326,20 @@ def check_registries_non_empty() -> None:
     07-UI-SPEC.md's screen has no empty state at all (D-03's boot-time
     validation is what makes that a fact rather than a hope). Run
     unconditionally at import, below, so an empty registry is an authoring
-    mistake caught at process start, never a blank screen with no error."""
+    mistake caught at process start, never a blank screen with no error.
+
+    IN-02 (code review): a `RuntimeError`, not an `assert`. `python -O`
+    compiles an assert out entirely, and the check this function exists
+    to perform would then silently disappear -- leaving exactly the blank
+    screen with no error the sentence above promises cannot happen. The
+    deployment CMD is `python -m spire_voice.app` today, but nothing stops
+    a values file or a derived image setting `PYTHONOPTIMIZE=1`, and the
+    failure mode of that mistake should not be this."""
     for slot, entries in _REGISTRIES.items():
-        assert entries, f"providers/registry.py: the {slot!r} registry must not be empty"
+        if not entries:
+            raise RuntimeError(
+                f"providers/registry.py: the {slot!r} registry must not be empty"
+            )
 
 
 check_registries_non_empty()

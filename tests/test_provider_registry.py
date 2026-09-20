@@ -4,12 +4,16 @@ network, no real credential, no real Postgres (D-01, D-03, D-04, PROV-01).
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from spire_voice.config import BrainConfig, BrainTierConfig, SttConfig, TtsConfig
 from spire_voice.providers import registry
 from spire_voice.providers.batch_tts_adapter import BatchTtsAdapter
 from spire_voice.providers.boot import ProviderSlotStatus, ProviderUnavailable, resolve_slot
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _stt_config() -> SttConfig:
@@ -402,8 +406,56 @@ def test_every_slot_registry_is_non_empty():
 def test_registries_non_empty_check_raises_on_an_empty_registry(monkeypatch):
     """The self-check itself, proven to actually fire rather than being a
     no-op that always passes -- monkeypatch one registry empty and confirm
-    the check catches it."""
+    the check catches it.
+
+    IN-02 (code review): a `RuntimeError`, not an `AssertionError`.
+    `python -O` compiles an assert out, and this check would then vanish
+    with it -- leaving the blank screen with no error that its own
+    docstring says cannot happen."""
     monkeypatch.setitem(registry._REGISTRIES, "stt", {})
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(RuntimeError) as excinfo:
         registry.check_registries_non_empty()
+
+    assert not isinstance(excinfo.value, AssertionError), (
+        "an assert is removed by python -O, which is the whole finding"
+    )
+    assert "stt" in str(excinfo.value)
+
+
+def test_the_registry_self_check_survives_python_optimize(tmp_path):
+    """The property behind the type change, proven against a real
+    interpreter running with -O rather than against the exception class
+    alone: import the module with the optimizer on, empty a registry, and
+    the check must still refuse it."""
+    import subprocess
+    import sys
+
+    program = (
+        "import spire_voice.providers.registry as r\n"
+        "r._REGISTRIES['stt'] = {}\n"
+        "try:\n"
+        "    r.check_registries_non_empty()\n"
+        "except RuntimeError as exc:\n"
+        "    print('REFUSED', exc)\n"
+        "else:\n"
+        "    print('SILENTLY PASSED')\n"
+    )
+    import os
+
+    env = dict(os.environ)
+    # pytest.ini's own `pythonpath` applies to this process only, never to
+    # a subprocess -- the same two roots, restated for the child.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(_REPO_ROOT / "src"), str(_REPO_ROOT / "mcp")]
+    )
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", program],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO_ROOT),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("REFUSED"), result.stdout or result.stderr
