@@ -11,6 +11,10 @@ is well-formed needs no real recording.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from spire_voice.audio.alaw import alaw_to_pcm16
@@ -21,6 +25,9 @@ from spire_voice.session.audio_wrap import (
     wrap_pcm16_as_wav,
     wrap_session_audio,
 )
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_SCRIPT = _REPO_ROOT / "scripts" / "dev-write-sample-wav.py"
 
 
 def _fmt_chunk_size(wav: bytes) -> int:
@@ -116,3 +123,55 @@ def test_wrap_session_audio_pcm_variants_never_touch_alaw_table() -> None:
 def test_wrap_session_audio_rejects_unknown_encoding() -> None:
     with pytest.raises(AudioWrapError, match="opus"):
         wrap_session_audio("opus", 8000, b"\x00")
+
+
+def test_dev_write_sample_wav_script_writes_two_playable_files(tmp_path: Path) -> None:
+    out_dir = tmp_path / "samples"
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--out-dir", str(out_dir)],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+    alaw_path = out_dir / "sample-alaw.wav"
+    pcm16_path = out_dir / "sample-pcm16.wav"
+    assert alaw_path.is_file()
+    assert pcm16_path.is_file()
+
+    alaw_bytes = alaw_path.read_bytes()
+    pcm16_bytes = pcm16_path.read_bytes()
+    assert alaw_bytes[:4] == b"RIFF"
+    assert pcm16_bytes[:4] == b"RIFF"
+
+    # The whole point of A-law: one byte per sample against PCM16's two,
+    # so the A-law file should land at roughly half the PCM16 file's size
+    # -- the cheapest available proof the two paths are not silently
+    # producing identical bytes under two names.
+    ratio = len(alaw_bytes) / len(pcm16_bytes)
+    assert 0.4 < ratio < 0.6, (len(alaw_bytes), len(pcm16_bytes))
+
+    printed_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(printed_lines) == 2
+    for line in printed_lines:
+        assert Path(line).is_absolute()
+
+
+def test_dev_write_sample_wav_default_out_dir_is_outside_repo() -> None:
+    # No --out-dir given: the script's own default must never resolve
+    # inside the working tree, so a bare invocation cannot leave household
+    # audio -- or, here, a synthesised tone -- anywhere git can see.
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT)],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    printed_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    assert len(printed_lines) == 2
+    for line in printed_lines:
+        assert not Path(line).is_relative_to(_REPO_ROOT), line
