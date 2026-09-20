@@ -18,7 +18,12 @@ _CONTAINER=spire-dev-postgres
 _USER=spire
 _PASSWORD=spire
 _DB=spire
-_PORT="${SPIRE_DEV_POSTGRES_PORT:-5432}"
+# WR-09 (code review): not 5432. That is the port every other Postgres on
+# a development machine is already bound to, and this script reusing it
+# means `.env.example`'s own DATABASE_URL reaches an unrelated container
+# and fails with an authentication error that reads like a bug in this
+# project. `.env.example` names this same port.
+_PORT="${SPIRE_DEV_POSTGRES_PORT:-54329}"
 _IMAGE=postgres:18
 
 if ! command -v docker >/dev/null 2>&1; then

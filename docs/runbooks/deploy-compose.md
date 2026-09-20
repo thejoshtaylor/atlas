@@ -80,7 +80,8 @@ change it before you expose this deployment beyond your own machine, by setting
 `POSTGRES_PASSWORD` in your `.env` before the first `docker compose up` (Postgres
 only reads this variable when its data volume is empty; changing it later needs a
 matching change to the database's own stored password, not just the environment
-variable).
+variable). `.env.example` names that variable, so copying it and filling in what
+it names is enough -- it was not, until the code review that found this.
 
 **The secret key is generated once, on first boot, and persisted -- back it up.**
 This one value derives both the session-signing key and the key every stored

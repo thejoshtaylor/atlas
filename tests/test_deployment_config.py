@@ -198,3 +198,74 @@ def test_the_image_pins_the_numeric_uid_and_gid_the_chart_names() -> None:
     ).read_text()
     assert "fsGroup: 1001" in deployment
     assert "fsGroupChangePolicy: OnRootMismatch" in deployment
+
+
+# --- WR-09 (code review): .env.example names what Compose reads ---------
+
+_ENV_EXAMPLE = _REPO_ROOT / ".env.example"
+
+
+def _env_example_names() -> "set[str]":
+    names: set[str] = set()
+    for line in _ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        names.add(stripped.split("=", 1)[0].strip())
+    return names
+
+
+def _compose_referenced_vars() -> "set[str]":
+    """Every `${NAME}` docker-compose.yml substitutes, read off its own
+    text -- comment lines skipped, the same rule
+    `_referenced_config_vars` above applies to the configuration file, so
+    a variable named only in prose is not counted as one Compose reads."""
+    names: set[str] = set()
+    for line in _COMPOSE_FILE.read_text(encoding="utf-8").splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        names.update(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", line))
+    return names
+
+
+def test_env_example_names_every_variable_docker_compose_reads() -> None:
+    """WR-09. `docker-compose.yml` substitutes `${POSTGRES_PASSWORD:-changeme}`
+    in two places and the runbook says to set it "in your `.env` before the
+    first `docker compose up`" -- but `.env.example`, the file README step 1
+    and the runbook both tell you to copy, never named it. An operator
+    following the documented "copy it and fill in the values it names" path
+    never learned the variable existed, and shipped `changeme` permanently,
+    since Postgres reads that variable only while its data volume is empty.
+
+    The mirror image of
+    `test_compose_app_environment_names_every_variable_the_example_config_references`
+    above, one layer out.
+    """
+    referenced = _compose_referenced_vars()
+    assert referenced, "expected docker-compose.yml to substitute at least one ${VAR}"
+    assert "POSTGRES_PASSWORD" in referenced
+
+    missing = referenced - _env_example_names()
+    assert not missing, (
+        ".env.example does not name variable(s) docker-compose.yml reads: "
+        f"{sorted(missing)} -- an operator who copies it and fills in what it names "
+        "never learns these exist"
+    )
+
+
+def test_the_example_database_url_names_the_port_the_dev_script_actually_uses() -> None:
+    """The second half of WR-09: `.env.example` pointed at 5432, the port
+    every other Postgres on a development machine is already bound to, so
+    a developer taking the example literally connected to an unrelated
+    container and got an authentication error that reads like a bug in
+    this project. The example and the script that starts the database
+    must name the same port."""
+    env_example = _ENV_EXAMPLE.read_text(encoding="utf-8")
+    dev_script = (_REPO_ROOT / "scripts" / "dev-postgres.sh").read_text(encoding="utf-8")
+
+    default_port = re.search(r'_PORT="\$\{SPIRE_DEV_POSTGRES_PORT:-(\d+)\}"', dev_script)
+    assert default_port, "could not read the dev Postgres script's default port"
+    port = default_port.group(1)
+
+    assert port != "5432", "the dev database must not claim Postgres's own default port"
+    assert f"127.0.0.1:{port}/spire" in env_example
