@@ -1975,3 +1975,129 @@ async def test_state_fetch_follows_the_enforcing_host_across_a_restart(
         assert hosts[0].call_count == 1
     finally:
         await manager.stop_all()
+
+
+def _apply_standard_lifespan_fakes(monkeypatch) -> None:
+    """The same eight monkeypatches every real-boot test in this file
+    applies individually (`test_lifespan_starts_and_assigns_every_owned_
+    resource` above is the first) -- collected here once for the tests
+    below, which boot the real `lifespan` only to read what it logged, not
+    to assert on `app.state` wiring a dozen other tests already cover."""
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+
+def test_boot_warns_by_name_when_cookie_is_insecure_and_bind_is_any_address(
+    tmp_path, monkeypatch, caplog
+):
+    """IN-01 (STATE.md, deferred here from Phase 3's code review), T-07-34:
+    a deployment bound to every address (`0.0.0.0`) with the insecure
+    cookie default must warn once, naming both `security.cookie_secure`
+    and `server.bind_host` -- the "any-address bind" half of the two
+    address-family cases this task's behaviour names."""
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "server": {"bind_host": "0.0.0.0", "port": 8080, "transport": "websocket"},
+            "security": {},
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    _apply_standard_lifespan_fakes(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    matches = [m for m in warnings if "cookie_secure" in m and "bind_host" in m]
+    assert len(matches) == 1, f"expected exactly one cookie/bind warning, got: {warnings}"
+    assert "0.0.0.0" in matches[0]
+
+
+def test_boot_warns_by_name_when_cookie_is_insecure_and_bind_is_a_named_host(
+    tmp_path, monkeypatch, caplog
+):
+    """The "named host" case this task's behaviour explicitly calls out:
+    the check must judge reachability, not match one literal string like
+    `"0.0.0.0"` -- a host this process cannot resolve to a loopback
+    address at all must warn exactly the same way."""
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "server": {
+                "bind_host": "spire-example-named-host.invalid",
+                "port": 8080,
+                "transport": "websocket",
+            },
+            "security": {},
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    _apply_standard_lifespan_fakes(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    matches = [m for m in warnings if "cookie_secure" in m and "bind_host" in m]
+    assert len(matches) == 1, f"expected exactly one cookie/bind warning, got: {warnings}"
+
+
+def test_boot_is_silent_when_cookie_is_insecure_and_bind_is_loopback(
+    tmp_path, monkeypatch, caplog
+):
+    """The development default (`bind_host: 127.0.0.1`, the insecure
+    cookie default) must log nothing -- warning on this every run would
+    train an operator to stop reading the message (this task's own
+    behaviour)."""
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "server": {"bind_host": "127.0.0.1", "port": 8080, "transport": "websocket"},
+            "security": {},
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    _apply_standard_lifespan_fakes(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    matches = [m for m in warnings if "cookie_secure" in m and "bind_host" in m]
+    assert matches == [], f"loopback boot must stay silent, got: {matches}"
+
+
+def test_boot_is_silent_when_cookie_is_secure_even_on_an_any_address_bind(
+    tmp_path, monkeypatch, caplog
+):
+    """A deployment that set `security.cookie_secure: true` -- the shipped
+    Helm chart's own default -- must stay silent regardless of bind
+    address (this task's own behaviour: "logs nothing, at any bind
+    address")."""
+    config_path = _write_fake_config(
+        tmp_path,
+        extra={
+            "server": {"bind_host": "0.0.0.0", "port": 8080, "transport": "websocket"},
+            "security": {"cookie_secure": True},
+        },
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    _apply_standard_lifespan_fakes(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with TestClient(app_module.app):
+            pass
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    matches = [m for m in warnings if "cookie_secure" in m and "bind_host" in m]
+    assert matches == [], f"secure-cookie boot must stay silent, got: {matches}"
