@@ -129,10 +129,19 @@ _ENTITY_ID_RE = re.compile(
 # in a comment describing what an untargeted service call would do).
 _ALLOWED_OBJECT_IDS = {"a", "b", "example", "brand_new", "turn_on", "turn_off", "toggle"}
 
+# The file suffixes the entity-id convention is actually enforced against --
+# named once here so the history scan below reuses the exact same scope
+# rather than restating it. Deliberately narrower than the credential-literal
+# scan's scope (which covers every file): a bare `domain.name` shape is
+# common, unrelated syntax in other languages (JS/TS property access chains,
+# for one), and this narrower scope is what keeps that noise out, in the
+# working tree and in history alike.
+_ENTITY_ID_SCAN_SUFFIXES = {".py", ".yaml", ".yml"}
+
 
 def test_test_fixtures_use_invented_entity_ids():
     violations: list[str] = []
-    for path in _iter_repo_files({".py", ".yaml", ".yml"}):
+    for path in _iter_repo_files(_ENTITY_ID_SCAN_SUFFIXES):
         text = path.read_text(encoding="utf-8")
         for match in _ENTITY_ID_RE.finditer(text):
             object_id = match.group(2)
@@ -162,6 +171,118 @@ _CREDENTIAL_RE = re.compile(
 # is what let this check widen to the whole repository without flagging its
 # own test suite's existing, pre-phase convention as a finding.
 _ALLOWED_CREDENTIAL_VALUES = {"test-key"}
+
+
+# DEP-05's second clause -- the history, not only the working tree. A real
+# secret or entity id is never a multi-megabyte blob in this project; the
+# cap bounds runtime against an accidentally-committed large binary rather
+# than trying to scan it as text.
+_MAX_HISTORY_BLOB_BYTES = 5 * 1024 * 1024
+
+
+def _iter_reachable_blob_paths() -> "tuple[set[str], dict[str, str]]":
+    """Every commit `git rev-list --all` finds reachable from any
+    reference, and every blob object reachable through any of their trees,
+    each paired with the first path `git rev-list --objects --all`
+    encountered it under.
+
+    `git rev-list --objects --all` walks every reachable commit's own
+    tree as it looked at that point in history -- not only the current
+    tip's tree -- which is exactly what lets a blob a later commit deleted
+    still turn up here: an earlier, still-reachable commit's own tree still
+    names it. Commit and tag objects have no path in this output and are
+    dropped; trees also carry a path but are filtered out downstream, by
+    `_batch_read_blobs`, once their real object type is known.
+    """
+    commits_proc = subprocess.run(
+        ["git", "rev-list", "--all"],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        timeout=120,
+    )
+    assert commits_proc.returncode == 0, f"git rev-list --all failed: {commits_proc.stderr}"
+    commits_scanned = {line.strip() for line in commits_proc.stdout.splitlines() if line.strip()}
+
+    objects_proc = subprocess.run(
+        ["git", "rev-list", "--objects", "--all"],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        timeout=120,
+    )
+    assert (
+        objects_proc.returncode == 0
+    ), f"git rev-list --objects --all failed: {objects_proc.stderr}"
+
+    blob_paths: dict[str, str] = {}
+    for line in objects_proc.stdout.splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue  # a commit/tag line -- no path, nothing to scan by path
+        sha, path = parts
+        blob_paths[sha] = path
+
+    return commits_scanned, blob_paths
+
+
+def _batch_read_blobs(shas: "set[str]") -> "dict[str, bytes]":
+    """The real content of every blob in `shas`, in one `git cat-file
+    --batch` process rather than one subprocess per object -- the only way
+    reading a few thousand small objects stays fast. Non-blob objects
+    (trees, which also carry paths in `_iter_reachable_blob_paths`'
+    output) are silently excluded, not raised on -- they were never blobs
+    to scan as text in the first place.
+    """
+    if not shas:
+        return {}
+    sha_list = sorted(shas)
+    proc = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        input=("\n".join(sha_list) + "\n").encode(),
+        capture_output=True,
+        cwd=_REPO_ROOT,
+        timeout=120,
+    )
+    assert proc.returncode == 0, f"git cat-file --batch failed: {proc.stderr!r}"
+
+    out = proc.stdout
+    result: dict[str, bytes] = {}
+    pos = 0
+    for _ in sha_list:
+        newline_idx = out.index(b"\n", pos)
+        header = out[pos:newline_idx].decode("ascii", errors="replace")
+        pos = newline_idx + 1
+        parts = header.split()
+        if len(parts) < 2 or parts[-1] == "missing":
+            continue
+        obj_sha, obj_type = parts[0], parts[1]
+        obj_size = int(parts[2])
+        content = out[pos : pos + obj_size]
+        pos += obj_size + 1  # skip the trailing newline git appends after each object
+        if obj_type == "blob":
+            result[obj_sha] = content
+    return result
+
+
+def _commits_touching_path(path: str) -> "list[str]":
+    """Candidate commits for a violation's report -- only ever called on
+    the (expected-empty) failure path, since a clean scan never needs
+    per-match commit attribution. Not a claim of the exact introducing
+    commit: `--follow` is deliberately omitted (a rename could point this
+    at the wrong history segment) -- naming a handful of commits that
+    touched this path is what makes a finding actionable for an operator,
+    who can run `git log -p -- {path}` themselves from here."""
+    proc = subprocess.run(
+        ["git", "log", "--all", "--format=%H", "--", path],
+        capture_output=True,
+        text=True,
+        cwd=_REPO_ROOT,
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
 # The new artifact classes Phase 7's deployment work introduces (DEP-05):
@@ -328,15 +449,21 @@ def test_repository_history_carries_no_entity_id_or_credential_literal():
         scanned_text_blobs += 1
         path = blob_paths[blob_sha]
 
-        for match in _ENTITY_ID_RE.finditer(text):
-            object_id = match.group(2)
-            if object_id.startswith("example_") or object_id in _ALLOWED_OBJECT_IDS:
-                continue
-            commits = _commits_touching_path(path)
-            violations.append(
-                f"{path} (blob {blob_sha}, commit(s) {commits[:3] or ['unknown']}): "
-                f"{match.group(0)} (entity id)"
-            )
+        # Same scope split the working-tree tests already use: the entity-id
+        # convention is enforced over _ENTITY_ID_SCAN_SUFFIXES only, the
+        # credential-literal scan over every file -- reused here unchanged
+        # rather than widened to a second, broader scan surface no existing
+        # check has ever policed.
+        if Path(path).suffix in _ENTITY_ID_SCAN_SUFFIXES:
+            for match in _ENTITY_ID_RE.finditer(text):
+                object_id = match.group(2)
+                if object_id.startswith("example_") or object_id in _ALLOWED_OBJECT_IDS:
+                    continue
+                commits = _commits_touching_path(path)
+                violations.append(
+                    f"{path} (blob {blob_sha}, commit(s) {commits[:3] or ['unknown']}): "
+                    f"{match.group(0)} (entity id)"
+                )
 
         for match in _CREDENTIAL_RE.finditer(text):
             if match.group(2) in _ALLOWED_CREDENTIAL_VALUES:
