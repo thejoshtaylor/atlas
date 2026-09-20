@@ -38,11 +38,27 @@ export interface SlotBadge {
   badgeText: string
 }
 
-/** Whether `slot`'s selected choice differs from what the process actually
+/** Whether `slot`'s stored choice differs from what the process actually
  * built at boot (D-02) -- the one fact the "Needs restart" badge exists to
- * report. `active === null` (a degraded slot) is not itself "needs
- * restart" -- see `degradedBadge` below for that case. */
-export function needsRestart(slot: Pick<ProviderSlot, "selected" | "active" | "state">): boolean {
+ * report.
+ *
+ * WR-08 (code review): `selection_changed_since_boot` comes first because
+ * it is the only one of the two that works for a DEGRADED slot. A
+ * degraded slot's `active` is `null`, so `selected !== active` can never
+ * fire for it -- and a degraded slot is precisely the one an admin has
+ * just changed. Walk the case it got wrong: the language-model slot
+ * boots degraded for want of a server URL, the admin types the URL and
+ * saves, and the screen showed no restart badge and the OLD failure
+ * reason, beside the field they had just filled in. Their fix looked
+ * like it had not taken.
+ *
+ * The second clause stays for the running case, where the server reports
+ * both names and the comparison is the more direct statement of the same
+ * fact. */
+export function needsRestart(
+  slot: Pick<ProviderSlot, "selected" | "active" | "state" | "selection_changed_since_boot">,
+): boolean {
+  if (slot.selection_changed_since_boot) return true
   return slot.state !== "degraded" && slot.active !== null && slot.selected !== slot.active
 }
 
@@ -50,11 +66,27 @@ export function needsRestart(slot: Pick<ProviderSlot, "selected" | "active" | "s
  * actually running right now -- 07-UI-SPEC.md's Copywriting Contract,
  * verbatim. `null` when the slot's selected choice matches what is
  * running: steady state carries no noise. */
-export function needsRestartBadge(slot: Pick<ProviderSlot, "selected" | "active" | "state" | "options">): {
+export function needsRestartBadge(
+  slot: Pick<
+    ProviderSlot,
+    "selected" | "active" | "state" | "options" | "selection_changed_since_boot"
+  >,
+): {
   badge: SlotBadge
   caption: string
 } | null {
   if (!needsRestart(slot)) return null
+  // A degraded slot has no active provider to name, so the caption says
+  // what is true instead of naming nothing (WR-08). Omitting the caption
+  // here would repeat the very "states neither" failure this fix is
+  // about: the badge would be shown with no honest present tense beside
+  // it.
+  if (slot.active === null) {
+    return {
+      badge: { badgeVariant: "secondary", badgeText: "Needs restart" },
+      caption: "Currently running: nothing — this slot did not start.",
+    }
+  }
   const activeOption = slot.options.find((option) => option.name === slot.active)
   const activeLabel = activeOption?.label ?? slot.active ?? ""
   return {
@@ -67,8 +99,18 @@ export function needsRestartBadge(slot: Pick<ProviderSlot, "selected" | "active"
  * unchanged -- never paraphrased (the CMD-07/VOICE-02 lesson, restated
  * once more for this phase's own screen). `null` when the slot is not
  * degraded. */
-export function degradedBadge(slot: Pick<ProviderSlot, "state" | "reason">): { badge: SlotBadge; caption: string } | null {
+export function degradedBadge(
+  slot: Pick<ProviderSlot, "state" | "reason" | "selection_changed_since_boot">,
+): { badge: SlotBadge; caption: string } | null {
   if (slot.state !== "degraded") return null
+  // WR-08 (code review): the reason describes the configuration this
+  // process booted with. Once the admin has stored a different one, it
+  // describes a configuration that is no longer saved anywhere -- so
+  // rendering it beside the field they just corrected is not "the
+  // server's reason, verbatim", it is a stale claim about the present.
+  // The "Needs restart" badge above takes over for that state and says
+  // the thing that is actually true.
+  if (slot.selection_changed_since_boot) return null
   return {
     badge: { badgeVariant: "denied", badgeText: "Degraded — won't start" },
     caption: slot.reason ?? "",

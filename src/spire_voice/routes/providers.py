@@ -113,6 +113,18 @@ class ProviderSlotResponse(BaseModel):
     # selectable providers) -- the home for the language-model slot's
     # local server URL (plan 07-04), always `{}` this plan.
     settings: dict
+    # WR-08 (code review): whether the stored selection (the provider
+    # name OR its settings) has moved since this process built the slot.
+    #
+    # `selected != active` was the only "needs restart" signal, and it
+    # cannot fire for a degraded slot, whose `active` is `None` -- yet a
+    # degraded slot is exactly the one an admin has just changed. An
+    # admin who filled in the missing server URL and saved saw
+    # `needsRestart` false and the OLD failure reason still rendered
+    # beside the field they had just filled in: their fix looked like it
+    # had not taken. The server has the data to answer this properly;
+    # the screen was guessing from a comparison that could not.
+    selection_changed_since_boot: bool = False
 
 
 class ProvidersResponse(BaseModel):
@@ -186,6 +198,10 @@ async def _slot_response(request: Request, slot: str, selection, status: "Provid
         state = status.state
         reason = status.reason
         wrapped = status.wrapped
+        # Both halves of the stored selection, against what the boot
+        # actually used. A slot with no row at all at boot and no row now
+        # has not changed; a row that appeared since has.
+        changed_since_boot = selected != status.selected or settings != status.booted_settings
     else:
         # Transitional read, the same "no manager entry recorded yet"
         # fallback `_to_plugin_response`'s own `resolved_state` uses --
@@ -194,6 +210,7 @@ async def _slot_response(request: Request, slot: str, selection, status: "Provid
         state = "starting"
         reason = None
         wrapped = False
+        changed_since_boot = False
 
     return ProviderSlotResponse(
         slot=slot,
@@ -206,6 +223,7 @@ async def _slot_response(request: Request, slot: str, selection, status: "Provid
         measured_ms=_measured_ms_for(request, slot),
         options=options,
         settings=settings,
+        selection_changed_since_boot=changed_since_boot,
     )
 
 

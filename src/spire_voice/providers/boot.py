@@ -15,7 +15,7 @@ function, passed a different `builder`/`config`/`api_key` each time.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 from spire_voice.db.repository import ProviderSelectionRepository
@@ -72,6 +72,15 @@ class ProviderSlotStatus:
     state: str
     reason: "str | None"
     wrapped: bool
+    # WR-08 (code review): the selection row's own `options` JSON as it
+    # stood when this process built (or failed to build) the client.
+    # `selected` above already records the provider NAME the boot used,
+    # so the two together are the whole of what a restart would change --
+    # and comparing them against a fresh read is how `/providers` reports
+    # "you have changed something since this process started" for a
+    # DEGRADED slot, where `active` is `None` and the usual
+    # `selected != active` comparison says nothing at all.
+    booted_settings: dict = field(default_factory=dict)
 
 
 async def resolve_slot(
@@ -128,6 +137,7 @@ async def resolve_slot(
                 state="degraded",
                 reason=str(exc),
                 wrapped=False,
+                booted_settings=dict(options),
             ),
             None,
         )
@@ -146,6 +156,7 @@ async def resolve_slot(
             state="running",
             reason=None,
             wrapped=wrapped,
+            booted_settings=dict(options),
         ),
         client,
     )

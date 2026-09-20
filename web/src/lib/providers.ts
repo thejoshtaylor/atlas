@@ -46,6 +46,11 @@ export interface ProviderSlot {
   measured_ms: number | null
   options: ProviderOption[]
   settings: Record<string, unknown>
+  /** Whether the stored selection -- the provider name or its settings --
+   * has moved since the running process built this slot. The only
+   * "needs restart" signal that works for a degraded slot, whose
+   * `active` is `null` (WR-08, code review). */
+  selection_changed_since_boot: boolean
 }
 
 /** `ProvidersResponse`'s exact shape. */

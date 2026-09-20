@@ -571,3 +571,110 @@ def test_get_providers_reports_a_degraded_tts_slot_with_no_measured_figure(
     slot = _slot(response.json(), "tts")
     assert slot["state"] == "degraded"
     assert slot["measured_ms"] is None
+
+
+# --- WR-08 (code review): a degraded slot the admin has just fixed ------
+
+
+def test_a_degraded_slot_whose_settings_changed_since_boot_reports_it(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    """WR-08, walked exactly as the review describes it.
+
+    The language-model slot is set to `local` with no server URL, so boot
+    degrades it: `state="degraded"`, `active=None`, and a reason naming
+    the missing URL. The admin types the URL and saves. `selected` is
+    still `"local"` and `active` is still `None`, so neither
+    `selected != active` nor anything else the response carried could
+    say that something had changed -- the screen showed no restart badge
+    and rendered the OLD reason beside the field they had just filled in.
+
+    `selection_changed_since_boot` is the fact that was missing: the
+    server knows what configuration the boot actually used, and can
+    compare it against a fresh read.
+    """
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    reason = "Missing a server URL for Self-hosted (local). Add one in Settings."
+    provider_slots = dict(_DEFAULT_PROVIDER_SLOTS)
+    provider_slots["brain"] = ProviderSlotStatus(
+        slot="brain",
+        selected="local",
+        active=None,
+        state="degraded",
+        reason=reason,
+        wrapped=False,
+        booted_settings={},
+    )
+    asyncio.run(
+        provider_selection_repo.set_selection(
+            "brain", "local", {}, updated_by_user_id=None, updated_at=datetime.now(timezone.utc)
+        )
+    )
+
+    app = _build_providers_app(
+        security,
+        account_repo,
+        provider_selection_repo,
+        credential_repo,
+        provider_slots=provider_slots,
+    )
+    client = _admin_client(app, security, account_repo)
+
+    before = _slot(client.get("/api/providers").json(), "brain")
+    assert before["selection_changed_since_boot"] is False, (
+        "nothing has been changed yet -- a slot that boots degraded and is then left "
+        "alone must not claim a restart would help"
+    )
+    assert before["reason"] == reason
+
+    # The admin fills in the server URL and saves.
+    response = client.put(
+        "/api/providers",
+        json={"slots": {"brain": {"provider_name": "local", "settings": {"server_url": "http://localhost:8000/v1"}}}},
+    )
+    assert response.status_code == 200, response.text
+
+    after = _slot(client.get("/api/providers").json(), "brain")
+    assert after["selected"] == "local"
+    assert after["active"] is None
+    assert after["state"] == "degraded"
+    assert after["settings"] == {"server_url": "http://localhost:8000/v1"}
+    assert after["selection_changed_since_boot"] is True
+    # The reason is still reported byte for byte -- the fix is that the
+    # screen now knows it describes a configuration that is no longer
+    # stored. Withdrawing it from the response would lose the ability to
+    # show it at all.
+    assert after["reason"] == reason
+
+
+def test_a_provider_name_changed_since_boot_reports_it_too(
+    monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
+):
+    """The running case still works through the same field, so a slot
+    that is not degraded reports the change from both directions."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    provider_selection_repo = fake_provider_selection_repository()
+    credential_repo = fake_credential_repository()
+
+    app = _build_providers_app(
+        security, account_repo, provider_selection_repo, credential_repo
+    )
+    client = _admin_client(app, security, account_repo)
+
+    assert _slot(client.get("/api/providers").json(), "stt")["selection_changed_since_boot"] is False
+
+    response = client.put(
+        "/api/providers", json={"slots": {"stt": {"provider_name": "faster-whisper"}}}
+    )
+    assert response.status_code == 200, response.text
+
+    after = _slot(client.get("/api/providers").json(), "stt")
+    assert after["selection_changed_since_boot"] is True
+    assert after["active"] == "xai", "what is actually running is unchanged by a save (D-02)"
