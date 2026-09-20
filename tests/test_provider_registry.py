@@ -139,10 +139,75 @@ def test_build_brain_raises_provider_unavailable_when_the_credential_is_missing(
 
 def test_stt_and_brain_entries_are_not_batch():
     stt_entries = registry.known_entries("stt")
-    [brain_entry] = registry.known_entries("brain")
+    brain_entries = registry.known_entries("brain")
 
     assert all(entry.batch is False for entry in stt_entries)
-    assert brain_entry.batch is False
+    assert all(entry.batch is False for entry in brain_entries)
+
+
+def test_known_entries_for_brain_includes_the_local_option_sorted():
+    """07-04-PLAN.md Task 1 adds `local` alongside `xai` -- `known_entries`
+    never returns registration order."""
+    entries = registry.known_entries("brain")
+
+    assert [entry.name for entry in entries] == ["local", "xai"]
+
+
+def test_local_brain_entry_requires_no_credential_and_flags_the_server_url_field():
+    """D-04's needs-a-credential gate is opt-in per entry, and D-09's
+    posture ('the local option is selectable and saveable with a blank
+    URL') needs its own flag -- a fact on the entry, not a hardcoded
+    provider name the screen would otherwise need to know about."""
+    local_entry = registry.BRAIN_REGISTRY["local"]
+    xai_entry = registry.BRAIN_REGISTRY["xai"]
+
+    assert local_entry.requires_credential is False
+    assert local_entry.needs_server_url is True
+    assert xai_entry.needs_server_url is False
+
+
+def test_build_brain_local_builds_the_same_tier_structure_pointed_at_the_server_url():
+    """The self-hosted entry needs no new provider class: `XaiBrain`'s
+    constructor already takes exactly a base URL and an API key, which is
+    why the config was shaped that way in the first place."""
+    from spire_voice.turn.brain_race import TierBrain
+
+    tiers = registry.build_brain(
+        "local", _brain_config(), "", {"server_url": "http://localhost:8080/v1"}
+    )
+
+    assert len(tiers) == 1
+    assert isinstance(tiers[0], TierBrain)
+    assert tiers[0].brain._config.base_url == "http://localhost:8080/v1"
+    # AsyncOpenAI itself refuses a falsy api_key at construction time;
+    # "not-needed" is the placeholder self-hosted server docs use.
+    assert tiers[0].brain._config.api_key == "not-needed"
+
+
+def test_build_brain_local_with_a_blank_server_url_raises_naming_the_field():
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_brain("local", _brain_config(), "", {"server_url": "   "})
+
+    message = str(excinfo.value)
+    assert "server URL" in message
+    assert "Settings" in message
+
+
+def test_build_brain_local_with_no_options_at_all_raises_naming_the_field():
+    """The stored row may not exist yet (`resolve_slot`'s own `options or
+    {}` fallback) -- a `None`/absent options dict must degrade exactly
+    like an explicit blank string, never raise a different error."""
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_brain("local", _brain_config(), "")
+
+    assert "server URL" in str(excinfo.value)
+
+
+def test_build_brain_local_refuses_a_non_http_scheme():
+    with pytest.raises(ProviderUnavailable) as excinfo:
+        registry.build_brain("local", _brain_config(), "", {"server_url": "ftp://x/v1"})
+
+    assert "http" in str(excinfo.value).lower()
 
 
 def test_known_names_is_sorted():
@@ -178,8 +243,9 @@ class _FakeSelectionRepo:
 
 
 class _Selection:
-    def __init__(self, provider_name: str) -> None:
+    def __init__(self, provider_name: str, options: "dict | None" = None) -> None:
         self.provider_name = provider_name
+        self.options = options or {}
 
 
 @pytest.mark.asyncio
@@ -214,7 +280,7 @@ async def test_resolve_slot_reads_the_stored_selection_when_one_exists():
 async def test_resolve_slot_reports_degraded_when_the_builder_raises_provider_unavailable():
     repo = _FakeSelectionRepo(selection=_Selection(provider_name="xai"))
 
-    def _always_unavailable(name, config, api_key):
+    def _always_unavailable(name, config, api_key, options):
         raise ProviderUnavailable("xAI needs an API key -- add one in Settings.")
 
     status, client = await resolve_slot(
@@ -289,6 +355,39 @@ async def test_resolve_slot_propagates_any_other_exception_and_stops_the_boot():
         await resolve_slot(
             "stt", repo, "xai", registry.build_stt, _stt_config(), "test-key"
         )
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_passes_the_stored_options_to_the_builder():
+    """Behavior: 'The stored per-slot options reach the factory, so a URL
+    saved through the route is the URL the next boot uses.'"""
+    repo = _FakeSelectionRepo(
+        selection=_Selection(provider_name="local", options={"server_url": "http://x:1/v1"})
+    )
+    received: dict = {}
+
+    def _capture(name, config, api_key, options):
+        received["options"] = options
+        return object()
+
+    status, client = await resolve_slot("brain", repo, "xai", _capture, _brain_config(), "")
+
+    assert received["options"] == {"server_url": "http://x:1/v1"}
+    assert status.state == "running"
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_passes_empty_options_when_no_selection_row_exists():
+    repo = _FakeSelectionRepo(selection=None)
+    received: dict = {}
+
+    def _capture(name, config, api_key, options):
+        received["options"] = options
+        return object()
+
+    await resolve_slot("stt", repo, "xai", _capture, _stt_config(), "test-key")
+
+    assert received["options"] == {}
 
 
 def test_every_slot_registry_is_non_empty():

@@ -62,7 +62,7 @@ async def resolve_slot(
     slot: str,
     repo: ProviderSelectionRepository,
     default_name: str,
-    builder: "Callable[[str, Any, str], Any]",
+    builder: "Callable[[str, Any, str, dict], Any]",
     config: Any,
     api_key: str,
     *,
@@ -74,7 +74,12 @@ async def resolve_slot(
 
     `builder` is expected to be one of `registry.build_stt`/`build_tts`/
     `build_brain` (or a thin wrapper around one) -- called as
-    `builder(selected, config, api_key)`. A `ProviderUnavailable` it raises
+    `builder(selected, config, api_key, options)`, where `options` is the
+    stored selection row's own `options` dict (`{}` when no row exists yet
+    or the row carries none). Every existing builder ignores it; the local
+    language-model entry (07-04-PLAN.md Task 1) is the first reader -- a
+    server URL saved through the route is what the next boot's factory
+    call actually receives. A `ProviderUnavailable` it raises
     yields a degraded status and a `None` client; this boot continues
     (D-04: an admin locked out of the very screen that would fix the
     configuration is the worst available outcome). Any other exception
@@ -94,9 +99,10 @@ async def resolve_slot(
     """
     selection = await repo.get_selection(slot)
     selected = selection.provider_name if selection is not None else default_name
+    options = selection.options if selection is not None else {}
 
     try:
-        client = builder(selected, config, api_key)
+        client = builder(selected, config, api_key, options)
     except ProviderUnavailable as exc:
         return (
             ProviderSlotStatus(

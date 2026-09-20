@@ -225,8 +225,11 @@ def test_get_providers_reports_the_brain_slot(
     assert slot["label"] == "Language model"
     assert slot["selected"] == "xai"
     assert slot["wrapped"] is False
-    [option] = slot["options"]
-    assert option["name"] == "xai"
+    # 07-04-PLAN.md Task 1 adds a second (local) brain option -- assert by
+    # name rather than assuming exactly one, matching the fix already
+    # applied for stt/tts in this file (07-02/07-03).
+    options_by_name = {option["name"]: option for option in slot["options"]}
+    assert options_by_name["xai"]["name"] == "xai"
 
 
 def test_get_providers_reports_credential_set_from_the_credential_repository(
