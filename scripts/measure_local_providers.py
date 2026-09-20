@@ -61,13 +61,19 @@ _FIXED_TEXT = (
     "high near seventy degrees, so you will not need a jacket."
 )
 
-# faster-whisper's own feature extractor expects 16 kHz mono PCM16 --
-# `FasterWhisperStt.stream` applies no resample at all for `encoding="pcm"`
-# (it assumes the source already is this rate, matching every browser
-# transport in this codebase). The audio fed to it here is resampled to
-# this exact rate by Piper's own `sink` parameter before it is ever
-# handed to the recognizer, so the recognizer sees real-rate audio, not
-# audio nominally mislabeled at the wrong rate.
+# faster-whisper's own feature extractor expects 16 kHz mono PCM16. The
+# audio fed to it here is resampled to this exact rate by Piper's own
+# `sink` parameter before it is ever handed to the recognizer, so the
+# recognizer sees real-rate audio, not audio nominally mislabeled at the
+# wrong rate.
+#
+# IN-05 (code review): `FasterWhisperStt.stream` resamples the `pcm`
+# branch too now, rather than assuming the source is already at this rate
+# -- so a source that declares 8 kHz PCM is converted instead of quietly
+# misread. That changes nothing about this harness, which hands over
+# genuine 16 kHz audio either way; what this figure still does NOT cover
+# is the `alaw_to_pcm16` decode plus resample that every real camera turn
+# pays. See this module's own docstring on the synthetic microphone.
 _STT_SOURCE_FORMAT = SourceFormat(encoding="pcm", sample_rate=16000)
 _STT_SINK_FORMAT = SinkFormat(codec="pcm", sample_rate=_STT_SOURCE_FORMAT.sample_rate)
 

@@ -97,9 +97,21 @@ class ProviderEntry:
 # the full report (median/min/max, repetition count, and the exact
 # command) -- this string is the one-line figure quoted from it, phrased
 # with 07-UI-SPEC.md's local-set latency sentence verbatim.
+#
+# IN-05 (code review): the caveat is part of the string, not a footnote
+# somewhere else. This note is rendered on every operator's /providers
+# screen, and it claims a figure "to transcribe a spoken reply" -- but
+# `scripts/measure_local_providers.py` feeds the recognizer clean
+# Piper-synthesized 16 kHz PCM, which skips the A-law decode and resample
+# every real camera turn pays. That script's own docstring disclosed the
+# synthetic microphone; the two places an operator actually reads the
+# number (here, and README.md's table) did not.
 _FASTER_WHISPER_MEASURED_NOTE = (
     "Measured on this project's CPU-only host: 1238ms median to transcribe a "
-    "spoken reply (5 repetitions, 12-core Apple M4 Pro, no GPU, 2026-09-20)."
+    "spoken reply (5 repetitions, 12-core Apple M4 Pro, no GPU, 2026-09-20). "
+    "Measured against clean synthesized 16 kHz speech, not camera audio: a "
+    "real camera turn also pays an A-law decode and a resample this figure "
+    "does not include."
 )
 _PIPER_MEASURED_NOTE = (
     "Measured on this project's CPU-only host: 112ms median to synthesize a "

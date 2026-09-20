@@ -447,3 +447,73 @@ def test_a_corrupt_piper_voice_degrades_the_slot_rather_than_stopping_the_boot(t
     message = str(excinfo.value)
     assert "Protobuf parsing failed" in message
     assert "provisioning" in message.lower()
+
+
+# --- IN-05 (code review): the pcm branch reads the rate it was given ----
+
+
+@pytest.mark.asyncio
+async def test_eight_khz_pcm_is_resampled_rather_than_read_as_sixteen(tmp_path):
+    """IN-05. The `alaw` branch resampled; the `pcm` branch took the
+    buffer unchanged whatever rate the source declared. Both PCM
+    transports in this codebase happen to report 16 kHz -- but
+    `CameraConfig` accepts `encoding: "pcm"` with any `sample_rate`, and
+    defaults to 8000. Such a camera fed 8 kHz audio straight into a 16 kHz
+    feature extractor: plausible-looking nonsense, with no error anywhere.
+
+    800 samples at 8 kHz is 100 ms, which is exactly 1600 samples at
+    16 kHz -- so the length of what the model received proves the
+    resample ran, rather than merely that some audio arrived.
+    """
+    fake_model = _FakeWhisperModel(segment_texts=("hello",))
+    stt = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: fake_model)
+
+    pcm16 = (np.arange(800, dtype=np.int16) - 400).tobytes()
+
+    async for _ in stt.stream(_frames(pcm16), SourceFormat("pcm", 8000)):
+        pass
+
+    assert fake_model.received_audio is not None
+    assert len(fake_model.received_audio) == 1600
+
+
+@pytest.mark.asyncio
+async def test_sixteen_khz_pcm_still_reaches_the_model_untouched(tmp_path):
+    """The case that already worked must not change: a source already at
+    the target rate is handed over sample for sample, not round-tripped
+    through an interpolation that would alter it."""
+    fake_model = _FakeWhisperModel(segment_texts=("hello",))
+    stt = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: fake_model)
+
+    pcm16 = (np.arange(1600, dtype=np.int16) - 800).tobytes()
+
+    async for _ in stt.stream(_frames(pcm16), SourceFormat("pcm", 16000)):
+        pass
+
+    expected = np.frombuffer(pcm16, dtype="<i2").astype(np.float32) / 32768.0
+    assert np.array_equal(fake_model.received_audio, expected)
+
+
+def test_the_published_local_figure_states_what_it_was_measured_against():
+    """The D-12 honesty half of IN-05. `_FASTER_WHISPER_MEASURED_NOTE` is
+    rendered on every operator's /providers screen and claims a figure
+    "to transcribe a spoken reply" -- but the harness feeds the
+    recognizer clean Piper-synthesized 16 kHz PCM, skipping the A-law
+    decode and resample every real camera turn pays. The measurement
+    script's own docstring disclosed the synthetic microphone; the two
+    places an operator actually reads the number did not."""
+    from pathlib import Path
+
+    from spire_voice.providers import registry
+
+    note = registry.STT_REGISTRY["faster-whisper"].measured_note
+    assert note.startswith("Measured on this project's CPU-only host:")
+    assert "not camera audio" in note
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
+    assert "not camera audio" in readme
+
+    runbook = (
+        Path(__file__).resolve().parent.parent / "docs" / "runbooks" / "local-providers.md"
+    ).read_text()
+    assert "synthetic microphone" in runbook

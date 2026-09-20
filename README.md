@@ -82,6 +82,10 @@ M4 Pro, CPU only, no GPU, on 2026-09-20:
 | Speech to text (`faster-whisper`, small, int8) | 1238 ms |
 | Text to speech (Piper, medium quality) | 112 ms |
 
+The speech-to-text figure is measured against clean synthesized 16 kHz
+speech, not camera audio: a real camera turn also pays an A-law decode and
+a resample this figure does not include.
+
 A different host will measure differently. See the runbook for the full
 report and the command to re-run it on your own host.
 

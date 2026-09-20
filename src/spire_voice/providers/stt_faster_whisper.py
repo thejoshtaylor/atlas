@@ -146,11 +146,23 @@ class FasterWhisperStt:
         chunks = [chunk async for chunk in frames]
         raw = b"".join(chunks)
 
+        # IN-05 (code review): both branches resample. The `pcm` branch
+        # used to take `raw` unchanged whatever rate the source declared,
+        # which happens to be right for both PCM transports in this
+        # codebase (`transports/websocket.py:54`,
+        # `transports/webrtc.py:117` both report 16 kHz) -- but
+        # `CameraConfig` accepts `encoding: "pcm"` with any `sample_rate`,
+        # defaulting to 8000. A camera configured that way fed 8 kHz audio
+        # straight into a 16 kHz feature extractor, which produces
+        # plausible-looking nonsense with no error anywhere. Reading a
+        # declared rate and then ignoring it is the part that made this
+        # silent; `_resample_pcm16` returns its input untouched when the
+        # rates already match, so the correct case costs nothing.
         if source_format.encoding == "alaw":
             pcm16 = alaw_to_pcm16(raw)
             pcm16 = _resample_pcm16(pcm16, source_format.sample_rate, _TARGET_SAMPLE_RATE)
         elif source_format.encoding == "pcm":
-            pcm16 = raw
+            pcm16 = _resample_pcm16(raw, source_format.sample_rate, _TARGET_SAMPLE_RATE)
         else:
             raise SttError(
                 f"local speech-to-text cannot handle source encoding {source_format.encoding!r}"

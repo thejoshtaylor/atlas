@@ -122,6 +122,12 @@ medium quality; 5 repetitions each):
 | Speech to text (`faster-whisper`) | 1238 ms | 1203 ms | 1276 ms |
 | Text to speech (Piper) | 112 ms | 105 ms | 472 ms |
 
+**The speech-to-text figure is measured against a synthetic microphone.** The
+harness hands the recognizer clean 16 kHz speech that Piper has just
+synthesized, so it does not include the A-law decode and resample every real
+camera turn pays before the recognizer sees anything. Treat it as a floor for
+that stage, not as the camera path's own number.
+
 This host is a development machine, not this project's target deployment
 host. A different host will measure differently. Re-run the command above on
 your own deployment host and use that number, not this one, to judge whether
