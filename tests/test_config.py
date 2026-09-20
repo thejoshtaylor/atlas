@@ -959,3 +959,61 @@ def test_security_config_defaults():
     assert security.refresh_token_ttl_s == 1209600
     assert security.cookie_name == "spire_session"
     assert security.cookie_secure is False
+
+
+# --- WR-03 (code review): cookie_secure is a boolean or it is refused ---
+
+
+def test_security_config_refuses_a_cookie_secure_that_is_not_a_boolean():
+    """WR-03. `expand_env` substitutes raw text before the YAML parse, so
+    `COOKIE_SECURE`'s value decides this field's type. An EMPTY value --
+    reachable from `COOKIE_SECURE=` in a `.env`, and from `--set-string
+    config.cookieSecure=""` in the chart -- parsed as `None`: falsy,
+    accepted with no error into a field typed `bool`, and then handed to
+    `auth/tokens.py` as `secure=None` on the session cookie. An insecure
+    cookie behind a TLS Ingress, with a startup log line as the only
+    signal that anything was wrong.
+
+    Every one of these is what the real loader produced for a value an
+    operator could plausibly type; `true`/`false` are the only two this
+    field has ever meant.
+    """
+    from spire_voice.config import ConfigError, SecurityConfig
+
+    for value in (None, 1, 0, "true", "false", "yes", "on", ""):
+        with pytest.raises(ConfigError) as exc:
+            SecurityConfig.from_config({"cookie_secure": value})
+        assert "cookie_secure" in str(exc.value)
+        assert "COOKIE_SECURE" in str(exc.value)
+
+
+def test_security_config_accepts_both_real_booleans():
+    from spire_voice.config import SecurityConfig
+
+    assert SecurityConfig.from_config({"cookie_secure": True}).cookie_secure is True
+    assert SecurityConfig.from_config({"cookie_secure": False}).cookie_secure is False
+
+
+def test_an_empty_cookie_secure_variable_is_refused_by_the_real_loader(tmp_path, monkeypatch):
+    """The end-to-end form of the case above, through `load_config` and
+    the real `${VAR}` expansion -- the path the chart and Compose both
+    take -- rather than through `SecurityConfig.from_config` alone."""
+    from spire_voice.config import ConfigError, load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "database:\n"
+        "  url: postgresql+asyncpg://spire:test-value@db.invalid:5432/spire\n"
+        "brain:\n"
+        "  base_url: https://brain.invalid/v1\n"
+        "  api_key: test-value\n"
+        "  models:\n"
+        "    - model: fake-model\n"
+        "security:\n"
+        "  cookie_secure: ${COOKIE_SECURE}\n"
+    )
+    monkeypatch.setenv("COOKIE_SECURE", "")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path)
+    assert "cookie_secure" in str(exc.value)

@@ -653,12 +653,34 @@ class SecurityConfig:
                 f"than security.refresh_token_ttl_s ({refresh_token_ttl_s!r}) -- an "
                 "access token outliving its refresh token is a configuration nobody means"
             )
+        # WR-03 (code review): validated against a closed set, the way
+        # `camera.encoding` and `stt.local_compute_type` already are.
+        # `expand_env` substitutes raw text before the YAML parse, so
+        # whatever `COOKIE_SECURE` holds decides this field's type:
+        # `true`/`false` parse as real booleans, but an EMPTY value
+        # (`COOKIE_SECURE=` in a `.env`, or `--set-string
+        # config.cookieSecure=""` in the chart) parses as `None`, and
+        # `'1'`/`'yes'`/`'on'` as an int or a string. `None` was the one
+        # that mattered: falsy, silently accepted into a field typed
+        # `bool`, and then handed to `auth/tokens.py` as `secure=None` on
+        # the session cookie -- an insecure cookie behind a TLS Ingress,
+        # with a startup log line as the only signal. A configuration
+        # nobody means is refused by name here instead.
+        raw_secure = raw.get("cookie_secure", cls.cookie_secure)
+        if not isinstance(raw_secure, bool):
+            raise ConfigError(
+                f"security.cookie_secure {raw_secure!r} is not a boolean -- set "
+                "COOKIE_SECURE to exactly 'true' or 'false' (unquoted in the YAML, "
+                "so it parses as a real boolean). An empty value is not 'false'; it "
+                "parses as null, which would ship a session cookie with no Secure "
+                "attribute at all."
+            )
         return cls(
             secret_key_env=raw.get("secret_key_env", cls.secret_key_env),
             access_token_ttl_s=access_token_ttl_s,
             refresh_token_ttl_s=refresh_token_ttl_s,
             cookie_name=raw.get("cookie_name", cls.cookie_name),
-            cookie_secure=raw.get("cookie_secure", cls.cookie_secure),
+            cookie_secure=raw_secure,
         )
 
 
