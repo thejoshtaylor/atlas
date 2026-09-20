@@ -129,6 +129,12 @@ FROM python-base AS test
 # applied above.
 RUN pip install --no-cache-dir pytest pytest-asyncio
 COPY --chown=spire:spire tests/ ./tests/
+# tests/test_deployment_config.py and tests/test_repo_hygiene.py's own
+# DEP-05 extension read these three deployment artifacts directly --
+# never needed by the application itself, so they land only in this
+# stage, not python-base.
+COPY --chown=spire:spire deploy/ ./deploy/
+COPY --chown=spire:spire docker-compose.yml .env.example ./
 # Non-root, matching the runtime stage: a test asserting that an
 # unwritable directory is actually unwritable is meaningless as root,
 # since root ignores ordinary permission bits.
