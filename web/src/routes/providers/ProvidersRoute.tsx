@@ -2,6 +2,7 @@ import * as React from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { Cpu, Mic, Volume2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { ErrorState } from "@/components/state/ErrorState"
@@ -39,16 +40,24 @@ function SlotCard({
   slot,
   selected,
   onSelect,
+  settings,
+  onSettingsChange,
   disabled,
 }: {
   slot: ProviderSlot
   selected: string
   onSelect: (name: string) => void
+  settings: Record<string, unknown>
+  onSettingsChange: (patch: Record<string, unknown>) => void
   disabled: boolean
 }) {
   const Icon = SLOT_ICONS[slot.slot] ?? Mic
   const restart = needsRestartBadge(slot)
   const degraded = degradedBadge(slot)
+  // D-09/07-04-PLAN.md: the flag lives on the option data, never a
+  // hardcoded provider name -- whichever option is currently selected
+  // (draft, not yet saved) reveals its own "Server URL" field.
+  const selectedOption = slot.options.find((option) => option.name === selected)
 
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
@@ -107,6 +116,22 @@ function SlotCard({
           )
         })}
       </RadioGroup>
+
+      {selectedOption?.needs_server_url ? (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={`provider-${slot.slot}-server-url`}>Server URL</Label>
+          <Input
+            id={`provider-${slot.slot}-server-url`}
+            className="scroll-field font-mono"
+            value={typeof settings.server_url === "string" ? settings.server_url : ""}
+            onChange={(event) => onSettingsChange({ server_url: event.target.value })}
+            disabled={disabled}
+          />
+          <p className="text-label text-muted-foreground">
+            The OpenAI-compatible endpoint serving your local model.
+          </p>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -120,6 +145,10 @@ export function ProvidersRoute() {
   // to the last-saved value) so a failed save costs the admin no
   // re-entry -- 07-UI-SPEC.md's UI Considerations table, "Save failure".
   const [draft, setDraft] = React.useState<Record<string, string>>({})
+  // Per-slot settings draft (today, only the local language-model
+  // option's "server_url") -- initialized from the slot's own stored
+  // `settings`, the same one-shot-per-slot seeding `draft` above uses.
+  const [settingsDraft, setSettingsDraft] = React.useState<Record<string, Record<string, unknown>>>({})
   const [saveMessage, setSaveMessage] = React.useState<string | null>(null)
   const [saveError, setSaveError] = React.useState<string | null>(null)
 
@@ -136,8 +165,22 @@ export function ProvidersRoute() {
       }
       return changed ? next : current
     })
+    setSettingsDraft((current) => {
+      let changed = false
+      const next = { ...current }
+      for (const slot of screen.slots) {
+        if (!(slot.slot in next)) {
+          next[slot.slot] = slot.settings
+          changed = true
+        }
+      }
+      return changed ? next : current
+    })
   }, [screen])
 
+  // While a save is in flight, every RadioGroup and the Server URL field
+  // are disabled -- a selection change can never race the request it
+  // belongs to (07-UI-SPEC.md's UI Considerations, "Save round trip").
   const controlsDisabled = screen.kind !== "ready" || save.isPending
 
   const handleSave = async () => {
@@ -146,11 +189,17 @@ export function ProvidersRoute() {
     try {
       await save.mutateAsync({
         slots: Object.fromEntries(
-          Object.entries(draft).map(([slot, provider_name]) => [slot, { provider_name }]),
+          Object.entries(draft).map(([slot, provider_name]) => [
+            slot,
+            { provider_name, settings: settingsDraft[slot] ?? {} },
+          ]),
         ),
       })
       setSaveMessage("Saved. Restart the assistant for this to take effect.")
     } catch {
+      // The draft (both the selection and any typed settings) is left
+      // exactly as it was -- a failed save must cost the admin no
+      // re-entry (07-UI-SPEC.md's UI Considerations, "Save failure").
       setSaveError("Couldn't save your provider choices. Try again.")
     }
   }
@@ -173,6 +222,13 @@ export function ProvidersRoute() {
               slot={slot}
               selected={draft[slot.slot] ?? slot.selected}
               onSelect={(name) => setDraft((current) => ({ ...current, [slot.slot]: name }))}
+              settings={settingsDraft[slot.slot] ?? slot.settings}
+              onSettingsChange={(patch) =>
+                setSettingsDraft((current) => ({
+                  ...current,
+                  [slot.slot]: { ...(current[slot.slot] ?? slot.settings), ...patch },
+                }))
+              }
               disabled={controlsDisabled}
             />
           ))}

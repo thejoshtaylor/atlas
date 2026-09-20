@@ -69,4 +69,39 @@ describe("ProvidersRoute -- the draft is never reverted on a failed save", () =>
   test("the draft state is only ever set from the loaded selection once per slot, never reset on save failure", () => {
     expect(SOURCE).not.toMatch(/setDraft\([^)]*\{\}\)/)
   })
+
+  test("the settings draft is also left untouched on a failed save", () => {
+    const catchBlock = SOURCE.slice(SOURCE.indexOf("} catch {"), SOURCE.indexOf("Couldn't save your provider choices"))
+    expect(catchBlock).not.toMatch(/setSettingsDraft/)
+  })
+})
+
+describe("ProvidersRoute -- one save carries all three slots' settings in one request", () => {
+  test("the save payload sends provider_name and settings per slot, not a per-slot save", () => {
+    expect(SOURCE).toMatch(/\{ provider_name, settings: settingsDraft\[slot\] \?\? \{\} \}/)
+  })
+})
+
+describe("ProvidersRoute -- the language-model slot's Server URL field is revealed by data, not a provider name", () => {
+  test("the field is gated on selectedOption?.needs_server_url, never a literal provider name check", () => {
+    expect(SOURCE).toMatch(/selectedOption\?\.needs_server_url/)
+    expect(SOURCE).not.toMatch(/=== *"local"/)
+  })
+
+  test("the field uses the Copywriting Contract's exact label and helper text", () => {
+    expect(SOURCE).toMatch(/<Label htmlFor=\{`provider-\$\{slot\.slot\}-server-url`\}>Server URL<\/Label>/)
+    expect(SOURCE).toMatch(/The OpenAI-compatible endpoint serving your local model\./)
+  })
+
+  test("the field reuses the existing scroll-field font-mono treatment, not a new input style", () => {
+    expect(SOURCE).toMatch(/id=\{`provider-\$\{slot\.slot\}-server-url`\}\s*className="scroll-field font-mono"/)
+  })
+
+  test("the field is disabled while a save is in flight, same as every RadioGroupItem", () => {
+    const fieldBlock = SOURCE.slice(
+      SOURCE.indexOf("selectedOption?.needs_server_url"),
+      SOURCE.indexOf("selectedOption?.needs_server_url") + 600,
+    )
+    expect(fieldBlock).toMatch(/disabled=\{disabled\}/)
+  })
 })
