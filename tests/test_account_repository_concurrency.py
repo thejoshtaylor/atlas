@@ -195,3 +195,134 @@ async def test_concurrent_invite_accept_calls_claim_exactly_once(monkeypatch):
         ).scalar_one()
     await check_engine.dispose()
     assert accepted_at is not None, "the winning claim must have set accepted_at"
+
+
+# --- WR-11 (code review): concurrent provider-selection saves -----------
+
+
+@skip_without_postgres
+async def test_concurrent_set_selection_calls_for_an_unseeded_slot_do_not_500(monkeypatch):
+    """WR-11 fix. `set_selection` was a SELECT followed by an
+    INSERT-or-UPDATE, with no row lock and no `ON CONFLICT`. Two
+    concurrent `PUT /api/providers` calls for a slot with no row yet both
+    saw `None`, both inserted, and `uq_provider_selections_slot` rejected
+    the second with an `IntegrityError` that reached the route uncaught.
+
+    The row is deleted first on purpose: migration 0011 seeds all three
+    slots, so the no-row case is rare on a real deployment -- but
+    `repository.py`'s own protocol documents `get_selection` returning
+    `None` as a real state, and a rare race is still a 500 on a save that
+    was perfectly valid.
+
+    Twenty concurrent callers, all of which must succeed, leaving exactly
+    one row whose provider name is one of the twenty that were offered.
+
+    The pool is pre-warmed on purpose. Without that, every caller's first
+    `await` is a TCP connect plus authentication, and the resulting
+    scheduling hides the race entirely -- this test passed against the
+    defective code until the warm-up was added. With it, 19 of 20 callers
+    raised `IntegrityError` on the pre-fix implementation.
+    """
+    from sqlalchemy import delete, select
+
+    from spire_voice.db.models import ProviderSelectionRow
+    from spire_voice.db.postgres import PostgresProviderSelectionRepository
+
+    _set_migration_env(monkeypatch)
+    await _reset_schema(_TEST_DB_URL)
+    await asyncio.to_thread(_run_upgrade_head, _TEST_DB_URL)
+
+    racers = 20
+    engine = create_async_engine(_TEST_DB_URL, pool_size=racers, max_overflow=0)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with sessionmaker() as session:
+        await session.execute(
+            delete(ProviderSelectionRow).where(ProviderSelectionRow.slot == "stt")
+        )
+        await session.commit()
+
+    repo = PostgresProviderSelectionRepository(sessionmaker)
+    now = datetime.now(timezone.utc)
+
+    # Every connection established before the racers start, so the first
+    # `await` inside `set_selection` is its own query and not a TCP
+    # connect -- see this test's docstring.
+    await asyncio.gather(*(repo.get_selection("stt") for _ in range(racers)))
+
+    async def _save(n: int):
+        return await repo.set_selection(
+            "stt", f"racer-{n}", {"n": n}, updated_by_user_id=None, updated_at=now
+        )
+
+    results = await asyncio.gather(
+        *(_save(n) for n in range(racers)), return_exceptions=True
+    )
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert not failures, (
+        f"every concurrent save must succeed; {len(failures)} raised: {failures!r}"
+    )
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ProviderSelectionRow).where(ProviderSelectionRow.slot == "stt")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    await engine.dispose()
+
+    assert len(rows) == 1, f"expected exactly one row for the slot, found {len(rows)}"
+    assert rows[0].provider_name in {f"racer-{n}" for n in range(racers)}
+
+
+@skip_without_postgres
+async def test_set_selection_updates_the_existing_row_rather_than_adding_a_second(monkeypatch):
+    """The upsert's other half: a slot that already has a row is updated
+    in place, and `set_selection` still returns the stored state."""
+    from sqlalchemy import select
+
+    from spire_voice.db.models import ProviderSelectionRow
+    from spire_voice.db.postgres import PostgresProviderSelectionRepository
+
+    _set_migration_env(monkeypatch)
+    await _reset_schema(_TEST_DB_URL)
+    await asyncio.to_thread(_run_upgrade_head, _TEST_DB_URL)
+
+    engine = create_async_engine(_TEST_DB_URL)
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    repo = PostgresProviderSelectionRepository(sessionmaker)
+    now = datetime.now(timezone.utc)
+
+    first = await repo.set_selection(
+        "tts", "piper", {"voice": "lessac"}, updated_by_user_id=None, updated_at=now
+    )
+    second = await repo.set_selection(
+        "tts", "xai", {}, updated_by_user_id=None, updated_at=now
+    )
+
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ProviderSelectionRow).where(ProviderSelectionRow.slot == "tts")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    await engine.dispose()
+
+    assert first.provider_name == "piper"
+    assert first.options == {"voice": "lessac"}
+    assert second.provider_name == "xai"
+    assert second.options == {}
+    assert len(rows) == 1
+    assert rows[0].provider_name == "xai"
+    # The upsert updates the row rather than replacing it: the identity a
+    # future audit row or foreign key would point at survives a save.
+    assert rows[0].id == first.id

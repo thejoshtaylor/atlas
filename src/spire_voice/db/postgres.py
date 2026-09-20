@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Sequence
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -726,29 +727,43 @@ class PostgresProviderSelectionRepository:
         updated_by_user_id: "int | None",
         updated_at: datetime,
     ) -> ProviderSelection:
+        # WR-11 (code review): one statement, not a SELECT followed by an
+        # INSERT-or-UPDATE. The read-then-write shape held no row lock and
+        # carried no `ON CONFLICT`, so two concurrent
+        # `PUT /api/providers` calls for a slot with no row yet both saw
+        # `None`, both inserted, and `uq_provider_selections_slot`
+        # rejected the second with an `IntegrityError` that reached the
+        # route uncaught -- a 500 for a save that was perfectly valid.
+        #
+        # The seed migration (0011) makes the no-row case rare, but
+        # `repository.py`'s own protocol documents `get_selection`
+        # returning `None` as a real state, and this project already
+        # carries `tests/test_account_repository_concurrency.py` for this
+        # exact class of defect in a sibling repository.
         naive_updated_at = _to_naive_utc(updated_at)
-        async with self._sessionmaker() as session:
-            row = (
-                await session.execute(
-                    select(ProviderSelectionRow).where(ProviderSelectionRow.slot == slot)
-                )
-            ).scalar_one_or_none()
-            if row is None:
-                row = ProviderSelectionRow(
-                    slot=slot,
+        statement = (
+            pg_insert(ProviderSelectionRow)
+            .values(
+                slot=slot,
+                provider_name=provider_name,
+                options=options,
+                updated_at=naive_updated_at,
+                updated_by_user_id=updated_by_user_id,
+            )
+            .on_conflict_do_update(
+                constraint="uq_provider_selections_slot",
+                set_=dict(
                     provider_name=provider_name,
                     options=options,
                     updated_at=naive_updated_at,
                     updated_by_user_id=updated_by_user_id,
-                )
-                session.add(row)
-            else:
-                row.provider_name = provider_name
-                row.options = options
-                row.updated_at = naive_updated_at
-                row.updated_by_user_id = updated_by_user_id
+                ),
+            )
+            .returning(ProviderSelectionRow)
+        )
+        async with self._sessionmaker() as session:
+            row = (await session.execute(statement)).scalar_one()
             await session.commit()
-            await session.refresh(row)
             return _provider_selection_from_row(row)
 
     async def list_selections(self) -> "list[ProviderSelection]":
