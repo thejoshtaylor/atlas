@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
 import {
+  MAX_BUFFERED_MESSAGES,
   MAX_FEED_CARDS,
+  appendBoundedObserverMessage,
   deriveLiveScreenState,
   describeTurnOutcome,
   formatElapsed,
@@ -152,4 +154,54 @@ test("describeTurnOutcome maps the two named outcomes and passes everything else
   expect(describeTurnOutcome("empty_reply")).toBe("No reply was given.")
   expect(describeTurnOutcome("completed")).toBe("completed")
   expect(describeTurnOutcome("round_cap")).toBe("round_cap")
+})
+
+// WR-11: the cards were bounded and the buffer behind them was not.
+
+/** Every message of a realistic turn, appended the way `LiveRoute` does. */
+function appendTurn(history: RawObserverMessage[], turnId: string): RawObserverMessage[] {
+  let next = history
+  for (const message of [
+    started("camera", turnId),
+    { type: "transcript.partial", text: "some speech", source: "camera" },
+    { type: "reply.text", text: "a reply", source: "camera" },
+    { type: "turn.timing", turn_outcome: "completed", source: "camera" },
+  ]) {
+    next = appendBoundedObserverMessage(next, message)
+  }
+  return next
+}
+
+test("the buffer bound is large enough that a full buffer still reconstructs a full screen of cards", () => {
+  let messages: RawObserverMessage[] = [opened()]
+  for (let i = 0; i < MAX_FEED_CARDS * 10; i += 1) {
+    messages = appendTurn(messages, `turn-${i}`)
+  }
+  expect(messages).toHaveLength(MAX_BUFFERED_MESSAGES)
+
+  const screen = deriveLiveScreenState(messages)
+  if (screen.kind !== "feed") throw new Error("unreachable")
+  expect(screen.cards).toHaveLength(MAX_FEED_CARDS)
+})
+
+test("the opening message survives truncation, so a long-lived tab never forgets the wake phrase", () => {
+  let messages: RawObserverMessage[] = [opened({ wake_phrase: "hey spire", sources: ["camera"] })]
+  for (let i = 0; i < MAX_FEED_CARDS * 10; i += 1) {
+    messages = appendTurn(messages, `turn-${i}`)
+  }
+
+  expect(messages).toHaveLength(MAX_BUFFERED_MESSAGES)
+  expect(messages[0]!.type).toBe("observer.opened")
+
+  const screen = deriveLiveScreenState(messages)
+  expect(screen.wakePhrase).toBe("hey spire")
+  expect(screen.sources).toEqual(["camera"])
+})
+
+test("under the bound nothing is dropped at all", () => {
+  let messages: RawObserverMessage[] = [opened()]
+  for (let i = 0; i < 10; i += 1) {
+    messages = appendBoundedObserverMessage(messages, started("camera", `turn-${i}`))
+  }
+  expect(messages).toHaveLength(11)
 })

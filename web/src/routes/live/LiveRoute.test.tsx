@@ -9,6 +9,7 @@ import { act } from "react"
 import { cleanup, render, screen } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { LiveRoute } from "./LiveRoute"
+import { MAX_BUFFERED_MESSAGES } from "./deriveLiveScreenState"
 import type { ObserverConnection, ObserverHandlers, ObserverMessage } from "./observerSocket"
 
 afterEach(() => {
@@ -160,4 +161,28 @@ test("unmounting closes the underlying connection", () => {
   expect(fake.isClosed()).toBe(false)
   unmount()
   expect(fake.isClosed()).toBe(true)
+})
+
+test("the raw message buffer is bounded, so a tab left open does not accumulate household speech without limit (WR-11)", () => {
+  const fake = fakeConnection()
+  renderLive(fake.connect)
+  fake.emit({ type: "observer.opened", wake_phrase: "hey spire", sources: ["camera"] })
+
+  const emitTurn = (turnId: string, reply: string) => {
+    fake.emit({ type: "turn.started", source: "camera", turn_id: turnId, session_id: null })
+    fake.emit({ type: "transcript.partial", text: `spoken in ${turnId}`, source: "camera" })
+    fake.emit({ type: "reply.text", text: reply, source: "camera" })
+    fake.emit({ type: "turn.timing", turn_outcome: "completed", source: "camera" })
+  }
+
+  emitTurn("turn-oldest", "the oldest reply in the house")
+  for (let i = 0; i < MAX_BUFFERED_MESSAGES; i += 1) {
+    emitTurn(`turn-${i}`, `reply ${i}`)
+  }
+
+  // The newest turn is on screen, so the feed still works after truncation.
+  expect(screen.getByText(`reply ${MAX_BUFFERED_MESSAGES - 1}`)).toBeTruthy()
+  // The oldest speech is gone from the buffer, not merely from the
+  // rendered cards -- which is the whole point.
+  expect(screen.queryByText("the oldest reply in the house")).toBeNull()
 })

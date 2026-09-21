@@ -8,6 +8,7 @@ import {
   type ObserverHandlers,
 } from "./observerSocket"
 import {
+  appendBoundedObserverMessage,
   deriveLiveScreenState,
   describeTurnOutcome,
   formatElapsed,
@@ -90,7 +91,10 @@ export function LiveRoute({ connect = connectObserverSocket }: LiveRouteProps) {
 
   React.useEffect(() => {
     const connection = connect({
-      onMessage: (message) => setMessages((history) => [...history, message]),
+      // Bounded at the source (WR-11): the buffer holds household speech,
+      // and an unbounded one on a page meant to stay open is an
+      // ever-growing, ever-slower accumulation of it in memory.
+      onMessage: (message) => setMessages((history) => appendBoundedObserverMessage(history, message)),
       onStateChange: setConnectionState,
     })
     return () => connection.close()
@@ -101,7 +105,9 @@ export function LiveRoute({ connect = connectObserverSocket }: LiveRouteProps) {
     return () => clearInterval(interval)
   }, [])
 
-  const screen = deriveLiveScreenState(messages)
+  // Memoised so the once-a-second `now` tick above stops re-folding the
+  // whole buffer -- the tick changes `now` and nothing the fold reads.
+  const screen = React.useMemo(() => deriveLiveScreenState(messages), [messages])
   const elapsedSeconds = (now - openedAt) / 1000
 
   return (

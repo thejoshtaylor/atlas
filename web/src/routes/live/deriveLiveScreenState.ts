@@ -9,6 +9,22 @@
  * changeable without reading the fold below. */
 export const MAX_FEED_CARDS = 20
 
+/** How many raw observer messages `LiveRoute.tsx` keeps behind those
+ * cards. The cards were bounded and the buffer they were folded from was
+ * not, so a `/live` tab left open on a wall tablet -- which is the
+ * intended use -- accumulated every transcript and every reply the house
+ * had produced since the page loaded, and re-folded all of it on every
+ * render including the once-a-second clock tick. D-06 hands "how far back
+ * the rolling feed reaches" to this project's discretion; the cards
+ * honoured that and the buffer behind them did not.
+ *
+ * Sized as a generous multiple of `MAX_FEED_CARDS` so the fold can still
+ * reconstruct a full screen of cards: one turn is several messages
+ * (`turn.started`, its partials, `reply.text`, `turn.timing`), and this
+ * leaves room for a talkative turn without the bound ever biting on a
+ * realistic one. */
+export const MAX_BUFFERED_MESSAGES = MAX_FEED_CARDS * 20
+
 export interface TurnCard {
   turnId: string
   sessionId: string | null
@@ -42,6 +58,29 @@ function asString(value: unknown, fallback = ""): string {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []
+}
+
+/**
+ * Appends one message to the buffer the fold below reads, dropping the
+ * oldest past `MAX_BUFFERED_MESSAGES` -- the buffer's own half of D-06,
+ * which the cards had and it did not (WR-11).
+ *
+ * `observer.opened` is exempt. It arrives once, on connect, and is never
+ * re-sent; it is the only carrier of the wake phrase the idle copy names
+ * (D-07) and of the source list (D-08). Truncating it away would leave a
+ * long-lived tab quietly showing `Listening for ""`, which is a worse
+ * failure than the one this bound exists to prevent.
+ */
+export function appendBoundedObserverMessage(
+  history: readonly RawObserverMessage[],
+  message: RawObserverMessage,
+): RawObserverMessage[] {
+  const next = [...history, message]
+  if (next.length <= MAX_BUFFERED_MESSAGES) return next
+  const recent = next.slice(-MAX_BUFFERED_MESSAGES)
+  const opening = next.find((entry) => entry.type === "observer.opened")
+  if (opening === undefined || recent.includes(opening)) return recent
+  return [opening, ...recent.slice(1)]
 }
 
 /**
