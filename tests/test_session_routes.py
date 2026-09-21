@@ -177,3 +177,132 @@ def test_a_half_written_session_is_listed_with_a_named_outcome_not_dropped(tmp_p
     assert sessions[0]["turn_outcome"] == "recording_incomplete"
     assert sessions[0]["duration_ms"] is None
     assert sessions[0]["has_audio"] is False
+
+
+# --- Task 2 (TDD): GET /api/sessions/{id} -----------------------------------
+#
+# RED: every test below targets `GET /api/sessions/{session_id}`, a route
+# `routes/sessions.py` does not register yet -- FastAPI's own generic 404
+# ("Not Found", no `detail` naming a refusal) answers every one of these
+# until Task 2's GREEN phase adds the route.
+
+
+def test_a_real_session_is_returned_in_full_with_offsets_on_every_timeline_entry(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config, transcript_text="turn the kitchen lights on")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == directory.name
+    assert body["turn_outcome"] == "completed"
+    assert body["transcript"] == "turn the kitchen lights on"
+    assert body["reply_text"] == "the reply"
+    assert body["stage_durations_ms"]
+    assert body["timeline"], "the merged timeline must not be empty for a real, closed session"
+    for entry in body["timeline"]:
+        assert entry["offset_s"] is not None
+
+
+def test_no_partial_before_the_final_mark_means_a_null_transcript(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config, transcript_text=None)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}")
+
+    assert response.status_code == 200
+    assert response.json()["transcript"] is None
+
+
+def test_a_session_id_not_shaped_like_a_directory_name_is_refused_as_unrecognised(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get("/api/sessions/not-a-session-id")
+
+    assert response.status_code == 404
+    assert "not a recognised session id" in response.json()["detail"]
+
+
+def test_a_traversal_attempt_is_refused_before_any_path_is_built(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    _write_recorded_session(session_config)
+    # A secret file this traversal attempt must never be able to reach.
+    (tmp_path.parent / "secret.txt").write_text("do not read me", encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    literal = client.get("/api/sessions/20260101T000000000000Z-../../secret.txt")
+    assert literal.status_code == 404
+    assert "not a recognised session id" in literal.json()["detail"]
+
+    # `httpx.Client` (what `TestClient` wraps) normalizes a raw `../` in the
+    # URL path itself before it ever reaches the server, so the meaningful
+    # traversal probe against *this* server is the percent-encoded form,
+    # which the transport does not touch.
+    encoded = client.get("/api/sessions/20260101T000000000000Z-%2e%2e%2Fsecret.txt")
+    assert encoded.status_code == 404
+    assert "not a recognised session id" in encoded.json()["detail"]
+
+
+def test_an_id_older_than_the_retention_window_is_refused_naming_the_sweep(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path), retain_days=7)
+    directory = _write_recorded_session(session_config, started_offset_days=30)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}")
+
+    assert response.status_code == 404
+    assert "removed by the retention sweep" in response.json()["detail"]
+
+
+def test_an_id_inside_the_window_with_no_directory_is_refused_as_not_found(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path), retain_days=7)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    made_up_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-turn-never-existed"
+    response = client.get(f"/api/sessions/{made_up_id}")
+
+    assert response.status_code == 404
+    assert "no session with id" in response.json()["detail"]
+
+
+def test_a_viewer_is_refused_the_detail_route_and_an_operator_succeeds(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    viewer_client = _client_with_role(app, security, account_repo, "viewer")
+    operator_client = _client_with_role(app, security, account_repo, "operator")
+
+    assert viewer_client.get(f"/api/sessions/{directory.name}").status_code == 403
+    assert operator_client.get(f"/api/sessions/{directory.name}").status_code == 200
