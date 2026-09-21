@@ -101,6 +101,10 @@ def _set_test_secret_key(monkeypatch):
 # Phase 1, and a spot check could miss a fourth one the same way.
 _EXPECTED_STATE_ATTRS = [
     "config",
+    # Plan 08-06 (D-05, WEB-06): the observer fan-out registry, set once at
+    # boot alongside `config` -- needs no other resource to land on
+    # `app.state`.
+    "observer_registry",
     "stt",
     "tier_brains",
     "brain",
@@ -2192,7 +2196,7 @@ def test_a_degraded_slot_logs_the_wake_word_refusal_once_not_once_per_turn(
 
     with TestClient(app_module.app):
         run_turn_for_source = app_module._make_run_turn_for_source(
-            app_module.app, app_module.app.state.config
+            app_module.app, app_module.app.state.config, app_module.CAMERA_SOURCE_NAME
         )
         first, second, third = _RecordingSource(), _RecordingSource(), _RecordingSource()
         with caplog.at_level(logging.WARNING, logger="spire_voice.app"):

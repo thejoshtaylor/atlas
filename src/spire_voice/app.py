@@ -13,7 +13,7 @@ import ipaddress
 import json
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +79,7 @@ from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
 from spire_voice.routes import register_routers
 from spire_voice.routes.wizard import resolve_audio_source
+from spire_voice.session.observers import ObserverPublishingSource, ObserverRegistry
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.session.retention import RetentionScheduler
 from spire_voice.sources.runner import SourceRunner
@@ -98,6 +99,15 @@ from spire_voice.workflow.summary import summarise_pending_runs
 from spire_voice.workflow.tool import WorkflowToolHost
 
 logger = logging.getLogger("spire_voice.app")
+
+# D-08: the names every source-turn path publishes to the observer feed
+# under. Not derived from `app.state.source_runners` (`SourceRunner` keeps
+# its own name private) -- this application has exactly two turn-starting
+# paths today, the camera's wake-word listener and the browser microphone
+# behind `/ws/turn`, and both names are fixed at the call site, not
+# discovered.
+CAMERA_SOURCE_NAME = "camera"
+BROWSER_MIC_SOURCE_NAME = "browser_mic"
 
 CONFIG_PATH = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
 # The repository's own `mcp/` directory -- three levels up from this file
@@ -535,13 +545,20 @@ async def _refuse_turn_if_any_slot_is_degraded(app: FastAPI, source: Any) -> boo
     return True
 
 
-def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], Any]:
+def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
     A fresh `TurnTimings()` per call -- never shared across turns, the same
     per-turn lifetime the WebSocket/WebRTC routes below already give it --
     is why this returns a closure rather than a bound partial over a single
     `TurnTimings` instance.
+
+    WEB-06/D-08: `source_name` is published on this turn's own
+    `turn.started` observer event and is what every event this turn emits
+    is labelled with -- `ObserverPublishingSource` is constructed fresh per
+    turn, here, which is what makes the turn boundary explicit rather than
+    inferred by an observer from the first transcript that happens to
+    arrive.
     """
 
     # CR-03: one warning per process for the camera path, not one per wake
@@ -565,6 +582,15 @@ def _make_run_turn_for_source(app: FastAPI, config: Config) -> Callable[[Any], A
 
         timings = TurnTimings()
         session_recorder = SessionRecorder(config.session, timings)
+        # Published before `run_turn` is ever called, from this turn's own
+        # freshly-constructed `TurnTimings`, so an observer's feed opens a
+        # new card before the first transcript partial can possibly arrive
+        # (08-UI-SPEC.md finding 1's `turn.started {source, turn_id}`
+        # boundary message).
+        app.state.observer_registry.publish(
+            {"type": "turn.started", "source": source_name, "turn_id": timings.turn_id}
+        )
+        source = ObserverPublishingSource(source, source_name, app.state.observer_registry)
         await run_turn(
             source,
             app.state.stt,
@@ -705,6 +731,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         reject_legacy_mcp_key=False,
     )
     app.state.config = config
+
+    # WEB-06/D-05: the observer fan-out, set once at boot beside the other
+    # long-lived objects. Needs nothing else on `app.state` to exist --
+    # `ObserverRegistry` has no dependency on config, the database, or any
+    # provider -- so it is safe to construct this early, before either turn
+    # path that publishes to it (the camera runner, further down, and
+    # `/ws/turn` below) is wired up.
+    app.state.observer_registry = ObserverRegistry()
 
     # IN-01 (STATE.md, deferred here from Phase 3's code review): a
     # deployment that would send its session cookie without the Secure
@@ -1165,7 +1199,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         camera_source,
         wake_detector,
         camera_source.decode_for_detector,
-        _make_run_turn_for_source(app, config),
+        _make_run_turn_for_source(app, config, CAMERA_SOURCE_NAME),
         wake_config=config.wake,
         gate_config=config.gate,
         barge_in_config=config.barge_in,
@@ -1648,6 +1682,15 @@ async def turn_ws(websocket: WebSocket) -> None:
     # camera_source`, so there is nothing for a scheduled step's own
     # utterance (guarded by `app.state.speaker_lock`) to interleave with.
     # See that route's own comment for what would make this unsafe.
+    #
+    # WEB-06/D-08: this turn appears on the observer feed too, labelled as
+    # the browser-microphone source -- 08-UI-SPEC.md's own unresolved
+    # question resolved yes (see this plan's SUMMARY): all sources appear
+    # uniformly, an operator's own browser turn included.
+    websocket.app.state.observer_registry.publish(
+        {"type": "turn.started", "source": BROWSER_MIC_SOURCE_NAME, "turn_id": timings.turn_id}
+    )
+    source = ObserverPublishingSource(source, BROWSER_MIC_SOURCE_NAME, websocket.app.state.observer_registry)
     await run_turn(
         source,
         websocket.app.state.stt,
@@ -1669,6 +1712,86 @@ async def turn_ws(websocket: WebSocket) -> None:
         workflow_tool_host=websocket.app.state.workflow_tool_host,
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
     )
+
+
+@app.websocket(
+    "/ws/sessions/live",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
+async def observer_ws(websocket: WebSocket) -> None:
+    """The read-only observer feed (WEB-06, D-05) -- a fan-out of the same
+    stream `/ws/turn` and the camera path already publish to, not a second
+    data source.
+
+    Declared as a top-level route here, exactly like `/ws/turn` above,
+    never nested inside a wrapping `APIRouter`: verified directly against
+    the installed `fastapi==0.141.1` that an `APIWebSocketRoute` added
+    through `include_router` loses its own `path` field, which would break
+    `tests/test_auth_roles.py`'s `_flatten_routes` walk (that test's own
+    docstring records the identical finding for `_IncludedRouter`). The
+    same dependency pair `/ws/turn` carries -- `require_setup_complete`
+    plus `require_role(Role.OPERATOR)` -- keeps this at the same trust
+    level, per D-03.
+
+    This connection carries no audio in either direction and cannot start a
+    turn (D-05, T-08-21): it subscribes and forwards, nothing else. A
+    binary frame closes the connection immediately; a text frame is read
+    and discarded, never interpreted -- there is no path here by which a
+    client message reaches a provider or a source. Two tasks run
+    concurrently for exactly this reason -- one forwarding published events
+    out, one watching the socket's own inbound frames for that binary
+    case -- and whichever finishes first (a disconnect, or a binary frame)
+    cancels the other; `finally` unsubscribes the queue from the registry
+    so a closed tab never leaves one accumulating (T-08-23).
+    """
+    await websocket.accept()
+    config: Config = websocket.app.state.config
+    registry: ObserverRegistry = websocket.app.state.observer_registry
+
+    await websocket.send_text(
+        json.dumps(
+            {
+                "type": "observer.opened",
+                "wake_phrase": config.wake.phrase,
+                "sources": [CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME],
+            }
+        )
+    )
+
+    queue = registry.subscribe()
+    try:
+        async def _forward_published_events() -> None:
+            while True:
+                event = await queue.get()
+                await websocket.send_text(json.dumps(event))
+
+        async def _watch_for_binary_or_disconnect() -> None:
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                if "bytes" in message:
+                    # D-05: an observer never carries audio in. Closing here
+                    # is the enforcement, not a convention the handler could
+                    # forget to honor.
+                    await websocket.close()
+                    return
+                # A text frame is read and discarded -- this connection is
+                # an observer, not a participant.
+
+        forward_task = asyncio.ensure_future(_forward_published_events())
+        watch_task = asyncio.ensure_future(_watch_for_binary_or_disconnect())
+        try:
+            await asyncio.wait({forward_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            forward_task.cancel()
+            watch_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await forward_task
+            with suppress(asyncio.CancelledError):
+                await watch_task
+    finally:
+        registry.unsubscribe(queue)
 
 
 if __name__ == "__main__":

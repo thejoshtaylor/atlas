@@ -217,3 +217,297 @@ def test_barge_in_defaults_to_none_when_the_wrapped_source_never_set_one():
     source = ObserverPublishingSource(wrapped, "camera", ObserverRegistry())
 
     assert source.barge_in is None
+
+
+# --- Task 2: one read-only socket beside the turn socket, on both sources --
+
+
+def _fake_run_turn_config(tmp_path):
+    from types import SimpleNamespace
+
+    from spire_voice.config import SessionConfig
+
+    return SimpleNamespace(
+        session=SessionConfig(dir=str(tmp_path)),
+        brain=SimpleNamespace(max_tool_rounds=3, filler_after_ms=600.0),
+        stt=SimpleNamespace(max_utterance_s=15.0),
+    )
+
+
+def _fake_run_turn_app_state(registry: ObserverRegistry):
+    """The subset of `app.state` `_make_run_turn_for_source`'s closure
+    reads before its (stubbed, in these tests) call to `run_turn` --
+    enough to build every argument the real call site builds, without
+    booting the real application or reaching a real provider."""
+    from types import SimpleNamespace
+
+    async def _list_macros():
+        return []
+
+    async def _list_runs(*, statuses):
+        return []
+
+    return SimpleNamespace(
+        stt=object(),
+        brain=object(),
+        tts=object(),
+        tool_host_lookup=object(),
+        tools_schema=[],
+        catalog_prompt="",
+        tier_brains=[],
+        filler_cache={},
+        plugin_manager=SimpleNamespace(owners_of_bare_name=lambda name: ()),
+        workflow_repo=SimpleNamespace(list_runs=_list_runs),
+        speaker_lock=None,
+        workflow_tool_host=None,
+        macro_repo=SimpleNamespace(list_macros=_list_macros),
+        observer_registry=registry,
+        provider_slots=None,
+    )
+
+
+async def test_a_camera_turn_publishes_a_labelled_turn_started_event_and_wraps_the_source(
+    tmp_path, monkeypatch
+):
+    """Exercises the real `_make_run_turn_for_source` closure -- the exact
+    production wiring this task adds -- against a stubbed `run_turn` so no
+    real provider is ever reached. Proves the turn-start boundary message
+    and the wrapping, not `run_turn`'s own behavior (already covered by
+    `tests/test_turn_controller.py`)."""
+    import spire_voice.app as app_module
+    from types import SimpleNamespace
+
+    from tests.conftest import FakeAudioSource
+
+    captured: dict = {}
+
+    async def _fake_run_turn(source, *args, **kwargs):
+        captured["source"] = source
+        # Simulate a real turn's own emission sequence -- a partial, a
+        # reply, then the closing timing event -- each of which must reach
+        # the observer feed labelled "camera" (D-08).
+        await source.send_event({"type": "transcript.partial", "text": "turn the lights on"})
+        await source.send_event({"type": "reply.text", "text": "done"})
+        await source.send_event({"type": "turn.timing", "turn_outcome": "completed"})
+
+    monkeypatch.setattr(app_module, "run_turn", _fake_run_turn)
+
+    registry = ObserverRegistry()
+    app_stub = SimpleNamespace(state=_fake_run_turn_app_state(registry))
+    config = _fake_run_turn_config(tmp_path)
+    queue = registry.subscribe()
+
+    run_turn_for_source = app_module._make_run_turn_for_source(
+        app_stub, config, app_module.CAMERA_SOURCE_NAME
+    )
+    await run_turn_for_source(FakeAudioSource())
+
+    started = queue.get_nowait()
+    assert started["type"] == "turn.started"
+    assert started["source"] == "camera"
+    assert isinstance(started["turn_id"], str) and started["turn_id"]
+
+    for expected_type in ("transcript.partial", "reply.text", "turn.timing"):
+        event = queue.get_nowait()
+        assert event["type"] == expected_type
+        assert event["source"] == "camera"
+
+    assert isinstance(captured["source"], ObserverPublishingSource)
+
+
+# --- Route-level tests, through a real TestClient WebSocket ---------------
+
+
+def _boot_authenticated_client(tmp_path, monkeypatch, role: str):
+    from fastapi.testclient import TestClient
+
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+    from spire_voice.plugins import manager as plugin_manager_module
+
+    import spire_voice.app as app_module
+    from tests import test_startup_smoke as smoke
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    # `debug.dir` -- real `SessionConfig`'s own default is `/data/sessions`,
+    # unwritable outside a container; `SessionRecorder`'s real constructor
+    # (both turn paths still call it unconditionally, session_recorder=None
+    # is never wired) needs somewhere it can actually `mkdir`.
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(smoke._write_fake_config(tmp_path, extra={"debug": {"dir": str(session_dir)}})),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", smoke._fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", smoke._fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", smoke._fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", smoke._fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", smoke._fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
+
+    client = TestClient(app_module.app)
+    client.__enter__()
+    security = SecurityConfig()
+    if role is not None:
+        # `current_user` reads the role fresh from `account_repo`, never
+        # from the token's own claim (`auth/dependencies.py`'s own
+        # docstring) -- `_fake_build_repositories` seeds exactly one user,
+        # id=1, role="admin". A non-admin role under test needs its own
+        # seeded user, at the id `FakeAccountRepository._next_user_id`
+        # already reserves.
+        if role == "admin":
+            user_id = 1
+        else:
+            from datetime import datetime, timezone
+
+            from spire_voice.db.repository import User
+
+            account_repo = app_module.app.state.account_repo
+            user_id = account_repo._next_user_id
+            account_repo._next_user_id += 1
+            account_repo.users[user_id] = User(
+                id=user_id,
+                email=f"{role}@example.invalid",
+                display_name=role,
+                password_hash="not-a-real-hash-never-checked",
+                role=role,
+                created_at=datetime.now(timezone.utc),
+                disabled_at=None,
+            )
+        token = issue_access_token(user_id=user_id, role=role, security=security)
+        client.cookies.set(security.cookie_name, token)
+    return client, app_module
+
+
+def test_connecting_with_no_session_is_refused(tmp_path, monkeypatch):
+    client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role=None)
+    try:
+        try:
+            with client.websocket_connect("/ws/sessions/live"):
+                raise AssertionError("an unauthenticated connection was accepted")
+        except Exception as exc:  # noqa: BLE001 -- asserting on the denial itself
+            assert getattr(exc, "status_code", None) == 401
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_connecting_with_a_viewer_role_session_is_refused(tmp_path, monkeypatch):
+    client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="viewer")
+    try:
+        try:
+            with client.websocket_connect("/ws/sessions/live"):
+                raise AssertionError("a viewer-role connection was accepted")
+        except Exception as exc:  # noqa: BLE001 -- asserting on the denial itself
+            assert getattr(exc, "status_code", None) == 403
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_an_operator_receives_the_opening_message_naming_the_wake_phrase_and_sources(
+    tmp_path, monkeypatch
+):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        with client.websocket_connect("/ws/sessions/live") as websocket:
+            opening = websocket.receive_json()
+        assert opening["type"] == "observer.opened"
+        assert opening["wake_phrase"] == app_module.app.state.config.wake.phrase
+        assert set(opening["sources"]) == {"camera", "browser_mic"}
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_binary_frame_closes_the_connection_and_starts_no_turn(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+
+    async def _fake_run_turn(*args, **kwargs):
+        raise AssertionError("the observer socket must never start a turn")
+
+    monkeypatch.setattr(app_module, "run_turn", _fake_run_turn)
+    try:
+        with client.websocket_connect("/ws/sessions/live") as websocket:
+            websocket.receive_json()  # the opening message
+            websocket.send_bytes(b"\x00\x01")
+            # The server closes on the binary frame -- the next receive
+            # observes the close rather than another message.
+            with pytest.raises(Exception):
+                websocket.receive_json()
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_disconnecting_removes_the_observers_queue_from_the_registry(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        registry = app_module.app.state.observer_registry
+        before = len(registry._queues)
+        with client.websocket_connect("/ws/sessions/live") as websocket:
+            websocket.receive_json()  # the opening message
+            assert len(registry._queues) == before + 1
+        # The `with` block's own exit performs the close handshake; the
+        # server-side handler's `finally` has run by the time it returns.
+        assert len(registry._queues) == before
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_two_observers_connected_at_once_both_receive_the_same_publish(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        with client.websocket_connect("/ws/sessions/live") as first:
+            first.receive_json()  # opening message
+            with client.websocket_connect("/ws/sessions/live") as second:
+                second.receive_json()  # opening message
+
+                app_module.app.state.observer_registry.publish(
+                    {"type": "transcript.partial", "text": "hello", "source": "camera"}
+                )
+
+                assert first.receive_json() == {
+                    "type": "transcript.partial",
+                    "text": "hello",
+                    "source": "camera",
+                }
+                assert second.receive_json() == {
+                    "type": "transcript.partial",
+                    "text": "hello",
+                    "source": "camera",
+                }
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_turn_started_from_the_websocket_route_is_labelled_browser_mic_on_the_feed(
+    tmp_path, monkeypatch
+):
+    """The `/ws/turn` half of D-08: a turn on that path appears on the
+    observer feed labelled `browser_mic`, and the participant socket still
+    gets its own events unchanged (the wrapped source's own `send_event`,
+    proven generically by `ObserverPublishingSource`'s own unit tests
+    above; this test proves the route wires the label and the publish)."""
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+
+    async def _fake_run_turn(source, *args, **kwargs):
+        await source.send_event({"type": "reply.text", "text": "done"})
+
+    monkeypatch.setattr(app_module, "run_turn", _fake_run_turn)
+    try:
+        with client.websocket_connect("/ws/sessions/live") as observer:
+            observer.receive_json()  # opening message
+            with client.websocket_connect("/ws/turn") as turn_socket:
+                started = observer.receive_json()
+                assert started == {
+                    "type": "turn.started",
+                    "source": "browser_mic",
+                    "turn_id": started["turn_id"],
+                }
+                labelled_reply = observer.receive_json()
+                assert labelled_reply == {"type": "reply.text", "text": "done", "source": "browser_mic"}
+                # The participant socket's own event carries no source key
+                # -- unchanged from what `/ws/turn` has always sent.
+                assert turn_socket.receive_json() == {"type": "reply.text", "text": "done"}
+    finally:
+        client.__exit__(None, None, None)
