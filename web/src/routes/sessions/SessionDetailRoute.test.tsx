@@ -25,12 +25,26 @@
 // claim about wiring, never a claim about playback smoothness; the
 // `<human-check>` in 08-05-PLAN.md's Task 3 is the only thing that can
 // close that second question.
+//
+// `SAMPLE_SESSION`'s offsets are now shaped like a camera recording (plan
+// 08-12, DBG-03): zero is the start of the replayed pre-roll, and the wake
+// hit (`turn_started_at`) is `1.5 s` in, not at zero. The phase's original
+// fixture invented its own flat offsets starting at zero, which is
+// precisely why these mount tests could pass while the product was out of
+// step with the corrected server -- 08-VERIFICATION.md's "The DOM harness
+// (D-17)" section named this as the harness's own gap. A flat fixture
+// cannot tell a corrected route from the defect 08-11 fixed; this one can.
 import { afterEach, expect, mock, test } from "bun:test"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { ApiError } from "@/lib/api"
 
+// A camera turn: `turn_started_at` sits 1.5 s into the recording (the
+// replayed pre-roll), and every later mark is measured from that same
+// monotonic clock plus the pre-roll shift -- `ts` values are the raw
+// recorded-at instants (1.0, 2.2, 5.0), `offset_s` is each `ts` minus
+// `turn_started_at`'s own `ts` (1.0) plus `preroll_s` (1.5).
 const SAMPLE_SESSION = {
   id: "20260919T154201123456Z-turn-abc123",
   started_at: "2026-09-19T15:42:01.123456+00:00",
@@ -42,6 +56,22 @@ const SAMPLE_SESSION = {
   end_of_speech_to_answer_audio_ms: 600.0,
   audio_format: { encoding: "pcm", sample_rate: 8000 },
   has_audio: true,
+  preroll_s: 1.5,
+  timeline: [
+    { ts: 1.0, kind: "stage", offset_s: 1.5, stage: "turn_started_at" },
+    { ts: 2.2, kind: "event", offset_s: 2.7, type: "transcript.partial" },
+    { ts: 5.0, kind: "stage", offset_s: 5.5, stage: "stt_final_at" },
+  ],
+}
+
+// The browser-microphone and WebRTC shape: no `PrerollReplayingSource`
+// wrapper, so `preroll_s` is `0` and the timeline starts at `0.0` -- the
+// same flat offsets `SAMPLE_SESSION` used before this plan. Proves the
+// no-pre-roll path acquired neither a caption nor a shifted highlight.
+const NO_PREROLL_SESSION = {
+  ...SAMPLE_SESSION,
+  id: "20260919T154201123456Z-turn-nopreroll",
+  preroll_s: 0,
   timeline: [
     { ts: 1.0, kind: "stage", offset_s: 0.0, stage: "turn_started_at" },
     { ts: 2.5, kind: "event", offset_s: 1.5, type: "transcript.partial" },
@@ -151,7 +181,7 @@ test("before any time has been reported, no timeline row is marked current", asy
   }
 })
 
-test("setting currentTime and dispatching timeupdate marks exactly the row activeTimelineIndexAt names", async () => {
+test("a clock inside the pre-roll window leaves no row marked current", async () => {
   stubLib(async () => SAMPLE_SESSION)
   const { SessionDetailRoute } = await import("./SessionDetailRoute")
 
@@ -159,11 +189,29 @@ test("setting currentTime and dispatching timeupdate marks exactly the row activ
   await screen.findByText(/Heard:/)
 
   const audioElement = document.querySelector("audio") as HTMLAudioElement
-  audioElement.currentTime = 1.5
+  // 1.0 s is before turn_started_at's own offset_s (1.5) -- room audio
+  // captured before the wake word, and no timeline entry exists in that
+  // window. Assert the absence across every row, not the presence of one.
+  audioElement.currentTime = 1.0
   fireEvent(audioElement, new Event("timeupdate"))
 
-  // offset_s 1.5 -> the second row ("transcript.partial"), per
-  // activeTimelineIndexAt's inclusive-at-offset boundary.
+  for (const button of screen.getAllByRole("button")) {
+    expect(button.getAttribute("aria-current")).toBeNull()
+  }
+})
+
+test("setting currentTime past a row marks exactly that row current", async () => {
+  stubLib(async () => SAMPLE_SESSION)
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  const audioElement = document.querySelector("audio") as HTMLAudioElement
+  audioElement.currentTime = 3.0
+  fireEvent(audioElement, new Event("timeupdate"))
+
+  // offset_s 2.7 -> "transcript.partial", the last row at or before 3.0.
   const activeRow = findRowButton("transcript.partial")
   expect(activeRow.getAttribute("aria-current")).toBe("true")
 
@@ -173,7 +221,7 @@ test("setting currentTime and dispatching timeupdate marks exactly the row activ
   }
 })
 
-test("moving the time forward moves the mark to a later row; moving it back moves it earlier", async () => {
+test("moving the time forward moves the mark to a later row; moving it back into the pre-roll window clears it", async () => {
   stubLib(async () => SAMPLE_SESSION)
   const { SessionDetailRoute } = await import("./SessionDetailRoute")
 
@@ -182,14 +230,16 @@ test("moving the time forward moves the mark to a later row; moving it back move
 
   const audioElement = document.querySelector("audio") as HTMLAudioElement
 
-  audioElement.currentTime = 4.0
+  audioElement.currentTime = 6.0
   fireEvent(audioElement, new Event("timeupdate"))
   expect(findRowButton("stt_final_at").getAttribute("aria-current")).toBe("true")
 
-  audioElement.currentTime = 0.0
+  audioElement.currentTime = 1.0
   fireEvent(audioElement, new Event("timeupdate"))
-  expect(findRowButton("turn_started_at").getAttribute("aria-current")).toBe("true")
   expect(findRowButton("stt_final_at").getAttribute("aria-current")).toBeNull()
+  for (const button of screen.getAllByRole("button")) {
+    expect(button.getAttribute("aria-current")).toBeNull()
+  }
 })
 
 test("clicking a timeline row sets the audio element's currentTime to that row's offset", async () => {
@@ -202,7 +252,34 @@ test("clicking a timeline row sets the audio element's currentTime to that row's
   const audioElement = document.querySelector("audio") as HTMLAudioElement
   fireEvent.click(findRowButton("stt_final_at"))
 
-  expect(audioElement.currentTime).toBe(4.0)
+  expect(audioElement.currentTime).toBe(5.5)
+})
+
+// --- Task 1 of 08-12: the pre-roll disclosure sentence -----------------
+
+test("a camera-shaped session renders the pre-roll sentence naming its length", async () => {
+  stubLib(async () => SAMPLE_SESSION)
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(await screen.findByText(/1\.5 s before the wake word/)).toBeTruthy()
+})
+
+test("a session with no pre-roll renders no pre-roll sentence, and the clock marks the first row at zero", async () => {
+  stubLib(async () => NO_PREROLL_SESSION)
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${NO_PREROLL_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(screen.queryByText(/before the wake word/)).toBeNull()
+
+  const audioElement = document.querySelector("audio") as HTMLAudioElement
+  audioElement.currentTime = 0.0
+  fireEvent(audioElement, new Event("timeupdate"))
+  expect(findRowButton("turn_started_at").getAttribute("aria-current")).toBe("true")
 })
 
 test("an audio error degrades only the player region -- timeline, transcript and reply stay intact", async () => {

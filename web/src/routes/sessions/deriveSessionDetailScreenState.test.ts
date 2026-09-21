@@ -165,3 +165,35 @@ describe("activeTimelineIndexAt", () => {
     expect(activeTimelineIndexAt(entries, 2.0)).toBe(2)
   })
 })
+
+// Camera geometry (plan 08-12, DBG-03): `turn_started_at` sits 1.5 s into
+// the recording -- the length of the replayed pre-roll -- rather than at
+// zero. WEB-07's adjacency and ordering edges, pinned against the shape a
+// real camera turn actually produces.
+describe("activeTimelineIndexAt -- camera geometry", () => {
+  const entries = [entryAt(1.5), entryAt(2.7), entryAt(5.5)]
+
+  test("before the pre-roll window ends, nothing is active", () => {
+    expect(activeTimelineIndexAt(entries, 0)).toBeNull()
+    expect(activeTimelineIndexAt(entries, 1.49)).toBeNull()
+  })
+
+  test("the inclusive-at-offset boundary at the wake hit itself", () => {
+    expect(activeTimelineIndexAt(entries, 1.5)).toBe(0)
+  })
+
+  test("a later mark and a time well past every mark", () => {
+    expect(activeTimelineIndexAt(entries, 2.7)).toBe(1)
+    expect(activeTimelineIndexAt(entries, 6.0)).toBe(2)
+  })
+
+  // Adding one constant (the pre-roll shift) to every offset cannot change
+  // which of two equal offsets is later -- the comparison is still between
+  // the same two numbers, just both larger by the same amount. So the
+  // shift plan 08-11 introduced needed no change to this function's tie
+  // rule, and this test is what would catch it if that stopped being true.
+  test("two entries tied at the same camera-shaped offset still resolve to the later index", () => {
+    const tied = [entryAt(1.5), entryAt(2.7), entryAt(2.7)]
+    expect(activeTimelineIndexAt(tied, 2.7)).toBe(2)
+  })
+})
