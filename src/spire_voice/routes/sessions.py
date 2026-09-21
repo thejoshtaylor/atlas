@@ -30,11 +30,12 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.config import SessionConfig
+from spire_voice.session.audio_wrap import wrap_session_audio
 from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
 from spire_voice.session.retention import parse_session_timestamp
 from spire_voice.session.timeline import TIMELINE_FILENAME, regenerate_timeline
@@ -66,6 +67,13 @@ def _removed_by_retention_error(session_id: str) -> HTTPException:
 
 def _session_not_found_error(session_id: str) -> HTTPException:
     return HTTPException(status_code=404, detail=f"no session with id {session_id!r}")
+
+
+def _audio_not_recorded_error(session_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail=f"session {session_id!r} has no recorded audio",
+    )
 
 
 # --- Response models --------------------------------------------------------
@@ -236,6 +244,26 @@ def _resolve_session_directory(root: Path, session_id: str) -> "tuple[Path, date
     return candidate, parsed
 
 
+def _resolve_readable_session_directory(session_config: SessionConfig, session_id: str) -> "tuple[Path, datetime]":
+    """The full three-way D-04 check every route that reads one session's
+    own files needs: shape-validated and traversal-contained
+    (`_resolve_session_directory`), then not yet swept by retention, then
+    actually present on disk. `get_session_detail` and the audio route
+    below both call this rather than each re-deriving the same three
+    checks -- exactly the "one code path, one confinement check" this
+    module's own docstring requires (T-08-16)."""
+    directory, parsed_at = _resolve_session_directory(Path(session_config.dir), session_id)
+
+    age = datetime.now(timezone.utc) - parsed_at
+    if age > timedelta(days=session_config.retain_days):
+        raise _removed_by_retention_error(session_id)
+
+    if not directory.is_dir():
+        raise _session_not_found_error(session_id)
+
+    return directory, parsed_at
+
+
 def _session_detail(session_id: str, started_at: datetime, directory: Path) -> SessionDetailResponse:
     timing_payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
     events = _read_events(directory)
@@ -294,13 +322,44 @@ async def get_session_detail(
     _user: CurrentUser = Depends(require_role(Role.OPERATOR)),
 ) -> SessionDetailResponse:
     session_config: SessionConfig = request.app.state.config.session
-    directory, parsed_at = _resolve_session_directory(Path(session_config.dir), session_id)
-
-    age = datetime.now(timezone.utc) - parsed_at
-    if age > timedelta(days=session_config.retain_days):
-        raise _removed_by_retention_error(session_id)
-
-    if not directory.is_dir():
-        raise _session_not_found_error(session_id)
+    directory, parsed_at = _resolve_readable_session_directory(session_config, session_id)
 
     return _session_detail(session_id, parsed_at, directory)
+
+
+@router.get("/api/sessions/{session_id}/audio")
+async def get_session_audio(
+    session_id: str,
+    request: Request,
+    _user: CurrentUser = Depends(require_role(Role.OPERATOR)),
+) -> Response:
+    """The recording, wrapped as a WAV a browser can play, served whole in
+    one response (D-11) -- no range handling, deliberately: a range
+    request header changes nothing about what is returned, and a test
+    below asserts that directly so a later change that adds range support
+    has to face that test rather than slipping in quietly.
+
+    `DEFAULT_ALAW_WRAPPING` (`session/audio_wrap.py`) stayed on the safe
+    PCM16-decoded default: the Task 3 checkpoint of plan 08-02 was
+    answered on the strength of PCM16's universal browser support, not on
+    the outcome of an actual browser test against A-law-tagged WAV -- that
+    question remains open (see `audio_wrap.py`'s own module docstring and
+    `scripts/dev-write-sample-wav.py`, which exists to settle it later).
+    """
+    session_config: SessionConfig = request.app.state.config.session
+    directory, _parsed_at = _resolve_readable_session_directory(session_config, session_id)
+
+    timing_payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
+    audio_format = timing_payload.get("audio_format")
+    if not _has_audio(directory, audio_format):
+        raise _audio_not_recorded_error(session_id)
+
+    encoding = audio_format["encoding"]
+    raw = (directory / f"audio.{encoding}").read_bytes()
+    wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw)
+
+    return Response(
+        content=wav_bytes,
+        media_type="audio/wav",
+        headers={"Content-Length": str(len(wav_bytes))},
+    )
