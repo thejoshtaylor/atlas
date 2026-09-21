@@ -88,6 +88,26 @@ def _audio_not_recorded_error(session_id: str) -> HTTPException:
     )
 
 
+def _incomplete_recording_error(session_id: str) -> HTTPException:
+    """The single-session routes' half of `_INCOMPLETE_OUTCOME`.
+
+    `list_sessions` advertises a directory whose own files cannot be read
+    as a `recording_incomplete` row rather than dropping it, so the
+    operator clicks it. 409 rather than 404 because the session genuinely
+    is there -- what is missing is the recording's own end, which is a
+    named state of this deployment, not a broken one. An unhandled 500
+    here would read as a broken server for the one untidy-shutdown case
+    the recorder can actually produce.
+    """
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"session {session_id!r} was never finished being written -- "
+            "the turn it recorded did not close cleanly"
+        ),
+    )
+
+
 # --- Response models --------------------------------------------------------
 
 
@@ -346,15 +366,33 @@ def _resolve_readable_session_directory(session_config: SessionConfig, session_i
     return directory, parsed_at
 
 
+def _require_timing_payload(directory: Path, session_id: str) -> dict:
+    """`_read_timing_payload`'s `None`, turned into the named refusal.
+
+    The list route and this one now read the same file through the same
+    function, so a session the list shows can never be a session these
+    routes crash on."""
+    payload = _read_timing_payload(directory)
+    if payload is None:
+        raise _incomplete_recording_error(session_id)
+    return payload
+
+
 def _session_detail(session_id: str, started_at: datetime, directory: Path) -> SessionDetailResponse:
-    timing_payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
+    timing_payload = _require_timing_payload(directory, session_id)
     events = _read_events(directory)
 
     timeline_path = directory / TIMELINE_FILENAME
     if not timeline_path.is_file():
         # `regenerate_timeline` exists precisely to prove the rendering is
-        # derivable from `events.jsonl` and `timing.json` alone (D-02).
-        regenerate_timeline(directory)
+        # derivable from `events.jsonl` and `timing.json` alone (D-02). It
+        # reads those two files with its own, stricter reader, so a
+        # half-written one reaches the operator as the same named refusal
+        # the list route already named it by -- never a 500.
+        try:
+            regenerate_timeline(directory)
+        except (OSError, ValueError):
+            raise _incomplete_recording_error(session_id)
     raw_timeline = _read_jsonl(timeline_path)
 
     turn_started_at = timing_payload.get("turn_started_at")
@@ -431,7 +469,7 @@ async def get_session_audio(
     session_config: SessionConfig = request.app.state.config.session
     directory, _parsed_at = _resolve_readable_session_directory(session_config, session_id)
 
-    timing_payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
+    timing_payload = _require_timing_payload(directory, session_id)
     audio_format = timing_payload.get("audio_format")
     if not _has_audio(directory, audio_format):
         raise _audio_not_recorded_error(session_id)

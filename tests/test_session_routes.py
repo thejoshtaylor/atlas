@@ -235,6 +235,57 @@ def test_a_directory_that_cannot_be_summarised_at_all_is_still_one_row(tmp_path,
     assert sessions[1]["duration_ms"] is None
 
 
+
+def test_the_session_the_list_calls_incomplete_is_refused_by_name_not_by_500(tmp_path, fake_account_repository):
+    """One directory, all three routes. Whatever the list route advertises,
+    the detail and audio routes have to honour -- they read the same
+    `timing.json` through the same function now, so they cannot come to
+    disagree about which recordings are openable (CR-02)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    (directory / "timing.json").unlink()
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    listed = client.get("/api/sessions").json()["sessions"]
+    assert [session["id"] for session in listed] == [directory.name]
+    assert listed[0]["turn_outcome"] == "recording_incomplete"
+
+    detail = client.get(f"/api/sessions/{directory.name}")
+    assert detail.status_code == 409
+    assert "was never finished being written" in detail.json()["detail"]
+
+    audio = client.get(f"/api/sessions/{directory.name}/audio")
+    assert audio.status_code == 409
+    assert "was never finished being written" in audio.json()["detail"]
+
+
+def test_a_detail_route_timeline_it_cannot_rebuild_is_the_same_named_refusal(tmp_path, fake_account_repository):
+    """The mixed case: `timing.json` survived, `events.jsonl` did not, and
+    the rendered timeline was never written. `regenerate_timeline` reads
+    both with its own stricter reader, so this is the one path into the
+    detail route that a guarded `timing.json` read does not already
+    cover (CR-02)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    (directory / "timeline.jsonl").unlink()
+    with (directory / EVENTS_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "reply.text", "text": "half')
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}")
+
+    assert response.status_code == 409
+    assert "was never finished being written" in response.json()["detail"]
+
+
 # --- Task 2 (TDD): GET /api/sessions/{id} -----------------------------------
 #
 # RED: every test below targets `GET /api/sessions/{session_id}`, a route
