@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { ErrorState } from "@/components/state/ErrorState"
+import { formatMs } from "@/lib/format"
 import {
   fetchConfiguredTransport,
   startWebrtcListening,
@@ -30,13 +31,6 @@ const STAGE_LABELS: Record<string, string> = {
   answer_audio_at: "Answer audio",
 }
 const STAGE_ORDER = Object.keys(STAGE_LABELS)
-
-// Exported for Phase 8's Sessions list (08-04-PLAN.md, Task 3): "the same
-// millisecond format the developer microphone page already uses" -- one
-// formatter, not a second one reimplemented per screen.
-export function formatMs(ms: number | null | undefined): string {
-  return ms === null || ms === undefined ? "not reached" : `${ms.toFixed(1)} ms`
-}
 
 /**
  * The developer browser-microphone page, folded into the application as

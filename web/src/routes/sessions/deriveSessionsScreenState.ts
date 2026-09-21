@@ -3,7 +3,7 @@
 // React, for the same stated reason: what belongs here is only ever a
 // fact about data, never a fact about a render.
 import { ApiError } from "@/lib/api"
-import { formatMs } from "@/routes/dev-mic/DevMicRoute"
+import { formatMs } from "@/lib/format"
 import type { SessionSummary } from "@/lib/sessions"
 
 export interface QueryLike<T> {
@@ -60,7 +60,7 @@ export function summarizeSessionOutcome(session: Pick<SessionSummary, "reply_tex
 }
 
 /** "{N} ms end to end" (08-UI-SPEC.md Copywriting Contract), reusing
- * `DevMicRoute.tsx`'s own millisecond formatter rather than a second one
+ * `lib/format.ts`'s shared millisecond formatter rather than a second one
  * -- `formatMs`'s own "not reached" branch composes into "not reached end
  * to end" for a session whose duration could not be measured. */
 export function formatSessionDuration(durationMs: number | null): string {
