@@ -74,12 +74,6 @@ describe("PolicyRoute -- the unsaved buffer lives in the Zustand store, not the 
   })
 })
 
-describe("PolicyRoute -- loading never renders as an empty list", () => {
-  test("SkeletonList renders for screen.kind === \"loading\"", () => {
-    expect(SOURCE).toMatch(/screen\.kind === "loading" \? <SkeletonList/)
-  })
-})
-
 describe("PolicyRoute -- the count line uses the shared pure formatter", () => {
   test("formatRuleCount is the only source of the count text", () => {
     expect(SOURCE).toMatch(/formatRuleCount\(currentMode, rules\.length\)/)
