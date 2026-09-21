@@ -27,6 +27,7 @@ this module never infers one from the audio format.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +41,8 @@ from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
 from spire_voice.session.retention import parse_session_timestamp
 from spire_voice.session.timeline import TIMELINE_FILENAME, regenerate_timeline
 
+logger = logging.getLogger("spire_voice.routes.sessions")
+
 router = APIRouter(tags=["sessions"])
 
 # A directory whose `timing.json` is missing or unreadable is listed with
@@ -47,6 +50,15 @@ router = APIRouter(tags=["sessions"])
 # turn is a real fact, and hiding it would make a crashed turn
 # indistinguishable from one that never happened (the same reasoning
 # `SessionRecorder` gives for creating its directory eagerly).
+#
+# This is the *only* name the list route gives a damaged directory, and it
+# is deliberately the same one the detail and audio routes refuse by
+# (`_incomplete_recording_error`): one definition of "a session whose own
+# files can be read", honoured two ways, so the list can never advertise a
+# session the single-session routes cannot open. The definition is
+# `_read_timing_payload` below. Anything else that goes wrong while
+# summarising one directory lands here too -- one damaged directory is one
+# damaged row, never a failed list.
 _INCOMPLETE_OUTCOME = "recording_incomplete"
 
 
@@ -122,10 +134,41 @@ class SessionDetailResponse(BaseModel):
 
 
 def _read_jsonl(path: Path) -> list[dict]:
+    """Every JSON object on its own line. A line that does not parse as one
+    is skipped, not raised.
+
+    `events.jsonl` is appended one line at a time while the turn is still
+    running (`SessionRecorder.record_event`), so a power loss, an OOM kill
+    or a container stop mid-append leaves exactly one partial line behind.
+    That partial line is a real fact about one turn; it is not a reason to
+    refuse every *other* session in the list, which is what raising here
+    did. The skip is logged with the path and a count and never the
+    content -- `session/retention.py`'s privacy boundary, which this
+    module reads the same directories under, holds here too.
+    """
     if not path.is_file():
         return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines if line.strip()]
+    entries: list[dict] = []
+    skipped = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        if not isinstance(parsed, dict):
+            skipped += 1
+            continue
+        entries.append(parsed)
+    if skipped:
+        logger.warning(
+            "session review: skipped %d unreadable line(s) in %s",
+            skipped,
+            path,
+        )
+    return entries
 
 
 def _read_events(directory: Path) -> list[dict]:
@@ -199,30 +242,69 @@ def _list_session_directories(root: Path) -> "list[tuple[str, datetime, Path]]":
     return candidates
 
 
-def _session_summary(name: str, started_at: datetime, directory: Path) -> SessionSummaryResponse:
-    timing_path = directory / TIMING_FILENAME
-    try:
-        timing_payload = json.loads(timing_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return SessionSummaryResponse(
-            id=name,
-            started_at=started_at,
-            turn_outcome=_INCOMPLETE_OUTCOME,
-            reply_text=None,
-            duration_ms=None,
-            has_audio=False,
-        )
+def _read_timing_payload(directory: Path) -> "dict | None":
+    """`timing.json` read back as the object `TurnTimings` wrote, or `None`
+    when it cannot be read as one.
 
-    events = _read_events(directory)
-    stage_durations_ms = timing_payload.get("stage_durations_ms") or {}
+    This is the single definition of "this session's own files can be
+    read" that every route in this module shares. `_session_summary` turns
+    a `None` into an `_INCOMPLETE_OUTCOME` row; `_require_timing_payload`
+    turns the same `None` into a named refusal. Neither re-derives the
+    check, so the list and the single-session routes cannot come to
+    disagree about which recordings are openable.
+    """
+    try:
+        payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _incomplete_summary(name: str, started_at: datetime) -> SessionSummaryResponse:
     return SessionSummaryResponse(
         id=name,
         started_at=started_at,
-        turn_outcome=timing_payload.get("turn_outcome", _INCOMPLETE_OUTCOME),
-        reply_text=_last_reply_text(events),
-        duration_ms=_sum_durations(stage_durations_ms),
-        has_audio=_has_audio(directory, timing_payload.get("audio_format")),
+        turn_outcome=_INCOMPLETE_OUTCOME,
+        reply_text=None,
+        duration_ms=None,
+        has_audio=False,
     )
+
+
+def _session_summary(name: str, started_at: datetime, directory: Path) -> SessionSummaryResponse:
+    try:
+        timing_payload = _read_timing_payload(directory)
+        if timing_payload is None:
+            return _incomplete_summary(name, started_at)
+
+        events = _read_events(directory)
+        stage_durations_ms = timing_payload.get("stage_durations_ms") or {}
+        return SessionSummaryResponse(
+            id=name,
+            started_at=started_at,
+            turn_outcome=timing_payload.get("turn_outcome", _INCOMPLETE_OUTCOME),
+            reply_text=_last_reply_text(events),
+            duration_ms=_sum_durations(stage_durations_ms),
+            has_audio=_has_audio(directory, timing_payload.get("audio_format")),
+        )
+    except (OSError, ValueError, TypeError):
+        # The blast radius of one unreadable directory is that one row.
+        # `list_sessions` builds every row from a separate directory, so
+        # there is no failure here that says anything true about the other
+        # sessions -- and an operator whose whole Sessions screen goes to
+        # `ErrorState` because one turn crashed mid-write cannot reach any
+        # recording at all until someone edits a file on the server.
+        # `json.JSONDecodeError` and pydantic's own `ValidationError` are
+        # both `ValueError`, so a malformed field value lands here too.
+        logger.warning(
+            "session review: session %s could not be summarised; listing it as %s",
+            name,
+            _INCOMPLETE_OUTCOME,
+            exc_info=True,
+        )
+        return _incomplete_summary(name, started_at)
 
 
 def _resolve_session_directory(root: Path, session_id: str) -> "tuple[Path, datetime]":

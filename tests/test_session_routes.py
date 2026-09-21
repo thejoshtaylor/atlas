@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from spire_voice.auth.tokens import issue_access_token
 from spire_voice.config import SecurityConfig, SessionConfig
 from spire_voice.routes.sessions import router as sessions_router
-from spire_voice.session.recorder import SessionRecorder
+from spire_voice.session.recorder import EVENTS_FILENAME, SessionRecorder
 from spire_voice.timing import TurnTimings
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
@@ -177,6 +177,62 @@ def test_a_half_written_session_is_listed_with_a_named_outcome_not_dropped(tmp_p
     assert sessions[0]["turn_outcome"] == "recording_incomplete"
     assert sessions[0]["duration_ms"] is None
     assert sessions[0]["has_audio"] is False
+
+
+def test_one_truncated_event_line_does_not_take_out_the_whole_list(tmp_path, fake_account_repository):
+    """A turn killed mid-`record_event` leaves exactly one partial line in
+    its own `events.jsonl`. That line must cost that session the events it
+    could not read and nothing more -- not the other sessions, and not the
+    list route (CR-01)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    intact = _write_recorded_session(session_config, reply_text="the intact reply")
+    damaged = _write_recorded_session(
+        session_config, reply_text="the reply before the crash", started_offset_days=1
+    )
+    # Byte-for-byte what an interrupted append leaves behind: a line the
+    # recorder started writing and never terminated.
+    with (damaged / EVENTS_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "reply.text", "text": "half')
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get("/api/sessions")
+
+    assert response.status_code == 200
+    sessions = response.json()["sessions"]
+    assert [session["id"] for session in sessions] == [intact.name, damaged.name]
+    assert sessions[0]["reply_text"] == "the intact reply"
+    # The whole lines are still read; only the partial one is dropped.
+    assert sessions[1]["reply_text"] == "the reply before the crash"
+    assert sessions[1]["turn_outcome"] == "completed"
+
+
+def test_a_directory_that_cannot_be_summarised_at_all_is_still_one_row(tmp_path, fake_account_repository):
+    """Not the missing-`timing.json` case above: a `timing.json` that parses
+    as JSON but is not the object the recorder writes. It must still be one
+    `recording_incomplete` row beside the intact session, never a 500 that
+    makes every recording unreachable (CR-01)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    intact = _write_recorded_session(session_config)
+    damaged = _write_recorded_session(session_config, started_offset_days=1)
+    (damaged / "timing.json").write_text('["not", "an", "object"]', encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get("/api/sessions")
+
+    assert response.status_code == 200
+    sessions = response.json()["sessions"]
+    assert [session["id"] for session in sessions] == [intact.name, damaged.name]
+    assert sessions[0]["turn_outcome"] == "completed"
+    assert sessions[1]["turn_outcome"] == "recording_incomplete"
+    assert sessions[1]["duration_ms"] is None
 
 
 # --- Task 2 (TDD): GET /api/sessions/{id} -----------------------------------
