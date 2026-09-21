@@ -761,6 +761,7 @@ class SourceRunnerSpec:
     clock: Callable[[], float] = field(default=time.monotonic)
     preroll: PrerollBuffer | None = None
     calibration: EchoCalibration | None = None
+    wake_event_repo: WakeEventRepository | None = None
 
 
 def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[SourceRunner]:
@@ -793,6 +794,7 @@ def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[Sourc
             clock=spec.clock,
             preroll=spec.preroll,
             calibration=spec.calibration,
+            wake_event_repo=spec.wake_event_repo,
         )
         for name, spec in specs.items()
     ]
