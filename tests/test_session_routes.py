@@ -14,6 +14,7 @@ drift about the on-disk format (this plan's own action text, Task 1).
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -554,6 +555,51 @@ def test_a_session_with_no_recorded_audio_gets_its_own_named_refusal(tmp_path, f
 
     assert response.status_code == 404
     assert "no recorded audio" in response.json()["detail"]
+
+
+def test_an_encoding_this_deployment_cannot_wrap_is_a_named_refusal(tmp_path, fake_account_repository):
+    """`_has_audio` is satisfied by any `audio.{encoding}` that exists, and
+    `wrap_session_audio` refuses anything outside its supported set --
+    `AudioWrapError` exists precisely so that is a named refusal. The route
+    dropped it on the floor as a 500 (WR-04)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    timing = json.loads((directory / "timing.json").read_text(encoding="utf-8"))
+    timing["audio_format"] = {"encoding": "opus", "sample_rate": 8000}
+    (directory / "timing.json").write_text(json.dumps(timing), encoding="utf-8")
+    (directory / "audio.opus").write_bytes(b"\x00" * 16)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 409
+    assert "cannot play back" in response.json()["detail"]
+    assert "opus" in response.json()["detail"]
+
+
+def test_an_audio_format_with_no_sample_rate_is_the_same_named_refusal(tmp_path, fake_account_repository):
+    """Same line, the other way it fails: `_has_audio` passes on `encoding`
+    alone, so a format carrying no `sample_rate` reached `wrap_session_audio`
+    as a `KeyError` (WR-04)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    timing = json.loads((directory / "timing.json").read_text(encoding="utf-8"))
+    timing["audio_format"] = {"encoding": "pcm"}
+    (directory / "timing.json").write_text(json.dumps(timing), encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 409
+    assert "cannot play back" in response.json()["detail"]
 
 
 def test_a_missing_session_gets_the_not_found_refusal_not_the_missing_audio_one(tmp_path, fake_account_repository):

@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict
 
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.config import SessionConfig
-from spire_voice.session.audio_wrap import wrap_session_audio
+from spire_voice.session.audio_wrap import AudioWrapError, wrap_session_audio
 from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
 from spire_voice.session.retention import parse_session_timestamp
 from spire_voice.session.timeline import TIMELINE_FILENAME, regenerate_timeline
@@ -85,6 +85,21 @@ def _audio_not_recorded_error(session_id: str) -> HTTPException:
     return HTTPException(
         status_code=404,
         detail=f"session {session_id!r} has no recorded audio",
+    )
+
+
+def _unplayable_encoding_error(session_id: str, encoding: str) -> HTTPException:
+    """`AudioWrapError` exists so an encoding this deployment cannot wrap is
+    a named refusal rather than a guess. Letting it out of the route as a
+    500 threw that away at the last step -- the operator saw a broken
+    server where the recorder had simply written a format the wrapper does
+    not support."""
+    return HTTPException(
+        status_code=409,
+        detail=(
+            f"session {session_id!r} was recorded in a format this "
+            f"deployment cannot play back ({encoding!r})"
+        ),
     )
 
 
@@ -516,7 +531,14 @@ async def get_session_audio(
 
     encoding = audio_format["encoding"]
     raw = (directory / f"audio.{encoding}").read_bytes()
-    wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw)
+    try:
+        wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw)
+    except (AudioWrapError, KeyError):
+        # `KeyError` too: `_has_audio` is satisfied by `encoding` alone, so
+        # an `audio_format` carrying no `sample_rate` reaches this line and
+        # is the same fact about the same recording -- this deployment
+        # cannot build a WAV out of it.
+        raise _unplayable_encoding_error(session_id, encoding)
 
     return Response(
         content=wav_bytes,
