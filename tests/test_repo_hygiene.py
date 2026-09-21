@@ -403,6 +403,15 @@ def test_repository_holds_no_credential_literal():
 # is_gitignored` below checks the actual runtime path
 # (`calibration.record.DEFAULT_CALIBRATION_DIR`) instead, which is the
 # artifact T-02-43 is actually about.
+#
+# Checked against the tracked path's own FIRST segment only (the repo-root
+# anchoring `.gitignore`'s own `/data/`/`/sessions/` patterns use, Phase 8
+# 08-04-PLAN.md) -- not every directory segment. An unanchored check here
+# had the identical bug this plan found and fixed in `.gitignore` itself:
+# `web/src/routes/sessions/` (Phase 8, WEB-07) is a legitimate, tracked
+# source directory named "sessions" nested well below the repo root, and a
+# check over every path segment flagged it as though it were the runtime
+# data root.
 _SESSION_DIR_NAMES = {"data", "sessions"}
 
 # Session audio and the TTS cache both write raw codec bytes under these
@@ -428,7 +437,7 @@ def test_no_session_path_or_audio_extension_is_tracked_by_git():
         if tracked.strip()
         and (
             Path(tracked).suffix in _AUDIO_EXTENSIONS
-            or _SESSION_DIR_NAMES & set(Path(tracked).parts[:-1])
+            or Path(tracked).parts[0] in _SESSION_DIR_NAMES
         )
     ]
 
