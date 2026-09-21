@@ -430,6 +430,21 @@ class SourceRunner:
             barge_in_config.resolve(name) if barge_in_config is not None else BargeInConfig(enabled=False)
         )
 
+    @property
+    def wake_threshold(self) -> float:
+        """The score this runner's gate currently requires a wake hit to
+        reach -- read through the gate's own named `threshold` accessor,
+        never a reach into `self._gate._threshold` from here (D-15): one
+        named accessor per object is what keeps the next reader from
+        reaching across two modules' private attributes."""
+        return self._gate.threshold
+
+    def set_wake_threshold(self, threshold: float) -> None:
+        """Move this runner's gate to a new threshold. Effective on the
+        very next wake hit evaluated on this source -- no restart (D-15).
+        A runner nobody calls this on behaves exactly as it did before."""
+        self._gate.set_threshold(threshold)
+
     async def run(self) -> None:
         """Consume `source.frames()` until it ends, running one turn per
         wake hit the gate allows along the way.

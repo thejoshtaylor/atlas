@@ -81,3 +81,26 @@ class WakeGate:
             return GateDecision.block("media_playing")
 
         return GateDecision.allow()
+
+    @property
+    def threshold(self) -> float:
+        """The score a hit must reach to clear this gate right now -- read
+        fresh off the same instance attribute `evaluate` compares against,
+        never a value captured at construction time. The one named
+        accessor a caller outside this module should ever use to learn
+        this gate's threshold (D-15)."""
+        return self._threshold
+
+    def set_threshold(self, threshold: float) -> None:
+        """Move the threshold this gate compares every future hit
+        against. Takes effect on the very next `evaluate` call -- no
+        restart, no re-construction (D-15): this class is already a plain
+        mutable instance holding one float, so moving it is one line
+        reassigning the same attribute the constructor set, not a
+        refactor. A threshold an operator moves narrows or widens the
+        ambient trigger; it does not become a safety boundary by being
+        movable -- every action a turn reaches still passes the same
+        `mcp.spire_mcp.safety.allow_call` check this module's own
+        docstring names, unconditionally, regardless of this value.
+        """
+        self._threshold = threshold
