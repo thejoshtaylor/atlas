@@ -42,12 +42,18 @@ export function SessionDetailRoute() {
   // matching `timeline.py`'s own "derived, and never the source of
   // truth" discipline) -- whether this session id has ever resolved to
   // real data in this component's lifetime, per D-04's client-side case.
-  const everReadyRef = React.useRef(false)
-  if (query.status === "success" && query.data) {
-    everReadyRef.current = true
-  }
+  // Set from an effect, never read or written during render itself (React
+  // refs/state must only be mutated outside render) -- a later render
+  // that reaches the `error` branch still sees the flag `true`, since the
+  // commit from the earlier `success` render always precedes it.
+  const [hasEverLoaded, setHasEverLoaded] = React.useState(false)
+  React.useEffect(() => {
+    if (query.status === "success" && query.data) {
+      setHasEverLoaded(true)
+    }
+  }, [query.status, query.data])
 
-  const screen = deriveSessionDetailScreenState({ query, hasEverLoaded: everReadyRef.current })
+  const screen = deriveSessionDetailScreenState({ query, hasEverLoaded })
 
   return (
     <div className="flex flex-col gap-6">

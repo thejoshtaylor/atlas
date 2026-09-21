@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
+import { EmptyState } from "@/components/state/EmptyState"
 import { ErrorState } from "@/components/state/ErrorState"
 import { SkeletonList } from "@/components/state/SkeletonList"
 import { SESSIONS_QUERY_KEY, fetchSessions, type SessionSummary } from "@/lib/sessions"
-import { deriveSessionsScreenState } from "./deriveSessionsScreenState"
+import { deriveSessionsScreenState, formatSessionDuration, summarizeSessionOutcome } from "./deriveSessionsScreenState"
 
 // WEB-07, D-01, D-02, 08-UI-SPEC.md's Focal Point row: "the card list
 // itself, in reverse-chronological order ... there is no primary action on
@@ -13,11 +14,11 @@ import { deriveSessionsScreenState } from "./deriveSessionsScreenState"
 // from this screen.
 
 function SessionRow({ session }: { session: SessionSummary }) {
-  const summary = session.reply_text ?? session.turn_outcome
   return (
     <li className="rounded-lg border border-border bg-card p-4">
       <Link to={`/sessions/${session.id}`} className="flex flex-col gap-1 touch-target">
-        <span className="text-body text-foreground">{summary}</span>
+        <span className="truncate text-body text-foreground">{summarizeSessionOutcome(session)}</span>
+        <span className="text-label text-muted-foreground">{formatSessionDuration(session.duration_ms)}</span>
       </Link>
     </li>
   )
@@ -44,6 +45,13 @@ export function SessionsRoute() {
 
       {screen.kind === "error" ? (
         <ErrorState message={screen.message} onRetry={() => void query.refetch()} />
+      ) : null}
+
+      {screen.kind === "empty" ? (
+        <EmptyState
+          heading="No sessions yet."
+          body="A session appears here the first time the wake word starts a turn."
+        />
       ) : null}
 
       {screen.kind === "ready" ? (

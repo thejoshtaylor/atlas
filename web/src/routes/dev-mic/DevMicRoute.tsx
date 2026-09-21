@@ -31,7 +31,10 @@ const STAGE_LABELS: Record<string, string> = {
 }
 const STAGE_ORDER = Object.keys(STAGE_LABELS)
 
-function formatMs(ms: number | null | undefined): string {
+// Exported for Phase 8's Sessions list (08-04-PLAN.md, Task 3): "the same
+// millisecond format the developer microphone page already uses" -- one
+// formatter, not a second one reimplemented per screen.
+export function formatMs(ms: number | null | undefined): string {
   return ms === null || ms === undefined ? "not reached" : `${ms.toFixed(1)} ms`
 }
 
