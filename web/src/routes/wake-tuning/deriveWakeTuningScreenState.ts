@@ -81,7 +81,14 @@ export interface HistogramBucket {
 export type WakeTuningScreenState =
   | { kind: "loading" }
   | { kind: "error"; message: string }
-  | { kind: "empty" }
+  // Carries `notScoredCount` for the same reason the `ready` state does.
+  // The empty state is the *guaranteed* first state of any deployment
+  // upgrading into this phase -- `wake_events` starts empty (the migration
+  // seeds nothing) while the session directory may hold hundreds of
+  // pre-scoring turns. Dropping the count here told the operator there was
+  // no history when there was a large one that simply could not be scored,
+  // which is precisely the reading D-16 exists to prevent.
+  | { kind: "empty"; notScoredCount: number }
   | {
       kind: "ready"
       engine: string
@@ -178,7 +185,8 @@ export function deriveWakeTuningScreenState(
   if (query.status === "error") return { kind: "error", message: messageFor(query.error) }
   const response = query.data
   if (!response) return { kind: "loading" }
-  if (response.events.length === 0) return { kind: "empty" }
+  if (response.events.length === 0)
+    return { kind: "empty", notScoredCount: response.not_scored_session_count }
 
   const events: WakeEventDisplay[] = response.events.map((event) => ({
     id: event.id,

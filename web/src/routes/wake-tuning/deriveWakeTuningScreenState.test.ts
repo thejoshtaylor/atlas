@@ -69,7 +69,15 @@ describe("deriveWakeTuningScreenState -- loading, error, empty", () => {
 
   test("zero recorded events yields the empty state, never a partition of nothing", () => {
     const state = deriveWakeTuningScreenState(success(response({ events: [] })), 0.5)
-    expect(state).toEqual({ kind: "empty" })
+    expect(state).toEqual({ kind: "empty", notScoredCount: 0 })
+  })
+
+  test("the empty state still carries D-16's not-scored count (WR-09)", () => {
+    const state = deriveWakeTuningScreenState(
+      success(response({ events: [], not_scored_session_count: 137 })),
+      0.5,
+    )
+    expect(state).toEqual({ kind: "empty", notScoredCount: 137 })
   })
 })
 

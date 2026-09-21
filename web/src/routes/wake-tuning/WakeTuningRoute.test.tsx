@@ -298,3 +298,23 @@ test("a blocked row with no reason recorded says so rather than naming one", asy
   expect(await screen.findByText("Blocked — no reason recorded")).toBeTruthy()
   expect(screen.queryByText("Blocked — below threshold")).toBeNull()
 })
+
+test("the empty state names the sessions that predate scoring, rather than reporting no history at all (WR-09)", async () => {
+  stubLib(async () => ({ events: [], not_scored_session_count: 137 }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  expect(await screen.findByText("No wake attempts recorded yet.")).toBeTruthy()
+  expect(
+    screen.getByText("137 earlier sessions predate wake-score recording and aren't included above."),
+  ).toBeTruthy()
+})
+
+test("a genuinely fresh install's empty state says nothing about earlier sessions", async () => {
+  stubLib(async () => ({ events: [], not_scored_session_count: 0 }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  expect(await screen.findByText("No wake attempts recorded yet.")).toBeTruthy()
+  expect(screen.queryByText(/predate wake-score recording/)).toBeNull()
+})

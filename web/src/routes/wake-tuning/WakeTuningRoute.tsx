@@ -128,10 +128,24 @@ export function WakeTuningRoute() {
       {screen.kind === "error" ? <ErrorState message={screen.message} onRetry={() => void query.refetch()} /> : null}
 
       {screen.kind === "empty" ? (
-        <EmptyState
-          heading="No wake attempts recorded yet."
-          body="This fills in the first time the wake word is spoken near a source."
-        />
+        <div className="flex flex-col gap-3">
+          <EmptyState
+            heading="No wake attempts recorded yet."
+            body="This fills in the first time the wake word is spoken near a source."
+          />
+          {/* D-16, in the one state where it matters most: a deployment
+              upgrading into this phase has an empty `wake_events` table and
+              a session directory that may hold hundreds of turns. "No
+              history" and "a history none of which can be scored" are
+              different facts and the screen has to tell them apart. Same
+              sentence as the `ready` branch's, deliberately. */}
+          {screen.notScoredCount > 0 ? (
+            <p className="text-label text-muted-foreground">
+              {screen.notScoredCount} earlier session{screen.notScoredCount === 1 ? "" : "s"} predate wake-score
+              recording and aren't included above.
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {screen.kind === "ready" ? (
