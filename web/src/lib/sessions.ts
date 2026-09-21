@@ -61,3 +61,14 @@ export function fetchSessions(): Promise<SessionSummary[]> {
 export function fetchSession(id: string): Promise<SessionDetail> {
   return apiFetch<SessionDetail>(`/api/sessions/${id}`)
 }
+
+/** The audio path for a session id -- a plain string, never a fetch. The
+ * `<audio>` element's own `src` attribute issues its own browser-native
+ * request and carries the session cookie automatically for a same-origin
+ * address, so this one path deliberately does not go through `apiFetch`
+ * (`lib/api.ts`'s own docstring: "No screen may call `fetch` directly").
+ * This is the named exception to that rule, not a lapse -- `apiFetch`'s
+ * JSON-shaped seam is the wrong fit for routing binary audio bytes. */
+export function sessionAudioUrl(id: string): string {
+  return `/api/sessions/${id}/audio`
+}

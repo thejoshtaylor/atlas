@@ -3,7 +3,7 @@
 // from React: what belongs here is only ever a fact about data, never a
 // fact about a render.
 import { ApiError } from "@/lib/api"
-import type { SessionDetail } from "@/lib/sessions"
+import type { SessionDetail, TimelineEntry } from "@/lib/sessions"
 
 export interface QueryLike<T> {
   status: "pending" | "error" | "success"
@@ -53,4 +53,27 @@ export function deriveSessionDetailScreenState(input: {
     return isRemovedByRetention(query.error) ? { kind: "removed" } : { kind: "not_found" }
   }
   return { kind: "loading" }
+}
+
+/**
+ * DBG-03/D-09's other pure half: which timeline row is active at a given
+ * `<audio>` `currentTime`. The last entry whose `offset_s` is at or before
+ * `currentTime` -- inclusive at the entry's own offset, because a row
+ * becomes active at the instant its event happened, not a tick later. A
+ * tie (two entries at the same offset) resolves to the later of the two,
+ * matching the order `session/recorder.py` appended them and
+ * `render_timeline`'s own stable sort preserves. `null` before the first
+ * entry's offset, or for an empty timeline -- there is nothing active yet.
+ * An entry with `offset_s: null` never becomes active (no offset to
+ * compare against a clock).
+ */
+export function activeTimelineIndexAt(entries: TimelineEntry[], currentTime: number): number | null {
+  let activeIndex: number | null = null
+  for (let index = 0; index < entries.length; index += 1) {
+    const offset = entries[index].offset_s
+    if (offset !== null && offset <= currentTime) {
+      activeIndex = index
+    }
+  }
+  return activeIndex
 }
