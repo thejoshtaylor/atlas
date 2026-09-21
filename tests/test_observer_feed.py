@@ -306,6 +306,12 @@ async def test_a_camera_turn_publishes_a_labelled_turn_started_event_and_wraps_t
     assert started["type"] == "turn.started"
     assert started["source"] == "camera"
     assert isinstance(started["turn_id"], str) and started["turn_id"]
+    # `session_id` is the real session directory name (a timestamp plus
+    # the turn id), not the bare turn id -- `routes/sessions.py`'s detail
+    # route is keyed on the directory name, and this is what makes `/live`'s
+    # own "View full session ->" link resolvable.
+    assert started["session_id"].endswith(started["turn_id"])
+    assert started["session_id"] != started["turn_id"]
 
     for expected_type in ("transcript.partial", "reply.text", "turn.timing"):
         event = queue.get_nowait()
@@ -503,7 +509,9 @@ def test_a_turn_started_from_the_websocket_route_is_labelled_browser_mic_on_the_
                     "type": "turn.started",
                     "source": "browser_mic",
                     "turn_id": started["turn_id"],
+                    "session_id": started["session_id"],
                 }
+                assert started["session_id"].endswith(started["turn_id"])
                 labelled_reply = observer.receive_json()
                 assert labelled_reply == {"type": "reply.text", "text": "done", "source": "browser_mic"}
                 # The participant socket's own event carries no source key

@@ -587,8 +587,22 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
         # new card before the first transcript partial can possibly arrive
         # (08-UI-SPEC.md finding 1's `turn.started {source, turn_id}`
         # boundary message).
+        #
+        # `session_id` (Task 3 deviation, Rule 2): `routes/sessions.py`'s
+        # detail route is keyed on the session *directory* name -- a
+        # timestamp plus this same turn_id, never the bare turn_id alone
+        # (`session/recorder.py::_directory_name`). Without it, `/live`'s
+        # own "View full session ->" link (08-UI-SPEC.md Copywriting
+        # Contract) would point at an id `routes/sessions.py` can never
+        # resolve. `session_recorder` is already constructed above, so its
+        # real directory name costs nothing extra to read here.
         app.state.observer_registry.publish(
-            {"type": "turn.started", "source": source_name, "turn_id": timings.turn_id}
+            {
+                "type": "turn.started",
+                "source": source_name,
+                "turn_id": timings.turn_id,
+                "session_id": session_recorder.directory.name,
+            }
         )
         source = ObserverPublishingSource(source, source_name, app.state.observer_registry)
         await run_turn(
@@ -1687,8 +1701,20 @@ async def turn_ws(websocket: WebSocket) -> None:
     # the browser-microphone source -- 08-UI-SPEC.md's own unresolved
     # question resolved yes (see this plan's SUMMARY): all sources appear
     # uniformly, an operator's own browser turn included.
+    #
+    # `session_recorder` is built here, not inline in the `run_turn(...)`
+    # call below, so its real directory name (`session_id`) is on hand for
+    # the published event -- see `_make_run_turn_for_source`'s own comment
+    # for why the bare `turn_id` alone cannot resolve `/live`'s "View full
+    # session ->" link.
+    session_recorder = SessionRecorder(config.session, timings)
     websocket.app.state.observer_registry.publish(
-        {"type": "turn.started", "source": BROWSER_MIC_SOURCE_NAME, "turn_id": timings.turn_id}
+        {
+            "type": "turn.started",
+            "source": BROWSER_MIC_SOURCE_NAME,
+            "turn_id": timings.turn_id,
+            "session_id": session_recorder.directory.name,
+        }
     )
     source = ObserverPublishingSource(source, BROWSER_MIC_SOURCE_NAME, websocket.app.state.observer_registry)
     await run_turn(
@@ -1708,7 +1734,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         macros=macros,
         state_fetch=_make_state_fetch(websocket.app.state.plugin_manager),
         pending_runs_fetch=_make_pending_runs_fetch(websocket.app.state.workflow_repo),
-        session_recorder=SessionRecorder(config.session, timings),
+        session_recorder=session_recorder,
         workflow_tool_host=websocket.app.state.workflow_tool_host,
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
     )
