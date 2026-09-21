@@ -540,3 +540,35 @@ class ProviderSelectionRow(Base):
     updated_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )
+
+
+class WakeEventRow(Base):
+    """One wake hit the detector reported to the gate, allowed or blocked
+    (D-13, D-14) -- this phase's own persistent counterpart to
+    `sources/runner.py::_record_blocked_hit`'s structured log line, which
+    stays exactly as narrow: `source`, `engine`, `score`, `allowed`,
+    `block_reason`, `recorded_at`, and nothing else.
+
+    No column here is a JSON or free-form type (T-08-06, 08-RESEARCH.md's
+    Security Domain): widening this record to carry a transcript or audio
+    bytes is a deliberate schema change with a failing test attached
+    (`tests/test_wake_events.py`'s column-set assertion), never a casual
+    one.
+
+    No unique constraint -- every row is a distinct event, not a per-key
+    singleton, so `record_wake_event` is a plain insert with no
+    `on_conflict_do_update` counterpart (`ProviderSelectionRow`'s own
+    `uq_provider_selections_slot` has no analog here). Indexed on
+    `recorded_at` instead, the column the newest-first read
+    (`list_wake_events`) orders by.
+    """
+
+    __tablename__ = "wake_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    engine: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[float | None] = mapped_column(nullable=True)
+    allowed: Mapped[bool] = mapped_column(nullable=False)
+    block_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recorded_at: Mapped[datetime] = mapped_column(nullable=False, index=True)

@@ -1066,3 +1066,69 @@ class ProviderSelectionRepository(Protocol):
         """Every `provider_selections` row -- the seeded three, present
         from the first migration onward."""
         ...
+
+
+@dataclass(frozen=True)
+class WakeEvent:
+    """One row from `wake_events` -- every wake hit the detector reported
+    to the gate, whether the gate allowed it or blocked it (D-13, D-14).
+
+    Field set is closed and exactly these seven names:
+    `id`, `source`, `engine`, `score`, `allowed`, `block_reason`,
+    `recorded_at`. `tests/test_wake_events.py` reads this dataclass's own
+    field names off `dataclasses.fields()` and fails on an added field,
+    not only a renamed one -- a later change cannot widen this record to
+    carry a transcript or audio silently.
+
+    No `session_directory` field: 08-RESEARCH.md's Open Question 2 is
+    resolved here, not deferred. The gate decision in
+    `sources/runner.py::_process_chunk` happens before `SessionRecorder`
+    is ever constructed further down the call chain, so a turn's
+    directory name does not exist at the instant this row is naturally
+    written -- linking would mean threading a return value back out of
+    the turn callable for one outline badge, and 08-UI-SPEC.md's own
+    Copywriting Contract asks only for the words "Started a turn", not a
+    link. A nullable column that is always null is a worse privacy
+    posture than no column at all, and adding one later is a one-column
+    migration.
+    """
+
+    id: int
+    source: str
+    engine: str
+    score: float | None
+    allowed: bool
+    block_reason: str | None
+    recorded_at: datetime
+
+
+class WakeEventRepository(Protocol):
+    """What the persistent wake-hit record's storage layer must answer
+    (D-13, D-14).
+
+    Two members only, matching `record_wake_event`'s two call sites in
+    `sources/runner.py` (one per branch of the gate) and the one read
+    the tuning screen needs. Append-only by design: no update method and
+    no delete method -- every wake attempt is a distinct event, never a
+    value replaced in place, the same "exactly one owner" register D-12
+    states for session deletion, applied here to mean there is no owner
+    at all.
+    """
+
+    async def record_wake_event(
+        self,
+        *,
+        source: str,
+        engine: str,
+        score: float | None,
+        allowed: bool,
+        block_reason: str | None,
+        recorded_at: datetime,
+    ) -> WakeEvent:
+        """Insert one row and return it with a real `id`."""
+        ...
+
+    async def list_wake_events(self, limit: int | None = None) -> "list[WakeEvent]":
+        """Every `wake_events` row, newest first -- or the `limit`
+        newest, newest first, when `limit` is given."""
+        ...

@@ -39,6 +39,7 @@ from spire_voice.db.models import (
     SetupStateRow,
     SetupStepRow,
     UserRow,
+    WakeEventRow,
     WorkflowRunRow,
     WorkflowStepRow,
 )
@@ -56,6 +57,7 @@ from spire_voice.db.repository import (
     Setting,
     SetupStep,
     User,
+    WakeEvent,
     WorkflowRun,
     WorkflowRunNotAppendableError,
     WorkflowRunNotFoundError,
@@ -770,6 +772,67 @@ class PostgresProviderSelectionRepository:
         async with self._sessionmaker() as session:
             rows = (await session.execute(select(ProviderSelectionRow))).scalars().all()
             return [_provider_selection_from_row(row) for row in rows]
+
+
+def _wake_event_from_row(row: WakeEventRow) -> WakeEvent:
+    return WakeEvent(
+        id=row.id,
+        source=row.source,
+        engine=row.engine,
+        score=row.score,
+        allowed=row.allowed,
+        block_reason=row.block_reason,
+        recorded_at=_to_aware_utc(row.recorded_at),
+    )
+
+
+class PostgresWakeEventRepository:
+    """`WakeEventRepository`, implemented against a real Postgres.
+
+    Structurally satisfies `spire_voice.db.repository.WakeEventRepository`
+    (a `typing.Protocol`) -- built from `PostgresProviderSelectionRepository`'s
+    own shape above. `record_wake_event` is a plain `INSERT`: unlike
+    `set_selection`'s deliberate `ON CONFLICT`, every wake event is a new
+    row, never an upsert target (D-13, D-14) -- there is no key for two
+    wake events to conflict on.
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker) -> None:
+        self._sessionmaker = sessionmaker
+
+    async def record_wake_event(
+        self,
+        *,
+        source: str,
+        engine: str,
+        score: float | None,
+        allowed: bool,
+        block_reason: str | None,
+        recorded_at: datetime,
+    ) -> WakeEvent:
+        row = WakeEventRow(
+            source=source,
+            engine=engine,
+            score=score,
+            allowed=allowed,
+            block_reason=block_reason,
+            recorded_at=_to_naive_utc(recorded_at),
+        )
+        async with self._sessionmaker() as session:
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return _wake_event_from_row(row)
+
+    async def list_wake_events(self, limit: int | None = None) -> "list[WakeEvent]":
+        statement = select(WakeEventRow).order_by(
+            WakeEventRow.recorded_at.desc(), WakeEventRow.id.desc()
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(statement)).scalars().all()
+            return [_wake_event_from_row(row) for row in rows]
 
 
 def _credential_from_row(row: ProviderCredentialRow) -> Credential:

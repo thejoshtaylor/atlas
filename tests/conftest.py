@@ -34,6 +34,7 @@ from spire_voice.db.repository import (
     Setting,
     SetupStep,
     User,
+    WakeEvent,
     WorkflowRun,
     WorkflowRunNotAppendableError,
     WorkflowRunNotFoundError,
@@ -1360,3 +1361,53 @@ def fake_provider_selection_repository():
     pointed at `"xai"` -- matching `fake_setup_repository`'s own
     factory-fixture convention."""
     return FakeProviderSelectionRepository
+
+
+class FakeWakeEventRepository:
+    """An in-memory `WakeEventRepository` (`spire_voice.db.repository`) --
+    the Postgres-free implementation `SourceRunner`'s own tests drive
+    (D-13, D-14), matching every other `Fake*Repository` in this file.
+    Starts empty: every test records its own events, matching
+    `fake_settings_repository`'s own convention rather than
+    `fake_provider_selection_repository`'s pre-seeded one -- there is no
+    equivalent of the three seeded provider slots for wake events.
+    """
+
+    def __init__(self) -> None:
+        self._next_id = 1
+        self.events: list[WakeEvent] = []
+
+    async def record_wake_event(
+        self,
+        *,
+        source: str,
+        engine: str,
+        score: "float | None",
+        allowed: bool,
+        block_reason: "str | None",
+        recorded_at: datetime,
+    ) -> WakeEvent:
+        event = WakeEvent(
+            id=self._next_id,
+            source=source,
+            engine=engine,
+            score=score,
+            allowed=allowed,
+            block_reason=block_reason,
+            recorded_at=recorded_at,
+        )
+        self._next_id += 1
+        self.events.append(event)
+        return event
+
+    async def list_wake_events(self, limit: "int | None" = None) -> "list[WakeEvent]":
+        newest_first = sorted(self.events, key=lambda e: e.recorded_at, reverse=True)
+        return newest_first if limit is None else newest_first[:limit]
+
+
+@pytest.fixture
+def fake_wake_event_repository():
+    """Factory: `fake_wake_event_repository()` builds an empty
+    `FakeWakeEventRepository` -- every test populates it itself, matching
+    `fake_settings_repository`'s own factory-fixture convention."""
+    return FakeWakeEventRepository
