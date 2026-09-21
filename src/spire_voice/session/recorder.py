@@ -77,6 +77,7 @@ class SessionRecorder:
         self._turn_id = timings.turn_id
         self._clock = clock
         self._audio_format: dict[str, Any] | None = None
+        self._preroll_bytes = 0
         self._audio_chunks: list[bytes] = []
         self._events: list[dict[str, Any]] = []
         self._closed = False
@@ -101,6 +102,19 @@ class SessionRecorder:
         guessing.
         """
         self._audio_format = {"encoding": encoding, "sample_rate": sample_rate}
+
+    def set_preroll_bytes(self, byte_count: int) -> None:
+        """Record how many bytes at the head of the audio this turn is
+        about to receive are replayed pre-roll, taken from the source's
+        own declaration (`PrerollReplayingSource.preroll_bytes`) -- never
+        assumed -- mirroring `set_audio_format`'s habit exactly (plan
+        08-11, DBG-03).
+
+        `close()` serializes the honest number, `min(declared, len of
+        bytes actually received)`, rather than this declared count --
+        this method only records what the source claims it will provide.
+        """
+        self._preroll_bytes = byte_count
 
     def record_audio_chunk(self, chunk: bytes) -> None:
         """Append one raw audio chunk, exactly as captured -- no
@@ -137,11 +151,20 @@ class SessionRecorder:
         event_lines = [json.dumps(event, sort_keys=True) for event in self._events]
         events_path.write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
 
-        timing_payload = _serialize_timings(timings, self._audio_format)
+        # The honest count, not the declared one (plan 08-11): a turn that
+        # ended before draining its whole pre-roll records fewer pre-roll
+        # bytes than the source declared, and a deployment that writes no
+        # audio at all -- `self._config.record_audio and audio_bytes`,
+        # the same guard the audio-file write below already uses -- must
+        # report zero rather than a count against bytes that never
+        # reached disk.
+        audio_bytes = b"".join(self._audio_chunks)
+        preroll_bytes = min(self._preroll_bytes, len(audio_bytes)) if self._config.record_audio and audio_bytes else 0
+
+        timing_payload = _serialize_timings(timings, self._audio_format, preroll_bytes)
         timing_path = self.directory / TIMING_FILENAME
         timing_path.write_text(json.dumps(timing_payload, sort_keys=True, indent=2), encoding="utf-8")
 
-        audio_bytes = b"".join(self._audio_chunks)
         if self._config.record_audio and audio_bytes:
             encoding = (self._audio_format or {}).get("encoding", "raw")
             (self.directory / f"audio.{encoding}").write_bytes(audio_bytes)
@@ -170,7 +193,9 @@ class SessionRecorder:
         )
 
 
-def _serialize_timings(timings: TurnTimings, audio_format: dict[str, Any] | None) -> dict[str, Any]:
+def _serialize_timings(
+    timings: TurnTimings, audio_format: dict[str, Any] | None, preroll_bytes: int
+) -> dict[str, Any]:
     """The `TurnTimings` record, serialized from the object the turn
     already built -- this module measures nothing itself; there is one
     source of stage timings in this system and it is `timing.py`.
@@ -181,10 +206,18 @@ def _serialize_timings(timings: TurnTimings, audio_format: dict[str, Any] | None
     `timings.stage_durations_ms()` -- `timing.py`'s own derivation,
     measured from the previous stage actually reached, never recomputed
     here.
+
+    `preroll_bytes` (plan 08-11, DBG-03) counts bytes at the head of the
+    audio file actually written to disk -- the caller (`close()`) has
+    already reduced it to `min(declared, len(audio_bytes))`, or `0` when
+    no audio file is written, so this key reports truthfully rather than
+    optimistically for a turn that ended early or a deployment that
+    records no audio at all.
     """
     payload = dataclasses.asdict(timings)
     payload["stage_durations_ms"] = timings.stage_durations_ms()
     payload["end_of_speech_to_first_audio_ms"] = timings.end_of_speech_to_first_audio_ms
     payload["end_of_speech_to_answer_audio_ms"] = timings.end_of_speech_to_answer_audio_ms
     payload["audio_format"] = audio_format
+    payload["preroll_bytes"] = preroll_bytes
     return payload

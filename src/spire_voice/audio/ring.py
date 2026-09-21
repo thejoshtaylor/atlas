@@ -25,9 +25,16 @@ _PCM_BYTES_PER_SAMPLE = 2
 _ALAW_BYTES_PER_SAMPLE = 1
 
 
-def _bytes_per_ms(source_format: SourceFormat) -> float:
+def bytes_per_ms(source_format: SourceFormat) -> float:
     """The byte rate implied by `source_format`'s own encoding and sample
-    rate -- read from the source, never assumed."""
+    rate -- read from the source, never assumed.
+
+    Called from both ends of the conversion (plan 08-11): it bounds
+    `PrerollBuffer` below, and `session/timeline.py::preroll_offset_s`
+    inverts it to turn a recorded pre-roll byte count back into seconds --
+    one definition, called from both ends, so the bound and its inverse
+    cannot drift.
+    """
     bytes_per_sample = _PCM_BYTES_PER_SAMPLE if source_format.encoding == "pcm" else _ALAW_BYTES_PER_SAMPLE
     return source_format.sample_rate * bytes_per_sample / 1000.0
 
@@ -37,7 +44,7 @@ class PrerollBuffer:
     bounded in bytes at every `push()`."""
 
     def __init__(self, source_format: SourceFormat, window_ms: int) -> None:
-        self._max_bytes = round(_bytes_per_ms(source_format) * window_ms)
+        self._max_bytes = round(bytes_per_ms(source_format) * window_ms)
         self._chunks: deque[bytes] = deque()
         self._held_bytes = 0
 

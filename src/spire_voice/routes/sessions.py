@@ -39,7 +39,7 @@ from spire_voice.config import SessionConfig
 from spire_voice.session.audio_wrap import AudioWrapError, wrap_session_audio
 from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
 from spire_voice.session.retention import parse_session_timestamp
-from spire_voice.session.timeline import TIMELINE_FILENAME, regenerate_timeline
+from spire_voice.session.timeline import TIMELINE_FILENAME, preroll_offset_s, regenerate_timeline
 
 logger = logging.getLogger("spire_voice.routes.sessions")
 
@@ -145,9 +145,16 @@ class TimelineEntryResponse(BaseModel):
     ts: float
     kind: str
     # The one field this route adds beyond what `render_timeline` itself
-    # writes: the entry's own timestamp minus the turn's start mark, both
-    # drawn from the same `time.monotonic()` clock domain -- one clock
-    # compared against itself, never a re-sort against a second one.
+    # writes: the entry's position in the recording served by `GET
+    # /api/sessions/{id}/audio` -- the entry's own timestamp minus the
+    # turn's start mark (both drawn from the same `time.monotonic()` clock
+    # domain -- one clock compared against itself, never a re-sort against
+    # a second one) PLUS the pre-roll the turn replayed ahead of that mark
+    # (plan 08-11, DBG-03). This is the coordinate system the `<audio>`
+    # element's `currentTime` already reports in (D-09): `turn_started_at`
+    # sits at the END of the replayed pre-roll window, so this field means
+    # "position in the file you are playing," never a raw delta from the
+    # wake hit.
     offset_s: "float | None" = None
 
 
@@ -451,9 +458,16 @@ def _session_detail(session_id: str, started_at: datetime, directory: Path) -> S
     raw_timeline = _read_jsonl(timeline_path)
 
     turn_started_at = timing_payload.get("turn_started_at")
+    # Plan 08-11 (DBG-03): computed once, added to every entry's delta from
+    # `turn_started_at` -- `turn_started_at` sits at the END of the
+    # replayed pre-roll window, so an unshifted delta would point about
+    # 1.5 s earlier in the recording than the event it names. `0.0` for
+    # every path that built no pre-roll buffer (the browser microphone and
+    # WebRTC transports), so nothing about them moves.
+    shift_s = preroll_offset_s(timing_payload)
     timeline = [
         TimelineEntryResponse(
-            offset_s=(entry["ts"] - turn_started_at) if turn_started_at is not None else None,
+            offset_s=(entry["ts"] - turn_started_at + shift_s) if turn_started_at is not None else None,
             **entry,
         )
         for entry in raw_timeline

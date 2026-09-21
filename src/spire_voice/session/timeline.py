@@ -21,6 +21,12 @@ broken by Python's stable `sorted()` alone: an event keeps its place
 relative to another event recorded at the same instant, because it was
 appended to the input list first, not because this module invented a
 second tiebreak rule.
+
+`preroll_offset_s` (plan 08-11, DBG-03) extends the same derive-never-store
+discipline to one more quantity: how far `turn_started_at` sits into the
+recorded audio, given the pre-roll byte count `SessionRecorder.close`
+wrote into `timing.json`. It is a pure function of `timing_payload`, never
+a value this module stores or caches, matching `render_timeline` above.
 """
 
 from __future__ import annotations
@@ -29,9 +35,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+from spire_voice.audio.ring import bytes_per_ms
 from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
+from spire_voice.transports.base import SourceFormat
 
 TIMELINE_FILENAME = "timeline.jsonl"
+
+# The closed set of encodings this codebase models exactly
+# (`transports/base.py::SourceFormat`'s own docstring). Anything outside
+# this set is a payload `preroll_offset_s` cannot convert exactly, never a
+# rate it guesses at.
+_MODELLED_ENCODINGS = ("pcm", "alaw")
 
 # Encounter order, matching `timing.py`'s own `_STAGE_ORDER` exactly -- not
 # re-declared there and imported here, because `timing.py`'s own privacy
@@ -67,6 +81,46 @@ def render_timeline(events: list[dict[str, Any]], timing_payload: dict[str, Any]
         if value is not None:
             entries.append({"ts": value, "kind": "stage", "stage": label})
     return sorted(entries, key=lambda entry: entry["ts"])
+
+
+def preroll_offset_s(timing_payload: dict[str, Any]) -> float:
+    """How far into the recorded audio `turn_started_at` sits, in seconds
+    (plan 08-11, DBG-03): `timing_payload["preroll_bytes"]` divided by the
+    recording's own byte rate, `bytes_per_ms(SourceFormat(...)) * 1000.0`
+    -- the same conversion that bounded `audio/ring.py::PrerollBuffer` in
+    the first place, inverted here, so the bound and its inverse cannot
+    drift.
+
+    A derived value: this module stores nothing (the module docstring's
+    own discipline), and this function reads `timing_payload` fresh on
+    every call rather than caching anything.
+
+    Returns `0.0` -- never raises, never guesses -- for every payload it
+    cannot convert exactly: a missing, non-numeric, or negative
+    `preroll_bytes`; a missing `audio_format`; a missing or non-positive
+    `sample_rate`; or an `encoding` outside the closed set `{"pcm",
+    "alaw"}` this codebase models exactly (`transports/base.py::
+    SourceFormat`). `0.0` is the pre-fix behavior, correct for every path
+    that never built a pre-roll buffer; a guessed byte rate would
+    silently move a recording by the wrong amount (T-08-23).
+    """
+    preroll_bytes = timing_payload.get("preroll_bytes")
+    if not isinstance(preroll_bytes, (int, float)) or isinstance(preroll_bytes, bool) or preroll_bytes < 0:
+        return 0.0
+
+    audio_format = timing_payload.get("audio_format")
+    if not isinstance(audio_format, dict):
+        return 0.0
+
+    encoding = audio_format.get("encoding")
+    sample_rate = audio_format.get("sample_rate")
+    if encoding not in _MODELLED_ENCODINGS:
+        return 0.0
+    if not isinstance(sample_rate, (int, float)) or isinstance(sample_rate, bool) or sample_rate <= 0:
+        return 0.0
+
+    byte_rate = bytes_per_ms(SourceFormat(encoding, sample_rate)) * 1000.0
+    return preroll_bytes / byte_rate
 
 
 def write_timeline(directory: Path, timeline: list[dict[str, Any]]) -> Path:

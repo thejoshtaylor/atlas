@@ -21,7 +21,6 @@ Task 2).
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,6 +63,7 @@ class FakeAlawSource:
     def __init__(self, frames: Sequence[bytes] = ()) -> None:
         self._frames = list(frames)
         self.sent_audio: list[bytes] = []
+        self.sent_events: list[dict] = []
 
     async def frames(self) -> AsyncIterator[bytes]:
         for frame in self._frames:
@@ -71,6 +71,14 @@ class FakeAlawSource:
 
     async def send_audio(self, chunk: bytes) -> None:
         self.sent_audio.append(chunk)
+
+    async def send_event(self, event: dict) -> None:
+        # `PrerollReplayingSource.send_event` (unlike `_RecordingAudioSource`'s
+        # own `getattr(..., None)` guard) delegates unconditionally, so this
+        # fake must implement it -- the same full `AudioSource` protocol
+        # `tests/conftest.py`'s `FakeAudioSource` satisfies via `run_turn`
+        # never calling `send_event` on an unwrapped fake directly.
+        self.sent_events.append(event)
 
     def source_format(self) -> SourceFormat:
         return SourceFormat("alaw", 8000)
@@ -86,14 +94,17 @@ def _build_sessions_app(security: SecurityConfig, account_repo, session_config: 
     return app
 
 
-def _client_with_role(app: FastAPI, security: SecurityConfig, account_repo, role: str) -> TestClient:
-    user = asyncio.run(
-        account_repo.create_user(
-            email=f"{role}@example.invalid",
-            display_name=role.title(),
-            password_hash="not-checked-by-this-test",
-            role=role,
-        )
+async def _client_with_role(app: FastAPI, security: SecurityConfig, account_repo, role: str) -> TestClient:
+    """Async, unlike `tests/test_session_routes.py`'s own synchronous
+    `_client_with_role` (which wraps the same call in `asyncio.run`) --
+    every test in this file that needs a client is itself an async test
+    driving a real `run_turn`, and `asyncio.run` cannot be called from
+    inside an already-running event loop."""
+    user = await account_repo.create_user(
+        email=f"{role}@example.invalid",
+        display_name=role.title(),
+        password_hash="not-checked-by-this-test",
+        role=role,
     )
     token = issue_access_token(user_id=user.id, role=role, security=security)
     return TestClient(app, cookies={security.cookie_name: token})
@@ -185,7 +196,7 @@ async def test_camera_turn_pre_roll_length_travels_to_the_browser_reported_offse
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200
@@ -272,7 +283,7 @@ async def test_browser_and_webrtc_paths_report_no_preroll_and_no_shift(
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200
@@ -300,7 +311,7 @@ async def test_a_timing_json_with_no_preroll_bytes_key_reads_the_same_as_an_expl
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200
@@ -325,7 +336,7 @@ async def test_a_negative_preroll_bytes_answers_200_with_unshifted_offsets(
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200
@@ -352,7 +363,7 @@ async def test_an_unmodelled_encoding_answers_200_with_unshifted_offsets(
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200
@@ -376,7 +387,7 @@ async def test_an_empty_timeline_answers_200_with_an_empty_list(
     account_repo = fake_account_repository()
     session_config = _session_config(tmp_path)
     app = _build_sessions_app(security, account_repo, session_config)
-    client = _client_with_role(app, security, account_repo, "operator")
+    client = await _client_with_role(app, security, account_repo, "operator")
 
     response = client.get(f"/api/sessions/{recorder.directory.name}")
     assert response.status_code == 200

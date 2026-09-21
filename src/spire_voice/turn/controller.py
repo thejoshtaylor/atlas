@@ -399,6 +399,16 @@ async def run_turn(
         # could be read, so this is the only tap this function opens.
         fmt = source.source_format()
         session_recorder.set_audio_format(fmt.encoding, fmt.sample_rate)
+        # Plan 08-11: read off the same still-unwrapped `source` the
+        # `barge_in` attachment above already reads off, and for the same
+        # reason -- `_RecordingAudioSource` delegates `frames()`/
+        # `send_audio()`/`send_event()` but forwards no arbitrary
+        # attribute, so after the wrap below this value is unreachable.
+        # `0` is the default for every source that is not a
+        # `PrerollReplayingSource` -- the browser microphone and WebRTC
+        # paths build no pre-roll buffer, so they pass zero and nothing
+        # about them moves (DBG-03).
+        session_recorder.set_preroll_bytes(getattr(source, "preroll_bytes", 0))
         source = _RecordingAudioSource(source, session_recorder)
 
     try:

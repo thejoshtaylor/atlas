@@ -356,6 +356,17 @@ class PrerollReplayingSource:
         self._wrapped = wrapped
         self._preroll_chunks = preroll_chunks
 
+    @property
+    def preroll_bytes(self) -> int:
+        """How many of the bytes `frames()` is about to yield are replay,
+        rather than audio captured after the wake hit -- a property, not a
+        bare attribute, because this wrapper is the only object in the
+        system that knows this count (plan 08-11). `run_turn` reads this
+        off the still-unwrapped source, before `_RecordingAudioSource`
+        wraps it, and hands it to `SessionRecorder.set_preroll_bytes`.
+        """
+        return sum(len(chunk) for chunk in self._preroll_chunks)
+
     async def frames(self) -> AsyncIterator[bytes]:
         for chunk in self._preroll_chunks:
             yield chunk
