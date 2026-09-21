@@ -56,9 +56,14 @@ export interface SetWakeThresholdInput {
   threshold: number
 }
 
-/** `SetWakeThresholdResponse`'s exact shape. */
+/** `SetWakeThresholdResponse`'s exact shape. `applied_to_sources` is how
+ * many running wake sources the change actually reached -- `0` means the
+ * value is stored and will be picked up at the next boot, but nothing is
+ * listening for it to take effect on right now. D-15 promises "takes
+ * effect live", so the screen states when it did not. */
 export interface SetWakeThresholdResult {
   threshold: number
+  applied_to_sources: number
 }
 
 /**

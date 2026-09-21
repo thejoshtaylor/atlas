@@ -101,9 +101,17 @@ logger = logging.getLogger("spire_voice.sources.runner")
 MAX_PENDING_WAKE_EVENT_WRITES = 64
 
 
-def _resolve_threshold(wake_config: WakeConfig) -> float:
+def resolve_wake_threshold(wake_config: WakeConfig) -> float:
     """The score a `WakeHit` must reach to count, for whichever engine
     `wake_config.engine` names.
+
+    Public as of the Phase 8 review (IN-06): `routes/wake.py` needs the
+    configured threshold for the case where no source is running to report
+    a live one, and a second implementation of this rule there could
+    disagree with this one about the categorical engine.
+    `_resolve_threshold` stays as a module alias for the existing callers,
+    the same shape `session/retention.py` used when its own directory
+    parser was promoted.
 
     Only `OpenWakeWordConfig` carries a graded `threshold` today --
     `VoskWakeDetector` reports a fixed `score=1.0` for every match, because
@@ -115,6 +123,10 @@ def _resolve_threshold(wake_config: WakeConfig) -> float:
     if wake_config.engine == "openwakeword":
         return wake_config.openwakeword.threshold
     return 1.0
+
+
+# Alias kept for every existing caller in this module.
+_resolve_threshold = resolve_wake_threshold
 
 
 class BargeInMonitor:

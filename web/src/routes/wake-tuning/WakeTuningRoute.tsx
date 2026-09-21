@@ -89,6 +89,7 @@ export function WakeTuningRoute() {
 
   const [showAll, setShowAll] = React.useState(false)
   const [committedValue, setCommittedValue] = React.useState<number | null>(null)
+  const [appliedToSources, setAppliedToSources] = React.useState<number | null>(null)
 
   const threshold = previewedThreshold ?? query.data?.threshold ?? 0
   const screen = deriveWakeTuningScreenState(query, threshold)
@@ -115,6 +116,7 @@ export function WakeTuningRoute() {
   const handleCommit = () =>
     setThreshold.mutateAsync({ threshold }).then((result) => {
       setCommittedValue(result.threshold)
+      setAppliedToSources(result.applied_to_sources)
     })
 
   const visibleEvents =
@@ -238,9 +240,20 @@ export function WakeTuningRoute() {
             <SubmitButton onSubmit={handleCommit} pendingLabel="Setting threshold…">
               Set as active threshold
             </SubmitButton>
-            {committedValue !== null ? (
+            {committedValue !== null && appliedToSources !== 0 ? (
               <p className="text-label text-muted-foreground">
                 Threshold set to {committedValue.toFixed(2)}. This takes effect immediately — no restart needed.
+              </p>
+            ) : null}
+            {/* D-15's promise is that a change takes effect live. When it
+                reached no running source it did not, and saying so is the
+                point -- the alternative is the same "takes effect
+                immediately" sentence for a change that took effect
+                nowhere. */}
+            {committedValue !== null && appliedToSources === 0 ? (
+              <p className="text-label text-muted-foreground">
+                Threshold saved as {committedValue.toFixed(2)}, but no wake source is running to apply it to. It
+                takes effect the next time one starts.
               </p>
             ) : null}
             {setThreshold.status === "error" ? (

@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.db.repository import SettingsRepository, WakeEventRepository
 from spire_voice.session.retention import parse_session_timestamp
+from spire_voice.sources.runner import resolve_wake_threshold
 
 router = APIRouter(tags=["wake"])
 
@@ -132,6 +133,12 @@ class SetWakeThresholdRequest(BaseModel):
 
 class SetWakeThresholdResponse(BaseModel):
     threshold: float
+    # How many running sources the change actually reached. `0` is a real
+    # answer, not an error: the value is stored and will be picked up at
+    # the next boot, but nothing is listening for it to take effect on
+    # right now -- and D-15's whole promise is "takes effect live", so the
+    # screen has to be able to tell the operator when it did not.
+    applied_to_sources: int
 
 
 # --- Routes -----------------------------------------------------------
@@ -172,8 +179,15 @@ async def list_wake_events(
     # The live threshold in force, read from the first running source
     # rather than from configuration -- so the number the screen shows is
     # the number the gate is actually using after any live change (D-15).
+    #
+    # The list is always `[camera_runner]` today, so the empty case is not
+    # reachable -- but it is read positionally and an `IndexError` here is
+    # an HTTP 500 on a screen whose whole job is to show a number. With no
+    # running source there is no live value to report, so the configured
+    # one is the honest answer: the global policy, unresolved, because
+    # there is no source to resolve an override for.
     source_runners = request.app.state.source_runners
-    threshold = source_runners[0].wake_threshold
+    threshold = source_runners[0].wake_threshold if source_runners else resolve_wake_threshold(config.wake)
 
     return WakeEventsResponse(
         events=[
@@ -216,7 +230,14 @@ async def set_wake_threshold(
     # Every running source, not just one -- `app.state.source_runners` is
     # assigned once at startup and lives for the process's life, and it is
     # the only reference the running gates are reachable through (D-15).
-    for runner in request.app.state.source_runners:
+    #
+    # Counted and reported, because this loop over an empty list used to
+    # return 200 having applied the change to nothing -- a "takes effect
+    # immediately" answer for a change that took effect nowhere.
+    source_runners = request.app.state.source_runners
+    for runner in source_runners:
         runner.set_wake_threshold(payload.threshold)
 
-    return SetWakeThresholdResponse(threshold=payload.threshold)
+    return SetWakeThresholdResponse(
+        threshold=payload.threshold, applied_to_sources=len(source_runners)
+    )

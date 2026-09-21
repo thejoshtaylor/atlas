@@ -58,8 +58,11 @@ interface StubResponse {
 
 function stubLib(
   fetchWakeEvents: () => Promise<StubResponse>,
-  mutationFn: (input: { threshold: number }) => Promise<{ threshold: number }> = async ({ threshold }) => ({
+  mutationFn: (input: {
+    threshold: number
+  }) => Promise<{ threshold: number; applied_to_sources: number }> = async ({ threshold }) => ({
     threshold,
+    applied_to_sources: 1,
   }),
 ) {
   mock.module("@/lib/wakeTuning", () => ({
@@ -356,4 +359,33 @@ test("a typed value below zero is clamped the same way", async () => {
   fireEvent.change(numberField, { target: { value: "-3" } })
 
   expect(numberField.value).toBe("0")
+})
+
+// IN-06: a save that reached no running source used to show the same
+// "takes effect immediately" sentence as one that did.
+test("a save that reached no running wake source says so, rather than claiming it took effect", async () => {
+  stubLib(
+    async () => ({ events: [stubEvent({ id: 1, score: 0.9 })], threshold: 0.5 }),
+    async ({ threshold }) => ({ threshold, applied_to_sources: 0 }),
+  )
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+  await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
+
+  fireEvent.click(screen.getByText("Set as active threshold"))
+
+  expect(await screen.findByText(/no wake source is running to apply it to/)).toBeTruthy()
+  expect(screen.queryByText(/takes effect immediately/)).toBeNull()
+})
+
+test("a save that reached a running source keeps the takes-effect-immediately sentence", async () => {
+  stubLib(async () => ({ events: [stubEvent({ id: 1, score: 0.9 })], threshold: 0.5 }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+  await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
+
+  fireEvent.click(screen.getByText("Set as active threshold"))
+
+  expect(await screen.findByText(/takes effect immediately/)).toBeTruthy()
+  expect(screen.queryByText(/no wake source is running/)).toBeNull()
 })

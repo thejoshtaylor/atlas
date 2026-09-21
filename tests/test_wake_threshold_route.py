@@ -265,7 +265,7 @@ def test_a_put_inside_range_changes_every_running_sources_threshold_and_the_next
 
         response = client.put("/api/wake-threshold", json={"threshold": 0.90})
         assert response.status_code == 200
-        assert response.json() == {"threshold": 0.90}
+        assert response.json() == {"threshold": 0.90, "applied_to_sources": 1}
 
         # The same score that used to clear the gate no longer does, on
         # the exact object a real chunk is evaluated against.
@@ -596,5 +596,53 @@ def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path
         assert len(body["events"]) == MAX_WAKE_EVENTS_IN_RESPONSE
         # The newest ones, not an arbitrary page.
         assert body["events"][0]["recorded_at"].startswith("2026-01-01T00:33:2")
+    finally:
+        client.__exit__(None, None, None)
+
+
+# === Code review IN-06: the positional read of app.state.source_runners ===
+
+
+def test_the_events_route_reports_the_configured_threshold_when_no_source_is_running(
+    tmp_path, monkeypatch
+):
+    """`source_runners[0]` is an unguarded index. It is always
+    `[camera_runner]` today, so this is not reachable -- but that list is
+    the one seam D-15 depends on, and an `IndexError` here is a 500 on a
+    screen whose whole job is to show a number (IN-06)."""
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"
+    )
+    try:
+        app_module.app.state.source_runners = []
+
+        response = client.get("/api/wake-events")
+
+        assert response.status_code == 200
+        # The configured value, which is the only honest answer when no
+        # gate is running to report a live one.
+        assert response.json()["threshold"] == 0.55
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_put_that_reaches_no_running_source_says_so_rather_than_claiming_it_applied(
+    tmp_path, monkeypatch
+):
+    """The mirror-image problem: the loop used to return 200 having applied
+    the change to nothing, which reads as D-15's "takes effect live"
+    promise being kept when it was not (IN-06)."""
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"
+    )
+    try:
+        app_module.app.state.source_runners = []
+
+        response = client.put("/api/wake-threshold", json={"threshold": 0.42})
+
+        assert response.status_code == 200
+        assert response.json() == {"threshold": 0.42, "applied_to_sources": 0}
+        # Still stored -- the write is not conditional on a running source.
+        assert client.get("/api/wake-events").json()["threshold"] == 0.55
     finally:
         client.__exit__(None, None, None)
