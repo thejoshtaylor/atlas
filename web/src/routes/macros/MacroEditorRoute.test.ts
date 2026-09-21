@@ -6,11 +6,13 @@ const SOURCE = readFileSync(join(import.meta.dir, "MacroEditorRoute.tsx"), "utf-
 const APP_SOURCE = readFileSync(join(import.meta.dir, "..", "..", "App.tsx"), "utf-8")
 
 describe("MacroEditorRoute -- save is blocked, with the reason inline, before a doomed submit", () => {
-  test("zero actions blocks save, with the exact zero-action copy shown inline under the action list", () => {
-    expect(SOURCE).toMatch(/const zeroActionsReason = saveBlockedByEmptyActions\(actions\)/)
-    expect(SOURCE).toMatch(/const saveDisabled = recordLoading \|\| actions\.length === 0 \|\| duplicate/)
-    expect(SOURCE).toMatch(/\{zeroActionsReason \? <p className="text-body text-destructive">\{zeroActionsReason\}<\/p> : null\}/)
-  })
+  // "zero actions blocks save, with the exact zero-action copy shown
+  // inline under the action list" retired (08-10-PLAN.md Task 2, D-17
+  // backfill part B): strictly superseded by
+  // MacroEditorRoute.dom.test.tsx's "removing the last action blocks
+  // save and renders the zero-actions message" test, which drives a
+  // real removal down to zero actions and observes the exact message and
+  // the disabled Save button at runtime.
 
   test("a duplicate phrase blocks save, with the exact Copywriting Contract text inline under the Phrase field", () => {
     expect(SOURCE).toMatch(/const duplicate = macrosListQuery\.data \? isDuplicatePhrase\(phrase, macrosListQuery\.data, macroId\) : false/)
