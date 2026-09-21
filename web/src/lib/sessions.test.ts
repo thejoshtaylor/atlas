@@ -2,7 +2,7 @@
 // already checks its sibling: a stubbed `global.fetch`, asserting the
 // right path is called and the envelope is unwrapped correctly.
 import { afterEach, describe, expect, test } from "bun:test"
-import { SESSIONS_QUERY_KEY, fetchSessions, type SessionSummary } from "./sessions"
+import { SESSIONS_QUERY_KEY, fetchSessions, sessionAudioUrl, type SessionSummary } from "./sessions"
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
@@ -46,5 +46,18 @@ describe("sessions.ts -- calls the real routes/sessions.py paths", () => {
 
   test("a session summary carries no source field -- the source label lives on /live, not here", () => {
     expect(Object.keys(sampleSession())).not.toContain("source")
+  })
+
+  test("sessionAudioUrl returns the audio path for that session id and issues no request", async () => {
+    let fetchCalled = false
+    global.fetch = (async () => {
+      fetchCalled = true
+      throw new Error("sessionAudioUrl must not fetch")
+    }) as typeof fetch
+
+    expect(sessionAudioUrl("20260919T154201123456Z-turn-abc123")).toBe(
+      "/api/sessions/20260919T154201123456Z-turn-abc123/audio",
+    )
+    expect(fetchCalled).toBe(false)
   })
 })

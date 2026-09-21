@@ -3,8 +3,8 @@
 // `deriveCalibrationScreenState.ts`'s own multi-branch shape.
 import { describe, expect, test } from "bun:test"
 import { ApiError } from "@/lib/api"
-import type { SessionDetail } from "@/lib/sessions"
-import { deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
+import type { SessionDetail, TimelineEntry } from "@/lib/sessions"
+import { activeTimelineIndexAt, deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
 
 function sampleDetail(overrides: Partial<SessionDetail> = {}): SessionDetail {
   return {
@@ -67,5 +67,46 @@ describe("deriveSessionDetailScreenState", () => {
       hasEverLoaded: true,
     })
     expect(state).toEqual({ kind: "removed" })
+  })
+})
+
+// Task 2 of 08-05 (TDD): activeTimelineIndexAt -- "which row is active at
+// time t," as arithmetic with no DOM in it. See deriveSessionDetailScreenState.ts's
+// own comment for the boundary rule this covers.
+
+function entryAt(offset: number | null): TimelineEntry {
+  return { ts: (offset ?? 0) + 1, kind: "stage", offset_s: offset }
+}
+
+describe("activeTimelineIndexAt", () => {
+  test("a single entry at offset zero is active at time zero", () => {
+    expect(activeTimelineIndexAt([entryAt(0)], 0)).toBe(0)
+  })
+
+  test("the inclusive-at-offset boundary and the gap between two later entries", () => {
+    const entries = [entryAt(0), entryAt(1.5), entryAt(4.0)]
+    expect(activeTimelineIndexAt(entries, 1.4)).toBe(0)
+    expect(activeTimelineIndexAt(entries, 1.5)).toBe(1)
+    expect(activeTimelineIndexAt(entries, 3.9)).toBe(1)
+  })
+
+  test("a time beyond the last entry's offset returns the last index", () => {
+    const entries = [entryAt(0), entryAt(1.5), entryAt(4.0)]
+    expect(activeTimelineIndexAt(entries, 99)).toBe(2)
+  })
+
+  test("a time before the first entry's offset returns null", () => {
+    const entries = [entryAt(1.0), entryAt(2.0)]
+    expect(activeTimelineIndexAt(entries, 0.5)).toBeNull()
+  })
+
+  test("an empty timeline returns null at any time", () => {
+    expect(activeTimelineIndexAt([], 0)).toBeNull()
+    expect(activeTimelineIndexAt([], 999)).toBeNull()
+  })
+
+  test("two entries sharing an offset resolve to the later of the two, matching append order", () => {
+    const entries = [entryAt(0), entryAt(2.0), entryAt(2.0)]
+    expect(activeTimelineIndexAt(entries, 2.0)).toBe(2)
   })
 })
