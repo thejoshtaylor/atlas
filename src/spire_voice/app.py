@@ -103,12 +103,30 @@ logger = logging.getLogger("spire_voice.app")
 
 # D-08: the names every source-turn path publishes to the observer feed
 # under. Not derived from `app.state.source_runners` (`SourceRunner` keeps
-# its own name private) -- this application has exactly two turn-starting
-# paths today, the camera's wake-word listener and the browser microphone
-# behind `/ws/turn`, and both names are fixed at the call site, not
-# discovered.
+# its own name private) -- this application has exactly three turn-starting
+# paths today, and all three names are fixed at the call site, not
+# discovered:
+#
+#   - the camera's wake-word listener (`_make_run_turn_for_source`),
+#   - the browser microphone behind `/ws/turn`,
+#   - the browser's WebRTC transport behind `POST /webrtc/offer`, which
+#     `GET /transport` can select instead of `/ws/turn`.
+#
+# The third was missing until the Phase 8 review found it: its turns were
+# recorded and appeared in the Sessions list while `/live` sat on the idle
+# "Listening for ..." state through the whole turn. D-08 says every turn is
+# labelled with the source it came from and all sources appear, so a turn
+# path that publishes nothing is a defect in this constant block as much as
+# in the route. `tests/test_observer_feed.py` asserts the count of
+# `run_turn` call sites against the count of wrapped sources, so a fourth
+# path cannot go missing the same way.
 CAMERA_SOURCE_NAME = "camera"
 BROWSER_MIC_SOURCE_NAME = "browser_mic"
+WEBRTC_SOURCE_NAME = "browser_webrtc"
+
+# What `observer.opened` advertises: every name above, in one place, so the
+# opening message cannot drift from the set of paths that actually publish.
+OBSERVED_SOURCE_NAMES = (CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME, WEBRTC_SOURCE_NAME)
 
 CONFIG_PATH = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
 # The repository's own `mcp/` directory -- three levels up from this file
@@ -1644,10 +1662,27 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
     # -- if that happens, thread `speech_lock=app.state.speaker_lock`
     # through here too, the same way the wake-word/camera path already
     # does.
+    # WEB-06/D-08: this path publishes to the observer feed too, the same
+    # way `/ws/turn` does -- `session_recorder` is built here rather than
+    # inline in the call below so its real directory name is on hand for
+    # the `turn.started` event's `session_id` (see `_make_run_turn_for_
+    # source`'s own comment for why the bare `turn_id` cannot resolve
+    # `/live`'s "View full session ->" link). The event is published inside
+    # the turn task, after the degraded-slot refusal, so a refused turn
+    # opens no card -- matching `/ws/turn`, which refuses before it
+    # publishes.
+    session_recorder = SessionRecorder(config.session, timings)
     task = asyncio.create_task(
         _run_webrtc_turn(
             app,
             transport,
+            ObserverPublishingSource(transport, WEBRTC_SOURCE_NAME, app.state.observer_registry),
+            {
+                "type": "turn.started",
+                "source": WEBRTC_SOURCE_NAME,
+                "turn_id": timings.turn_id,
+                "session_id": session_recorder.directory.name,
+            },
             app.state.stt,
             app.state.brain,
             app.state.tts,
@@ -1663,7 +1698,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             macros=macros,
             state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
-            session_recorder=SessionRecorder(config.session, timings),
+            session_recorder=session_recorder,
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
         )
@@ -1675,9 +1710,24 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
 
 
 async def _run_webrtc_turn(
-    app: FastAPI, transport: WebrtcTransport, *args: Any, **kwargs: Any
+    app: FastAPI,
+    transport: WebrtcTransport,
+    source: Any,
+    turn_started_event: dict[str, Any],
+    *args: Any,
+    **kwargs: Any,
 ) -> None:
-    """Run one turn against `transport`, then close its peer connection.
+    """Run one turn against `source`, then close `transport`'s peer
+    connection.
+
+    `source` is `transport` wrapped in `ObserverPublishingSource` (D-08);
+    `transport` itself is kept as a separate parameter because the wrapper
+    deliberately forwards only the `AudioSource` protocol plus `barge_in`,
+    and `close()` is neither -- closing the peer connection is this
+    function's own responsibility, not something to route through a
+    fan-out wrapper. The degraded-slot refusal is asked of `transport` for
+    the same reason `/ws/turn` asks it of the unwrapped source: a refused
+    turn is not a turn, and must not open a card on `/live`.
 
     `**kwargs` forwards `run_turn`'s keyword-only `tiers`/`filler_after_ms`/
     `filler_cache`/`macros` -- `*args` alone cannot carry them. Missing this
@@ -1697,7 +1747,8 @@ async def _run_webrtc_turn(
     try:
         if await _refuse_turn_if_any_slot_is_degraded(app, transport):
             return
-        await run_turn(transport, *args, **kwargs)
+        app.state.observer_registry.publish(turn_started_event)
+        await run_turn(source, *args, **kwargs)
     finally:
         await transport.close()
 
@@ -1821,7 +1872,7 @@ async def observer_ws(websocket: WebSocket) -> None:
             {
                 "type": "observer.opened",
                 "wake_phrase": config.wake.phrase,
-                "sources": [CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME],
+                "sources": list(OBSERVED_SOURCE_NAMES),
             }
         )
     )

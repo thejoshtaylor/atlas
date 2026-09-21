@@ -421,7 +421,7 @@ def test_an_operator_receives_the_opening_message_naming_the_wake_phrase_and_sou
             opening = websocket.receive_json()
         assert opening["type"] == "observer.opened"
         assert opening["wake_phrase"] == app_module.app.state.config.wake.phrase
-        assert set(opening["sources"]) == {"camera", "browser_mic"}
+        assert set(opening["sources"]) == {"camera", "browser_mic", "browser_webrtc"}
     finally:
         client.__exit__(None, None, None)
 
@@ -519,3 +519,112 @@ def test_a_turn_started_from_the_websocket_route_is_labelled_browser_mic_on_the_
                 assert turn_socket.receive_json() == {"type": "reply.text", "text": "done"}
     finally:
         client.__exit__(None, None, None)
+
+
+def _receive_json_within(websocket, timeout: float = 10.0) -> dict:
+    """`receive_json` with a deadline. `TestClient`'s websocket session
+    blocks forever on an empty queue, so a route that publishes nothing --
+    exactly the WR-03 defect -- would hang the suite instead of failing it.
+    A daemon thread is what makes the wait abandonable: it is left blocked
+    on the queue and does not hold the interpreter open at exit."""
+    import threading
+
+    received: list[dict] = []
+    reader = threading.Thread(target=lambda: received.append(websocket.receive_json()), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    assert received, f"nothing arrived on the observer feed within {timeout}s"
+    return received[0]
+
+
+def test_a_turn_started_from_the_webrtc_route_is_labelled_on_the_feed(tmp_path, monkeypatch):
+    """The third turn-starting path (WR-03). `POST /webrtc/offer` schedules a
+    real `run_turn` with a real `SessionRecorder` -- the turn is recorded and
+    shows up in the Sessions list -- and published nothing at all, so `/live`
+    sat on the idle state through the whole turn and a session then appeared
+    from nowhere."""
+    import spire_voice.app as app_module
+
+    client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+
+    class _FakeWebrtcTransport:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def send_event(self, event: dict[str, Any]) -> None:
+            return None
+
+    async def _fake_create_offer_answer(transport, offer):
+        return {"sdp": "answer-sdp", "type": "answer"}
+
+    async def _fake_run_turn(source, *args, **kwargs):
+        await source.send_event({"type": "reply.text", "text": "done"})
+
+    monkeypatch.setattr(app_module, "WebrtcTransport", _FakeWebrtcTransport)
+    monkeypatch.setattr(app_module, "create_offer_answer", _fake_create_offer_answer)
+    monkeypatch.setattr(app_module, "run_turn", _fake_run_turn)
+
+    try:
+        with client.websocket_connect("/ws/sessions/live") as observer:
+            observer.receive_json()  # opening message
+            answer = client.post("/webrtc/offer", json={"sdp": "offer-sdp", "type": "offer"})
+            assert answer.status_code == 200
+
+            started = _receive_json_within(observer)
+            assert started["type"] == "turn.started"
+            assert started["source"] == "browser_webrtc"
+            assert started["session_id"].endswith(started["turn_id"])
+
+            labelled_reply = _receive_json_within(observer)
+            assert labelled_reply == {
+                "type": "reply.text",
+                "text": "done",
+                "source": "browser_webrtc",
+            }
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_every_run_turn_call_site_in_app_py_is_wrapped_for_the_observer_feed():
+    """Structural, deliberately. WR-03 was a whole turn path that simply did
+    not publish, and nothing failed -- the two paths that did publish had
+    tests, and the third had none to be missing from. This counts the
+    `run_turn` call sites against the sources wrapped for the feed and the
+    `turn.started` events published, so a fourth path added later cannot go
+    missing the same way: it fails here the moment it is written."""
+    import ast
+    from pathlib import Path
+
+    import spire_voice.app as app_module
+
+    tree = ast.parse(Path(app_module.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    run_turn_calls = [node for node in calls if node.func.id == "run_turn"]
+    wrapped_sources = [node for node in calls if node.func.id == "ObserverPublishingSource"]
+    turn_started_events = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == "turn.started"
+    ]
+
+    assert len(run_turn_calls) == 3, (
+        "a turn-starting path was added or removed; update "
+        "app.py's OBSERVED_SOURCE_NAMES block and this count together"
+    )
+    assert len(wrapped_sources) == len(run_turn_calls)
+    assert len(turn_started_events) == len(run_turn_calls)
+    # Every one of them runs the turn against the wrapped source, never the
+    # raw transport -- the exact substitution WR-03 found missing.
+    assert [node.args[0].id for node in run_turn_calls] == ["source"] * len(run_turn_calls)
+    assert set(app_module.OBSERVED_SOURCE_NAMES) == {
+        "camera",
+        "browser_mic",
+        "browser_webrtc",
+    }
