@@ -38,7 +38,7 @@ describe("deriveSessionDetailScreenState", () => {
       query: { status: "success", data: session, error: undefined },
       hasEverLoaded: false,
     })
-    expect(state).toEqual({ kind: "ready", session })
+    expect(state).toEqual({ kind: "ready", session, stale: false })
   })
 
   test("a retention refusal, never previously loaded, is removed", () => {
@@ -61,9 +61,64 @@ describe("deriveSessionDetailScreenState", () => {
     expect(state).toEqual({ kind: "not_found" })
   })
 
-  test("a session that loaded a moment ago and now fails to fetch is removed, regardless of the error text (D-04)", () => {
+  test("a session that loaded a moment ago and is now answered as not there is removed (D-04)", () => {
     const state = deriveSessionDetailScreenState({
       query: { status: "error", data: undefined, error: new ApiError(404, "no session with id 'x'") },
+      hasEverLoaded: true,
+    })
+    expect(state).toEqual({ kind: "removed" })
+  })
+})
+
+// WR-10: the loaded-then-gone reading, narrowed to what actually says so.
+describe("deriveSessionDetailScreenState -- a failed refresh is not a removal", () => {
+  test("data still held plus a failed refetch keeps showing the data, marked stale", () => {
+    const session = sampleDetail()
+    const state = deriveSessionDetailScreenState({
+      query: { status: "error", data: session, error: new ApiError(500, "boom") },
+      hasEverLoaded: true,
+    })
+    expect(state).toEqual({ kind: "ready", session, stale: true })
+  })
+
+  test("a 500 with nothing held is a named failure carrying the server's own reason, never 'removed'", () => {
+    const state = deriveSessionDetailScreenState({
+      query: { status: "error", data: undefined, error: new ApiError(500, "boom") },
+      hasEverLoaded: true,
+    })
+    expect(state).toEqual({ kind: "failed", message: "boom" })
+  })
+
+  test("the audio route's own 409 is a named failure, not a missing session", () => {
+    const state = deriveSessionDetailScreenState({
+      query: {
+        status: "error",
+        data: undefined,
+        error: new ApiError(409, "session 'x' was never finished being written -- the turn it recorded did not close cleanly"),
+      },
+      hasEverLoaded: false,
+    })
+    expect(state).toEqual({
+      kind: "failed",
+      message: "session 'x' was never finished being written -- the turn it recorded did not close cleanly",
+    })
+  })
+
+  test("a dropped connection with nothing held is a failure with the generic message, never 'removed'", () => {
+    const state = deriveSessionDetailScreenState({
+      query: { status: "error", data: undefined, error: new Error("network down") },
+      hasEverLoaded: true,
+    })
+    expect(state).toEqual({ kind: "failed", message: "Couldn't load this session. Try again." })
+  })
+
+  test("the retention refusal still wins even when data is still held -- the server said what happened", () => {
+    const state = deriveSessionDetailScreenState({
+      query: {
+        status: "error",
+        data: sampleDetail(),
+        error: new ApiError(404, "session 'x' has been removed by the retention sweep"),
+      },
       hasEverLoaded: true,
     })
     expect(state).toEqual({ kind: "removed" })

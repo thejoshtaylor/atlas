@@ -122,6 +122,19 @@ export function SessionDetailRoute() {
         />
       ) : null}
 
+      {screen.kind === "failed" ? (
+        <div className="flex flex-col gap-3">
+          {/* The server's own reason, verbatim -- `routes/sessions.py`
+              answers 409 by name for a recording that was never finished
+              being written and for one this deployment cannot play back.
+              Neither is a missing session and neither may read as one. */}
+          <ErrorState message={screen.message} onRetry={() => void query.refetch()} />
+          <Link to="/sessions" className="text-body text-primary underline touch-target">
+            Back to Sessions
+          </Link>
+        </div>
+      ) : null}
+
       {screen.kind === "not_found" ? (
         <div className="flex flex-col gap-3">
           <ErrorState
@@ -136,6 +149,14 @@ export function SessionDetailRoute() {
 
       {screen.kind === "ready" ? (
         <div className="flex flex-col gap-6">
+          {/* Data this screen genuinely holds, shown as what it is: a
+              failed refresh is not evidence the recording went away, and
+              discarding it to say so was the defect. */}
+          {screen.stale ? (
+            <p className="text-label text-muted-foreground">
+              Couldn't refresh this session just now. Showing what was loaded earlier.
+            </p>
+          ) : null}
           <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
             <p className="text-body text-foreground">{screen.session.turn_outcome}</p>
             <p className="text-body text-foreground">
