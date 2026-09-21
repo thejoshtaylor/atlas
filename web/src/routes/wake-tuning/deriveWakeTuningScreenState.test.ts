@@ -208,3 +208,66 @@ describe("deriveWakeTuningScreenState -- a partial history says so (WR-06)", () 
     expect(state.capped).toBe(true)
   })
 })
+
+describe("buildHistogram -- the bucket the threshold falls inside (WR-07)", () => {
+  test("a score of 0.87 against a threshold of 0.85 is a clearing event in its own bucket, matching the count line", () => {
+    const state = deriveWakeTuningScreenState(
+      success(response({ events: [event({ id: 1, score: 0.87 })] })),
+      0.85,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+
+    // The count line says it clears.
+    expect(state.clearingCount).toBe(1)
+    // And so does the bar it sits in -- [0.80, 0.90), whose lower bound
+    // does not clear. Asking the lower bound was the defect.
+    const straddling = state.histogram[8]
+    expect(straddling.from).toBeCloseTo(0.8)
+    expect(straddling.count).toBe(1)
+    expect(straddling.clearingCount).toBe(1)
+    expect(straddling.belowCount).toBe(0)
+  })
+
+  test("the straddling bucket is genuinely split, not shaded one way for both of its events", () => {
+    const state = deriveWakeTuningScreenState(
+      success(
+        response({ events: [event({ id: 1, score: 0.87 }), event({ id: 2, score: 0.81 })] }),
+      ),
+      0.85,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+
+    const straddling = state.histogram[8]
+    expect(straddling.count).toBe(2)
+    expect(straddling.clearingCount).toBe(1)
+    expect(straddling.belowCount).toBe(1)
+    expect(state.clearingCount).toBe(1)
+    expect(state.belowCount).toBe(1)
+  })
+
+  test("every bucket's two parts sum to its own count, and the buckets' clearing parts sum to the headline count", () => {
+    const state = deriveWakeTuningScreenState(
+      success(
+        response({
+          events: [
+            event({ id: 1, score: 0.05 }),
+            event({ id: 2, score: 0.5 }),
+            event({ id: 3, score: 0.55 }),
+            event({ id: 4, score: 1.0 }),
+            event({ id: 5, score: null }),
+          ],
+        }),
+      ),
+      0.52,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+
+    for (const bucket of state.histogram) {
+      expect(bucket.clearingCount + bucket.belowCount).toBe(bucket.count)
+    }
+    const clearingAcrossBuckets = state.histogram.reduce((sum, b) => sum + b.clearingCount, 0)
+    expect(clearingAcrossBuckets).toBe(state.clearingCount)
+    const belowAcrossBuckets = state.histogram.reduce((sum, b) => sum + b.belowCount, 0)
+    expect(belowAcrossBuckets).toBe(state.belowCount)
+  })
+})

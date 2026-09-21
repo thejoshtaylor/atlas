@@ -48,10 +48,18 @@ export interface HistogramBucket {
    * both ends so a score of exactly 1.0 has a bucket to land in). */
   to: number
   count: number
-  /** Whether this bucket's own lower bound clears the previewed
-   * threshold -- the histogram's own lightness-not-hue split
-   * (08-UI-SPEC.md Color section). */
-  clears: boolean
+  /** How many of `count` clear the previewed threshold, and how many do
+   * not. Two numbers, not one `clears` boolean: the threshold almost
+   * always falls *inside* a bucket rather than on a boundary, and no
+   * single flag is true of that bucket. The old flag asked whether the
+   * bucket's lower bound cleared, which made the bar holding a clearing
+   * event render as "does not clear" and put the histogram -- DBG-05's
+   * focal element -- in direct contradiction with the count line beside
+   * it. The straddling bucket is split instead, which is the only answer
+   * that is true of every event in it (08-UI-SPEC.md's lightness-not-hue
+   * split applies to each part). */
+  clearingCount: number
+  belowCount: number
 }
 
 export type WakeTuningScreenState =
@@ -120,7 +128,7 @@ function buildHistogram(events: readonly WakeEvent[], threshold: number): Histog
   for (let index = 0; index < HISTOGRAM_BUCKET_COUNT; index += 1) {
     const from = index / HISTOGRAM_BUCKET_COUNT
     const to = (index + 1) / HISTOGRAM_BUCKET_COUNT
-    buckets.push({ from, to, count: 0, clears: from >= threshold })
+    buckets.push({ from, to, count: 0, clearingCount: 0, belowCount: 0 })
   }
   for (const event of events) {
     if (event.score === null) continue
@@ -128,6 +136,11 @@ function buildHistogram(events: readonly WakeEvent[], threshold: number): Histog
     if (index >= HISTOGRAM_BUCKET_COUNT) index = HISTOGRAM_BUCKET_COUNT - 1
     if (index < 0) index = 0
     buckets[index].count += 1
+    // Asked of the event's own score, through the same `clearsThreshold`
+    // the count line uses -- so a bar and the sentence under it can never
+    // disagree about the same event.
+    if (clearsThreshold(event.score, threshold)) buckets[index].clearingCount += 1
+    else buckets[index].belowCount += 1
   }
   return buckets
 }

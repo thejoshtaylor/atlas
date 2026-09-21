@@ -122,12 +122,26 @@ export function WakeTuningRoute() {
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">
             <div className="flex h-24 items-end gap-1" aria-hidden="true">
+              {/* One column per bucket, split where the threshold falls
+                  inside it: the clearing part and the below part are two
+                  segments of the same bar, sized by their own counts. A
+                  single shade per bucket could not be true of the bucket
+                  the threshold lands in, which is the one the operator is
+                  looking at while they drag. */}
               {screen.histogram.map((bucket, index) => (
                 <div
                   key={index}
-                  className={bucket.clears ? "flex-1 bg-foreground" : "flex-1 bg-border"}
+                  className="flex flex-1 flex-col justify-end"
                   style={{ height: `${Math.max(4, (bucket.count / maxBucketCount) * 100)}%` }}
-                />
+                >
+                  {bucket.count === 0 ? <div className="w-full flex-1 bg-border" /> : null}
+                  {bucket.clearingCount > 0 ? (
+                    <div className="w-full bg-foreground" style={{ flexGrow: bucket.clearingCount }} />
+                  ) : null}
+                  {bucket.belowCount > 0 ? (
+                    <div className="w-full bg-border" style={{ flexGrow: bucket.belowCount }} />
+                  ) : null}
+                </div>
               ))}
             </div>
             <p className="text-body text-foreground">
