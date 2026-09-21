@@ -164,3 +164,12 @@ class ObserverPublishingSource:
     @barge_in.setter
     def barge_in(self, value: Any) -> None:
         self._wrapped.barge_in = value
+
+    @property
+    def preroll_bytes(self) -> int:
+        # Same forwarding discipline as `barge_in` above: without this,
+        # `turn/controller.py::run_turn`'s `getattr(source, "preroll_bytes",
+        # 0)` reads off this wrapper -- never the `PrerollReplayingSource`
+        # underneath it -- and always falls through to `0` for every real
+        # camera turn (CR-01).
+        return getattr(self._wrapped, "preroll_bytes", 0)

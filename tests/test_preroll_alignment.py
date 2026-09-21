@@ -34,6 +34,7 @@ from spire_voice.auth.tokens import issue_access_token
 from spire_voice.config import SecurityConfig, SessionConfig
 from spire_voice.providers.base import BrainReply, FinalTranscript
 from spire_voice.routes.sessions import router as sessions_router
+from spire_voice.session.observers import ObserverPublishingSource, ObserverRegistry
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.session.timeline import preroll_offset_s
 from spire_voice.sources.runner import PrerollReplayingSource
@@ -118,11 +119,18 @@ async def _run_camera_turn(
     *,
     preroll_chunks: "list[bytes] | None" = None,
     record_audio: bool = True,
+    wrap_in_observer: bool = False,
 ) -> SessionRecorder:
     """Drive one real `run_turn` through a real `SessionRecorder`, wrapping
     a `FakeAlawSource` in `PrerollReplayingSource` when `preroll_chunks` is
     given -- the real wrapper `sources/runner.py::_process_chunk` builds,
     never a hand-written stand-in.
+
+    `wrap_in_observer`: also wraps the result in `ObserverPublishingSource`,
+    the same order `app.py`'s `_make_run_turn_for_source` always builds
+    (`ObserverPublishingSource(PrerollReplayingSource(...))`) before calling
+    `run_turn` (CR-01) -- every test above this one skips that outer wrap,
+    which is exactly why the wrapper-order regression went undetected.
     """
     config = _session_config(tmp_path, record_audio=record_audio)
     timings = TurnTimings()
@@ -130,6 +138,8 @@ async def _run_camera_turn(
 
     live_source = FakeAlawSource(frames=[_LIVE_BYTE * _PREROLL_CHUNK_SIZE])
     source = PrerollReplayingSource(live_source, preroll_chunks) if preroll_chunks else live_source
+    if wrap_in_observer:
+        source = ObserverPublishingSource(source, "camera", ObserverRegistry())
 
     stt = recording_fake_stt(events=[FinalTranscript(text="turn on the fan")])
     brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
@@ -207,6 +217,34 @@ async def test_camera_turn_pre_roll_length_travels_to_the_browser_reported_offse
     assert offset_s == 1.5
     byte_rate = bytes_per_ms(SourceFormat("alaw", 8000)) * 1000.0
     assert offset_s * byte_rate == live_byte_index == _PREROLL_TOTAL_BYTES
+
+
+async def test_camera_turn_wrapped_in_observer_publishing_source_still_reports_preroll_bytes(
+    tmp_path, recording_fake_stt, fake_brain, fake_tts
+):
+    """CR-01 regression: `app.py`'s real closure never hands `run_turn` the
+    bare `PrerollReplayingSource` the tracer test above uses -- it always
+    wraps it in `ObserverPublishingSource` first
+    (`_make_run_turn_for_source`). Without `ObserverPublishingSource`
+    forwarding `preroll_bytes` the way it already forwards `barge_in`,
+    `getattr(source, "preroll_bytes", 0)` in `turn/controller.py::run_turn`
+    silently falls through to `0` for every real camera turn, regardless of
+    how much pre-roll audio was actually replayed. This test fails on the
+    old `ObserverPublishingSource` (no `preroll_bytes` property) and passes
+    once it forwards the attribute."""
+    preroll_chunks = [_PREROLL_BYTE * _PREROLL_CHUNK_SIZE for _ in range(_PREROLL_CHUNK_COUNT)]
+
+    recorder = await _run_camera_turn(
+        tmp_path,
+        recording_fake_stt,
+        fake_brain,
+        fake_tts,
+        preroll_chunks=preroll_chunks,
+        wrap_in_observer=True,
+    )
+
+    timing_payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+    assert timing_payload["preroll_bytes"] == _PREROLL_TOTAL_BYTES
 
 
 def test_declared_preroll_exceeding_bytes_received_serializes_the_smaller_count(tmp_path):
