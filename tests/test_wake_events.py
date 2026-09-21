@@ -549,3 +549,120 @@ async def test_booting_the_real_lifespan_assigns_app_state_wake_event_repo(tmp_p
         assert repo is not None
         assert hasattr(repo, "record_wake_event")
         assert hasattr(repo, "list_wake_events")
+
+
+# === Code review WR-05: the last write before a restart ================
+
+
+class _SlowWakeEventRepository:
+    """Answers, but not instantly. The write is genuinely still in flight
+    when the listening loop ends, which is what a real repository over a
+    real socket looks like and what an in-memory fake never does."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def record_wake_event(self, **kwargs):
+        await asyncio.sleep(0.05)
+        self.events.append(kwargs)
+
+    async def list_wake_events(self, limit=None):
+        return list(self.events)
+
+
+class _HangingWakeEventRepository:
+    """Reachable, and never answering. The failure mode a raising fake
+    cannot reproduce: the write neither succeeds nor fails, so the task
+    stays in flight and the set it lives in never drains."""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.released = asyncio.Event()
+
+    async def record_wake_event(self, **_kwargs):
+        self.started += 1
+        await self.released.wait()
+
+    async def list_wake_events(self, limit=None):
+        return []
+
+
+async def test_a_pending_wake_event_write_is_drained_before_shutdown():
+    """The wake immediately before a restart is the one D-14 says must not
+    disappear silently. Nothing drained the scheduled write, so the engine
+    was disposed underneath it (WR-05)."""
+    repo = _SlowWakeEventRepository()
+    source = FakeAudioSource(frames=[b"\x00"])
+    detector = _AlwaysHitWakeDetector(score=1.0)
+
+    async def _run_turn(src: object) -> None:
+        return None
+
+    runner = SourceRunner(
+        "camera",
+        source,
+        detector,
+        lambda chunk: chunk,
+        _run_turn,
+        wake_config=WakeConfig(engine="vosk", refractory_s=0.0),
+        gate_config=GateConfig(),
+        wake_event_repo=repo,
+    )
+
+    await runner.run()
+    # Still in flight when the listening loop ends -- which is precisely
+    # the moment `lifespan`'s teardown used to dispose the engine under it.
+    assert runner._pending_wake_event_tasks
+    assert repo.events == []
+
+    await runner.drain_pending_wake_events()
+
+    assert len(repo.events) == 1
+    assert not runner._pending_wake_event_tasks
+
+
+async def test_a_store_that_never_answers_bounds_the_pending_set_and_says_so(caplog):
+    """A repository that hangs rather than raises leaves every scheduled
+    write in flight forever, and a talking television never stops waking
+    the house. The set has to be bounded, and the skip has to be said out
+    loud -- D-14 forbids a silent drop, not a bounded one (WR-05)."""
+    from spire_voice.sources.runner import MAX_PENDING_WAKE_EVENT_WRITES
+
+    repo = _HangingWakeEventRepository()
+    source = FakeAudioSource(frames=[b"\x00"])
+    detector = _AlwaysHitWakeDetector(score=1.0)
+
+    async def _run_turn(src: object) -> None:
+        return None
+
+    runner = SourceRunner(
+        "camera",
+        source,
+        detector,
+        lambda chunk: chunk,
+        _run_turn,
+        wake_config=WakeConfig(engine="vosk", refractory_s=0.0),
+        gate_config=GateConfig(),
+        wake_event_repo=repo,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.sources.runner"):
+        for _ in range(MAX_PENDING_WAKE_EVENT_WRITES + 20):
+            runner._schedule_wake_event_write(score=1.0, allowed=True, block_reason=None)
+            await asyncio.sleep(0)
+
+        assert len(runner._pending_wake_event_tasks) == MAX_PENDING_WAKE_EVENT_WRITES
+        saturation_warnings = [
+            record for record in caplog.records if "already in flight" in record.getMessage()
+        ]
+        # Said once per episode, not once per wake hit.
+        assert len(saturation_warnings) == 1
+
+        # And a shutdown does not wait on a store that is not answering:
+        # every write is genuinely finished when the drain returns, not
+        # merely asked to stop.
+        scheduled = set(runner._pending_wake_event_tasks)
+        await runner.drain_pending_wake_events(timeout=0.01)
+        assert all(task.done() for task in scheduled)
+
+    repo.released.set()

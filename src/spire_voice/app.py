@@ -1383,6 +1383,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     for task in app.state.source_runner_tasks:
         task.cancel()
     await asyncio.gather(*app.state.source_runner_tasks, return_exceptions=True)
+    # WR-05 (code review): the runner tasks are gathered above, but a wake
+    # event's own write is a separate task `SourceRunner` schedules and
+    # never awaits (the turn path's latency budget is why). Nothing drained
+    # those, so the wake immediately before a restart was written into an
+    # engine this teardown was about to dispose. Drained here, after the
+    # listening loops have stopped scheduling new ones and before
+    # `engine.dispose()` below.
+    for runner in getattr(app.state, "source_runners", []):
+        await runner.drain_pending_wake_events()
     await camera_source.close()
     wake_detector.close()
     await ffmpeg_supervisor.stop()

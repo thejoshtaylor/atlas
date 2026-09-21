@@ -91,6 +91,15 @@ from spire_voice.wake.gate import WakeGate
 
 logger = logging.getLogger("spire_voice.sources.runner")
 
+# How many wake-event writes one source may have in flight before it stops
+# scheduling more. Not a tuned number: a household's wake hits arrive
+# seconds apart at worst and each write is a single insert, so a healthy
+# store never approaches this. It exists for the unhealthy one -- a
+# repository that hangs rather than raises, where every hit from an ambient
+# noise source would otherwise add a task that never completes and is never
+# discarded.
+MAX_PENDING_WAKE_EVENT_WRITES = 64
+
 
 def _resolve_threshold(wake_config: WakeConfig) -> float:
     """The score a `WakeHit` must reach to count, for whichever engine
@@ -388,6 +397,10 @@ class SourceRunner:
         # finishes.
         self._wake_event_repo = wake_event_repo
         self._pending_wake_event_tasks: set[asyncio.Task] = set()
+        # One line per episode of saturation, not one per wake hit -- the
+        # same "the operator gets the fact once instead of a log they stop
+        # reading" discipline the degraded-slot refusal already uses.
+        self._pending_writes_warned = False
         # Plan 02-12 Task 3: `app.py`'s own startup refusal is what keeps
         # this from ever being a *stale or missing* calibration for a
         # source whose policy has correlation turned on -- by the time it
@@ -617,14 +630,69 @@ class SourceRunner:
         garbage-collected before it ever runs. A no-op when this runner
         was built with no repository at all (D-13, D-14's absent-
         configuration discipline).
+
+        The set is bounded. A repository that *hangs* rather than raises
+        -- Postgres reachable but wedged, or a pool exhausted -- leaves
+        every scheduled write in flight forever, and a talking television
+        is a wake source that never stops. Past `MAX_PENDING_WAKE_EVENT_
+        WRITES` this skips the write and says so once, which is the
+        bounded version of what D-14 asks for: a wake hit is never
+        dropped *silently*.
         """
         if self._wake_event_repo is None:
             return
+        if len(self._pending_wake_event_tasks) >= MAX_PENDING_WAKE_EVENT_WRITES:
+            if not self._pending_writes_warned:
+                self._pending_writes_warned = True
+                logger.warning(
+                    "source %r: %d wake-event writes are already in flight and none are "
+                    "completing; skipping further writes until they drain. The store is "
+                    "reachable but not answering.",
+                    self._name,
+                    len(self._pending_wake_event_tasks),
+                )
+            return
+        self._pending_writes_warned = False
         task = asyncio.create_task(
             self._write_wake_event(score=score, allowed=allowed, block_reason=block_reason)
         )
         self._pending_wake_event_tasks.add(task)
         task.add_done_callback(self._pending_wake_event_tasks.discard)
+
+    async def drain_pending_wake_events(self, timeout: float = 2.0) -> None:
+        """Let every in-flight wake-event write finish before the engine
+        under it is disposed.
+
+        Nothing drained this set. `lifespan`'s teardown cancels and gathers
+        the source-runner *tasks* only, so a write scheduled by the last
+        wake before a restart was left dangling and the database engine was
+        disposed underneath it -- the record D-14 says must not disappear
+        silently, disappearing with a swallowed log line at best and a
+        "Task was destroyed but it is pending" warning at worst.
+
+        Bounded, not unbounded: a store that is down must not hold up a
+        shutdown either. Anything still running past `timeout` is
+        cancelled, which is the same outcome as before for that write and
+        a clean one for every write that would have made it.
+        """
+        pending = set(self._pending_wake_event_tasks)
+        if not pending:
+            return
+        _done, still_running = await asyncio.wait(pending, timeout=timeout)
+        for task in still_running:
+            task.cancel()
+        if still_running:
+            # Awaited, not merely cancelled: `cancel()` only *requests*,
+            # and this method's whole purpose is that nothing is still
+            # touching the engine when it returns.
+            await asyncio.gather(*still_running, return_exceptions=True)
+            logger.warning(
+                "source %r: %d wake-event write(s) did not finish within %.1fs of shutdown "
+                "and were cancelled",
+                self._name,
+                len(still_running),
+                timeout,
+            )
 
     async def _write_wake_event(
         self, *, score: float, allowed: bool, block_reason: str | None
