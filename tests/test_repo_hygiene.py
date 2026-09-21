@@ -570,6 +570,28 @@ def test_the_entity_id_scan_covers_the_surfaces_this_project_publishes():
     assert _REPO_ROOT / "README.md" in set(_iter_repo_files(_ENTITY_ID_SCAN_SUFFIXES))
 
 
+def test_the_wake_events_migration_and_module_are_covered_by_the_repository_scan():
+    """Plan 08-03 Task 3: this file scans by directory walk
+    (`_iter_repo_files`), pruning only `_EXCLUDED_DIR_NAMES` -- neither
+    `alembic/` nor `src/spire_voice/db/` is in that set, so the new
+    `wake_events` migration and the modified `db/` modules are already
+    inside both the credential-literal scan (every file) and the
+    entity-id scan (`.py` is in `_ENTITY_ID_SCAN_SUFFIXES`) with no list
+    to extend. Asserted here rather than silently assumed, so a future
+    change narrowing `_iter_repo_files`'s scope would fail this test
+    rather than quietly stop scanning these surfaces."""
+    scanned_paths = set(_iter_repo_files())
+    scanned_entity_id_paths = set(_iter_repo_files(_ENTITY_ID_SCAN_SUFFIXES))
+
+    migration = _REPO_ROOT / "alembic" / "versions" / "0012_wake_events.py"
+    module = _REPO_ROOT / "src" / "spire_voice" / "db" / "models.py"
+
+    assert migration in scanned_paths
+    assert module in scanned_paths
+    assert migration in scanned_entity_id_paths
+    assert module in scanned_entity_id_paths
+
+
 def test_the_runbook_entity_ids_follow_the_invented_object_id_convention():
     """The two the widening found, corrected in the working tree. The
     allowlist entries exist for the history scan alone, which reads blobs
