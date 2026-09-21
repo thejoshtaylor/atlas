@@ -36,6 +36,7 @@ function stubSessions(fetchSessions: () => Promise<unknown[]>) {
     fetchSession: async () => {
       throw new Error("fetchSession is not stubbed in SessionsRoute.test.tsx")
     },
+    sessionAudioUrl: (id: string) => `/api/sessions/${id}/audio`,
   }))
 }
 
