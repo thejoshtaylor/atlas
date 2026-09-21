@@ -79,3 +79,8 @@ describe("PolicyRoute -- the count line uses the shared pure formatter", () => {
     expect(SOURCE).toMatch(/formatRuleCount\(currentMode, rules\.length\)/)
   })
 })
+// "the loading state renders SkeletonList" retired (08-10-PLAN.md Task 2,
+// D-17 backfill part B). Note added by the Phase 8 code review (IN-01) --
+// the retirement was correct and undocumented. Superseded by
+// PolicyRoute.dom.test.tsx:112, which mounts the route against a pending
+// query and asserts the skeleton actually renders.

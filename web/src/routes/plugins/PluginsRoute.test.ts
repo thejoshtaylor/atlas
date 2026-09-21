@@ -94,3 +94,11 @@ describe("PluginsRoute -- built from the enumerated inventory only, no data tabl
     expect(SOURCE).not.toMatch(/@\/components\/ui\/table/)
   })
 })
+// "the enable/disable control reads Disable for an enabled plugin and
+// Enable for a disabled one", "toggling calls the enable mutation" and
+// "a builtin row renders without a delete control" retired (08-10-PLAN.md
+// Task 2, D-17 backfill part B). Note added by the Phase 8 code review
+// (IN-01) -- the retirement was correct and undocumented. Superseded by
+// PluginsRoute.dom.test.tsx's own mount tests at :107, :128 and :175,
+// which render the list and assert the runtime label, the real mutation
+// call and the real absent control.

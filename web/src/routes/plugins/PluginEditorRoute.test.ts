@@ -167,3 +167,17 @@ describe("PluginEditorRoute -- IN-04: the per-plugin deadline is editable after 
     expect(SOURCE).toMatch(/values: draftConfigValuesToInput\(configValues\),\s*\n\s*timeout_ms: timeoutMs,/)
   })
 })
+// "saveBlockedByNoCatalogSelection / saveBlockedByMissingCustomSource /
+// saveBlockedByBlankDisplayName all feed installDisabled" retired
+// (08-10-PLAN.md Task 2, D-17 backfill part B). This note is added by the
+// Phase 8 code review (IN-01): the retirement itself was right, but it
+// shipped undocumented and, unlike every other retirement in that change,
+// without a superseding test to name. It is superseded now by
+// PluginEditorRoute.dom.test.tsx's "a blank required field renders a
+// validation message and blocks submission", "catalog mode with nothing
+// selected leaves Install disabled, with the named reason" and "custom
+// mode with a blank command leaves Install disabled, with the named
+// reason" -- which drive the real controls and read the real button's own
+// `disabled`, rather than asserting the predicates appear in source text.
+// The predicates themselves stay covered in derivePluginEditorState.test.ts;
+// what had no check at all was the wiring between them and the button.

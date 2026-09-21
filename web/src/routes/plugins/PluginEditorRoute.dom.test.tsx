@@ -20,7 +20,10 @@ afterEach(() => {
   usePluginDraftStore.getState().loadBlank()
 })
 
-function stubPluginsForEditor(options: { install?: (input: unknown) => Promise<unknown> }) {
+function stubPluginsForEditor(options: {
+  install?: (input: unknown) => Promise<unknown>
+  catalog?: unknown[]
+}) {
   const notStubbed = (name: string) => async () => {
     throw new Error(`${name} is not stubbed in this test`)
   }
@@ -30,7 +33,7 @@ function stubPluginsForEditor(options: { install?: (input: unknown) => Promise<u
     PLUGIN_CATALOG_QUERY_KEY: ["plugins", "catalog"],
     fetchPlugins: notStubbed("fetchPlugins"),
     fetchPlugin: notStubbed("fetchPlugin"),
-    fetchPluginCatalog: async () => [],
+    fetchPluginCatalog: async () => options.catalog ?? [],
     installPluginMutationOptions: {
       mutationFn: options.install ?? notStubbed("installPlugin"),
       onSuccess: () => {},
@@ -98,4 +101,65 @@ test("a successful save calls the mutation with the edited values", async () => 
       },
     ]),
   )
+})
+
+// IN-01 (Phase 8 code review). `PluginEditorRoute.test.ts`'s
+// "saveBlockedByNoCatalogSelection / saveBlockedByMissingCustomSource /
+// saveBlockedByBlankDisplayName all feed installDisabled" was retired in
+// 08-10 with no replacement -- unlike every other retirement in that
+// change, which named its superseding mount test inline. The pure
+// predicates stayed covered in `derivePluginEditorState.test.ts`; the
+// wiring between them and the disabled Install button had no check at all,
+// which is the exact seam D-17 says the harness exists to cover. The
+// blank-display-name third is already covered by the first test in this
+// file; these two are the missing ones.
+
+const SAMPLE_CATALOG = [
+  {
+    name: "weather",
+    description: "Current conditions and the forecast.",
+    transport: "command",
+    config_keys: [],
+  },
+]
+
+test("catalog mode with nothing selected leaves Install disabled, with the named reason (IN-01)", async () => {
+  stubPluginsForEditor({ catalog: SAMPLE_CATALOG })
+  const { PluginEditorRoute } = await import("./PluginEditorRoute")
+
+  renderEditor(PluginEditorRoute)
+
+  // The catalog has an entry to pick, and nothing is picked.
+  await screen.findByText("weather")
+  expect(screen.getByText("Select a plugin from the catalog before installing.")).toBeTruthy()
+  expect((screen.getByRole("button", { name: "Install plugin" }) as HTMLButtonElement).disabled).toBe(true)
+
+  // Picking one clears both.
+  fireEvent.click(screen.getByRole("button", { name: "Select" }))
+
+  await waitFor(() => {
+    expect((screen.getByRole("button", { name: "Install plugin" }) as HTMLButtonElement).disabled).toBe(false)
+  })
+  expect(screen.queryByText("Select a plugin from the catalog before installing.")).toBeNull()
+})
+
+test("custom mode with a blank command leaves Install disabled, with the named reason (IN-01)", async () => {
+  stubPluginsForEditor({})
+  const { PluginEditorRoute } = await import("./PluginEditorRoute")
+
+  renderEditor(PluginEditorRoute)
+
+  fireEvent.click(screen.getByRole("radio", { name: "Custom" }))
+  fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+    target: { value: "A hand-added plugin" },
+  })
+
+  expect(await screen.findByText("Add a command before installing.")).toBeTruthy()
+  expect((screen.getByRole("button", { name: "Install plugin" }) as HTMLButtonElement).disabled).toBe(true)
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), { target: { value: "python plugin.py" } })
+
+  await waitFor(() => {
+    expect((screen.getByRole("button", { name: "Install plugin" }) as HTMLButtonElement).disabled).toBe(false)
+  })
 })
