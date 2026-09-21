@@ -133,8 +133,17 @@ class SessionRecorder:
         second, disagreeing clock. This is an event-sequencing mark, not
         one of `timing.py`'s own eight named stages, and duplicates none
         of them.
+
+        The clock reading always wins (WR-02): `event` is spread first so
+        that if a caller ever passes a dict already carrying a
+        `"recorded_at"` key, this method's own reading overwrites it
+        rather than being silently overwritten by it -- `dict` literal
+        merge order means whichever key comes last wins, and
+        `render_timeline`'s sort depends on every entry's `recorded_at`
+        being this clock's own domain, never a caller-supplied value that
+        might not be.
         """
-        self._events.append({"recorded_at": self._clock(), **event})
+        self._events.append({**event, "recorded_at": self._clock()})
 
     def close(self, timings: TurnTimings) -> None:
         """Write every artifact and mark this recorder closed.
