@@ -2,6 +2,7 @@ import * as React from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, useParams } from "react-router-dom"
 import { ErrorState } from "@/components/state/ErrorState"
+import { formatSeconds } from "@/lib/format"
 import { fetchSession, sessionAudioUrl, sessionQueryKey, type TimelineEntry } from "@/lib/sessions"
 import { activeTimelineIndexAt, deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
 
@@ -193,6 +194,19 @@ export function SessionDetailRoute() {
 
           <div className="flex flex-col gap-2">
             <h2 className="text-heading font-semibold">Timeline</h2>
+            {/* Only for a camera-path recording (preroll_s > 0): the first
+                seconds are room audio captured before the wake word, so no
+                timeline row highlights during them. Without this sentence
+                that silence reads as the highlight lagging -- exactly the
+                defect plan 08-11 fixed (DBG-03, D-03). Built from the
+                number alone; no text carried by any recorded event may
+                reach it. */}
+            {screen.session.preroll_s > 0 ? (
+              <p className="text-label text-muted-foreground">
+                The recording starts {formatSeconds(screen.session.preroll_s)} before the wake word. No row is
+                highlighted until the assistant starts listening.
+              </p>
+            ) : null}
             <ul className="flex flex-col gap-2">
               {screen.session.timeline.map((entry, index) => (
                 <TimelineRow

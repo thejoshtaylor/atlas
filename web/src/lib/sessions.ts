@@ -45,6 +45,10 @@ export interface SessionDetail {
   end_of_speech_to_answer_audio_ms: number | null
   audio_format: { encoding: string; sample_rate: number } | null
   has_audio: boolean
+  /** Seconds at the head of the recording captured before the wake word.
+   * `0` when the session built no pre-roll buffer. The one place this is
+   * derived server-side is `session/timeline.py::preroll_offset_s`. */
+  preroll_s: number
   timeline: TimelineEntry[]
 }
 

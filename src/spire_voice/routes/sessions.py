@@ -169,6 +169,12 @@ class SessionDetailResponse(BaseModel):
     end_of_speech_to_answer_audio_ms: "float | None"
     audio_format: "dict | None"
     has_audio: bool
+    # How many seconds at the head of the recording `GET
+    # /api/sessions/{id}/audio` serves were captured before the wake hit
+    # (plan 08-12, DBG-03). This is the same value `_session_detail` already
+    # adds to every timeline entry's `offset_s` -- reported here separately
+    # so the screen can name it, not recomputed a second time.
+    preroll_s: float = 0.0
     timeline: list[TimelineEntryResponse]
 
 
@@ -487,6 +493,7 @@ def _session_detail(session_id: str, started_at: datetime, directory: Path) -> S
         end_of_speech_to_answer_audio_ms=timing_payload.get("end_of_speech_to_answer_audio_ms"),
         audio_format=audio_format,
         has_audio=_has_audio(directory, audio_format),
+        preroll_s=shift_s,
         timeline=timeline,
     )
 

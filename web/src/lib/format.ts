@@ -19,3 +19,12 @@
 export function formatMs(ms: number | null | undefined): string {
   return ms === null || ms === undefined ? "not reached" : `${ms.toFixed(1)} ms`
 }
+
+/** A duration in seconds, to one decimal place -- or "not recorded" for a
+ * session with no reading. A sibling of `formatMs`, not a call to it: the
+ * pre-roll is a whole-seconds-scale fact about a recording an operator is
+ * about to hear, and quoting it in milliseconds would read as a latency
+ * measurement, which it is not (plan 08-12, DBG-03). */
+export function formatSeconds(seconds: number | null | undefined): string {
+  return seconds === null || seconds === undefined ? "not recorded" : `${seconds.toFixed(1)} s`
+}
