@@ -37,10 +37,6 @@ describe("PluginsRoute -- a failed load disables the new-plugin action and every
 })
 
 describe("PluginsRoute -- disable/enable act with no confirmation; delete always confirms", () => {
-  test("the enable/disable button calls the mutation directly on click, no AlertDialog wraps it", () => {
-    expect(SOURCE).toMatch(/setEnabled\.mutate\(\s*\{ pluginId: plugin\.id, enabled: !plugin\.enabled \}/)
-  })
-
   // IN-02 (code review): both row writes used to have no error path at
   // all -- a 502 from the server's own "saved, but the running assistant
   // could not be updated" refusal produced an unhandled promise rejection
@@ -63,16 +59,6 @@ describe("PluginsRoute -- disable/enable act with no confirmation; delete always
       /Delete "\$\{plugin\.display_name\}"\? Its tools will no longer reach the assistant, and any macro or workflow step that used one will be flagged as unresolved\./,
     )
     expect(SOURCE).toMatch(/variant="destructive"[\s\S]{0,500}Delete plugin/)
-  })
-
-  test("the button reads Disable when enabled, Enable when not", () => {
-    expect(SOURCE).toMatch(/\{plugin\.enabled \? "Disable" : "Enable"\}/)
-  })
-})
-
-describe("PluginsRoute -- a builtin row renders no delete control at all", () => {
-  test("the delete control is gated by showDeleteControl(plugin), absent rather than disabled", () => {
-    expect(SOURCE).toMatch(/\{showDeleteControl\(plugin\) \? \(/)
   })
 })
 

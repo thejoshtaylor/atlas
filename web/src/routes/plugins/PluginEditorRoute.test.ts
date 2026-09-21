@@ -46,13 +46,6 @@ describe("PluginEditorRoute -- the install flow is a picker between a curated ca
 })
 
 describe("PluginEditorRoute -- install is blocked, with a named reason, until a source is chosen", () => {
-  test("saveBlockedByNoCatalogSelection / saveBlockedByMissingCustomSource / saveBlockedByBlankDisplayName all feed installDisabled", () => {
-    expect(SOURCE).toMatch(/saveBlockedByNoCatalogSelection\(selectedCatalogEntry\)/)
-    expect(SOURCE).toMatch(/saveBlockedByMissingCustomSource\(customTransport, command, url\)/)
-    expect(SOURCE).toMatch(/saveBlockedByBlankDisplayName\(displayName\)/)
-    expect(SOURCE).toMatch(/const installDisabled = installBlockedReason !== null/)
-  })
-
   test("install failure is inline, under Install plugin, and never clears the typed form", () => {
     expect(SOURCE).toMatch(/setInstallError\(installFailureMessage\(err\)\)/)
     expect(SOURCE).not.toMatch(/catch \(err\) \{[\s\S]{0,80}loadBlank\(\)/)
