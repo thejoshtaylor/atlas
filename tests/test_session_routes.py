@@ -312,3 +312,105 @@ def test_a_viewer_is_refused_the_detail_route_and_an_operator_succeeds(tmp_path,
 
     assert viewer_client.get(f"/api/sessions/{directory.name}").status_code == 403
     assert operator_client.get(f"/api/sessions/{directory.name}").status_code == 200
+
+
+# --- Task 1 of 08-05 (TDD): GET /api/sessions/{id}/audio --------------------
+#
+# RED: `routes/sessions.py` does not register this route yet -- FastAPI's
+# own generic 404 answers every request below until Task 1's GREEN phase
+# adds it.
+
+
+def test_a_recorded_session_returns_a_valid_wav_body_to_an_operator(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/wav"
+    body = response.content
+    assert body[0:4] == b"RIFF"
+    assert body[8:12] == b"WAVE"
+    assert int(response.headers["content-length"]) == len(body)
+
+
+def test_a_traversal_attempt_against_the_audio_route_is_refused(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    _write_recorded_session(session_config)
+    (tmp_path.parent / "secret.txt").write_text("do not read me", encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get("/api/sessions/20260101T000000000000Z-../../secret.txt/audio")
+    assert response.status_code == 404
+    assert "do not read me" not in response.text
+
+
+def test_a_range_header_is_ignored_and_the_full_body_still_comes_back(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    full = client.get(f"/api/sessions/{directory.name}/audio")
+    ranged = client.get(f"/api/sessions/{directory.name}/audio", headers={"Range": "bytes=0-3"})
+
+    assert ranged.status_code == 200
+    assert ranged.status_code != 206
+    assert ranged.content == full.content
+
+
+def test_a_session_with_no_recorded_audio_gets_its_own_named_refusal(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config, include_audio=False)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 404
+    assert "no recorded audio" in response.json()["detail"]
+
+
+def test_a_missing_session_gets_the_not_found_refusal_not_the_missing_audio_one(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path), retain_days=7)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    made_up_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-turn-never-existed"
+    response = client.get(f"/api/sessions/{made_up_id}/audio")
+
+    assert response.status_code == 404
+    assert "no session with id" in response.json()["detail"]
+
+
+def test_a_viewer_is_refused_the_audio_route_and_an_operator_succeeds(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    viewer_client = _client_with_role(app, security, account_repo, "viewer")
+    operator_client = _client_with_role(app, security, account_repo, "operator")
+
+    assert viewer_client.get(f"/api/sessions/{directory.name}/audio").status_code == 403
+    assert operator_client.get(f"/api/sessions/{directory.name}/audio").status_code == 200
