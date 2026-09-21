@@ -350,6 +350,10 @@ def test_a_real_session_is_returned_in_full_with_offsets_on_every_timeline_entry
     # preroll_offset_s returning a non-zero fallback (plan 08-11, DBG-03).
     turn_started_row = next(entry for entry in body["timeline"] if entry.get("stage") == "turn_started_at")
     assert turn_started_row["offset_s"] == 0.0
+    # Same fixture, same fallback: `preroll_s` is the value the route
+    # already adds to every offset above, reported separately (plan 08-12,
+    # DBG-03). No pre-roll buffer built this session, so it must be 0.0.
+    assert body["preroll_s"] == 0.0
 
 
 def test_no_partial_before_the_final_mark_means_a_null_transcript(tmp_path, fake_account_repository):
