@@ -46,9 +46,19 @@ export function SubmitButton({
   }
 
   const handleClick = () => {
-    void guardRef.current!.run().finally(() => {
-      setPending(guardRef.current!.isPending())
-    })
+    // `.catch(() => {})` after `.finally(...)`, not instead of it: nothing
+    // downstream ever reads this promise (a click handler is `void` by
+    // nature), so a rejected `onSubmit` -- e.g. `handleAddRule` in
+    // `PolicyRoute.tsx`, which awaits its mutation with no catch of its
+    // own -- would otherwise surface as an unhandled promise rejection on
+    // every real submit failure this component's callers do not already
+    // catch themselves (found while mounting this component for the
+    // first time, 08-09-PLAN.md Task 1).
+    void guardRef.current!.run()
+      .finally(() => {
+        setPending(guardRef.current!.isPending())
+      })
+      .catch(() => {})
     // Reflects the guard's synchronous decision immediately -- the
     // `finally` above only matters for the eventual `false` transition,
     // since `run()` itself already rejected a re-entrant call before any
