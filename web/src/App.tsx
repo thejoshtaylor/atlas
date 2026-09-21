@@ -22,6 +22,7 @@ import { ProvidersRoute } from "@/routes/providers/ProvidersRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { SessionDetailRoute } from "@/routes/sessions/SessionDetailRoute"
 import { SessionsRoute } from "@/routes/sessions/SessionsRoute"
+import { WakeTuningRoute } from "@/routes/wake-tuning/WakeTuningRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
 import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
 import { AudioSourceStep } from "@/routes/wizard/AudioSourceStep"
@@ -78,6 +79,7 @@ function AppRoutes() {
             <Route path="/live" element={<LiveRoute />} />
             <Route path="/sessions" element={<SessionsRoute />} />
             <Route path="/sessions/:id" element={<SessionDetailRoute />} />
+            <Route path="/wake-tuning" element={<WakeTuningRoute />} />
           </Route>
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />

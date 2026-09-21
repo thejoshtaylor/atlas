@@ -26,6 +26,8 @@ const NAV_ITEMS = [
   // entry of its own -- reached by a link from this list, matching how
   // `/plugins/:id` has no separate nav entry today.
   { to: "/sessions", label: "Sessions", minimumRole: "operator" },
+  // Phase 8, DBG-05: the wake-threshold tuning screen.
+  { to: "/wake-tuning", label: "Wake threshold", minimumRole: "operator" },
 ] as const
 
 const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2 }
