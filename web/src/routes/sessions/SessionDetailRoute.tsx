@@ -2,8 +2,8 @@ import * as React from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, useParams } from "react-router-dom"
 import { ErrorState } from "@/components/state/ErrorState"
-import { fetchSession, sessionQueryKey, type TimelineEntry } from "@/lib/sessions"
-import { deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
+import { fetchSession, sessionAudioUrl, sessionQueryKey, type TimelineEntry } from "@/lib/sessions"
+import { activeTimelineIndexAt, deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
 
 // DBG-03, D-02, D-03, D-04, 08-UI-SPEC.md's Focal Point row: "the
 // transcript/reply/outcome block at the top ... the timeline immediately
@@ -17,13 +17,29 @@ function formatStartedAt(startedAt: string): string {
   return new Date(startedAt).toLocaleString()
 }
 
-function TimelineRow({ entry }: { entry: TimelineEntry }) {
+// D-09: the <audio> element is the clock; this row only ever reads
+// `isActive` (derived from that element's own `currentTime` via
+// `activeTimelineIndexAt`) and calls `onSelect` to seek it -- it holds no
+// clock of its own. `aria-current` names the row the same way any other
+// "this one is the current one in a sequence" UI does; the neutral
+// `bg-accent` token is 08-UI-SPEC.md's Color section's explicit choice,
+// not the reserved 10% primary accent.
+function TimelineRow({ entry, isActive, onSelect }: { entry: TimelineEntry; isActive: boolean; onSelect: () => void }) {
   const label = typeof entry.stage === "string" ? entry.stage : typeof entry.type === "string" ? entry.type : entry.kind
   const offset = entry.offset_s === null ? "—" : `${entry.offset_s.toFixed(2)}s`
   return (
-    <li className="flex flex-col gap-0.5 rounded-lg border border-border bg-card p-4">
-      <span className="text-label text-muted-foreground">{offset}</span>
-      <span className="text-body text-foreground">{label}</span>
+    <li>
+      <button
+        type="button"
+        onClick={onSelect}
+        aria-current={isActive ? "true" : undefined}
+        className={`touch-target flex w-full flex-col gap-0.5 rounded-lg border border-border p-4 text-left ${
+          isActive ? "bg-accent" : "bg-card"
+        }`}
+      >
+        <span className="text-label text-muted-foreground">{offset}</span>
+        <span className="text-body text-foreground">{label}</span>
+      </button>
     </li>
   )
 }
@@ -54,6 +70,35 @@ export function SessionDetailRoute() {
   }, [query.status, query.data])
 
   const screen = deriveSessionDetailScreenState({ query, hasEverLoaded })
+
+  // The one piece of state the audio element's own clock drives (D-09):
+  // `null` until the first `timeupdate` fires, so no timeline row is
+  // marked current before playback (or a seek) has reported a real time.
+  // `audioFailed` is set from the element's own `error` event and is the
+  // one-region degradation D-11/the Copywriting Contract require -- the
+  // rest of the screen (transcript, reply, timeline) is untouched by it.
+  const [currentTime, setCurrentTime] = React.useState<number | null>(null)
+  const [audioFailed, setAudioFailed] = React.useState(false)
+  const audioRef = React.useRef<HTMLAudioElement>(null)
+
+  React.useEffect(() => {
+    setCurrentTime(null)
+    setAudioFailed(false)
+  }, [sessionId])
+
+  const activeIndex =
+    screen.kind === "ready" && currentTime !== null ? activeTimelineIndexAt(screen.session.timeline, currentTime) : null
+
+  const handleTimeUpdate = (event: React.SyntheticEvent<HTMLAudioElement>) => {
+    setCurrentTime(event.currentTarget.currentTime)
+  }
+  const handleAudioError = () => {
+    setAudioFailed(true)
+  }
+  const handleRowSelect = (offset: number | null) => {
+    if (offset === null || audioRef.current === null) return
+    audioRef.current.currentTime = offset
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -101,11 +146,31 @@ export function SessionDetailRoute() {
             </p>
           </div>
 
+          {audioFailed ? (
+            <p className="text-body text-muted-foreground">
+              Couldn't load the recording. The rest of this session is still shown below.
+            </p>
+          ) : (
+            <audio
+              ref={audioRef}
+              controls
+              className="w-full"
+              src={sessionAudioUrl(screen.session.id)}
+              onTimeUpdate={handleTimeUpdate}
+              onError={handleAudioError}
+            />
+          )}
+
           <div className="flex flex-col gap-2">
             <h2 className="text-heading font-semibold">Timeline</h2>
             <ul className="flex flex-col gap-2">
               {screen.session.timeline.map((entry, index) => (
-                <TimelineRow key={index} entry={entry} />
+                <TimelineRow
+                  key={index}
+                  entry={entry}
+                  isActive={activeIndex === index}
+                  onSelect={() => handleRowSelect(entry.offset_s)}
+                />
               ))}
             </ul>
           </div>
