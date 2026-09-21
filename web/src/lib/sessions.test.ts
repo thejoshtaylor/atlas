@@ -2,7 +2,13 @@
 // already checks its sibling: a stubbed `global.fetch`, asserting the
 // right path is called and the envelope is unwrapped correctly.
 import { afterEach, describe, expect, test } from "bun:test"
-import { SESSIONS_QUERY_KEY, fetchSessions, sessionAudioUrl, type SessionSummary } from "./sessions"
+import {
+  SESSIONS_QUERY_KEY,
+  fetchSession,
+  fetchSessions,
+  sessionAudioUrl,
+  type SessionSummary,
+} from "./sessions"
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
@@ -59,5 +65,36 @@ describe("sessions.ts -- calls the real routes/sessions.py paths", () => {
       "/api/sessions/20260919T154201123456Z-turn-abc123/audio",
     )
     expect(fetchCalled).toBe(false)
+  })
+})
+
+// IN-04: these two ids come from `useParams` -- i.e. from the address bar
+// -- unlike every other id this `lib/` layer interpolates, which come back
+// from a server response.
+describe("a session id from the address bar is encoded before it is interpolated", () => {
+  test("fetchSession encodes an id that would otherwise retarget the request", async () => {
+    let calledUrl: string | undefined
+    global.fetch = (async (url: string) => {
+      calledUrl = url
+      return jsonResponse(200, {})
+    }) as typeof fetch
+
+    await fetchSession("20260101T000000000000Z-a?b")
+
+    // Not `/api/sessions/20260101T000000000000Z-a` plus a query string,
+    // which is a different request answering with a different refusal.
+    expect(calledUrl).toBe("/api/sessions/20260101T000000000000Z-a%3Fb")
+  })
+
+  test("sessionAudioUrl encodes the same way", () => {
+    expect(sessionAudioUrl("20260101T000000000000Z-a#b")).toBe(
+      "/api/sessions/20260101T000000000000Z-a%23b/audio",
+    )
+  })
+
+  test("an ordinary recorder-written id is unchanged by the encoding", () => {
+    expect(sessionAudioUrl("20260919T154201123456Z-turn-abc123")).toBe(
+      "/api/sessions/20260919T154201123456Z-turn-abc123/audio",
+    )
   })
 })

@@ -58,8 +58,15 @@ export function fetchSessions(): Promise<SessionSummary[]> {
   return apiFetch<SessionsListResponse>("/api/sessions").then((response) => response.sessions)
 }
 
+/** `encodeURIComponent` on the id, unlike `lib/plugins.ts`/`lib/macros.ts`/
+ * `lib/workflows.ts`, which interpolate theirs raw. The difference is
+ * where the id comes from: theirs come back from a server response, this
+ * one comes from `useParams` -- i.e. from the address bar. An id holding a
+ * `?` or a `#` silently retargets the request (`/api/sessions/a?b` asks for
+ * `/api/sessions/a` with a query string), so D-04's named not-found copy is
+ * replaced by whatever that different request answers. */
 export function fetchSession(id: string): Promise<SessionDetail> {
-  return apiFetch<SessionDetail>(`/api/sessions/${id}`)
+  return apiFetch<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`)
 }
 
 /** The audio path for a session id -- a plain string, never a fetch. The
@@ -70,5 +77,5 @@ export function fetchSession(id: string): Promise<SessionDetail> {
  * This is the named exception to that rule, not a lapse -- `apiFetch`'s
  * JSON-shaped seam is the wrong fit for routing binary audio bytes. */
 export function sessionAudioUrl(id: string): string {
-  return `/api/sessions/${id}/audio`
+  return `/api/sessions/${encodeURIComponent(id)}/audio`
 }
