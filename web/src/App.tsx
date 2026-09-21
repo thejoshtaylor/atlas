@@ -19,6 +19,7 @@ import { PluginsRoute } from "@/routes/plugins/PluginsRoute"
 import { PolicyRoute } from "@/routes/policy/PolicyRoute"
 import { ProvidersRoute } from "@/routes/providers/ProvidersRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
+import { SessionDetailRoute } from "@/routes/sessions/SessionDetailRoute"
 import { SessionsRoute } from "@/routes/sessions/SessionsRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
 import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
@@ -74,6 +75,7 @@ function AppRoutes() {
             <Route path="/workflows/:id" element={<WorkflowEditorRoute />} />
             <Route path="/dev-mic" element={<DevMicRoute />} />
             <Route path="/sessions" element={<SessionsRoute />} />
+            <Route path="/sessions/:id" element={<SessionDetailRoute />} />
           </Route>
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />

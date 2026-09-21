@@ -254,14 +254,20 @@ def test_a_traversal_attempt_is_refused_before_any_path_is_built(tmp_path, fake_
     literal = client.get("/api/sessions/20260101T000000000000Z-../../secret.txt")
     assert literal.status_code == 404
     assert "not a recognised session id" in literal.json()["detail"]
+    assert "do not read me" not in literal.text
 
     # `httpx.Client` (what `TestClient` wraps) normalizes a raw `../` in the
     # URL path itself before it ever reaches the server, so the meaningful
     # traversal probe against *this* server is the percent-encoded form,
-    # which the transport does not touch.
+    # which the transport does not touch. Starlette's own router never
+    # matches `%2F` against a single-segment `{session_id}` path parameter
+    # at all -- the request never reaches this module's handler, and the
+    # 404 it gets is Starlette's own generic one, not this module's named
+    # refusal. Either shape refuses the same traversal before any path is
+    # built; only the message differs by which layer caught it.
     encoded = client.get("/api/sessions/20260101T000000000000Z-%2e%2e%2Fsecret.txt")
     assert encoded.status_code == 404
-    assert "not a recognised session id" in encoded.json()["detail"]
+    assert "do not read me" not in encoded.text
 
 
 def test_an_id_older_than_the_retention_window_is_refused_naming_the_sweep(tmp_path, fake_account_repository):

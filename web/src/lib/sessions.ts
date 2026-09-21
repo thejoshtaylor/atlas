@@ -21,8 +21,43 @@ interface SessionsListResponse {
   sessions: SessionSummary[]
 }
 
+/** `TimelineEntryResponse`'s exact shape. `stage`/`type`/`text`/... are
+ * whichever extra fields `render_timeline` wrote for that entry's own
+ * kind -- carried through untyped (`[key: string]: unknown`) rather than
+ * re-declared here, the same "derived, never a second source of truth"
+ * discipline `session/timeline.py` states for the merge itself. */
+export interface TimelineEntry {
+  ts: number
+  kind: "event" | "stage"
+  offset_s: number | null
+  [key: string]: unknown
+}
+
+/** `SessionDetailResponse`'s exact shape. */
+export interface SessionDetail {
+  id: string
+  started_at: string
+  turn_outcome: string
+  transcript: string | null
+  reply_text: string | null
+  stage_durations_ms: Record<string, number | null>
+  end_of_speech_to_first_audio_ms: number | null
+  end_of_speech_to_answer_audio_ms: number | null
+  audio_format: { encoding: string; sample_rate: number } | null
+  has_audio: boolean
+  timeline: TimelineEntry[]
+}
+
 export const SESSIONS_QUERY_KEY = ["sessions"] as const
+
+export function sessionQueryKey(id: string) {
+  return ["sessions", id] as const
+}
 
 export function fetchSessions(): Promise<SessionSummary[]> {
   return apiFetch<SessionsListResponse>("/api/sessions").then((response) => response.sessions)
+}
+
+export function fetchSession(id: string): Promise<SessionDetail> {
+  return apiFetch<SessionDetail>(`/api/sessions/${id}`)
 }

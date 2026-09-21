@@ -19,9 +19,18 @@ const SAMPLE_SESSION = {
   has_audio: true,
 }
 
+// The full named-export set, not just what this file's own test reads --
+// `mock.module` replaces the module registry entry for every consumer for
+// the rest of this `bun test` process, including `SessionDetailRoute.tsx`
+// imported by a sibling test file. An incomplete stub here would silently
+// break that other file's own import of `fetchSession`/`sessionQueryKey`.
 mock.module("@/lib/sessions", () => ({
   SESSIONS_QUERY_KEY: ["sessions"],
   fetchSessions: async () => [SAMPLE_SESSION],
+  sessionQueryKey: (id: string) => ["sessions", id],
+  fetchSession: async () => {
+    throw new Error("fetchSession is not stubbed in SessionsRoute.test.tsx")
+  },
 }))
 
 afterEach(() => {

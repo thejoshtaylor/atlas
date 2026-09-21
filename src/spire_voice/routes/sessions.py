@@ -1,5 +1,5 @@
-"""Session review over HTTP: list recorded turns, straight off disk
-(D-01, D-02, WEB-07).
+"""Session review over HTTP: list recorded turns and read one in full,
+straight off disk (D-01, D-02, D-04, WEB-07).
 
 Every route here requires `Role.OPERATOR` (D-03): a recording is reachable
 at the same trust level `/policy`, `/macros`, and `/dev-mic` already carry,
@@ -27,16 +27,17 @@ this module never infers one from the audio format.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.config import SessionConfig
 from spire_voice.session.recorder import EVENTS_FILENAME, TIMING_FILENAME
 from spire_voice.session.retention import parse_session_timestamp
+from spire_voice.session.timeline import TIMELINE_FILENAME, regenerate_timeline
 
 router = APIRouter(tags=["sessions"])
 
@@ -46,6 +47,25 @@ router = APIRouter(tags=["sessions"])
 # indistinguishable from one that never happened (the same reasoning
 # `SessionRecorder` gives for creating its directory eagerly).
 _INCOMPLETE_OUTCOME = "recording_incomplete"
+
+
+# --- Named refusals (`routes/plugins.py`'s own house convention; D-04's
+# --- first-class-"unknown" discipline, `routes/conflict.py`) --------------
+
+
+def _unrecognised_session_id_error(session_id: str) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"{session_id!r} is not a recognised session id")
+
+
+def _removed_by_retention_error(session_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail=f"session {session_id!r} has been removed by the retention sweep",
+    )
+
+
+def _session_not_found_error(session_id: str) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"no session with id {session_id!r}")
 
 
 # --- Response models --------------------------------------------------------
@@ -62,6 +82,32 @@ class SessionSummaryResponse(BaseModel):
 
 class SessionsListResponse(BaseModel):
     sessions: list[SessionSummaryResponse]
+
+
+class TimelineEntryResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    ts: float
+    kind: str
+    # The one field this route adds beyond what `render_timeline` itself
+    # writes: the entry's own timestamp minus the turn's start mark, both
+    # drawn from the same `time.monotonic()` clock domain -- one clock
+    # compared against itself, never a re-sort against a second one.
+    offset_s: "float | None" = None
+
+
+class SessionDetailResponse(BaseModel):
+    id: str
+    started_at: datetime
+    turn_outcome: str
+    transcript: "str | None"
+    reply_text: "str | None"
+    stage_durations_ms: dict
+    end_of_speech_to_first_audio_ms: "float | None"
+    end_of_speech_to_answer_audio_ms: "float | None"
+    audio_format: "dict | None"
+    has_audio: bool
+    timeline: list[TimelineEntryResponse]
 
 
 # --- Filesystem helpers ------------------------------------------------------
@@ -84,6 +130,26 @@ def _last_reply_text(events: list[dict]) -> "str | None":
         if event.get("type") == "reply.text":
             reply_text = event.get("text")
     return reply_text
+
+
+def _transcript_before_stt_final(events: list[dict], stt_final_at: "float | None") -> "str | None":
+    """The text of the last `transcript.partial` event whose recorded
+    instant is at or before `stt_final_at` -- 08-UI-SPEC.md's own flagged
+    assumption: there is no `transcript.final` event today, and every
+    partial recorded to `events.jsonl` is exactly that. `None` when no
+    partial precedes the mark (or the mark itself was never reached) --
+    the screen says so rather than showing a blank."""
+    if stt_final_at is None:
+        return None
+    transcript: "str | None" = None
+    for event in events:
+        if event.get("type") != "transcript.partial":
+            continue
+        recorded_at = event.get("recorded_at")
+        if recorded_at is None or recorded_at > stt_final_at:
+            continue
+        transcript = event.get("text")
+    return transcript
 
 
 def _sum_durations(stage_durations_ms: dict) -> "float | None":
@@ -151,6 +217,63 @@ def _session_summary(name: str, started_at: datetime, directory: Path) -> Sessio
     )
 
 
+def _resolve_session_directory(root: Path, session_id: str) -> "tuple[Path, datetime]":
+    """Match `session_id` against the recorder's own directory-name shape
+    before it is ever joined onto a path, then confirm the resolved path
+    is genuinely a direct child of the resolved root -- the same two-step
+    `sweep_expired_sessions` already performs before it deletes anything.
+    A literal traversal segment and a percent-encoded one both fail this
+    containment check identically, because both are resolved through the
+    same `Path.resolve()` call before comparison -- there is nothing
+    percent-decoding could do here that changes which check runs."""
+    parsed = parse_session_timestamp(session_id)
+    if parsed is None:
+        raise _unrecognised_session_id_error(session_id)
+    resolved_root = root.resolve()
+    candidate = (resolved_root / session_id).resolve()
+    if candidate.parent != resolved_root:
+        raise _unrecognised_session_id_error(session_id)
+    return candidate, parsed
+
+
+def _session_detail(session_id: str, started_at: datetime, directory: Path) -> SessionDetailResponse:
+    timing_payload = json.loads((directory / TIMING_FILENAME).read_text(encoding="utf-8"))
+    events = _read_events(directory)
+
+    timeline_path = directory / TIMELINE_FILENAME
+    if not timeline_path.is_file():
+        # `regenerate_timeline` exists precisely to prove the rendering is
+        # derivable from `events.jsonl` and `timing.json` alone (D-02).
+        regenerate_timeline(directory)
+    raw_timeline = _read_jsonl(timeline_path)
+
+    turn_started_at = timing_payload.get("turn_started_at")
+    timeline = [
+        TimelineEntryResponse(
+            offset_s=(entry["ts"] - turn_started_at) if turn_started_at is not None else None,
+            **entry,
+        )
+        for entry in raw_timeline
+    ]
+
+    stage_durations_ms = timing_payload.get("stage_durations_ms") or {}
+    audio_format = timing_payload.get("audio_format")
+
+    return SessionDetailResponse(
+        id=session_id,
+        started_at=started_at,
+        turn_outcome=timing_payload.get("turn_outcome", _INCOMPLETE_OUTCOME),
+        transcript=_transcript_before_stt_final(events, timing_payload.get("stt_final_at")),
+        reply_text=_last_reply_text(events),
+        stage_durations_ms=stage_durations_ms,
+        end_of_speech_to_first_audio_ms=timing_payload.get("end_of_speech_to_first_audio_ms"),
+        end_of_speech_to_answer_audio_ms=timing_payload.get("end_of_speech_to_answer_audio_ms"),
+        audio_format=audio_format,
+        has_audio=_has_audio(directory, audio_format),
+        timeline=timeline,
+    )
+
+
 # --- Routes ------------------------------------------------------------------
 
 
@@ -162,3 +285,22 @@ async def list_sessions(
     directories = _list_session_directories(Path(session_config.dir))
     sessions = [_session_summary(name, started_at, directory) for name, started_at, directory in directories]
     return SessionsListResponse(sessions=sessions)
+
+
+@router.get("/api/sessions/{session_id}")
+async def get_session_detail(
+    session_id: str,
+    request: Request,
+    _user: CurrentUser = Depends(require_role(Role.OPERATOR)),
+) -> SessionDetailResponse:
+    session_config: SessionConfig = request.app.state.config.session
+    directory, parsed_at = _resolve_session_directory(Path(session_config.dir), session_id)
+
+    age = datetime.now(timezone.utc) - parsed_at
+    if age > timedelta(days=session_config.retain_days):
+        raise _removed_by_retention_error(session_id)
+
+    if not directory.is_dir():
+        raise _session_not_found_error(session_id)
+
+    return _session_detail(session_id, parsed_at, directory)
