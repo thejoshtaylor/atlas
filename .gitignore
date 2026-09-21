@@ -40,6 +40,13 @@ build/
 .vite/
 *.tsbuildinfo
 
+# `tests/test_web_typecheck.py` writes this probe into the tracked source
+# tree (it has to be somewhere `tsconfig.app.json` includes) and removes it
+# in a `finally`. A SIGKILL or a timeout during `bunx tsc -b` leaves it
+# behind, where `git status` shows it as untracked source and a later
+# `git add -A` would commit a deliberate type error into the repository.
+web/src/__typecheck_probe__.ts
+
 # Models are large binaries, downloaded at build or first run.
 models/
 

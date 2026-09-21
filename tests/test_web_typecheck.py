@@ -76,3 +76,22 @@ def test_web_package_json_declares_a_typecheck_script():
         "web/package.json's `typecheck` script must be exactly `tsc -b` -- the "
         "bare `tsc --noEmit` form does not follow project references (D-10a)"
     )
+
+
+def test_the_probe_path_is_gitignored_so_an_interrupted_run_cannot_be_committed():
+    """The probe is written into the tracked source tree and removed in a
+    `finally`. A SIGKILL or a timeout during `bunx tsc -b` (the 120s cap
+    above) leaves it behind as untracked source, where a later `git add -A`
+    commits a deliberate type error into the repository."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "check-ignore", "-q", str(_PROBE_PATH.relative_to(_REPO_ROOT))],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+    )
+    assert proc.returncode == 0, (
+        f"{_PROBE_PATH.relative_to(_REPO_ROOT)} is not gitignored -- an interrupted "
+        "type-check run would leave a deliberate type error in the working tree "
+        "where `git add -A` would pick it up"
+    )
