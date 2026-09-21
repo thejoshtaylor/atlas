@@ -11,8 +11,11 @@ add their own test classes below as they land.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 
 from spire_voice.config import GateConfig, WakeConfig
 from spire_voice.sources.runner import SourceRunner
@@ -140,3 +143,282 @@ async def test_a_runner_nobody_calls_set_wake_threshold_on_behaves_as_before(cap
     with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
         await runner.run()
     assert len(turns_started) == 1
+
+
+# --- Task 2: GET /api/wake-events, PUT /api/wake-threshold -----------------
+#
+# `TestClient` against the real application (`_boot_authenticated_client`
+# below), matching `tests/test_observer_feed.py`'s own precedent for a
+# route this project needs booted through the real `lifespan`, not called
+# as a bare handler function -- `list_wake_events`/`set_wake_threshold`
+# both read `app.state` objects only a real boot assembles
+# (`source_runners`, `wake_event_repo`, `settings_repo`).
+
+
+class _ScriptedWakeDetector:
+    """Stands in for the real engine: reports a fixed score for every
+    chunk it processes, so a test can drive a real wake hit through
+    `SourceRunner._process_chunk` at a score it chooses -- the "real
+    evaluated wake hit" the plan's own `<action>` asks for, not merely a
+    read of `wake_threshold`."""
+
+    def __init__(self, score: float) -> None:
+        self.score = score
+
+    def process(self, chunk: bytes):
+        from spire_voice.wake.base import WakeHit
+
+        return WakeHit(score=self.score)
+
+    def close(self) -> None:
+        pass
+
+
+def _boot_authenticated_client(tmp_path, monkeypatch, *, role, wake_engine="openwakeword", wake_score=0.60):
+    """`tests/test_observer_feed.py::_boot_authenticated_client`'s own
+    shape, extended with a `wake_event_repo` (needed for `GET
+    /api/wake-events`, which `_fake_build_repositories` does not seed) and
+    a scripted, non-`None`-returning wake detector (needed to drive a real
+    hit through the boot's own `camera` `SourceRunner`)."""
+    from fastapi.testclient import TestClient
+
+    from spire_voice.auth.tokens import issue_access_token
+    from spire_voice.config import SecurityConfig
+    from spire_voice.plugins import manager as plugin_manager_module
+
+    import spire_voice.app as app_module
+    import tests.conftest as conftest
+    from tests import test_startup_smoke as smoke
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(
+            smoke._write_fake_config(
+                tmp_path,
+                extra={"debug": {"dir": str(session_dir)}, "wake": {"engine": wake_engine}},
+            )
+        ),
+    )
+
+    def _repositories_with_wake_events(config: object, engine: object) -> dict:
+        repositories = smoke._fake_build_repositories(config, engine)
+        repositories["wake_event_repo"] = conftest.FakeWakeEventRepository()
+        return repositories
+
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", smoke._fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", smoke._fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _repositories_with_wake_events)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", smoke._fake_build_tiers)
+    monkeypatch.setattr(
+        app_module, "_build_wake_detector", lambda wake_config: _ScriptedWakeDetector(wake_score)
+    )
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
+
+    client = TestClient(app_module.app)
+    client.__enter__()
+    security = SecurityConfig()
+    if role is not None:
+        if role == "admin":
+            user_id = 1
+        else:
+            from datetime import datetime, timezone
+
+            from spire_voice.db.repository import User
+
+            account_repo = app_module.app.state.account_repo
+            user_id = account_repo._next_user_id
+            account_repo._next_user_id += 1
+            account_repo.users[user_id] = User(
+                id=user_id,
+                email=f"{role}@example.invalid",
+                display_name=role,
+                password_hash="not-a-real-hash-never-checked",
+                role=role,
+                created_at=datetime.now(timezone.utc),
+                disabled_at=None,
+            )
+        token = issue_access_token(user_id=user_id, role=role, security=security)
+        client.cookies.set(security.cookie_name, token)
+    return client, app_module
+
+
+def test_a_put_inside_range_changes_every_running_sources_threshold_and_the_next_real_hit(
+    tmp_path, monkeypatch
+):
+    """The assertion the plan's own `<action>` asks for: a put followed by
+    a real evaluated wake hit, not merely an attribute read."""
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword", wake_score=0.60
+    )
+    try:
+        runner = app_module.app.state.source_runners[0]
+        # 0.60 clears the shipped `OpenWakeWordConfig` default (0.55).
+        assert runner._gate.evaluate(score=0.60, now=1.0, last_hit_at=None).allowed is True
+
+        response = client.put("/api/wake-threshold", json={"threshold": 0.90})
+        assert response.status_code == 200
+        assert response.json() == {"threshold": 0.90}
+
+        # The same score that used to clear the gate no longer does, on
+        # the exact object a real chunk is evaluated against.
+        assert runner._gate.evaluate(score=0.60, now=2.0, last_hit_at=None).allowed is False
+        assert runner.wake_threshold == 0.90
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_put_outside_range_is_refused_and_changes_nothing(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        runner = app_module.app.state.source_runners[0]
+        before = runner.wake_threshold
+
+        response = client.put("/api/wake-threshold", json={"threshold": 1.5})
+        assert response.status_code == 422
+        assert runner.wake_threshold == before
+
+        response = client.put("/api/wake-threshold", json={"threshold": -0.1})
+        assert response.status_code == 422
+        assert runner.wake_threshold == before
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_a_submitted_threshold_is_stored_and_a_later_read_returns_it(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        response = client.put("/api/wake-threshold", json={"threshold": 0.42})
+        assert response.status_code == 200
+
+        setting = asyncio.run(
+            app_module.app.state.settings_repo.get_setting("wake_threshold")
+        )
+        assert setting is not None
+        assert setting.value == 0.42
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_wake_events_reports_engine_grading_threshold_and_events_newest_first(
+    tmp_path, monkeypatch
+):
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"
+    )
+    try:
+        repo = app_module.app.state.wake_event_repo
+        asyncio.run(
+            repo.record_wake_event(
+                source="camera",
+                engine="openwakeword",
+                score=0.60,
+                allowed=True,
+                block_reason=None,
+                recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        asyncio.run(
+            repo.record_wake_event(
+                source="camera",
+                engine="openwakeword",
+                score=0.30,
+                allowed=False,
+                block_reason="below_threshold",
+                recorded_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            )
+        )
+
+        response = client.get("/api/wake-events")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["engine"] == "openwakeword"
+        assert body["engine_grades"] is True
+        assert body["threshold"] == 0.55
+        assert [event["score"] for event in body["events"]] == [0.30, 0.60]
+        assert body["events"][0]["allowed"] is False
+        assert body["events"][0]["block_reason"] == "below_threshold"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_wake_events_states_plainly_when_the_engine_does_not_grade(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="vosk"
+    )
+    try:
+        response = client.get("/api/wake-events")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["engine"] == "vosk"
+        assert body["engine_grades"] is False
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_wake_events_counts_sessions_older_than_the_earliest_recorded_wake_event(
+    tmp_path, monkeypatch
+):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        session_dir = Path(app_module.app.state.config.session.dir)
+        (session_dir / "20250101T000000000000Z-old-turn").mkdir()
+        (session_dir / "20260601T000000000000Z-new-turn").mkdir()
+
+        repo = app_module.app.state.wake_event_repo
+        asyncio.run(
+            repo.record_wake_event(
+                source="camera",
+                engine="openwakeword",
+                score=0.60,
+                allowed=True,
+                block_reason=None,
+                recorded_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            )
+        )
+
+        response = client.get("/api/wake-events")
+        assert response.status_code == 200
+        # Only the 2025 session predates the one recorded wake event.
+        assert response.json()["not_scored_session_count"] == 1
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_get_wake_events_with_no_wake_events_counts_every_session_as_not_scored(
+    tmp_path, monkeypatch
+):
+    client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        session_dir = Path(app_module.app.state.config.session.dir)
+        (session_dir / "20250101T000000000000Z-old-turn").mkdir()
+        (session_dir / "20260601T000000000000Z-new-turn").mkdir()
+
+        response = client.get("/api/wake-events")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["not_scored_session_count"] == 2
+        assert body["events"] == []
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_both_wake_routes_are_refused_to_a_viewer_and_allowed_to_an_operator(tmp_path, monkeypatch):
+    viewer_client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="viewer")
+    try:
+        assert viewer_client.get("/api/wake-events").status_code == 403
+        assert viewer_client.put("/api/wake-threshold", json={"threshold": 0.5}).status_code == 403
+    finally:
+        viewer_client.__exit__(None, None, None)
+
+    operator_client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        assert operator_client.get("/api/wake-events").status_code == 200
+        assert operator_client.put("/api/wake-threshold", json={"threshold": 0.5}).status_code == 200
+    finally:
+        operator_client.__exit__(None, None, None)
