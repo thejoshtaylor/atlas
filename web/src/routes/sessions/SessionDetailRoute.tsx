@@ -167,7 +167,16 @@ export function SessionDetailRoute() {
             </p>
           </div>
 
-          {audioFailed ? (
+          {/* `has_audio` is the server's own answer to "was anything
+              recorded for this turn" (`_audio_not_recorded_error` is the
+              named refusal behind it). Rendering the player anyway meant
+              a 404, an `onError`, and "Couldn't load the recording." for a
+              turn where nothing was ever recorded -- a load failure
+              reported where there was nothing to load. The load-failure
+              copy is reserved for a real failure now. */}
+          {!screen.session.has_audio ? (
+            <p className="text-body text-muted-foreground">No audio was recorded for this turn.</p>
+          ) : audioFailed ? (
             <p className="text-body text-muted-foreground">
               Couldn't load the recording. The rest of this session is still shown below.
             </p>

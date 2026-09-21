@@ -230,3 +230,19 @@ test("an audio error degrades only the player region -- timeline, transcript and
     expect(button.getAttribute("aria-current")).toBeNull()
   }
 })
+
+// IN-02: `has_audio` was fetched, typed, and never read.
+test("a session the server says has no audio says so, instead of a player that 404s into a load failure", async () => {
+  stubLib(async () => ({ ...SAMPLE_SESSION, has_audio: false }))
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(screen.getByText("No audio was recorded for this turn.")).toBeTruthy()
+  expect(document.querySelectorAll("audio").length).toBe(0)
+  // The load-failure copy is reserved for a real failure.
+  expect(screen.queryByText(/Couldn't load the recording/)).toBeNull()
+  // The rest of the session is untouched by it.
+  expect(screen.getByText("Timeline")).toBeTruthy()
+})
