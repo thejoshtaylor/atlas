@@ -271,3 +271,53 @@ describe("buildHistogram -- the bucket the threshold falls inside (WR-07)", () =
     expect(belowAcrossBuckets).toBe(state.belowCount)
   })
 })
+
+describe("historicalOutcomeFor -- an unrecognised block reason (WR-08)", () => {
+  test("each of the gate's own three reasons maps to its own outcome", () => {
+    const state = deriveWakeTuningScreenState(
+      success(
+        response({
+          events: [
+            event({ id: 1, allowed: false, block_reason: "below_threshold" }),
+            event({ id: 2, allowed: false, block_reason: "refractory" }),
+            event({ id: 3, allowed: false, block_reason: "media_playing" }),
+            event({ id: 4, allowed: true, block_reason: null }),
+          ],
+        }),
+      ),
+      0.5,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+    expect(state.events.map((e) => e.historicalOutcome)).toEqual([
+      "blocked_below_threshold",
+      "blocked_refractory",
+      "blocked_media_playing",
+      "started_turn",
+    ])
+  })
+
+  test("a reason this fold does not recognise is not silently relabelled as a threshold decision", () => {
+    const state = deriveWakeTuningScreenState(
+      success(
+        response({
+          events: [event({ id: 1, allowed: false, block_reason: "a_fourth_reason" })],
+        }),
+      ),
+      0.5,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+    expect(state.events[0].historicalOutcome).toBe("blocked_unknown_reason")
+    // Carried through verbatim, so the render can show the gate's own word.
+    expect(state.events[0].blockReason).toBe("a_fourth_reason")
+  })
+
+  test("a blocked row with no reason recorded is unknown, not a threshold decision that never happened", () => {
+    const state = deriveWakeTuningScreenState(
+      success(response({ events: [event({ id: 1, allowed: false, block_reason: null })] })),
+      0.5,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+    expect(state.events[0].historicalOutcome).toBe("blocked_unknown_reason")
+    expect(state.events[0].blockReason).toBeNull()
+  })
+})

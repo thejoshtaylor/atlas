@@ -26,11 +26,27 @@ import { deriveWakeTuningScreenState, type WakeEventDisplay } from "./deriveWake
 
 const DEFAULT_LIST_SIZE = 20
 
-const HISTORICAL_OUTCOME_LABEL: Record<WakeEventDisplay["historicalOutcome"], string> = {
+const HISTORICAL_OUTCOME_LABEL: Record<
+  Exclude<WakeEventDisplay["historicalOutcome"], "blocked_unknown_reason">,
+  string
+> = {
   started_turn: "Started a turn",
   blocked_below_threshold: "Blocked — below threshold",
   blocked_refractory: "Blocked — refractory window",
   blocked_media_playing: "Blocked — media playing",
+}
+
+/** An outcome this screen does not recognise shows the gate's own string
+ * verbatim, never a friendlier label for a decision this contract has not
+ * confirmed -- the same fallback `summarizeSessionOutcome` gives an
+ * unrecognised `turn_outcome`. A blocked row with no reason recorded says
+ * that, rather than naming one. */
+function historicalOutcomeLabel(event: WakeEventDisplay): string {
+  if (event.historicalOutcome !== "blocked_unknown_reason") {
+    return HISTORICAL_OUTCOME_LABEL[event.historicalOutcome]
+  }
+  if (event.blockReason === null) return "Blocked — no reason recorded"
+  return `Blocked — ${event.blockReason}`
 }
 
 function formatRecordedAt(recordedAt: string): string {
@@ -48,7 +64,7 @@ function EventRow({ event }: { event: WakeEventDisplay }) {
         <Badge variant={event.clearsPreviewedThreshold ? "secondary" : "outline"}>
           {event.clearsPreviewedThreshold ? "Clears" : "Below"}
         </Badge>
-        <Badge variant="outline">{HISTORICAL_OUTCOME_LABEL[event.historicalOutcome]}</Badge>
+        <Badge variant="outline">{historicalOutcomeLabel(event)}</Badge>
       </div>
     </li>
   )

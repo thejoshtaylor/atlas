@@ -274,3 +274,27 @@ test("an uncapped response says nothing about a cap", async () => {
   await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
   expect(screen.queryByText("Older wake attempts than these exist and aren't included above.")).toBeNull()
 })
+
+test("an unrecognised block reason renders the gate's own string verbatim, never a threshold label (WR-08)", async () => {
+  stubLib(async () => ({
+    events: [stubEvent({ id: 1, score: 0.9, allowed: false, block_reason: "a_fourth_reason" })],
+    threshold: 0.5,
+  }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  expect(await screen.findByText("Blocked — a_fourth_reason")).toBeTruthy()
+  expect(screen.queryByText("Blocked — below threshold")).toBeNull()
+})
+
+test("a blocked row with no reason recorded says so rather than naming one", async () => {
+  stubLib(async () => ({
+    events: [stubEvent({ id: 1, score: 0.9, allowed: false, block_reason: null })],
+    threshold: 0.5,
+  }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  expect(await screen.findByText("Blocked — no reason recorded")).toBeTruthy()
+  expect(screen.queryByText("Blocked — below threshold")).toBeNull()
+})

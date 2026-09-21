@@ -7,11 +7,14 @@ import type { UseMutationOptions } from "@tanstack/react-query"
 import { apiFetch } from "./api"
 import { queryClient } from "./queryClient"
 
-/** `GateDecision`'s own three named block reasons (`wake/gate.py`), plus
- * `null` for an allowed hit. Carried through untyped as `string | null`
- * on the wire (the server sends the raw `BlockReason` literal or
- * `None`) -- this module does not re-narrow it; `deriveWakeTuningScreenState.ts`
- * owns turning it into the screen's own outcome vocabulary. */
+/** `GateDecision`'s own three named block reasons (`wake/gate.py`) as of
+ * this phase. The three this screen recognises -- not a closed statement
+ * about what the column can hold: `block_reason` below is `string | null`
+ * on purpose, because the server sends whatever `BlockReason` holds at
+ * the time and the column is nullable. A fourth reason added to the gate
+ * later arrives here as a string this union does not name, and
+ * `deriveWakeTuningScreenState.ts` is where that becomes a first-class
+ * unknown rather than a wrong label. */
 export type WakeEventBlockReason = "below_threshold" | "refractory" | "media_playing"
 
 /** `WakeEventResponse`'s exact shape (`routes/wake.py`). `score` is
@@ -23,7 +26,7 @@ export interface WakeEvent {
   engine: string
   score: number | null
   allowed: boolean
-  block_reason: WakeEventBlockReason | null
+  block_reason: string | null
   recorded_at: string
 }
 

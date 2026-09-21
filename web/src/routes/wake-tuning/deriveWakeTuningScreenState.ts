@@ -19,14 +19,24 @@ export interface QueryLike<T> {
 }
 
 /** What the gate actually decided at record time -- a historical fact no
- * re-partition can alter. `started_turn` is the one allowed outcome;
- * the other three mirror `wake/gate.py::BlockReason`'s own three named
- * reasons exactly, never a fourth invented here. */
+ * re-partition can alter. `started_turn` is the one allowed outcome; the
+ * three named blocks mirror `wake/gate.py::BlockReason`'s own three
+ * reasons exactly, never a fourth invented here.
+ *
+ * `blocked_unknown_reason` is the fifth member and the point of this
+ * type. `blocked_below_threshold` used to be a bare fallthrough, so a
+ * fourth reason added to `BlockReason` later would have rendered as a
+ * *wrong* third one, and a row written `allowed=false, block_reason=null`
+ * (the column is nullable and nothing enforces the pairing) read as a
+ * threshold decision that never happened. Fabricating a reason is exactly
+ * what `deriveSessionsScreenState`'s own `summarizeSessionOutcome`
+ * refuses to do two directories away. */
 export type HistoricalOutcome =
   | "started_turn"
   | "blocked_below_threshold"
   | "blocked_refractory"
   | "blocked_media_playing"
+  | "blocked_unknown_reason"
 
 export interface WakeEventDisplay {
   id: number
@@ -39,6 +49,12 @@ export interface WakeEventDisplay {
   /** Historical: what the gate actually decided. Fixed; moving the
    * control never changes this field (T-08-34). */
   historicalOutcome: HistoricalOutcome
+  /** The server's own `block_reason` string, carried through unchanged so
+   * the render can show an unrecognised one verbatim -- the same verbatim
+   * fallback the Sessions list gives an unrecognised `turn_outcome`.
+   * `null` for an allowed hit, and also for a blocked one the gate
+   * recorded no reason against. */
+  blockReason: string | null
 }
 
 export interface HistogramBucket {
@@ -111,9 +127,10 @@ export function clearsThreshold(score: number | null, threshold: number): boolea
 
 function historicalOutcomeFor(event: WakeEvent): HistoricalOutcome {
   if (event.allowed) return "started_turn"
+  if (event.block_reason === "below_threshold") return "blocked_below_threshold"
   if (event.block_reason === "refractory") return "blocked_refractory"
   if (event.block_reason === "media_playing") return "blocked_media_playing"
-  return "blocked_below_threshold"
+  return "blocked_unknown_reason"
 }
 
 /**
@@ -170,6 +187,7 @@ export function deriveWakeTuningScreenState(
     score: event.score,
     clearsPreviewedThreshold: clearsThreshold(event.score, threshold),
     historicalOutcome: historicalOutcomeFor(event),
+    blockReason: event.block_reason,
   }))
 
   const scoredEvents = response.events.filter((event) => event.score !== null)
