@@ -150,6 +150,31 @@ def test_a_directory_the_recorder_did_not_write_is_not_listed(tmp_path, fake_acc
     assert len(response.json()["sessions"]) == 1
 
 
+
+def test_a_session_past_the_retention_window_is_not_listed_at_all(tmp_path, fake_account_repository):
+    """The sweep only runs every `expiry_interval_s`, so a directory past
+    `retain_days` sits on disk between two runs. Listing it advertises a
+    row whose detail route says it was removed -- while it is still there
+    (WR-02). One predicate, asked by both routes."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path), retain_days=7)
+    inside = _write_recorded_session(session_config, started_offset_days=1)
+    past = _write_recorded_session(session_config, started_offset_days=30)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    listed = client.get("/api/sessions").json()["sessions"]
+
+    assert [session["id"] for session in listed] == [inside.name]
+    # Still on disk -- the sweep has not reached it. The list is silent
+    # about it because the detail route is about to refuse it, not because
+    # anything deleted it.
+    assert past.is_dir()
+    assert client.get(f"/api/sessions/{past.name}").status_code == 404
+
+
 def test_a_viewer_is_refused_and_an_operator_succeeds(tmp_path, fake_account_repository):
     security = SecurityConfig()
     account_repo = fake_account_repository()

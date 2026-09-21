@@ -239,23 +239,49 @@ def _has_audio(directory: Path, audio_format: "dict | None") -> bool:
     return (directory / f"audio.{encoding}").is_file()
 
 
-def _list_session_directories(root: Path) -> "list[tuple[str, datetime, Path]]":
-    """Every directory under `root` whose name the recorder wrote, newest
-    first. A directory whose name does not parse is skipped -- the same
+def _is_past_retention(started_at: datetime, session_config: SessionConfig, now: datetime) -> bool:
+    """The one retention predicate this module has. The boundary matches
+    `sweep_expired_sessions`'s exactly -- a session whose age is precisely
+    `retain_days` is kept, one strictly older is gone -- and both the list
+    route and `_resolve_readable_session_directory` ask it, so the list
+    cannot advertise a session the detail route refuses as swept."""
+    return now - started_at > timedelta(days=session_config.retain_days)
+
+
+def _list_session_directories(session_config: SessionConfig) -> "list[tuple[str, datetime, Path]]":
+    """Every directory under the configured root whose name the recorder
+    wrote and whose age is still inside the retention window, newest
+    first.
+
+    A directory whose name does not parse is skipped -- the same
     discipline `sweep_expired_sessions` already applies to one it does not
-    recognise."""
+    recognise. One past `retain_days` is skipped too: the sweep only runs
+    every `debug.expiry_interval_s`, so between two runs such a directory
+    is still on disk, and listing it would advertise a row whose detail
+    route answers "has been removed by the retention sweep" -- a statement
+    that is not true at that moment, which is the opposite of what D-04 is
+    for.
+
+    The clock is read once for the whole listing, for the same reason
+    `sweep_expired_sessions` reads it once per run: two readings can put
+    two identically-aged sessions on opposite sides of the boundary within
+    one response.
+    """
     try:
-        resolved_root = root.resolve()
+        resolved_root = Path(session_config.dir).resolve()
     except OSError:
         return []
     if not resolved_root.is_dir():
         return []
+    now = datetime.now(timezone.utc)
     candidates: "list[tuple[str, datetime, Path]]" = []
     for entry in resolved_root.iterdir():
         if not entry.is_dir():
             continue
         parsed = parse_session_timestamp(entry.name)
         if parsed is None:
+            continue
+        if _is_past_retention(parsed, session_config, now):
             continue
         candidates.append((entry.name, parsed, entry))
     candidates.sort(key=lambda item: item[1], reverse=True)
@@ -371,8 +397,7 @@ def _resolve_readable_session_directory(session_config: SessionConfig, session_i
     module's own docstring requires (T-08-16)."""
     directory, parsed_at = _resolve_session_directory(Path(session_config.dir), session_id)
 
-    age = datetime.now(timezone.utc) - parsed_at
-    if age > timedelta(days=session_config.retain_days):
+    if _is_past_retention(parsed_at, session_config, datetime.now(timezone.utc)):
         raise _removed_by_retention_error(session_id)
 
     if not directory.is_dir():
@@ -445,7 +470,7 @@ async def list_sessions(
     request: Request, _user: CurrentUser = Depends(require_role(Role.OPERATOR))
 ) -> SessionsListResponse:
     session_config: SessionConfig = request.app.state.config.session
-    directories = _list_session_directories(Path(session_config.dir))
+    directories = _list_session_directories(session_config)
     sessions = [_session_summary(name, started_at, directory) for name, started_at, directory in directories]
     return SessionsListResponse(sessions=sessions)
 
