@@ -65,7 +65,19 @@ export function connect(handlers: ObserverHandlers): ObserverConnection {
         // somehow arrived, there is nothing meaningful to parse it as.
         return
       }
-      handlers.onMessage(JSON.parse(event.data) as ObserverMessage)
+      // Guarded for the same reason the binary branch above is: a frame
+      // there is nothing meaningful to parse is a frame to drop, not an
+      // uncaught `SyntaxError` escaping an event handler. The server only
+      // ever sends `json.dumps` output, so this is defensive -- but the
+      // inconsistency with the branch directly above read as an oversight
+      // rather than a decision, which is what made it worth closing.
+      let message: ObserverMessage
+      try {
+        message = JSON.parse(event.data) as ObserverMessage
+      } catch {
+        return
+      }
+      handlers.onMessage(message)
     }
 
     socket.onclose = () => {
