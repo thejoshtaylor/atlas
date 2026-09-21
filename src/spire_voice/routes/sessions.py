@@ -330,18 +330,33 @@ def _session_summary(name: str, started_at: datetime, directory: Path) -> Sessio
 def _resolve_session_directory(root: Path, session_id: str) -> "tuple[Path, datetime]":
     """Match `session_id` against the recorder's own directory-name shape
     before it is ever joined onto a path, then confirm the resolved path
-    is genuinely a direct child of the resolved root -- the same two-step
-    `sweep_expired_sessions` already performs before it deletes anything.
-    A literal traversal segment and a percent-encoded one both fail this
-    containment check identically, because both are resolved through the
-    same `Path.resolve()` call before comparison -- there is nothing
-    percent-decoding could do here that changes which check runs."""
+    is genuinely the direct child of the resolved root that `session_id`
+    names -- the same two-step `sweep_expired_sessions` already performs
+    before it deletes anything.
+
+    The name check is load-bearing and not redundant with the parent
+    check. `SESSION_DIRECTORY_RE`'s trailing `.+` matches a separator, so
+    `20260101T000000000000Z-x/../<other>` satisfies the shape check, and
+    `root/X-x/../other` resolves to `root/other`, whose parent *is* the
+    root. Only requiring the resolved name to equal the supplied one
+    closes that -- and it closes a second hole with it: the timestamp this
+    function returns is parsed from the string it was given, so without
+    the name check `_resolve_readable_session_directory` would measure a
+    fresh-looking prefix's age against a directory it is supposed to
+    refuse as swept.
+
+    A percent-encoded traversal never reaches here at all -- Starlette
+    matches `{session_id}`'s `[^/]+` against an already-decoded path, so
+    `%2F` is a `/` before routing and the route does not match. That is
+    the ASGI layer's behaviour, not this function's guarantee, which is
+    why this function makes its own.
+    """
     parsed = parse_session_timestamp(session_id)
     if parsed is None:
         raise _unrecognised_session_id_error(session_id)
     resolved_root = root.resolve()
     candidate = (resolved_root / session_id).resolve()
-    if candidate.parent != resolved_root:
+    if candidate.parent != resolved_root or candidate.name != session_id:
         raise _unrecognised_session_id_error(session_id)
     return candidate, parsed
 

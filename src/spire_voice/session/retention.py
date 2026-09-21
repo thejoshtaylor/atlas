@@ -51,7 +51,9 @@ logger = logging.getLogger("spire_voice.session.retention")
 # from filesystem mtime, which a backup, a copy or a container restore can
 # rewrite without anything having changed about the recording (T-02-35). A
 # directory under the root whose name does not match this shape is left
-# untouched -- it is not one this module owns.
+# untouched -- it is not one this module owns. Matched with `fullmatch`,
+# never `match`: `$` accepts a trailing newline, so `re.match` would parse
+# a name the recorder could not have written as though it had.
 #
 # Public as of Phase 8 (08-04-PLAN.md, D-01): `routes/sessions.py` reads the
 # session list straight off disk and needs this exact pattern, not a second,
@@ -63,7 +65,7 @@ _SESSION_DIRECTORY_RE = SESSION_DIRECTORY_RE
 
 
 def parse_session_timestamp(name: str) -> datetime | None:
-    match = SESSION_DIRECTORY_RE.match(name)
+    match = SESSION_DIRECTORY_RE.fullmatch(name)
     if match is None:
         return None
     stamp = match.group(1)

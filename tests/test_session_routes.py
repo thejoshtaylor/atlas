@@ -18,13 +18,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from spire_voice.auth.tokens import issue_access_token
 from spire_voice.config import SecurityConfig, SessionConfig
+from spire_voice.routes.sessions import _resolve_readable_session_directory
 from spire_voice.routes.sessions import router as sessions_router
 from spire_voice.session.recorder import EVENTS_FILENAME, SessionRecorder
+from spire_voice.session.retention import parse_session_timestamp
 from spire_voice.timing import TurnTimings
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
@@ -375,6 +378,40 @@ def test_a_traversal_attempt_is_refused_before_any_path_is_built(tmp_path, fake_
     encoded = client.get("/api/sessions/20260101T000000000000Z-%2e%2e%2Fsecret.txt")
     assert encoded.status_code == 404
     assert "do not read me" not in encoded.text
+
+
+def test_a_traversal_segment_is_refused_by_the_helper_itself_not_by_the_router(tmp_path, fake_account_repository):
+    """Called directly, with no ASGI layer in front of it. Starlette's
+    `[^/]+` is what stops the HTTP form of this today; the helper is the
+    "one code path, one confinement check" both single-session routes lean
+    on, and its own docstring claims the containment. It has to hold on its
+    own (WR-01)."""
+    session_config = SessionConfig(dir=str(tmp_path), retain_days=7)
+    older = _write_recorded_session(session_config, started_offset_days=30)
+
+    # A fresh-looking prefix in front of a segment that escapes back into
+    # the root: the shape check passes (`.+` matches a separator) and the
+    # resolved parent *is* the root, so the containment check alone let
+    # this through -- and the retention gate then measured today's date,
+    # parsed from the prefix, against a directory 30 days old.
+    escaping_id = f"20260101T000000000000Z-x/../{older.name}"
+
+    with pytest.raises(HTTPException) as refusal:
+        _resolve_readable_session_directory(session_config, escaping_id)
+    assert refusal.value.status_code == 404
+    assert "not a recognised session id" in refusal.value.detail
+
+    # And the directory it was reaching for is genuinely still there, so
+    # the refusal is the helper's doing and not a missing fixture.
+    assert older.is_dir()
+
+
+def test_a_name_the_recorder_could_not_have_written_does_not_parse(tmp_path):
+    """`re.match` accepted a trailing newline, because `$` does. The sweep
+    and this module share this one parser, so a name it misreads is a name
+    both misread (WR-01)."""
+    assert parse_session_timestamp("20260101T000000000000Z-abc") is not None
+    assert parse_session_timestamp("20260101T000000000000Z-abc\n") is None
 
 
 def test_an_id_older_than_the_retention_window_is_refused_naming_the_sweep(tmp_path, fake_account_repository):
