@@ -344,6 +344,12 @@ def test_a_real_session_is_returned_in_full_with_offsets_on_every_timeline_entry
     assert body["timeline"], "the merged timeline must not be empty for a real, closed session"
     for entry in body["timeline"]:
         assert entry["offset_s"] is not None
+    # `_write_recorded_session` builds this fixture with no pre-roll, so
+    # preroll_offset_s must fall back to 0.0 and the turn_started_at row
+    # must acquire no shift at all -- this is what would catch a
+    # preroll_offset_s returning a non-zero fallback (plan 08-11, DBG-03).
+    turn_started_row = next(entry for entry in body["timeline"] if entry.get("stage") == "turn_started_at")
+    assert turn_started_row["offset_s"] == 0.0
 
 
 def test_no_partial_before_the_final_mark_means_a_null_transcript(tmp_path, fake_account_repository):
