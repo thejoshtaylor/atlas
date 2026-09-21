@@ -448,54 +448,67 @@ def _require_timing_payload(directory: Path, session_id: str) -> dict:
 
 def _session_detail(session_id: str, started_at: datetime, directory: Path) -> SessionDetailResponse:
     timing_payload = _require_timing_payload(directory, session_id)
-    events = _read_events(directory)
+    try:
+        events = _read_events(directory)
 
-    timeline_path = directory / TIMELINE_FILENAME
-    if not timeline_path.is_file():
-        # `regenerate_timeline` exists precisely to prove the rendering is
-        # derivable from `events.jsonl` and `timing.json` alone (D-02). It
-        # reads those two files with its own, stricter reader, so a
-        # half-written one reaches the operator as the same named refusal
-        # the list route already named it by -- never a 500.
-        try:
+        timeline_path = directory / TIMELINE_FILENAME
+        if not timeline_path.is_file():
+            # `regenerate_timeline` exists precisely to prove the rendering
+            # is derivable from `events.jsonl` and `timing.json` alone
+            # (D-02). It reads those two files with its own, stricter
+            # reader, so a half-written one reaches the operator as the
+            # same named refusal the list route already named it by --
+            # never a 500.
             regenerate_timeline(directory)
-        except (OSError, ValueError):
-            raise _incomplete_recording_error(session_id)
-    raw_timeline = _read_jsonl(timeline_path)
+        raw_timeline = _read_jsonl(timeline_path)
 
-    turn_started_at = timing_payload.get("turn_started_at")
-    # Plan 08-11 (DBG-03): computed once, added to every entry's delta from
-    # `turn_started_at` -- `turn_started_at` sits at the END of the
-    # replayed pre-roll window, so an unshifted delta would point about
-    # 1.5 s earlier in the recording than the event it names. `0.0` for
-    # every path that built no pre-roll buffer (the browser microphone and
-    # WebRTC transports), so nothing about them moves.
-    shift_s = preroll_offset_s(timing_payload)
-    timeline = [
-        TimelineEntryResponse(
-            offset_s=(entry["ts"] - turn_started_at + shift_s) if turn_started_at is not None else None,
-            **entry,
+        turn_started_at = timing_payload.get("turn_started_at")
+        # Plan 08-11 (DBG-03): computed once, added to every entry's delta
+        # from `turn_started_at` -- `turn_started_at` sits at the END of
+        # the replayed pre-roll window, so an unshifted delta would point
+        # about 1.5 s earlier in the recording than the event it names.
+        # `0.0` for every path that built no pre-roll buffer (the browser
+        # microphone and WebRTC transports), so nothing about them moves.
+        shift_s = preroll_offset_s(timing_payload)
+        timeline = [
+            TimelineEntryResponse(
+                offset_s=(entry["ts"] - turn_started_at + shift_s) if turn_started_at is not None else None,
+                **entry,
+            )
+            for entry in raw_timeline
+        ]
+
+        stage_durations_ms = timing_payload.get("stage_durations_ms") or {}
+        audio_format = timing_payload.get("audio_format")
+
+        return SessionDetailResponse(
+            id=session_id,
+            started_at=started_at,
+            turn_outcome=timing_payload.get("turn_outcome", _INCOMPLETE_OUTCOME),
+            transcript=_transcript_before_stt_final(events, timing_payload.get("stt_final_at")),
+            reply_text=_last_reply_text(events),
+            stage_durations_ms=stage_durations_ms,
+            end_of_speech_to_first_audio_ms=timing_payload.get("end_of_speech_to_first_audio_ms"),
+            end_of_speech_to_answer_audio_ms=timing_payload.get("end_of_speech_to_answer_audio_ms"),
+            audio_format=audio_format,
+            has_audio=_has_audio(directory, audio_format),
+            preroll_s=shift_s,
+            timeline=timeline,
         )
-        for entry in raw_timeline
-    ]
-
-    stage_durations_ms = timing_payload.get("stage_durations_ms") or {}
-    audio_format = timing_payload.get("audio_format")
-
-    return SessionDetailResponse(
-        id=session_id,
-        started_at=started_at,
-        turn_outcome=timing_payload.get("turn_outcome", _INCOMPLETE_OUTCOME),
-        transcript=_transcript_before_stt_final(events, timing_payload.get("stt_final_at")),
-        reply_text=_last_reply_text(events),
-        stage_durations_ms=stage_durations_ms,
-        end_of_speech_to_first_audio_ms=timing_payload.get("end_of_speech_to_first_audio_ms"),
-        end_of_speech_to_answer_audio_ms=timing_payload.get("end_of_speech_to_answer_audio_ms"),
-        audio_format=audio_format,
-        has_audio=_has_audio(directory, audio_format),
-        preroll_s=shift_s,
-        timeline=timeline,
-    )
+    except (OSError, ValueError, TypeError):
+        # WR-01: the same blast-radius discipline `_session_summary` above
+        # already gives the list route -- an unexpected failure anywhere in
+        # this body (a malformed `events.jsonl` line, a `TypeError` from
+        # sorting a `None` timestamp against a numeric one, any future
+        # field access on malformed-but-JSON-valid data) reaches the
+        # operator as the same named refusal the list route would have
+        # shown this session by, never an unhandled 500.
+        logger.warning(
+            "session review: session %s detail could not be built; refusing as incomplete",
+            session_id,
+            exc_info=True,
+        )
+        raise _incomplete_recording_error(session_id)
 
 
 # --- Routes ------------------------------------------------------------------
@@ -551,8 +564,8 @@ async def get_session_audio(
         raise _audio_not_recorded_error(session_id)
 
     encoding = audio_format["encoding"]
-    raw = (directory / f"audio.{encoding}").read_bytes()
     try:
+        raw = (directory / f"audio.{encoding}").read_bytes()
         wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw)
     except (AudioWrapError, KeyError):
         # `KeyError` too: `_has_audio` is satisfied by `encoding` alone, so
@@ -560,6 +573,20 @@ async def get_session_audio(
         # is the same fact about the same recording -- this deployment
         # cannot build a WAV out of it.
         raise _unplayable_encoding_error(session_id, encoding)
+    except (OSError, ValueError, TypeError):
+        # WR-01: the same blast-radius containment `_session_summary`/
+        # `_session_detail` already give the other routes -- an
+        # unexpected failure in the read-and-wrap sequence (a vanished
+        # audio file, a corrupted read, any future field access on
+        # malformed-but-JSON-valid data) reaches the operator as the same
+        # named refusal the list route would have shown this session by,
+        # never an unhandled 500.
+        logger.warning(
+            "session review: session %s audio could not be read; refusing as incomplete",
+            session_id,
+            exc_info=True,
+        )
+        raise _incomplete_recording_error(session_id)
 
     return Response(
         content=wav_bytes,
