@@ -54,6 +54,7 @@ from spire_voice.db.postgres import (
     PostgresProviderSelectionRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
+    PostgresWakeEventRepository,
     PostgresWorkflowRepository,
 )
 from spire_voice.db.repository import (
@@ -62,6 +63,7 @@ from spire_voice.db.repository import (
     PluginRepository,
     ProviderSelectionRepository,
     SettingsRepository,
+    WakeEventRepository,
     WorkflowRepository,
 )
 from spire_voice.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
@@ -427,6 +429,11 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # currently pointed at -- the table `resolve_slot` reads instead
         # of a hardcoded provider-class construction.
         "provider_selection_repo": PostgresProviderSelectionRepository(sessionmaker),
+        # Plan 08-03 (D-13, D-14): every wake hit the detector reports,
+        # allowed or blocked -- the persistent record the wake-tuning
+        # screen (DBG-05) re-partitions arithmetic against instead of
+        # re-running an engine over recorded audio.
+        "wake_event_repo": PostgresWakeEventRepository(sessionmaker),
         # Plan 05-01: scheduled workflow runs and steps (D-01 .. D-04).
         "workflow_repo": PostgresWorkflowRepository(
             sessionmaker,
@@ -755,6 +762,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     plugin_repo: PluginRepository = repositories["plugin_repo"]
     workflow_repo: WorkflowRepository = repositories["workflow_repo"]
     provider_selection_repo: ProviderSelectionRepository = repositories["provider_selection_repo"]
+    # Plan 08-03: `.get(...)`, not `[...]` -- `SourceRunner`'s own
+    # `wake_event_repo` parameter is optional (defaults to `None`), and
+    # `tests/test_startup_smoke.py`'s existing fake-repository dict
+    # predates this key. A `SourceRunner` built with no repository at all
+    # behaves exactly as it did before this plan (same absent-
+    # configuration discipline the gate and barge-in policy already carry
+    # in that constructor).
+    wake_event_repo: WakeEventRepository | None = repositories.get("wake_event_repo")
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
     # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
@@ -1156,6 +1171,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         barge_in_config=config.barge_in,
         preroll=preroll,
         calibration=camera_calibration,
+        wake_event_repo=wake_event_repo,
     )
     app.state.source_runners = [camera_runner]
     app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]

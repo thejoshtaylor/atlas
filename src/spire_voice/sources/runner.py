@@ -77,12 +77,14 @@ import contextlib
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
 from spire_voice.audio.energy import rms_amplitude
 from spire_voice.audio.ring import PrerollBuffer
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.config import BargeInConfig, GateConfig, WakeConfig
+from spire_voice.db.repository import WakeEventRepository
 from spire_voice.speaker.output_trace import EmittedAudioTrace
 from spire_voice.wake.base import WakeDetector
 from spire_voice.wake.gate import WakeGate
@@ -367,6 +369,7 @@ class SourceRunner:
         clock: Callable[[], float] = time.monotonic,
         preroll: PrerollBuffer | None = None,
         calibration: EchoCalibration | None = None,
+        wake_event_repo: WakeEventRepository | None = None,
     ) -> None:
         self._name = name
         self._source = source
@@ -375,6 +378,16 @@ class SourceRunner:
         self._run_turn_fn = run_turn_fn
         self._clock = clock
         self._preroll = preroll
+        # Plan 08-03 (D-13, D-14): `None` (every test and tracer
+        # construction that predates this plan) means "record nothing" --
+        # the same absent-configuration discipline the gate and the
+        # barge-in policy above already carry in this constructor. Every
+        # scheduled write's own task is held here so it cannot be
+        # garbage-collected before it runs (a task with no strong
+        # reference can be); the done-callback below discards it once it
+        # finishes.
+        self._wake_event_repo = wake_event_repo
+        self._pending_wake_event_tasks: set[asyncio.Task] = set()
         # Plan 02-12 Task 3: `app.py`'s own startup refusal is what keeps
         # this from ever being a *stale or missing* calibration for a
         # source whose policy has correlation turned on -- by the time it
@@ -392,6 +405,11 @@ class SourceRunner:
         resolved_wake = wake_config.resolve(name) if wake_config is not None else WakeConfig(refractory_s=0.0)
         resolved_gate = gate_config.resolve(name) if gate_config is not None else GateConfig()
         threshold = _resolve_threshold(resolved_wake) if wake_config is not None else 0.0
+        # Plan 08-03: resolved once, here, from the same `wake_config` the
+        # threshold above is resolved from -- never re-read from global
+        # configuration inside a write call, matching the gate's own
+        # resolve-once-at-construction discipline (D-04).
+        self._wake_engine_name = resolved_wake.engine
         self._gate = WakeGate(
             threshold=threshold,
             refractory_s=resolved_wake.refractory_s,
@@ -466,6 +484,7 @@ class SourceRunner:
 
         self._last_hit_at = now
         logger.info("wake hit on source %r (score=%.3f)", self._name, hit.score)
+        self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
 
         turn_source = self._source
         if self._preroll is not None:
@@ -551,14 +570,73 @@ class SourceRunner:
         only the source, the score, the reason, and the timestamp, in the
         same structured-log shape `timing.py` emits its own line.
 
-        Plan 02-05's session store consumes these once it exists; until
-        then this log line is already more than the silence CONTEXT.md
-        rejects.
+        Plan 08-03: this used to say plan 02-05's session store would
+        consume these once it existed. That never happened, and could
+        not have: `SessionRecorder` is only ever constructed after the
+        gate *allows* a hit, so a blocked hit has no session directory to
+        live in. Phase 8 built a separate, persistent wake-event record
+        instead (`db.repository.WakeEventRepository`), deliberately
+        distinct from the per-turn session store -- see
+        `_schedule_wake_event_write`, called below beside this log line,
+        which stays exactly as it was and independently useful.
         """
         logger.info(
             "wake hit blocked",
             extra={"source_name": self._name, "score": score, "block_reason": reason, "hit_at": at},
         )
+        self._schedule_wake_event_write(score=score, allowed=False, block_reason=reason)
+
+    def _schedule_wake_event_write(
+        self, *, score: float, allowed: bool, block_reason: str | None
+    ) -> None:
+        """Build one `WakeEvent` and schedule its write -- never awaited.
+
+        The allowed branch of `_process_chunk` runs immediately before a
+        turn starts, and this project's latency budget is load-bearing (a
+        reply under one second, per the project constraints) -- awaiting
+        a database write on that path would cost the turn real time for
+        no benefit a house could feel. `asyncio.create_task` starts the
+        write independently; the task is held in
+        `self._pending_wake_event_tasks` until its own done-callback
+        discards it, because a task with no strong reference can be
+        garbage-collected before it ever runs. A no-op when this runner
+        was built with no repository at all (D-13, D-14's absent-
+        configuration discipline).
+        """
+        if self._wake_event_repo is None:
+            return
+        task = asyncio.create_task(
+            self._write_wake_event(score=score, allowed=allowed, block_reason=block_reason)
+        )
+        self._pending_wake_event_tasks.add(task)
+        task.add_done_callback(self._pending_wake_event_tasks.discard)
+
+    async def _write_wake_event(
+        self, *, score: float, allowed: bool, block_reason: str | None
+    ) -> None:
+        """The awaited body `_schedule_wake_event_write` schedules, never
+        awaits itself. Wrapped so a repository that raises is logged and
+        swallowed here -- never escaping as an unretrieved-exception
+        warning, and never stopping this source's own listening loop: a
+        store that is down must not stop a house listening, the same
+        containment discipline `run()`'s own try/except around chunk
+        processing already applies (module docstring)."""
+        assert self._wake_event_repo is not None
+        try:
+            await self._wake_event_repo.record_wake_event(
+                source=self._name,
+                engine=self._wake_engine_name,
+                score=score,
+                allowed=allowed,
+                block_reason=block_reason,
+                recorded_at=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.exception(
+                "source %r: failed to record a wake event -- continuing to listen; a "
+                "store that is down must never stop a house listening",
+                self._name,
+            )
 
 
 @dataclass(frozen=True)
