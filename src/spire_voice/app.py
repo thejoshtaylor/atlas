@@ -1903,10 +1903,17 @@ async def observer_ws(websocket: WebSocket) -> None:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
                     return
-                if "bytes" in message:
+                if message.get("bytes") is not None:
                     # D-05: an observer never carries audio in. Closing here
                     # is the enforcement, not a convention the handler could
                     # forget to honor.
+                    #
+                    # The value, not the key. The installed uvicorn emits
+                    # only one of `text`/`bytes`, but an ASGI server that
+                    # emits `{"bytes": None, "text": "..."}` would have
+                    # closed every observer connection on its first text
+                    # frame -- frames this handler's own comment below says
+                    # it reads and discards.
                     await websocket.close()
                     return
                 # A text frame is read and discarded -- this connection is

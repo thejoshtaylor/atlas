@@ -628,3 +628,31 @@ def test_every_run_turn_call_site_in_app_py_is_wrapped_for_the_observer_feed():
         "browser_mic",
         "browser_webrtc",
     }
+
+
+def test_a_text_frame_alongside_a_null_bytes_key_is_discarded_not_closed(tmp_path, monkeypatch):
+    """IN-05: the binary check keyed on the presence of `bytes`, not on a
+    non-`None` value. An ASGI server that emits both keys with `bytes:
+    None` would have closed every observer on its first text frame. Driven
+    against the handler's own receive, not through the installed server,
+    because the installed server is precisely what hides this."""
+    import spire_voice.app as app_module
+
+    client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    try:
+        with client.websocket_connect("/ws/sessions/live") as observer:
+            observer.receive_json()  # opening message
+            # The raw ASGI message, both keys present -- what the
+            # installed uvicorn never produces and another server may.
+            observer.send(
+                {
+                    "type": "websocket.receive",
+                    "text": "a text frame an observer may send and have ignored",
+                    "bytes": None,
+                }
+            )
+            # Still open, and still receiving: a published event arrives.
+            app_module.app.state.observer_registry.publish({"type": "reply.text", "text": "still here"})
+            assert _receive_json_within(observer) == {"type": "reply.text", "text": "still here"}
+    finally:
+        client.__exit__(None, None, None)
