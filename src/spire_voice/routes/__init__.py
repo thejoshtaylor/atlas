@@ -25,6 +25,7 @@ from spire_voice.routes.macros import router as macros_router
 from spire_voice.routes.plugins import router as plugins_router
 from spire_voice.routes.policy import router as policy_router
 from spire_voice.routes.providers import router as providers_router
+from spire_voice.routes.sessions import router as sessions_router
 from spire_voice.routes.wizard import router as wizard_router
 from spire_voice.routes.workflows import router as workflows_router
 
@@ -62,4 +63,5 @@ def register_routers(app: FastAPI) -> None:
     gated.include_router(workflows_router)
     gated.include_router(plugins_router)
     gated.include_router(providers_router)
+    gated.include_router(sessions_router)
     app.include_router(gated)

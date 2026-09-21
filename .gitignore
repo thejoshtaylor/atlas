@@ -10,8 +10,11 @@ config/*.local.yaml
 !.env.example
 
 # Recorded voice sessions: audio, transcripts, and timelines of real speech.
-data/
-sessions/
+# Anchored to the repo root (leading slash) -- an unanchored `sessions/`
+# also matched `web/src/routes/sessions/` (Phase 8, WEB-07), silently
+# hiding that screen's whole source directory from git.
+/data/
+/sessions/
 
 # The measurement harness's fixture (plan 01.1-07): a real person's voice
 # naming real things in a real house. DEP-05 keeps entity names, addresses,

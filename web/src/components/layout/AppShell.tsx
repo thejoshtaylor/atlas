@@ -20,6 +20,10 @@ const NAV_ITEMS = [
   // (that page is a wizard step first; this one is a standalone
   // diagnostic tool an operator navigates to on purpose).
   { to: "/dev-mic", label: "Developer mic", minimumRole: "operator" },
+  // Phase 8, WEB-07/D-01: past recorded turns. `/sessions/:id` has no nav
+  // entry of its own -- reached by a link from this list, matching how
+  // `/plugins/:id` has no separate nav entry today.
+  { to: "/sessions", label: "Sessions", minimumRole: "operator" },
 ] as const
 
 const ROLE_RANK: Record<string, number> = { viewer: 0, operator: 1, admin: 2 }

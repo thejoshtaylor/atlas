@@ -52,11 +52,18 @@ logger = logging.getLogger("spire_voice.session.retention")
 # rewrite without anything having changed about the recording (T-02-35). A
 # directory under the root whose name does not match this shape is left
 # untouched -- it is not one this module owns.
-_SESSION_DIRECTORY_RE = re.compile(r"^(\d{8}T\d{12}Z)-.+$")
+#
+# Public as of Phase 8 (08-04-PLAN.md, D-01): `routes/sessions.py` reads the
+# session list straight off disk and needs this exact pattern, not a second,
+# independently written one that could disagree with this sweep's own at a
+# boundary case. `_SESSION_DIRECTORY_RE` stays as a module alias for any
+# caller already using the old, private name.
+SESSION_DIRECTORY_RE = re.compile(r"^(\d{8}T\d{12}Z)-.+$")
+_SESSION_DIRECTORY_RE = SESSION_DIRECTORY_RE
 
 
-def _parse_session_timestamp(name: str) -> datetime | None:
-    match = _SESSION_DIRECTORY_RE.match(name)
+def parse_session_timestamp(name: str) -> datetime | None:
+    match = SESSION_DIRECTORY_RE.match(name)
     if match is None:
         return None
     stamp = match.group(1)
@@ -66,6 +73,10 @@ def _parse_session_timestamp(name: str) -> datetime | None:
         return datetime.strptime(stamp[:-1], "%Y%m%dT%H%M%S%f").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+# Alias kept for the same reason as `_SESSION_DIRECTORY_RE` above.
+_parse_session_timestamp = parse_session_timestamp
 
 
 @dataclass(frozen=True)
