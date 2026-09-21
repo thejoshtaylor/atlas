@@ -149,6 +149,15 @@ export function ProvidersRoute() {
   // option's "server_url") -- initialized from the slot's own stored
   // `settings`, the same one-shot-per-slot seeding `draft` above uses.
   const [settingsDraft, setSettingsDraft] = React.useState<Record<string, Record<string, unknown>>>({})
+  // Which slots the admin has actually touched this visit (D-17 backfill,
+  // 08-10-PLAN.md Task 1): `draft`/`settingsDraft` are seeded with every
+  // slot's stored value on load so each `SlotCard`'s `selected` prop
+  // always has a value, but that seeding is not a change. Submitting a
+  // slot the admin never touched would resend a value read at page-load
+  // time, silently clobbering a concurrent change to that same slot made
+  // by another admin session in between -- a lost-update bug, not a
+  // hypothetical one, since three slots share one save request.
+  const [touchedSlots, setTouchedSlots] = React.useState<Set<string>>(new Set())
   const [saveMessage, setSaveMessage] = React.useState<string | null>(null)
   const [saveError, setSaveError] = React.useState<string | null>(null)
 
@@ -189,10 +198,12 @@ export function ProvidersRoute() {
     try {
       await save.mutateAsync({
         slots: Object.fromEntries(
-          Object.entries(draft).map(([slot, provider_name]) => [
-            slot,
-            { provider_name, settings: settingsDraft[slot] ?? {} },
-          ]),
+          Object.entries(draft)
+            .filter(([slot]) => touchedSlots.has(slot))
+            .map(([slot, provider_name]) => [
+              slot,
+              { provider_name, settings: settingsDraft[slot] ?? {} },
+            ]),
         ),
       })
       setSaveMessage("Saved. Restart the assistant for this to take effect.")
@@ -221,14 +232,18 @@ export function ProvidersRoute() {
               key={slot.slot}
               slot={slot}
               selected={draft[slot.slot] ?? slot.selected}
-              onSelect={(name) => setDraft((current) => ({ ...current, [slot.slot]: name }))}
+              onSelect={(name) => {
+                setDraft((current) => ({ ...current, [slot.slot]: name }))
+                setTouchedSlots((current) => new Set(current).add(slot.slot))
+              }}
               settings={settingsDraft[slot.slot] ?? slot.settings}
-              onSettingsChange={(patch) =>
+              onSettingsChange={(patch) => {
                 setSettingsDraft((current) => ({
                   ...current,
                   [slot.slot]: { ...(current[slot.slot] ?? slot.settings), ...patch },
                 }))
-              }
+                setTouchedSlots((current) => new Set(current).add(slot.slot))
+              }}
               disabled={controlsDisabled}
             />
           ))}

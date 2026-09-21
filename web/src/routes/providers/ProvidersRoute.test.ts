@@ -33,14 +33,15 @@ describe("ProvidersRoute -- the page title and the primary CTA copy", () => {
     expect(SOURCE).toMatch(/<h1 className="text-display font-semibold">Providers<\/h1>/)
   })
 
-  test("the save button reads the Copywriting Contract's exact text", () => {
-    expect(SOURCE).toMatch(/Save provider choices/)
-  })
-
-  test("save success and failure copy match the Copywriting Contract verbatim", () => {
-    expect(SOURCE).toMatch(/Saved\. Restart the assistant for this to take effect\./)
-    expect(SOURCE).toMatch(/Couldn't save your provider choices\. Try again\./)
-  })
+  // "the save button reads the Copywriting Contract's exact text" and
+  // "save success and failure copy match the Copywriting Contract
+  // verbatim" retired (08-10-PLAN.md Task 1, D-17 backfill part B):
+  // strictly superseded by ProvidersRoute.dom.test.tsx's
+  // "choosing a different provider ... calls the mutation" /
+  // "a successful save renders the restart-required message" / "a
+  // failed save leaves the chosen value on screen" tests, which drive a
+  // real save and assert the exact runtime-rendered button label and
+  // success/failure copy, not just its presence in source text.
 })
 
 describe("ProvidersRoute -- one card per slot, driven entirely by the server response", () => {
@@ -48,9 +49,12 @@ describe("ProvidersRoute -- one card per slot, driven entirely by the server res
     expect(SOURCE).toMatch(/screen\.slots\.map/)
   })
 
-  test("each slot renders its own RadioGroup bound to the draft selection", () => {
-    expect(SOURCE).toMatch(/<RadioGroup value=\{selected\} onValueChange=\{onSelect\}/)
-  })
+  // "each slot renders its own RadioGroup bound to the draft selection"
+  // retired (08-10-PLAN.md Task 1): strictly superseded by
+  // ProvidersRoute.dom.test.tsx's "each slot renders its currently
+  // stored provider ..." and "choosing a different provider ..." tests,
+  // which drive the RadioGroup by its accessible name and observe the
+  // draft-bound selection and the save payload it produces.
 
   test("every option row carries touch-target", () => {
     expect(SOURCE).toMatch(/touch-target/)
@@ -66,9 +70,13 @@ describe("ProvidersRoute -- badges are derived, never computed inline", () => {
 })
 
 describe("ProvidersRoute -- the draft is never reverted on a failed save", () => {
-  test("the draft state is only ever set from the loaded selection once per slot, never reset on save failure", () => {
-    expect(SOURCE).not.toMatch(/setDraft\([^)]*\{\}\)/)
-  })
+  // "the draft state is only ever set from the loaded selection once per
+  // slot, never reset on save failure" retired (08-10-PLAN.md Task 1):
+  // strictly superseded by ProvidersRoute.dom.test.tsx's "a failed save
+  // leaves the chosen value on screen rather than reverting it" test,
+  // which drives a real failed save and asserts the chosen radio is
+  // still checked afterward -- the runtime outcome the source-text
+  // check could only approximate.
 
   test("the settings draft is also left untouched on a failed save", () => {
     const catchBlock = SOURCE.slice(SOURCE.indexOf("} catch {"), SOURCE.indexOf("Couldn't save your provider choices"))
