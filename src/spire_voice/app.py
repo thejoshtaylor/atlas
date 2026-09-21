@@ -78,6 +78,7 @@ from spire_voice.providers.boot import (
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
 from spire_voice.routes import register_routers
+from spire_voice.routes.wake import WAKE_THRESHOLD_SETTING_KEY
 from spire_voice.routes.wizard import resolve_audio_source
 from spire_voice.session.observers import ObserverPublishingSource, ObserverRegistry
 from spire_voice.session.recorder import SessionRecorder
@@ -467,6 +468,21 @@ async def _resolve_and_log_credential(
     return value
 
 
+async def _resolve_wake_threshold(settings_repo: SettingsRepository) -> "tuple[float | None, str]":
+    """`(threshold, resolved_from)` for the wake threshold, mirroring
+    `resolve_audio_source`'s own database-then-configuration precedence
+    (`routes/wizard.py`) rather than re-deriving a second resolution
+    order. `None`/`"config"` means nothing has ever been stored through
+    `PUT /api/wake-threshold` -- `SourceRunner.__init__`'s own
+    configuration-resolved threshold is left exactly as it is. A stored
+    value/`"database"` means an operator has moved it, and `lifespan`
+    applies it after construction (D-15)."""
+    setting = await settings_repo.get_setting(WAKE_THRESHOLD_SETTING_KEY)
+    if setting is not None and isinstance(setting.value, (int, float)) and not isinstance(setting.value, bool):
+        return float(setting.value), "database"
+    return None, "config"
+
+
 async def _open_speaker_writer(writer: FifoWriter) -> None:
     """Open `writer` in the background, never inline in `lifespan`.
 
@@ -836,6 +852,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "audio source resolved to %r from %s", resolved_audio_source, audio_source_resolved_from
     )
+
+    # Plan 08-07 (D-15): the wake threshold an operator moved through
+    # `PUT /api/wake-threshold` outlives the process that received it.
+    # Same precedence as the audio source immediately above -- the
+    # database wins when a value has ever been stored, this process's own
+    # configured value otherwise -- and a stored value out of range
+    # refuses the boot by name rather than silently clamping: it cannot
+    # have come from the route, which already enforces this range, so it
+    # came from something that bypassed it.
+    resolved_wake_threshold, wake_threshold_resolved_from = await _resolve_wake_threshold(
+        settings_repo
+    )
+    if resolved_wake_threshold is not None and not 0.0 <= resolved_wake_threshold <= 1.0:
+        raise ConfigError(
+            f"stored wake threshold {resolved_wake_threshold!r} is outside [0.0, 1.0] -- this "
+            "cannot have come from PUT /api/wake-threshold, which enforces this exact range "
+            "itself, so refusing to boot on a setting this process cannot honestly interpret"
+        )
+    logger.info("wake threshold resolved from %s", wake_threshold_resolved_from)
 
     # Every provider credential is resolved exactly once, here, in the one
     # order D-07 states: the database wins when an operator has saved a
@@ -1221,6 +1256,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         calibration=camera_calibration,
         wake_event_repo=wake_event_repo,
     )
+    if resolved_wake_threshold is not None:
+        # Applied by calling `set_wake_threshold` immediately after
+        # construction, never by rewriting `config.wake` itself: the
+        # configuration is what the file says and the setting is what the
+        # operator later chose, and collapsing the two would lose which
+        # is which (D-15).
+        camera_runner.set_wake_threshold(resolved_wake_threshold)
     app.state.source_runners = [camera_runner]
     app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]
 

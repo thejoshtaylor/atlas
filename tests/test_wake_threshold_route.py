@@ -17,6 +17,8 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from spire_voice.config import GateConfig, WakeConfig
 from spire_voice.sources.runner import SourceRunner
 from spire_voice.wake.gate import WakeGate
@@ -422,3 +424,113 @@ def test_both_wake_routes_are_refused_to_a_viewer_and_allowed_to_an_operator(tmp
         assert operator_client.put("/api/wake-threshold", json={"threshold": 0.5}).status_code == 200
     finally:
         operator_client.__exit__(None, None, None)
+
+
+# --- Task 3: the setting outlives the process that received it -------------
+#
+# Through the real lifespan with `tests/test_startup_smoke.py`'s own
+# fake-builder shape (`_fake_build_repositories`, `_FakeCameraSource`,
+# `_fake_build_wake_detector`) -- the plan's own `<action>` names this
+# file's fixtures explicitly rather than asking for a second boot harness.
+
+
+def _repositories_with_stored_threshold(stored_threshold):
+    """A `_build_repositories` replacement seeding `settings_repo` with a
+    `wake_threshold` row before `lifespan` ever reads it -- `None` seeds
+    nothing, matching "no stored threshold" (D-15's absent-configuration
+    case)."""
+
+    def _builder(config: object, engine: object) -> dict:
+        from datetime import datetime, timezone
+
+        from spire_voice.db.repository import Setting
+
+        from tests import test_startup_smoke as smoke
+
+        repositories = smoke._fake_build_repositories(config, engine)
+        if stored_threshold is not None:
+            settings_repo = repositories["settings_repo"]
+            settings_repo.settings["wake_threshold"] = Setting(
+                id=1,
+                key="wake_threshold",
+                value=stored_threshold,
+                updated_at=datetime.now(timezone.utc),
+                updated_by_user_id=1,
+            )
+        return repositories
+
+    return _builder
+
+
+def _boot_with_stored_threshold(tmp_path, monkeypatch, *, stored_threshold, wake_engine="openwakeword"):
+    from fastapi.testclient import TestClient
+    from spire_voice.plugins import manager as plugin_manager_module
+
+    import spire_voice.app as app_module
+    from tests import test_startup_smoke as smoke
+
+    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        app_module,
+        "CONFIG_PATH",
+        str(
+            smoke._write_fake_config(
+                tmp_path,
+                extra={"debug": {"dir": str(session_dir)}, "wake": {"engine": wake_engine}},
+            )
+        ),
+    )
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", smoke._fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", smoke._fake_build_engine)
+    monkeypatch.setattr(
+        app_module, "_build_repositories", _repositories_with_stored_threshold(stored_threshold)
+    )
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", smoke._fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", smoke._fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "CameraAudioSource", smoke._FakeCameraSource)
+    return TestClient(app_module.app), app_module
+
+
+def test_booting_with_a_stored_threshold_constructs_runners_using_it(tmp_path, monkeypatch):
+    client, app_module = _boot_with_stored_threshold(
+        tmp_path, monkeypatch, stored_threshold=0.81, wake_engine="openwakeword"
+    )
+    with client:
+        assert app_module.app.state.source_runners[0].wake_threshold == 0.81
+
+
+def test_booting_with_no_stored_threshold_uses_the_configured_value(tmp_path, monkeypatch):
+    client, app_module = _boot_with_stored_threshold(
+        tmp_path, monkeypatch, stored_threshold=None, wake_engine="openwakeword"
+    )
+    with client:
+        # `OpenWakeWordConfig`'s shipped default -- exactly as today, per
+        # the plan's own `<behavior>`.
+        assert app_module.app.state.source_runners[0].wake_threshold == 0.55
+
+
+def test_a_stored_out_of_range_threshold_refuses_the_boot_by_name(tmp_path, monkeypatch):
+    client, app_module = _boot_with_stored_threshold(
+        tmp_path, monkeypatch, stored_threshold=1.5, wake_engine="openwakeword"
+    )
+    ConfigError = app_module.ConfigError
+    with pytest.raises(ConfigError, match="stored wake threshold.*outside \\[0.0, 1.0\\]"):
+        with client:
+            pass
+
+
+def test_the_boot_logs_which_source_the_threshold_came_from(tmp_path, monkeypatch, caplog):
+    client, app_module = _boot_with_stored_threshold(
+        tmp_path, monkeypatch, stored_threshold=0.81, wake_engine="openwakeword"
+    )
+    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+        with client:
+            pass
+    assert any(
+        "wake threshold resolved from database" in record.message for record in caplog.records
+    )
