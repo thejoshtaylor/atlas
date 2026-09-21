@@ -68,6 +68,11 @@ export type WakeTuningScreenState =
       belowCount: number
       totalScored: number
       notScoredCount: number
+      /** The server had more wake attempts than it would send. The partition
+       * above is of the newest ones only, and the screen says so -- the same
+       * reason `notScoredCount` is reported separately rather than folded
+       * away (D-16). */
+      capped: boolean
       histogram: HistogramBucket[]
       /** Newest first, matching the server's own ordering -- unchanged
        * from `response.events`. */
@@ -166,6 +171,7 @@ export function deriveWakeTuningScreenState(
     belowCount,
     totalScored: scoredEvents.length,
     notScoredCount: response.not_scored_session_count,
+    capped: response.capped,
     histogram: buildHistogram(response.events, threshold),
     events,
   }

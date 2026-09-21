@@ -1404,6 +1404,12 @@ class FakeWakeEventRepository:
         newest_first = sorted(self.events, key=lambda e: e.recorded_at, reverse=True)
         return newest_first if limit is None else newest_first[:limit]
 
+    async def delete_wake_events_before(self, cutoff: datetime) -> int:
+        kept = [event for event in self.events if event.recorded_at >= cutoff]
+        removed = len(self.events) - len(kept)
+        self.events = kept
+        return removed
+
 
 @pytest.fixture
 def fake_wake_event_repository():

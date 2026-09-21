@@ -256,3 +256,98 @@ async def test_a_sweep_that_raises_is_logged_and_the_schedule_continues(tmp_path
 
     assert any("sweep raised" in record.message for record in caplog.records)
     assert call_count["n"] >= 2, "one failed run must not silently end the schedule for the life of the process"
+
+
+# === Code review WR-06: the wake-event table's own retention ============
+
+
+class _RecordingWakeEventRepo:
+    """Counts deletions and remembers the cutoff it was asked for. Small on
+    purpose -- what this proves is that the schedule reaches the table at
+    all, and with the same window."""
+
+    def __init__(self, *, rows: int = 3) -> None:
+        self.cutoffs: list = []
+        self._rows = rows
+
+    async def delete_wake_events_before(self, cutoff) -> int:
+        self.cutoffs.append(cutoff)
+        removed, self._rows = self._rows, 0
+        return removed
+
+
+class _RaisingWakeEventRepo:
+    async def delete_wake_events_before(self, cutoff) -> int:
+        raise RuntimeError("the store is down")
+
+
+async def test_the_schedule_sweeps_wake_events_on_the_same_window(tmp_path, caplog):
+    """`wake_events` was the one piece of persistent state in this project
+    with no owner and no bound -- every gate-blocked hit a television
+    triggers, kept for the life of the deployment, while the recordings it
+    describes expire on `retain_days` (WR-06)."""
+    repo = _RecordingWakeEventRepo()
+    scheduler = RetentionScheduler(
+        tmp_path,
+        retain_days=7,
+        interval_s=0.01,
+        clock=lambda: _NOW,
+        sleep=_instant_sleep,
+        wake_event_repo=repo,
+    )
+
+    with caplog.at_level(logging.INFO, logger="spire_voice.session.retention"):
+        scheduler.start()
+        try:
+            await _wait_for(lambda: len(repo.cutoffs) >= 2)
+        finally:
+            await scheduler.stop()
+
+    # The same window the directory sweep uses, measured from the same clock.
+    assert repo.cutoffs[0] == _NOW - timedelta(days=7)
+    # Logged whether or not it removed anything, the way the directory
+    # sweep logs its own -- "ran and had nothing to do" must stay
+    # distinguishable from "never ran".
+    sweep_lines = [r for r in caplog.records if "wake-event retention sweep ran" in r.getMessage()]
+    assert len(sweep_lines) >= 2
+    assert "removed=3" in sweep_lines[0].getMessage()
+    assert "removed=0" in sweep_lines[1].getMessage()
+
+
+async def test_a_wake_event_sweep_that_raises_does_not_stop_the_directory_sweep(tmp_path, caplog):
+    """The two sweeps are separately guarded on purpose: a store that is
+    down must not stop the one that bounds actual audio (WR-06)."""
+    expired = _make_session(tmp_path, _NOW - timedelta(days=30))
+    scheduler = RetentionScheduler(
+        tmp_path,
+        retain_days=7,
+        interval_s=0.01,
+        clock=lambda: _NOW,
+        sleep=_instant_sleep,
+        wake_event_repo=_RaisingWakeEventRepo(),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="spire_voice.session.retention"):
+        scheduler.start()
+        try:
+            await _wait_for(lambda: not expired.exists())
+        finally:
+            await scheduler.stop()
+
+    assert not expired.exists()
+    assert any("wake-event retention sweep raised" in r.getMessage() for r in caplog.records)
+
+
+async def test_no_wake_event_repository_means_no_wake_event_sweep(tmp_path):
+    """A deployment with no repository at all behaves exactly as it did
+    before -- the same absent-configuration discipline the rest of this
+    codebase carries."""
+    scheduler = RetentionScheduler(
+        tmp_path, retain_days=7, interval_s=0.01, clock=lambda: _NOW, sleep=_instant_sleep
+    )
+    scheduler.start()
+    try:
+        await _wait_for(lambda: scheduler.sweep_count >= 2)
+    finally:
+        await scheduler.stop()
+    assert scheduler.sweep_count >= 2

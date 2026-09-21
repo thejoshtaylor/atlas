@@ -1293,6 +1293,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config.session.dir,
         config.session.retain_days,
         config.session.expiry_interval_s,
+        # WR-06 (code review): `wake_events` is the other persistent record
+        # of what this house's microphone heard, and Phase 8 shipped it
+        # with no owner and no bound. Same sweep, same window -- D-12's
+        # "exactly one owner" for deletion, extended to cover it.
+        wake_event_repo=wake_event_repo,
     )
     retention_scheduler.start()
     app.state.retention_scheduler = retention_scheduler

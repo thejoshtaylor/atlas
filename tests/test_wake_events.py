@@ -184,6 +184,37 @@ async def test_list_wake_events_with_a_limit_returns_the_twenty_newest(sessionma
 
 
 @skip_without_postgres
+async def test_delete_wake_events_before_removes_only_what_is_older_than_the_cutoff(sessionmaker):
+    """The retention sweep's own call, against a real Postgres (WR-06).
+    The boundary matches `sweep_expired_sessions`'s: strictly older goes,
+    exactly at the cutoff stays."""
+    repo = PostgresWakeEventRepository(sessionmaker)
+    cutoff = datetime(2026, 9, 20, 12, 0, 0, tzinfo=timezone.utc)
+    for offset in (timedelta(seconds=-1), timedelta(0), timedelta(seconds=1)):
+        await repo.record_wake_event(
+            source="camera",
+            engine="vosk",
+            score=1.0,
+            allowed=True,
+            block_reason=None,
+            recorded_at=cutoff + offset,
+        )
+
+    removed = await repo.delete_wake_events_before(cutoff)
+
+    assert removed == 1
+    remaining = await repo.list_wake_events()
+    assert [event.recorded_at for event in remaining] == [
+        cutoff + timedelta(seconds=1),
+        cutoff,
+    ]
+
+    # Idempotent: a second sweep over the same window removes nothing and
+    # says so, the way the directory sweep's empty run does.
+    assert await repo.delete_wake_events_before(cutoff) == 0
+
+
+@skip_without_postgres
 async def test_two_events_recorded_at_the_same_instant_both_persist(sessionmaker):
     """No uniqueness rule could collapse them -- every row is a distinct
     event, not a per-key singleton."""

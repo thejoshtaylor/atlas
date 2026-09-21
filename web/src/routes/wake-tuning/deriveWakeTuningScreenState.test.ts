@@ -33,6 +33,7 @@ function response(overrides: Partial<WakeEventsResponse> = {}): WakeEventsRespon
     engine_grades: true,
     threshold: 0.5,
     not_scored_session_count: 0,
+    capped: false,
     ...overrides,
   }
 }
@@ -93,6 +94,7 @@ describe("deriveWakeTuningScreenState -- the partition", () => {
     expect(state.totalScored).toBe(2)
     expect(state.clearingCount + state.belowCount).toBe(state.totalScored)
     expect(state.notScoredCount).toBe(4)
+    expect(state.capped).toBe(false)
   })
 
   test("a threshold change recomputes the counts from the already-held event list, taking no argument that could be a network result", () => {
@@ -193,5 +195,16 @@ describe("deriveWakeTuningScreenState -- the two kinds of fact stay separate", (
       "blocked_refractory",
       "blocked_media_playing",
     ])
+  })
+})
+
+describe("deriveWakeTuningScreenState -- a partial history says so (WR-06)", () => {
+  test("the server's cap is carried onto the ready state, never dropped", () => {
+    const state = deriveWakeTuningScreenState(
+      success(response({ events: [event({ id: 1, score: 0.9 })], capped: true })),
+      0.5,
+    )
+    if (state.kind !== "ready") throw new Error("expected ready")
+    expect(state.capped).toBe(true)
   })
 })

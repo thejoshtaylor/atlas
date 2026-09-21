@@ -53,6 +53,7 @@ interface StubResponse {
   engine_grades?: boolean
   threshold?: number
   not_scored_session_count?: number
+  capped?: boolean
 }
 
 function stubLib(
@@ -71,6 +72,7 @@ function stubLib(
         engine_grades: response.engine_grades ?? true,
         threshold: response.threshold ?? 0.5,
         not_scored_session_count: response.not_scored_session_count ?? 0,
+        capped: response.capped ?? false,
       }
     },
     setWakeThresholdMutationOptions: { mutationFn },
@@ -248,4 +250,27 @@ test("this screen never renders the household-audio disclosure", async () => {
 
   await screen.findByText(/recorded openwakeword wake attempts\./)
   expect(screen.queryByText("This shows real speech and audio recorded in your home.")).toBeNull()
+})
+
+test("a capped response says so on screen, rather than presenting a partial history as a whole one (WR-06)", async () => {
+  stubLib(async () => ({
+    events: [stubEvent({ id: 1, score: 0.9 })],
+    threshold: 0.5,
+    capped: true,
+  }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  expect(
+    await screen.findByText("Older wake attempts than these exist and aren't included above."),
+  ).toBeTruthy()
+})
+
+test("an uncapped response says nothing about a cap", async () => {
+  stubLib(async () => ({ events: [stubEvent({ id: 1, score: 0.9 })], threshold: 0.5 }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+
+  await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
+  expect(screen.queryByText("Older wake attempts than these exist and aren't included above.")).toBeNull()
 })

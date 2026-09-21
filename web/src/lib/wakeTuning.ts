@@ -37,6 +37,10 @@ export interface WakeEventsResponse {
   engine_grades: boolean
   threshold: number
   not_scored_session_count: number
+  /** True when older wake attempts exist that this response does not
+   * carry (`routes/wake.py::MAX_WAKE_EVENTS_IN_RESPONSE`). The screen
+   * states it rather than presenting a partial history as a whole one. */
+  capped: boolean
 }
 
 export const WAKE_EVENTS_QUERY_KEY = ["wake-events"] as const

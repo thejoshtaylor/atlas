@@ -23,7 +23,14 @@ Two pieces live here:
   configured interval, for the life of the process -- the same
   `start()`/`stop()` shape `speaker/ffmpeg_supervisor.py`'s `FfmpegSupervisor`
   already uses, with no scheduling dependency, because this is one loop
-  that sleeps and calls one function.
+  that sleeps and calls one function. When it is given a
+  `WakeEventRepository` it sweeps that table on the same schedule and the
+  same `retain_days`, because Phase 8's `wake_events` table is the only
+  other persistent record of what this house's microphone heard, and it
+  shipped with no owner and no bound at all -- growing for the life of the
+  deployment in a household with an ambient noise source, while the
+  recordings it describes expired on schedule. A wake event older than
+  the recordings it describes cannot be checked against anything anyway.
 
 Privacy boundary, extended verbatim from `timing.py` and
 `session/recorder.py`: every log line this module writes names a path, an
@@ -41,7 +48,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger("spire_voice.session.retention")
 
@@ -216,12 +223,14 @@ class RetentionScheduler:
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        wake_event_repo: Any | None = None,
     ) -> None:
         self._root = root
         self._retain_days = retain_days
         self._interval_s = interval_s
         self._clock = clock
         self._sleep = sleep
+        self._wake_event_repo = wake_event_repo
         self._stopping = False
         self._task: asyncio.Task[None] | None = None
         # Exposed for tests to prove the loop ran more than once by
@@ -241,6 +250,27 @@ class RetentionScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
 
+    async def _sweep_wake_events(self) -> None:
+        """Delete every `wake_events` row older than `retain_days`, and log
+        the run the way `sweep_expired_sessions` logs its own -- including
+        the empty case, so "ran and had nothing to do" stays distinguishable
+        from "never ran".
+
+        Privacy boundary, same as the rest of this module: the line names a
+        count and a cutoff. A wake event never held a transcript or an
+        audio byte to begin with (`sources/runner.py`'s own record), and
+        deleting it is not a licence to read it first either.
+        """
+        if self._wake_event_repo is None:
+            return
+        cutoff = self._clock() - timedelta(days=self._retain_days)
+        removed = await self._wake_event_repo.delete_wake_events_before(cutoff)
+        logger.info(
+            "wake-event retention sweep ran: removed=%d cutoff=%s",
+            removed,
+            cutoff.isoformat(),
+        )
+
     async def _run(self) -> None:
         while not self._stopping:
             self.sweep_count += 1
@@ -250,6 +280,15 @@ class RetentionScheduler:
                 raise
             except Exception:
                 logger.exception("session retention sweep raised; the schedule continues")
+            try:
+                await self._sweep_wake_events()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Its own try/except, not one wrapped around both: a store
+                # that is down must not stop the directory sweep from
+                # running, which is the one that bounds actual audio.
+                logger.exception("wake-event retention sweep raised; the schedule continues")
             if self._stopping:
                 return
             await self._sleep(self._interval_s)

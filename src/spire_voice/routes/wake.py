@@ -50,6 +50,16 @@ WAKE_THRESHOLD_SETTING_KEY = "wake_threshold"
 # misreport a graded engine that has so far only heard one voice.
 _GRADING_ENGINES: frozenset[str] = frozenset({"openwakeword"})
 
+# The most events one response will carry. The table's real bound is the
+# retention sweep, which removes wake events on the same `retain_days` as
+# the recordings they describe (WR-06); this is the backstop for the window
+# between two sweeps in a household with an ambient noise source, where a
+# television can trigger the gate all day. Generous on purpose -- the
+# screen fetches once and re-partitions locally on every drag (08-PATTERNS.md's
+# own no-network-call-per-drag discipline), so it needs the history, not a
+# page of it -- and never silent: `capped` says so when it bites.
+MAX_WAKE_EVENTS_IN_RESPONSE = 2000
+
 
 def _engine_grades(engine: str) -> bool:
     return engine in _GRADING_ENGINES
@@ -102,6 +112,11 @@ class WakeEventsResponse(BaseModel):
     engine_grades: bool
     threshold: float
     not_scored_session_count: int
+    # True when older wake events exist that this response does not carry
+    # (`MAX_WAKE_EVENTS_IN_RESPONSE`). The screen states it rather than
+    # presenting a partial history as a whole one -- the same discipline
+    # D-16 applies to the sessions that could not be scored at all.
+    capped: bool
 
 
 class SetWakeThresholdRequest(BaseModel):
@@ -129,15 +144,26 @@ async def list_wake_events(
     wake_event_repo: WakeEventRepository = request.app.state.wake_event_repo
     config = request.app.state.config
 
-    # The full recorded set, not a capped page: the tuning screen fetches
-    # once and re-partitions locally on every drag (08-PATTERNS.md's own
-    # "no-network-call-per-drag" discipline), which needs every scored
-    # attempt on hand, not merely the newest few.
-    events = await wake_event_repo.list_wake_events()
+    # The recorded set as a whole, up to a stated bound: the tuning screen
+    # fetches once and re-partitions locally on every drag (08-PATTERNS.md's
+    # own "no-network-call-per-drag" discipline), which needs every scored
+    # attempt on hand, not merely the newest few. One row past the bound is
+    # asked for so the response can say whether the bound bit, without a
+    # second count query.
+    events = await wake_event_repo.list_wake_events(limit=MAX_WAKE_EVENTS_IN_RESPONSE + 1)
+    capped = len(events) > MAX_WAKE_EVENTS_IN_RESPONSE
+    if capped:
+        events = events[:MAX_WAKE_EVENTS_IN_RESPONSE]
 
     # `list_wake_events` returns newest first, so the last element is the
     # oldest -- the earliest recorded wake attempt this D-16 count is
-    # measured against.
+    # measured against. When `capped`, that is the earliest attempt *being
+    # shown*, not the earliest on record, so the count runs high rather
+    # than low: it over-reports how much of the operator's history is
+    # unscored. That is the safe direction for D-16, whose whole purpose is
+    # to stop a threshold looking better-evidenced than it is -- and
+    # `capped` is on the response so the screen never presents the number
+    # without the reason.
     earliest_recorded_at = events[-1].recorded_at if events else None
     not_scored_session_count = _count_sessions_not_yet_scored(
         config.session.dir, earliest_recorded_at
@@ -166,6 +192,7 @@ async def list_wake_events(
         engine_grades=_engine_grades(config.wake.engine),
         threshold=threshold,
         not_scored_session_count=not_scored_session_count,
+        capped=capped,
     )
 
 

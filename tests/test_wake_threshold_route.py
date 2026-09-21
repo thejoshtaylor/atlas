@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -534,3 +534,67 @@ def test_the_boot_logs_which_source_the_threshold_came_from(tmp_path, monkeypatc
     assert any(
         "wake threshold resolved from database" in record.message for record in caplog.records
     )
+
+
+# === Code review WR-06: the response's own bound =======================
+
+
+def test_a_response_inside_the_bound_says_it_is_not_capped(tmp_path, monkeypatch):
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"
+    )
+    try:
+        repo = app_module.app.state.wake_event_repo
+        asyncio.run(
+            repo.record_wake_event(
+                source="camera",
+                engine="openwakeword",
+                score=0.60,
+                allowed=True,
+                block_reason=None,
+                recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+
+        body = client.get("/api/wake-events").json()
+
+        assert body["capped"] is False
+        assert len(body["events"]) == 1
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path, monkeypatch):
+    """The route read the whole table with no limit and serialised all of
+    it on every load of the tuning screen. The sweep bounds the table now;
+    this is the backstop for the window between two sweeps -- and it is
+    never silent (WR-06)."""
+    from spire_voice.routes.wake import MAX_WAKE_EVENTS_IN_RESPONSE
+
+    client, app_module = _boot_authenticated_client(
+        tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"
+    )
+    try:
+        repo = app_module.app.state.wake_event_repo
+
+        async def _seed() -> None:
+            for index in range(MAX_WAKE_EVENTS_IN_RESPONSE + 5):
+                await repo.record_wake_event(
+                    source="camera",
+                    engine="openwakeword",
+                    score=0.60,
+                    allowed=True,
+                    block_reason=None,
+                    recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index),
+                )
+
+        asyncio.run(_seed())
+
+        body = client.get("/api/wake-events").json()
+
+        assert body["capped"] is True
+        assert len(body["events"]) == MAX_WAKE_EVENTS_IN_RESPONSE
+        # The newest ones, not an arbitrary page.
+        assert body["events"][0]["recorded_at"].startswith("2026-01-01T00:33:2")
+    finally:
+        client.__exit__(None, None, None)

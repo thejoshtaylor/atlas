@@ -140,6 +140,11 @@ export function WakeTuningRoute() {
                 recording and aren't included above.
               </p>
             ) : null}
+            {screen.capped ? (
+              <p className="text-label text-muted-foreground">
+                Older wake attempts than these exist and aren't included above.
+              </p>
+            ) : null}
             {!screen.engineGrades ? (
               <p className="text-label text-muted-foreground">
                 The configured wake engine ({screen.engine}) reports the same score for every wake it recognizes.

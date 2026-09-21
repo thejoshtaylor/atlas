@@ -25,6 +25,7 @@ function sampleResponse(overrides: Partial<WakeEventsResponse> = {}): WakeEvents
     engine_grades: false,
     threshold: 0.5,
     not_scored_session_count: 0,
+    capped: false,
     ...overrides,
   }
 }

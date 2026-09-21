@@ -1106,13 +1106,21 @@ class WakeEventRepository(Protocol):
     """What the persistent wake-hit record's storage layer must answer
     (D-13, D-14).
 
-    Two members only, matching `record_wake_event`'s two call sites in
-    `sources/runner.py` (one per branch of the gate) and the one read
-    the tuning screen needs. Append-only by design: no update method and
-    no delete method -- every wake attempt is a distinct event, never a
-    value replaced in place, the same "exactly one owner" register D-12
-    states for session deletion, applied here to mean there is no owner
-    at all.
+    `record_wake_event`'s two call sites in `sources/runner.py` (one per
+    branch of the gate), the one read the tuning screen needs, and the
+    retention sweep's own delete.
+
+    No *update* method, deliberately: every wake attempt is a distinct
+    event, never a value replaced in place. The delete is not an exception
+    to that -- it is D-12's "exactly one owner" register applied here.
+    Phase 8 shipped this table with no owner at all, which made it the one
+    piece of persistent state in this project that grows for the life of
+    the deployment: a house with an ambient noise source records every
+    gate-blocked hit the television triggers, forever, while the session
+    recordings -- which hold vastly more sensitive data -- expire on
+    `retain_days`. `delete_wake_events_before` gives it the same owner and
+    the same window (`RetentionScheduler`), and there is still no second
+    path to deletion.
     """
 
     async def record_wake_event(
@@ -1131,4 +1139,11 @@ class WakeEventRepository(Protocol):
     async def list_wake_events(self, limit: int | None = None) -> "list[WakeEvent]":
         """Every `wake_events` row, newest first -- or the `limit`
         newest, newest first, when `limit` is given."""
+        ...
+
+    async def delete_wake_events_before(self, cutoff: datetime) -> int:
+        """Remove every row whose `recorded_at` is strictly before
+        `cutoff`, and answer how many. The retention sweep's call, and the
+        only deletion path there is -- see this protocol's own docstring.
+        """
         ...

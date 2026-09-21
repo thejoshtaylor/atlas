@@ -834,6 +834,17 @@ class PostgresWakeEventRepository:
             rows = (await session.execute(statement)).scalars().all()
             return [_wake_event_from_row(row) for row in rows]
 
+    async def delete_wake_events_before(self, cutoff: datetime) -> int:
+        """One `DELETE`, returning the row count. `_to_naive_utc` on the
+        way in for the same reason `record_wake_event` uses it: the column
+        is naive-UTC and an aware bound would compare against it wrongly.
+        """
+        statement = delete(WakeEventRow).where(WakeEventRow.recorded_at < _to_naive_utc(cutoff))
+        async with self._sessionmaker() as session:
+            result = await session.execute(statement)
+            await session.commit()
+            return int(result.rowcount or 0)
+
 
 def _credential_from_row(row: ProviderCredentialRow) -> Credential:
     return Credential(
