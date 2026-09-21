@@ -95,7 +95,14 @@ export function WakeTuningRoute() {
 
   const handleThresholdChange = (value: number) => {
     if (Number.isNaN(value)) return
-    setPreviewedThreshold(value)
+    // `min`/`max` on `<input type="number">` are not enforced for a typed
+    // value, so typing `5` used to re-partition everything as "Below" and
+    // then send 5 to a route whose own `Field(ge=0.0, le=1.0)` refuses it
+    // -- the operator got "Couldn't set the threshold" with no hint that
+    // the value was out of range. Clamped to the same closed [0, 1] the
+    // request model enforces, so the control cannot preview a value the
+    // server would not accept.
+    setPreviewedThreshold(Math.min(1, Math.max(0, value)))
     // A failed commit leaves the previewed value on screen rather than
     // reverting it (Copywriting Contract) -- but a *new* drag after a
     // failed or successful commit clears that commit's own transient

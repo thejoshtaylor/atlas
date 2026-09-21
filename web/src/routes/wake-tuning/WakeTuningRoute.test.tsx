@@ -318,3 +318,42 @@ test("a genuinely fresh install's empty state says nothing about earlier session
   expect(await screen.findByText("No wake attempts recorded yet.")).toBeTruthy()
   expect(screen.queryByText(/predate wake-score recording/)).toBeNull()
 })
+
+// IN-03: the number field accepted values outside its own declared range.
+test("a typed value above the declared maximum is clamped, not previewed and then refused by the server", async () => {
+  let sentThreshold: number | null = null
+  stubLib(
+    async () => ({ events: [stubEvent({ id: 1, score: 0.9 })], threshold: 0.5 }),
+    async ({ threshold }) => {
+      sentThreshold = threshold
+      return { threshold }
+    },
+  )
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+  await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
+
+  const numberField = document.querySelector("#wake-threshold-value") as HTMLInputElement
+  fireEvent.change(numberField, { target: { value: "5" } })
+
+  expect(numberField.value).toBe("1")
+  // And the partition is the one a threshold of 1 really gives, not the
+  // everything-below picture a threshold of 5 produced.
+  expect(screen.getByText("0 clear this threshold, 1 do not, out of 1 recorded openwakeword wake attempts.")).toBeTruthy()
+
+  fireEvent.click(screen.getByText("Set as active threshold"))
+  await screen.findByText(/Threshold set to/)
+  expect(sentThreshold).toBe(1)
+})
+
+test("a typed value below zero is clamped the same way", async () => {
+  stubLib(async () => ({ events: [stubEvent({ id: 1, score: 0.9 })], threshold: 0.5 }))
+  const { WakeTuningRoute } = await import("./WakeTuningRoute")
+  renderRoute(WakeTuningRoute)
+  await screen.findByText("1 clear this threshold, 0 do not, out of 1 recorded openwakeword wake attempts.")
+
+  const numberField = document.querySelector("#wake-threshold-value") as HTMLInputElement
+  fireEvent.change(numberField, { target: { value: "-3" } })
+
+  expect(numberField.value).toBe("0")
+})
