@@ -559,13 +559,31 @@ class CalibrationConfig:
                 f"calibration.max_age_days must be a positive integer, got {max_age_days!r} -- "
                 "a zero or negative age would call every calibration stale the instant it is taken"
             )
+        # D-15/WR-03 pattern (mirrors SecurityConfig.from_config's
+        # cookie_secure guard below): `expand_env` substitutes raw text
+        # before the YAML parse, so `CALIBRATION_ROUTE_ENABLED`'s value
+        # decides this field's type. An EMPTY value -- reachable from
+        # `CALIBRATION_ROUTE_ENABLED=` in a `.env`, or `--set-string
+        # config.calibrationRouteEnabled=""` in the chart -- parses as
+        # `None`, not `false`, and this route makes a real home play a
+        # sound and record the room (T-FMI-01): a configuration nobody
+        # means is refused by name here instead of silently defaulting
+        # to off (or worse, truthy).
+        raw_route_enabled = raw.get("route_enabled", cls.route_enabled)
+        if not isinstance(raw_route_enabled, bool):
+            raise ConfigError(
+                f"calibration.route_enabled {raw_route_enabled!r} is not a boolean -- set "
+                "CALIBRATION_ROUTE_ENABLED to exactly 'true' or 'false' (unquoted in the "
+                "YAML, so it parses as a real boolean). An empty value is not 'false'; it "
+                "parses as null."
+            )
         return cls(
             dir=raw.get("dir", cls.dir),
             probe_duration_s=probe_duration_s,
             settle_s=settle_s,
             tail_s=tail_s,
             max_age_days=max_age_days,
-            route_enabled=raw.get("route_enabled", cls.route_enabled),
+            route_enabled=raw_route_enabled,
         )
 
 

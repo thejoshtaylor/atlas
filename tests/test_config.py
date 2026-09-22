@@ -477,6 +477,7 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # arbitrary string -- "false" keeps the assertion below (cookie_secure
     # is False) true, matching this file's own shipped default.
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # 260922-cmo (D-1): camera.rtsp_url is a plain string passthrough like
     # the vars in the loop above, so "test-value" would be as honest a
     # placeholder as any -- a real rtsp:// string is used instead so this
@@ -589,6 +590,7 @@ def test_example_config_camera_url_and_speaker_backend_expand_from_env(monkeypat
     ):
         monkeypatch.setenv(name, "test-value")
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     monkeypatch.setenv(
@@ -882,6 +884,95 @@ def test_calibration_config_route_enabled_defaults_off():
 
     assert CalibrationConfig.from_config(None).route_enabled is False
     assert CalibrationConfig.from_config({}).route_enabled is False
+
+
+# --- 260922-fmi (D-15/WR-03): route_enabled is a boolean or it is refused,
+# mirroring SecurityConfig's cookie_secure rejections above ---
+
+
+def test_calibration_config_refuses_a_route_enabled_that_is_not_a_boolean():
+    """`expand_env` substitutes raw text before the YAML parse, so
+    `CALIBRATION_ROUTE_ENABLED`'s value decides this field's type, exactly
+    as `COOKIE_SECURE` decides `cookie_secure`'s (WR-03 above). An EMPTY
+    value parses as `None`, not `false`, and this route makes a real home
+    play a sound and record the room (T-FMI-01) -- a configuration nobody
+    means is refused by name here instead."""
+    from spire_voice.config import CalibrationConfig, ConfigError
+
+    for value in (None, 1, 0, "true", "false", "yes", "on", ""):
+        with pytest.raises(ConfigError) as exc:
+            CalibrationConfig.from_config({"route_enabled": value})
+        assert "route_enabled" in str(exc.value)
+        assert "CALIBRATION_ROUTE_ENABLED" in str(exc.value)
+
+
+def test_calibration_config_accepts_both_real_booleans_for_route_enabled():
+    from spire_voice.config import CalibrationConfig
+
+    assert CalibrationConfig.from_config({"route_enabled": True}).route_enabled is True
+    assert CalibrationConfig.from_config({"route_enabled": False}).route_enabled is False
+
+
+def test_an_empty_calibration_route_enabled_variable_is_refused_by_the_real_loader(
+    tmp_path, monkeypatch
+):
+    """The end-to-end form of the case above, through `load_config` and the
+    real `${VAR}` expansion -- the path the chart and Compose both take --
+    rather than through `CalibrationConfig.from_config` alone."""
+    from spire_voice.config import ConfigError, load_config
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "database:\n"
+        "  url: postgresql+asyncpg://spire:test-value@db.invalid:5432/spire\n"
+        "brain:\n"
+        "  base_url: https://brain.invalid/v1\n"
+        "  api_key: test-value\n"
+        "  models:\n"
+        "    - model: fake-model\n"
+        "calibration:\n"
+        "  route_enabled: ${CALIBRATION_ROUTE_ENABLED}\n"
+    )
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "")
+
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path)
+    assert "route_enabled" in str(exc.value)
+
+
+def test_shipped_config_resolves_calibration_route_enabled_from_the_real_env_var(monkeypatch):
+    """The unquoted `${CALIBRATION_ROUTE_ENABLED}` in the shipped example
+    file must resolve to a real YAML boolean, exactly as `${COOKIE_SECURE}`
+    already does -- proven end-to-end through `load_config` on the shipped
+    file rather than through a hand-built fixture."""
+    from spire_voice.config import load_config
+
+    for name in (
+        "XAI_API_KEY",
+        "TAPO_USER",
+        "TAPO_PASSWORD",
+        "SPEAKER_ENSURE_URL",
+        "HA_URL",
+        "HA_TOKEN",
+        "BIND_HOST",
+    ):
+        monkeypatch.setenv(name, "test-value")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    )
+
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "true")
+    config = load_config("config/config.example.yaml")
+    assert config.calibration.route_enabled is True
+
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+    config = load_config("config/config.example.yaml")
+    assert config.calibration.route_enabled is False
 
 
 # --- Plan 02-12: BargeInConfig's two correlation ConfigError rejections ---

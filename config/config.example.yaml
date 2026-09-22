@@ -587,7 +587,11 @@ calibration:
   # system, no roles, and no session to put in front of it. Turning this on
   # is a deliberate operator choice until WEB-01/WEB-04 (Phase 3) ship
   # authentication in front of it.
-  route_enabled: false
+  #
+  # 260922-fmi (D-15): read from ${VAR}, the same mechanism cookie_secure
+  # uses above. The public default is false; the operator sets this true
+  # only in the cluster's hand-applied Secret (D-2), never in this file.
+  route_enabled: ${CALIBRATION_ROUTE_ENABLED}
 
 workflow:
   # Scheduled workflows (FLOW-01 through FLOW-10, SAFE-08): a spoken or
