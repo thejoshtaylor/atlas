@@ -12,8 +12,31 @@ image:
 
 secretName: spire-voice
 
-# No ingress/TLS yet — matches this project's current working deploy.
-# Reached through the Service directly, on the release's own namespace.
+# The public ingress: `voice.jtlabs.co` already resolves (the wildcard
+# `*.jtlabs.co` record is Cloudflare-proxied) straight to this cluster.
+# Cloudflare terminates public TLS in "Full" mode (not "Full strict"), so
+# the origin hop lands on k3s Traefik's `websecure` entrypoint and is
+# validated only as far as "some cert is presented" — Traefik's own
+# default cert is enough, and no per-host cert Secret is needed here. This
+# is the same public-hop model chat-manager already runs on this cluster.
+ingress:
+  enabled: true
+  className: traefik
+  host: voice.jtlabs.co
+  tls: []
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+
+# The ingress above puts this webapp on public HTTPS, so the session
+# cookie must be Secure. `config.cookieSecure` here is inert: `secretName`
+# is set above, so the chart renders no templated Secret at all (see
+# tests/test_helm_chart.py::test_a_hand_applied_secret_name_renders_no_templated_secret)
+# — the value that actually reaches the running pod is COOKIE_SECURE in
+# the hand-applied `home/spire-voice` Secret, which must be "true" now
+# that this ingress is public. See
+# docs/runbooks/deploy-build-cluster.md for that coupling and the
+# pod-restart it needs to take effect.
 config:
   bindHost: "0.0.0.0"
   cookieSecure: "false"
