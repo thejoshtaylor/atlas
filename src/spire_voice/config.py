@@ -401,7 +401,10 @@ class SpeakerConfig:
     `respawn_backoff_s` must be positive: a zero or negative backoff turns
     the supervisor into a busy loop restarting a dead subprocess with no
     delay between attempts, which is a worse failure than refusing to start
-    (RESEARCH.md Pitfalls 4 and 5).
+    (RESEARCH.md Pitfalls 4 and 5). 260922-gde: the camera's talk port
+    (8800) locks out every client after a run of failed auths, and a short
+    backoff re-arms that lockout on every retry -- the default is 30s, not
+    a couple of seconds, so a dead session gets a real chance to recover.
 
     `reopen_timeout_s` must be positive for the same reason: it bounds how
     long `FifoWriter.write()` retries reopening the pipe after every reader
@@ -421,7 +424,7 @@ class SpeakerConfig:
     stream: str = "cam"
     ensure_url: str = ""
     fifo_path: str = "/run/spire/speaker.alaw"
-    respawn_backoff_s: float = 2.0
+    respawn_backoff_s: float = 30.0
     reopen_timeout_s: float = 10.0
     backend: str = "go2rtc"
 

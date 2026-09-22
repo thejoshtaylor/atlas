@@ -76,12 +76,17 @@ _DETECTOR_FORMAT = "s16"
 _DETECTOR_LAYOUT = "mono"
 _DETECTOR_SAMPLE_RATE = 16000
 
-# Matches `SpeakerConfig.respawn_backoff_s`'s own default (config.py) -- one
-# named backoff shape reused for both directions of the camera connection
-# (RESEARCH.md Pattern 4), not a second retry policy invented here. Wiring
-# this source into `app.py` should pass `config.speaker.respawn_backoff_s`
-# explicitly for `backoff_s`; `CameraConfig` itself carries no backoff field
-# of its own, precisely so there is only ever one place this number lives.
+# 260922-gde: this is the RTSP (mic) reconnect, not the speaker's. The two
+# used to share one number, but the speaker side has since grown a real
+# reason to be slower -- the camera's talk port locks itself out after
+# repeated failed auths, and a short backoff kept re-arming that lockout
+# (`SpeakerConfig.respawn_backoff_s`, config.py, now 30s). The RTSP read
+# side has no such lockout, so it stays fast: a dropped microphone stream
+# should reconnect quickly, not wait out a lockout timer that does not
+# apply to it. `app.py` must not pass `config.speaker.respawn_backoff_s`
+# in for `backoff_s` here -- that would make the mic inherit the speaker's
+# slower backoff for no reason. `CameraConfig` carries no backoff field of
+# its own, so this module-level default is this source's only home for it.
 _DEFAULT_BACKOFF_S = 2.0
 
 

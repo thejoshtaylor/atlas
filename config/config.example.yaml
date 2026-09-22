@@ -205,7 +205,11 @@ speaker:
   # one writable volume both the Helm chart (a PVC) and Compose (a named
   # volume) already mount.
   fifo_path: "/data/speaker.alaw"
-  respawn_backoff_s: 2.0
+  # 260922-gde: the camera's talk port (8800) locks out every client after
+  # a run of failed auths. A short backoff re-armed that lockout on every
+  # retry, so a dead speaker session never recovered while the pod kept
+  # running; 30s gives the lockout time to clear between attempts.
+  respawn_backoff_s: 30.0
 
   # Opening this FIFO blocks at the OS level until a reader attaches. The
   # first open, at startup, waits as long as it takes -- there is nothing
@@ -213,7 +217,9 @@ speaker:
   # loses its reader and respawn_backoff_s is already retrying it, is
   # different: this bounds that wait, so a respawn that stalls or fails
   # turns into a raised, logged error instead of a permanently silent
-  # assistant. A few respawn_backoff_s cycles is a reasonable floor.
+  # assistant. This is independent of respawn_backoff_s -- it bounds how
+  # long one write waits for a reader before it fails loudly, not how many
+  # respawn cycles fit inside it.
   reopen_timeout_s: 10.0
 
 wake:
