@@ -276,6 +276,10 @@ wake:
   # "heyyy spire" fires two sessions and the second one transcribes silence.
   refractory_s: 2.0
 
+  # Play a short chime on a wake-word hit, so the speaker knows when to start
+  # the command. Only a source with a speaker (the camera) plays it.
+  cue: true
+
 gate:
   # Voice is an ambient trigger: the camera microphone hears the television, and
   # a television can say any sentence in the language. This gate decides when

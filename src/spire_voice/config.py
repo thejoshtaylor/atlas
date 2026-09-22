@@ -900,6 +900,7 @@ class WakeConfig:
     engine: str = "vosk"
     phrase: str = "hey spire"
     refractory_s: float = 2.0
+    cue: bool = True
     openwakeword: OpenWakeWordConfig = field(default_factory=OpenWakeWordConfig)
     vosk: VoskWakeConfig = field(default_factory=VoskWakeConfig)
     sources: dict[str, dict] = field(default_factory=dict)
@@ -913,6 +914,9 @@ class WakeConfig:
         refractory_s = float(raw.get("refractory_s", cls.refractory_s))
         if refractory_s < 0:
             raise ConfigError(f"wake.refractory_s must be non-negative, got {refractory_s!r}")
+        cue = raw.get("cue", cls.cue)
+        if not isinstance(cue, bool):
+            raise ConfigError(f"wake.cue must be true or false, got {cue!r}")
         sources_raw = raw.get("sources", {}) or {}
         sources = {
             name: _validate_and_normalize_override(cls, override or {}, f"wake.sources.{name}")
@@ -922,6 +926,7 @@ class WakeConfig:
             engine=engine,
             phrase=raw.get("phrase", cls.phrase),
             refractory_s=refractory_s,
+            cue=cue,
             openwakeword=OpenWakeWordConfig.from_config(raw.get("openwakeword")),
             vosk=VoskWakeConfig.from_config(raw.get("vosk")),
             sources=sources,

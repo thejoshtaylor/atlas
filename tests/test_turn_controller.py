@@ -1686,3 +1686,50 @@ async def test_a_dead_speaker_does_not_abort_the_turn(fake_tts):
 
     assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights"}
     assert {"type": "reply.text", "text": "turned on the lights"} in source.sent_events
+
+
+class _CameraLikeSource(_FrameCountingLiveSource):
+    def sink_format(self):
+        from spire_voice.providers.tts_xai import SinkFormat
+
+        return SinkFormat(codec="alaw", sample_rate=8000)
+
+
+async def _run_cue_turn(fake_tts, source, *, wake_cue: bool):
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    await run_turn(
+        source,
+        _SequentialDrainingStt(calls=[[FinalTranscript(text="turn on the lights")]]),
+        _RecordingBrain(replies=[BrainReply(text="turned on the lights")]),
+        fake_tts(chunks=[b"\x01\x02"]),
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        wake_cue=wake_cue,
+    )
+
+
+async def test_wake_cue_plays_before_the_reply_on_a_source_with_a_speaker(fake_tts):
+    from spire_voice.audio.cue import wake_cue
+    from spire_voice.providers.tts_xai import SinkFormat
+
+    source = _CameraLikeSource(frames=[b"\x00\x01"])
+    await _run_cue_turn(fake_tts, source, wake_cue=True)
+
+    assert source.sent_audio[0] == wake_cue(SinkFormat(codec="alaw", sample_rate=8000))
+    assert source.sent_audio[1:] == [b"\x01\x02"]
+
+
+async def test_no_wake_cue_when_disabled_or_when_the_source_has_no_speaker(fake_tts):
+    camera = _CameraLikeSource(frames=[b"\x00\x01"])
+    await _run_cue_turn(fake_tts, camera, wake_cue=False)
+    assert camera.sent_audio == [b"\x01\x02"]
+
+    browser = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    await _run_cue_turn(fake_tts, browser, wake_cue=True)
+    assert browser.sent_audio == [b"\x01\x02"]

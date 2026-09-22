@@ -233,7 +233,7 @@ def _fake_run_turn_config(tmp_path):
         # `config.brain.turn_timeout_s` and `config.wake.phrase`.
         brain=SimpleNamespace(max_tool_rounds=3, filler_after_ms=600.0, turn_timeout_s=25.0),
         stt=SimpleNamespace(max_utterance_s=15.0),
-        wake=SimpleNamespace(phrase="hey spire"),
+        wake=SimpleNamespace(phrase="hey spire", cue=True),
     )
 
 

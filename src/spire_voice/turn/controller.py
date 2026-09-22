@@ -87,6 +87,7 @@ from spire_voice.providers.base import BrainError
 from spire_voice.transports.base import SourceFormat
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
+from spire_voice.audio.cue import wake_cue as wake_cue_audio
 from spire_voice.speaker.fifo_writer import SpeakerError
 from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.session.recorder import SessionRecorder
@@ -296,6 +297,7 @@ async def run_turn(
     workflow_tool_host: Any | None = None,
     tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
     wake_phrase: str | None = None,
+    wake_cue: bool = False,
     brain_turn_timeout_s: float = 25.0,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
@@ -437,6 +439,11 @@ async def run_turn(
     # and WebRTC source today), which is `_speak`'s own pre-fix default.
     _sink_format_fn = getattr(source, "sink_format", None)
     sink: SinkFormat | None = _sink_format_fn() if _sink_format_fn is not None else None
+
+    # 260922-cue: a chime tells the operator when to speak. Only a source
+    # that declares its own sink (the camera) has a speaker to play it on.
+    if wake_cue and sink is not None:
+        await _play_wake_cue(source, sink, speech_lock)
 
     # D-15: started here, before the drain below is ever awaited, so the
     # fetch overlaps the operator still speaking and has usually finished by
@@ -1310,6 +1317,20 @@ async def _speak(
             await _synthesize_and_write()
     else:
         await _synthesize_and_write()
+
+
+async def _play_wake_cue(source: _AudioSource, sink: SinkFormat, speech_lock: asyncio.Lock | None) -> None:
+    cue = wake_cue_audio(sink)
+    if not cue:
+        return
+    try:
+        if speech_lock is not None:
+            async with speech_lock:
+                await source.send_audio(cue)
+        else:
+            await source.send_audio(cue)
+    except SpeakerError as exc:
+        logger.warning("speaker unavailable, skipping the wake cue: %s", exc)
 
 
 async def _emit_event(source: _AudioSource, event: dict[str, Any]) -> None:

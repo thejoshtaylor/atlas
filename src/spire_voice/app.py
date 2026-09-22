@@ -679,6 +679,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             # pass no `wake_phrase` at all, which is `run_turn`'s own signal
             # to skip the wake-only check entirely.
             wake_phrase=config.wake.phrase,
+            wake_cue=config.wake.cue,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
         )
 
