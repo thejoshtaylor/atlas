@@ -21,16 +21,20 @@ Create a Harbor project named `spire-voice`. Create a robot account scoped
 to that project with push and pull permission. The build pushes to this
 project. No other part of this pipeline needs a different registry.
 
-## 2. Registry credentials: `regcred-spire-voice`, twice
+## 2. Registry credentials: `regcred-spire-voice`, in three namespaces
 
 Create a Kubernetes `dockerconfigjson` Secret named `regcred-spire-voice`
-from that robot account's credentials. Create it in both of these
+from that robot account's credentials. Create it in all three of these
 namespaces:
 
 - `argo` — the CI build (`buildctl`, inside the WorkflowTemplate) pushes
   with it.
 - `argocd` — `argocd-image-updater` pulls image metadata with it, through
   the `pullsecret:argocd/regcred-spire-voice` annotation on the Application.
+- `home` — the running pod pulls the image itself with it. The Harbor
+  `spire-voice` project is private, so without this Secret (and the
+  ServiceAccount patch below) the pod fails to start with
+  `ImagePullBackOff: no basic auth credentials`.
 
 ```bash
 kubectl create secret docker-registry regcred-spire-voice \
@@ -44,7 +48,31 @@ kubectl create secret docker-registry regcred-spire-voice \
   --docker-username='<robot account name>' \
   --docker-password '<robot account token>' \
   --namespace argocd
+
+kubectl create secret docker-registry regcred-spire-voice \
+  --docker-server=harbor.tail41bc66.ts.net \
+  --docker-username='<robot account name>' \
+  --docker-password '<robot account token>' \
+  --namespace home
 ```
+
+The Secret alone is not enough. The pod pulls under the `home` namespace's
+default ServiceAccount, and nothing points that ServiceAccount at the new
+Secret until you patch it:
+
+```bash
+kubectl -n home patch serviceaccount default \
+  -p '{"imagePullSecrets":[{"name":"regcred-spire-voice"}]}'
+```
+
+Apply this patch by hand. Do not add it to the chart or to an Argo CD
+manifest. Argo CD's `syncPolicy.automated.selfHeal` reverts any field a
+synced manifest does not declare back to that manifest's own state on
+every reconcile. A hand-applied patch to an object Argo CD does not manage
+survives that reconcile; a patch folded into a synced manifest would not.
+This mirrors the pattern chat-manager already uses: a `regcred` Secret
+referenced from its own namespace's default ServiceAccount, applied by
+hand for the same reason.
 
 ## 3. The runtime Secret, in the `home` namespace
 
@@ -64,7 +92,7 @@ The shipped configuration needs every key below.
 | `CAMERA_RTSP_URL` | The whole authenticated camera RTSP URL. This value never appears in this repository. This Secret is the one place it lives. |
 | `SPEAKER_BACKEND` | `go2rtc` or `tapo_talk`. |
 | `BIND_HOST` | `0.0.0.0`. This matches `values-build.yaml`'s `config.bindHost`. |
-| `COOKIE_SECURE` | `false`. This matches `values-build.yaml`'s `config.cookieSecure`, because no ingress or TLS sits in front of this release yet. |
+| `COOKIE_SECURE` | Set `COOKIE_SECURE=true` once the public ingress at `voice.jtlabs.co` is enabled (section 7 below) — public HTTPS in front of this release means the session cookie must be Secure. `false` is only correct for a deploy with no ingress and no TLS in front of it at all. |
 | `DATABASE_URL` | See the pairing rule below. |
 | `POSTGRES_PASSWORD` | See the pairing rule below. |
 | `SPIRE_SECRET_KEY` | See the generation command below. |
@@ -160,6 +188,28 @@ namespace, so this one command places each in the right place: the Sensor
 goes into `argo-events`, the WorkflowTemplate goes into `argo`, and the
 Application goes into `argocd`.
 
+## 7. The public ingress at voice.jtlabs.co, and the cookie it requires
+
+`values-build.yaml` enables the chart's ingress. Once it is applied, this
+webapp is reachable at `https://voice.jtlabs.co` over public HTTPS
+(Cloudflare-terminated, in "Full" mode). A session cookie served over
+public HTTPS must be Secure, so the hand-applied `home/spire-voice`
+Secret must set `COOKIE_SECURE=true` — see the table in section 3.
+
+Set it there, not in `values-build.yaml`. `config.cookieSecure` in that
+file is inert once `secretName` is set (the chart then renders no
+Secret of its own); the value that reaches the running pod is the one
+in the hand-applied Secret.
+
+Flipping a live Secret's key does not, by itself, restart the pod that
+reads it. Restart the pod after you change `COOKIE_SECURE`, or the
+running process keeps the old value until its next restart for any
+other reason.
+
+This runbook documents the required value and the restart it needs. It
+does not flip the live Secret for you — that edit is an operator
+hand-action, run once when you first enable the ingress.
+
 ## The seam: what CI does automatically, versus what you just did by hand
 
 Once every step above is done, this sequence runs on every push to `main`,
@@ -181,11 +231,11 @@ with no further action from you.
    with the freshly built image, in the `home` namespace. No one runs
    `helm upgrade` by hand.
 
-Steps 1 through 6 above (the Harbor project, the registry credentials, the
-runtime Secret, the GitHub webhook, the image-updater registration, and
-applying the three manifests) are the one-time, hand-run setup. This setup
-makes the automatic sequence above possible. None of it repeats on a later
-push.
+Steps 1 through 7 above (the Harbor project, the registry credentials, the
+runtime Secret, the GitHub webhook, the image-updater registration,
+applying the three manifests, and the public ingress) are the one-time,
+hand-run setup. This setup makes the automatic sequence above possible.
+None of it repeats on a later push.
 
 ## Public-repo safety note
 
