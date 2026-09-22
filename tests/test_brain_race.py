@@ -761,6 +761,123 @@ async def test_run_turn_rejects_two_tiers_both_flagged_calls_tools(
         )
 
 
+async def test_an_echoed_confident_triage_reply_does_not_win(fake_envelope_client):
+    """260922-lim-01: a triage tier's confident reply that is really just the
+    user's own transcript echoed back must not end the race -- the top
+    tier's own answer must be used instead.
+    """
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    transcript = "we're off the example cooler"
+    echoed_reply = TierReply(
+        answer="We're off the example cooler.",
+        confident=True,
+        needs_tool=False,
+        filler=FillerPhrase.STILL_LOOKING,
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=echoed_reply),
+        calls_tools=False,
+    )
+
+    reply = await brain_race.run_triage_tier(
+        triage_tier, [{"role": "user", "content": transcript}]
+    )
+
+    assert reply.confident is False
+    assert reply.filler == FillerPhrase.STILL_LOOKING
+
+
+async def test_a_genuine_confident_triage_reply_still_wins(fake_envelope_client):
+    """The companion case: a confident answer that is not an echo of the
+    transcript is left completely untouched."""
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.turn import brain_race
+
+    genuine_reply = TierReply(
+        answer="it is 3 pm", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=genuine_reply),
+        calls_tools=False,
+    )
+
+    reply = await brain_race.run_triage_tier(
+        triage_tier, [{"role": "user", "content": "what time is it"}]
+    )
+
+    assert reply is genuine_reply
+    assert reply.confident is True
+
+
+async def test_an_echoed_confident_triage_reply_loses_the_race_end_to_end(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    """260922-lim-01, end to end through `run_turn`: an echoed confident
+    triage reply must not reach the operator -- the top tier's own answer
+    must be spoken instead.
+    """
+    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import run_turn
+
+    transcript = "we're off the example cooler"
+    echoed_reply = TierReply(
+        answer="We're off the example cooler.",
+        confident=True,
+        needs_tool=False,
+        filler=FillerPhrase.STILL_LOOKING,
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=echoed_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+
+    top_answer = "turned off the example cooler socket"
+    top_reply = TierReply(answer=top_answer, confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=fake_brain(replies=[BrainReply(text=top_answer)]),
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.01),
+        calls_tools=True,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text=transcript)])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_tier.brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=1000,
+        filler_cache=None,
+    )
+
+    assert tts.received_text == [top_answer]
+
+
 async def test_run_turn_rejects_calls_tools_on_a_tier_that_is_not_the_highest_index(
     fake_audio_source, fake_stt, fake_tts, fake_envelope_client
 ):

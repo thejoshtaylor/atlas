@@ -19,7 +19,9 @@ natural hook for "keep waiting."
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,6 +103,36 @@ def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
     )
 
 
+_ECHO_PUNCTUATION_RE = re.compile(r"[^\w\s]")
+
+# A live-house bug (see this task's plan): a triage tier answered a garbled
+# transcript back verbatim as a CONFIDENT reply, and that echo won the race
+# in under the top tier's own answer's time. 0.85 is loose enough to catch a
+# reply that only drops or adds a trailing word, tight enough that a genuine
+# short answer ("it is 3 pm") does not collide with a short question.
+_ECHO_RATIO_THRESHOLD = 0.85
+
+
+def _normalize_for_echo_check(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace.
+
+    Shared normalization for both sides of the echo comparison, so
+    "We're off the swamp core." and "were off the swamp core" compare on
+    their words alone, not on case or punctuation noise transcription adds.
+    """
+    return " ".join(_ECHO_PUNCTUATION_RE.sub("", text.lower()).split())
+
+
+def _last_user_message(messages: list[dict[str, Any]]) -> str | None:
+    """The transcript a triage tier was actually asked about: the last
+    `{"role": "user"}` message in its own messages list."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            content = message.get("content")
+            return content if isinstance(content, str) else None
+    return None
+
+
 async def run_triage_tier(tier: TierBrain, messages: list[dict[str, Any]]) -> TierReply:
     """One `instructor` call, no `tools=` parameter at all.
 
@@ -108,12 +140,35 @@ async def run_triage_tier(tier: TierBrain, messages: list[dict[str, Any]]) -> Ti
     injected live state already covers, or reports (through `TierReply`)
     that the request needs a tool call and hands off with a filler. Lower
     tiers only ever need this single-call, no-collision path.
+
+    A confident reply that is really just the user's own transcript echoed
+    back (a live-house bug: a garbled transcript answered as a CONFIDENT
+    reply, word for word) is downgraded to non-confident here, before it
+    ever reaches `race_tiers` -- it keeps its filler, so the race simply
+    keeps waiting and the top tier answers instead.
     """
-    return await tier.envelope_client.chat.completions.create(
+    reply = await tier.envelope_client.chat.completions.create(
         model=tier.model,
         messages=messages,
         response_model=TierReply,
     )
+    if reply.confident:
+        transcript = _last_user_message(messages)
+        if transcript is not None:
+            ratio = difflib.SequenceMatcher(
+                None,
+                _normalize_for_echo_check(reply.answer),
+                _normalize_for_echo_check(transcript),
+            ).ratio()
+            if ratio >= _ECHO_RATIO_THRESHOLD:
+                logger.info(
+                    "triage tier %d confident answer echoes the user transcript "
+                    "(ratio=%.2f); treating as not confident",
+                    tier.index,
+                    ratio,
+                )
+                return reply.model_copy(update={"confident": False})
+    return reply
 
 
 async def run_top_tier(
