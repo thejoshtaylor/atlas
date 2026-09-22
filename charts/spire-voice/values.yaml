@@ -110,6 +110,10 @@ env:
   cameraRtspUrl: ""
   # go2rtc | tapo_talk -- see config/config.example.yaml's own comment.
   speakerBackend: go2rtc
+  # 260922-fmi (D-15, D-20): public safe default. The house turns the
+  # calibration echo-path route on by setting this true in its own
+  # hand-applied Secret (D-2), never in this chart.
+  calibrationRouteEnabled: "false"
 
 postgres:
   # D-14: always bundled, plain manifests against the official image --

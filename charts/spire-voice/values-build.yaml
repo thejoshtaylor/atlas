@@ -37,6 +37,11 @@ ingress:
 # that this ingress is public. See
 # docs/runbooks/deploy-build-cluster.md for that coupling and the
 # pod-restart it needs to take effect.
+# CALIBRATION_ROUTE_ENABLED (260922-fmi, D-15, D-20) is not set here for
+# the same reason COOKIE_SECURE above is not: `secretName` above means
+# this chart renders no templated Secret at all, so the value that
+# actually reaches the running pod lives in the hand-applied
+# `home/spire-voice` Secret (D-2), not in this file.
 config:
   bindHost: "0.0.0.0"
   cookieSecure: "false"

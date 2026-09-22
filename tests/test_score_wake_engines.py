@@ -415,6 +415,10 @@ def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # ({go2rtc, tapo_talk}) -- it cannot share the "test-value" placeholder
     # the other vars in the tuple above use.
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    # 260922-fmi (D-15/WR-03): calibration.route_enabled is unquoted in
+    # config.example.yaml, so expansion must produce a real YAML boolean
+    # literal, not an arbitrary string.
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
 
 
 def _engine_report(

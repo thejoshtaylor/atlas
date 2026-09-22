@@ -173,6 +173,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")
@@ -510,6 +511,7 @@ async def test_workflow_tables_upgrade_from_empty_with_index_and_constraint_and_
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")
@@ -764,6 +766,7 @@ async def test_provider_selections_seed_all_three_slots_with_xai_and_are_idempot
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")
@@ -801,6 +804,7 @@ async def test_provider_selections_slot_is_unique(monkeypatch):
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")
@@ -870,6 +874,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
     monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")

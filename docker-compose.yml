@@ -63,6 +63,9 @@ services:
       # always shipped for a Phase-1, no-camera dev clone.
       CAMERA_RTSP_URL: "${CAMERA_RTSP_URL:-rtsp://unused-in-phase-1:unused-in-phase-1@camera.invalid:554/stream1}"
       SPEAKER_BACKEND: "${SPEAKER_BACKEND:-go2rtc}"
+      # 260922-fmi (D-15, D-20): the calibration echo-path route's on/off
+      # switch. Safe default false, same as the shipped config.
+      CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"
       # Only read by speaker/tapo_talk.py, and only when speaker.backend is
       # set to tapo_talk in config.yaml -- unused (and safe to leave unset)
       # on the default go2rtc path.
