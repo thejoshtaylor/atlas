@@ -1,5 +1,6 @@
-# CI build for spire-voice, submitted by spire-voice-ci-sensor.yaml on
-# every push to main. Builds the one runtime image this project ships
+# CI build for spire-voice, submitted by the spire-voice-ci Sensor
+# (config/argo/spire-voice-ci-sensor) on every push to main. Builds the
+# one runtime image this project ships
 # from the repo-root Dockerfile's default (`runtime`) stage and pushes
 # harbor.tail41bc66.ts.net/spire-voice/app at both :latest and :sha. The
 # `test` stage (the project's own full backend suite) is never a build

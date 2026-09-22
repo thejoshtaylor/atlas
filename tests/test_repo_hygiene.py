@@ -152,6 +152,22 @@ _ALLOWED_OBJECT_IDS = {
     # caught, in the working tree and in history alike.
     "office_lamp",
     "office_fan",
+    # 260922-cmo, historical. config/argo/spire-voice-ci-workflowtemplate.yaml
+    # (blob `909910246ec63ec2736063bb9e2c75e05536fa54`, reachable from commit
+    # `05685f463a21fe7e24857ef86267a1adb783cd58`) referenced its own sibling
+    # manifest's filename, `spire-voice-ci-sensor.yaml`, in a header comment
+    # -- coincidentally matching `sensor.` (the Home Assistant domain) plus
+    # `yaml` (an ordinary filename extension, not a house fixture's object
+    # id) as its object id. The working tree no longer spells this filename
+    # out this way (it names the manifest without its extension instead, or
+    # applies the whole `config/argo/` directory at once), but the history
+    # scan reads blobs as the earlier commit wrote them, and that cannot be
+    # corrected without rewriting history. Allowlisted here rather than
+    # reported because "yaml" is plainly a file extension, never a real
+    # house entity's object id -- `_ENTITY_ID_RE` itself is unchanged, so a
+    # real house's `sensor.<anything else>` is still caught, in the working
+    # tree and in history alike.
+    "yaml",
 }
 
 # The file suffixes the entity-id convention is actually enforced against --
