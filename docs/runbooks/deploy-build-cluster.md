@@ -145,48 +145,35 @@ Sensor's own filters (`body.repository.full_name`, `body.ref`) narrow this
 down to a push on this repository's `main` branch. The webhook itself can
 stay a generic push hook.
 
-## 5. Image-updater registration: read, modify, write
+## 5. Image-updater registration
 
-`argocd-image-updater` writes digests only for applications named in the
-cluster's one shared `ImageUpdater` object, `perpetuity`, in the `argocd`
-namespace. Add an entry for `spire-voice` to it.
+`argocd-image-updater` writes digests only for applications that an
+`ImageUpdater` object names. The Application's annotations alone do
+nothing. Without this object, a push to `main` builds and pushes an image,
+but the running pod never changes.
 
-Read the live object first:
+`config/argo/spire-voice-image-updater.yaml` is this project's own
+`ImageUpdater` object. Step 6 applies it with the other manifests. Do not
+add `spire-voice` to another project's shared `ImageUpdater` object.
 
-```bash
-kubectl -n argocd get imageupdater perpetuity -o yaml > /tmp/perpetuity.yaml
-```
-
-Edit `/tmp/perpetuity.yaml`. Add this entry alongside whatever
-`applicationRefs` entries are already there:
-
-```yaml
-- namePattern: spire-voice
-  useAnnotations: true
-```
-
-Apply the edited file:
+To make sure that the updater found the application:
 
 ```bash
-kubectl apply -f /tmp/perpetuity.yaml
+kubectl -n argocd get imageupdater spire-voice
 ```
 
-**Do not apply a freshly authored file for this object without reading the
-live object first.** This object is shared across every project on this
-cluster that uses image-updater. A file that names only `spire-voice`
-replaces every other project's entry. Always read the live object first,
-fold your entry into it, and apply the result.
+The `APPS` column must show `1`.
 
-## 6. Apply the three manifests
+## 6. Apply the four manifests
 
 ```bash
 kubectl apply -f config/argo/
 ```
 
-This directory holds exactly three manifests. Each one names its own
+This directory holds exactly four manifests. Each one names its own
 namespace, so this one command places each in the right place: the Sensor
 goes into `argo-events`, the WorkflowTemplate goes into `argo`, and the
-Application goes into `argocd`.
+Application and the ImageUpdater go into `argocd`.
 
 ## 7. The public ingress at voice.jtlabs.co, and the cookie it requires
 
