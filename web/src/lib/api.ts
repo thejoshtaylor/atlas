@@ -3,12 +3,18 @@
 // through `apiFetch`, which turns a 401, a setup-incomplete 503, and any
 // other non-2xx into three distinguishable outcomes:
 //
-//   - 401                           -> UnauthorizedError, and the cached
-//                                      session is cleared so the guard
-//                                      (components/layout/AuthGuard.tsx)
-//                                      redirects to sign-in on its next
-//                                      render, rather than this module
-//                                      reaching into the router directly.
+//   - 401                           -> one silent `POST /api/auth/refresh`
+//                                      and a single retry of the original
+//                                      request (skipped for `/api/auth/
+//                                      refresh` and `/api/auth/login`
+//                                      themselves). If the refresh or the
+//                                      retry also fails: UnauthorizedError,
+//                                      and the cached session is cleared so
+//                                      the guard (components/layout/
+//                                      AuthGuard.tsx) redirects to sign-in
+//                                      on its next render, rather than this
+//                                      module reaching into the router
+//                                      directly.
 //   - 503 naming setup incomplete   -> SetupIncompleteError, rendered as
 //                                      the full-page setup gate
 //                                      (components/layout/SetupGate.tsx).
@@ -76,6 +82,39 @@ export interface ApiFetchInit extends Omit<RequestInit, "body"> {
   body?: unknown
 }
 
+// Paths that must never trigger a refresh-and-retry on their own 401: a
+// 401 from `/api/auth/refresh` means the refresh token itself is dead
+// (nothing to refresh with), and a 401 from `/api/auth/login` is a plain
+// bad-credentials rejection -- neither should spend a refresh attempt.
+const NO_REFRESH_ON_401 = ["/api/auth/refresh", "/api/auth/login"]
+
+// Single-flight refresh: the backend rotates the refresh token on every
+// use and treats a replayed (already-rotated) token as theft, revoking
+// the whole chain. Several `apiFetch` calls that 401 at the same moment
+// (e.g. a page that fires a few queries in parallel) must share ONE
+// in-flight refresh, or the second one to run would replay an
+// already-rotated token and log the user out.
+let refreshing: Promise<boolean> | null = null
+
+function refreshSession(): Promise<boolean> {
+  if (!refreshing) {
+    refreshing = (async () => {
+      try {
+        const response = await fetch("/api/auth/refresh", {
+          method: "POST",
+          credentials: "same-origin",
+        })
+        return response.ok
+      } catch {
+        return false
+      } finally {
+        refreshing = null
+      }
+    })()
+  }
+  return refreshing
+}
+
 /**
  * The one seam. `credentials: "same-origin"` on every request so the
  * HttpOnly session cookie travels; a JSON `body` (when given) is
@@ -84,15 +123,29 @@ export interface ApiFetchInit extends Omit<RequestInit, "body"> {
  */
 export async function apiFetch<T = unknown>(path: string, init: ApiFetchInit = {}): Promise<T> {
   const { body, headers, ...rest } = init
-  const response = await fetch(path, {
-    ...rest,
-    credentials: "same-origin",
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...headers,
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
+
+  const request = () =>
+    fetch(path, {
+      ...rest,
+      credentials: "same-origin",
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...headers,
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+
+  let response = await request()
+
+  // One refresh attempt and one retry, never a loop: a 401 on the retry
+  // falls straight through to the UnauthorizedError below rather than
+  // trying to refresh again.
+  if (response.status === 401 && !NO_REFRESH_ON_401.includes(path)) {
+    const refreshed = await refreshSession()
+    if (refreshed) {
+      response = await request()
+    }
+  }
 
   if (response.status === 401) {
     // Clear the cached session so the guard's next render sees "no
