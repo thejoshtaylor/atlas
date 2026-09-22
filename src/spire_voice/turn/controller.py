@@ -108,6 +108,17 @@ _EMPTY_REPLY = "sorry, i don't have anything to say to that"
 # refusal from a crash will stop trusting the refusals.
 _DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to tell you about it"
 
+# 260922-woc: spoken whenever a turn would otherwise end silent past the
+# point a language model was ever consulted -- a winning `TierReply` whose
+# `answer` is empty or whitespace-only (a top tier can win the race with
+# `confident=False` and no fallback text at all; `TierReply`'s own
+# validator only requires a non-empty answer when `confident` is True), and
+# the brain-timeout path below. Precached at startup (`tts.precache` in
+# `config.example.yaml`) specifically so this phrase is available from
+# every sink's cache, never a live synthesis call on top of a turn that has
+# already run long or failed to answer.
+_CANNOT_DO_REPLY = "i can't do that one"
+
 # The fixed phrase `_compose_mixed_outcome_reply` speaks for one action that
 # succeeded, in a batch where at least one other action did not (CMD-07,
 # D-14). Never a restatement of what the model asked for -- the point is
@@ -284,6 +295,7 @@ async def run_turn(
     workflow_tool_host: Any | None = None,
     tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
     wake_phrase: str | None = None,
+    brain_turn_timeout_s: float = 25.0,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -387,6 +399,16 @@ async def run_turn(
     until whichever drain turns out to be the last one, so a source's
     barge-in listener never starts reading `frames()` while this
     function's own second drain still needs to be its sole reader.
+
+    `brain_turn_timeout_s` (260922-woc, default 25.0) bounds the wait on
+    the tier race as a whole, on top of whatever `filler_after_ms` already
+    covers: a race that is still running past this deadline is cancelled
+    -- every tier task cancelled and awaited, since `race_tiers`'s own
+    cleanup never runs when the cancellation reaches it from outside
+    (`asyncio.wait_for` raises `CancelledError` into the task, which
+    `race_tiers`' `except Exception` does not catch) -- and the turn
+    speaks the cached "i can't do that one" phrase rather than sitting
+    silent forever, with `turn_outcome = "brain_timeout"`.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -492,16 +514,35 @@ async def run_turn(
 
         if not final_text:
             # VOICE-08's two cases end the turn the same way, with no language
-            # model call and no text-to-speech call: `final is None` is
-            # RESEARCH.md Pitfall 3's second case (the provider never sent
-            # anything at all, closed here by the client-side timeout); a
-            # `FinalTranscript` whose text is empty is the first case (something
-            # arrived and decoded to nothing). `turn_outcome` keeps the two
-            # distinguishable in the log even though the reply path is shared.
+            # model call: `final is None` is RESEARCH.md Pitfall 3's second
+            # case (the provider never sent anything at all, closed here by
+            # the client-side timeout); a `FinalTranscript` whose text is
+            # empty is the first case (something arrived and decoded to
+            # nothing). `turn_outcome` keeps the two distinguishable in the
+            # log even though the reply path is shared.
+            #
+            # 260922-woc: this used to emit `_NO_SPEECH_REPLY` as a
+            # `reply.text` event only, with no audio ever sent -- a camera
+            # operator who paused, then said nothing intelligible, heard
+            # silence with no indication the turn had ended at all. `_speak`
+            # both plays the cached phrase and emits the identical event
+            # itself, so this is one call doing what used to be two, not an
+            # added step. The no-language-model-call guarantee above is
+            # untouched: nothing here reaches `brain`.
             timings.turn_outcome = "timeout" if final is None else "empty_transcript"
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
-            await _emit_event(source, {"type": "reply.text", "text": _NO_SPEECH_REPLY})
+            no_speech_tts = _tts_for_precached_fallback(filler_cache, sink, _NO_SPEECH_REPLY, tts)
+            await _speak(
+                source,
+                no_speech_tts,
+                timings,
+                _NO_SPEECH_REPLY,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+            )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
@@ -708,7 +749,41 @@ async def run_turn(
                 sink=sink,
             )
 
-        winner = await race_task
+        try:
+            winner = await asyncio.wait_for(race_task, timeout=brain_turn_timeout_s)
+        except asyncio.TimeoutError:
+            # 260922-woc: `race_task` is cancelled by `wait_for` itself, but
+            # `race_tiers`' own cleanup (module docstring: cancel every
+            # still-pending tier and await it) never runs for a cancellation
+            # that arrives from *outside* -- `asyncio.CancelledError` is not
+            # an `Exception`, so `race_tiers`' `except Exception:` handler
+            # does not catch it, and the `CancelledError` propagates straight
+            # out of the suspended `asyncio.wait` inside it with no chance to
+            # reach its own cleanup block. `tier_tasks` is this function's
+            # own reference to the same tasks `race_tiers` was racing, so
+            # cancelling and awaiting them here is not a second mechanism --
+            # it is the one cleanup `race_tiers` would have run, performed
+            # from the one place that still holds a reference once the
+            # cancellation has already bypassed it.
+            for task in tier_tasks.values():
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tier_tasks.values(), return_exceptions=True)
+            timings.turn_outcome = "brain_timeout"
+            timeout_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
+            await _speak(
+                source,
+                timeout_tts,
+                timings,
+                _CANNOT_DO_REPLY,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+            )
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
         timings.mark_tool_rounds_done()
 
         if winner.needs_clarification:
@@ -730,8 +805,33 @@ async def run_turn(
             timings.log()
             return
 
+        # 260922-woc: a winning `TierReply` can carry `confident=False` and
+        # no answer at all -- `TierReply`'s own validator only requires a
+        # non-empty `answer` when `confident` is True (`providers/
+        # tier_reply.py`), and the top tier wins the race unconditionally
+        # regardless of its own `confident` flag (`brain_race.py`'s own
+        # docstring: "there is nothing above it to escalate to"). Before
+        # this fix, that reply reached `_speak` verbatim and the turn ended
+        # in silence with no indication anything had gone wrong -- one of
+        # this task's own two live-house recordings. `.strip()` catches a
+        # whitespace-only answer the same way, not just a bare `""`.
+        answer_text = winner.answer
+        if not answer_text.strip():
+            timings.turn_outcome = "empty_answer"
+            reply_text = _CANNOT_DO_REPLY
+            speaking_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
+        else:
+            reply_text = answer_text
+            speaking_tts = tts
         await _speak(
-            source, tts, timings, winner.answer, kind="answer", barge_in=barge_in, speech_lock=speech_lock, sink=sink
+            source,
+            speaking_tts,
+            timings,
+            reply_text,
+            kind="answer",
+            barge_in=barge_in,
+            speech_lock=speech_lock,
+            sink=sink,
         )
         await _emit_event(source, timings.to_event())
         timings.log()
@@ -778,6 +878,37 @@ def _validate_tiers(tiers: "list[brain_race.TierBrain]") -> None:
             f"calls_tools=True on index {top_by_flag.index}, but the highest index present is "
             f"{top_by_index.index}"
         )
+
+
+def _tts_for_precached_fallback(
+    filler_cache: "Mapping[tuple[str, int] | None, Mapping[str, bytes]] | None",
+    sink: "SinkFormat | None",
+    text: str,
+    live_tts: "_TtsProvider",
+) -> "_TtsProvider":
+    """`CachedTts(filler_cache)` when `text` is actually in the cache entry
+    built for `sink`; `live_tts` otherwise (260922-woc).
+
+    Every call site of this function names a phrase this project's own
+    `tts.precache` list always carries (`_NO_SPEECH_REPLY`,
+    `_CANNOT_DO_REPLY`) -- in the shipped configuration, this always
+    resolves to the cache. The membership check exists only because
+    `get_cached` (`providers/tts_cache.py`) raises `TtsError` on a miss
+    rather than falling back itself (that module's own doctrine, for the
+    ordinary filler/macro-reply case where a miss means the startup
+    precache failed and should be loud about it) -- and this function's own
+    callers run on a path that must never itself raise past an already
+    failing or empty turn. A misconfigured deployment that dropped one of
+    these two phrases from `tts.precache` still gets *a* voice, through the
+    live provider, rather than a second silent turn stacked on top of the
+    first one this fix exists to close.
+    """
+    if filler_cache:
+        key = (sink.codec, sink.sample_rate) if sink is not None else None
+        cache = filler_cache.get(key) or {}
+        if text in cache:
+            return CachedTts(filler_cache)
+    return live_tts
 
 
 async def _cancel_state_task(state_task: "asyncio.Task[Any] | None") -> None:

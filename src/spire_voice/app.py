@@ -679,6 +679,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             # pass no `wake_phrase` at all, which is `run_turn`'s own signal
             # to skip the wake-only check entirely.
             wake_phrase=config.wake.phrase,
+            brain_turn_timeout_s=config.brain.turn_timeout_s,
         )
 
     return _run
@@ -1792,6 +1793,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             session_recorder=session_recorder,
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
+            brain_turn_timeout_s=config.brain.turn_timeout_s,
         )
     )
     app.state.background_turns.add(task)
@@ -1921,6 +1923,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         session_recorder=session_recorder,
         workflow_tool_host=websocket.app.state.workflow_tool_host,
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
+        brain_turn_timeout_s=config.brain.turn_timeout_s,
     )
 
 

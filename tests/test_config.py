@@ -254,6 +254,34 @@ def test_xai_brain_resolves_against_top_tier_by_default_and_explicit_model_overr
     assert explicit_brain._model == "a"
 
 
+# --- 260922-woc: brain.turn_timeout_s bounds the whole tier race ---
+
+
+def test_brain_turn_timeout_s_defaults_to_25_seconds():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
+    assert brain.turn_timeout_s == 25.0
+
+
+def test_brain_turn_timeout_s_is_configurable():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": 10})
+    assert brain.turn_timeout_s == 10.0
+
+
+def test_brain_turn_timeout_s_must_be_positive():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": 0})
+    assert "turn_timeout_s" in str(exc.value)
+
+    with pytest.raises(ConfigError):
+        BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": -1})
+
+
 # --- Task 2: macros: block and the normalization that decides sameness ---
 
 

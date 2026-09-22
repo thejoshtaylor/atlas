@@ -241,6 +241,14 @@ class BrainConfig:
     temperature: float = 0.0
     max_tokens: int = 400
     max_tool_rounds: int = 3
+    # 260922-woc: a ceiling on the whole tier race, on top of
+    # `filler_after_ms`'s own deadline -- a live turn once spent about 55 s
+    # in tool rounds (`max_tool_rounds` x `tts.request_timeout_s`-scale
+    # provider latency) and returned an empty answer, with nothing having
+    # bounded the wait itself. Past this many seconds, `turn/controller.py`
+    # cancels the race and speaks a fixed "i can't do that one" rather than
+    # holding the turn open indefinitely.
+    turn_timeout_s: float = 25.0
 
     @property
     def top_tier(self) -> BrainTierConfig:
@@ -274,6 +282,12 @@ class BrainConfig:
             BrainTierConfig.from_config(entry, index)
             for index, entry in enumerate(models_raw)
         )
+        turn_timeout_s = float(raw.get("turn_timeout_s", cls.turn_timeout_s))
+        if turn_timeout_s <= 0:
+            raise ConfigError(
+                f"brain.turn_timeout_s must be positive, got {turn_timeout_s!r} -- a zero or "
+                "negative bound would cancel the tier race before it could ever answer"
+            )
         return cls(
             base_url=raw.get("base_url", cls.base_url),
             api_key=raw.get("api_key", cls.api_key),
@@ -283,6 +297,7 @@ class BrainConfig:
             temperature=raw.get("temperature", cls.temperature),
             max_tokens=raw.get("max_tokens", cls.max_tokens),
             max_tool_rounds=raw.get("max_tool_rounds", cls.max_tool_rounds),
+            turn_timeout_s=turn_timeout_s,
         )
 
 

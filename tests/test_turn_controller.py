@@ -159,18 +159,20 @@ async def test_answer_is_synthesized_against_the_sources_own_sink(fake_stt, fake
 
 
 async def test_empty_transcript_closes_turn(fake_audio_source, fake_stt, fake_brain, fake_tts):
-    """A final transcript that decoded to nothing ends the turn immediately.
-
-    No language-model call and no text-to-speech call -- there is nothing to
-    reason about, per RESEARCH.md Pitfall 3's first case.
+    """A final transcript that decoded to nothing ends the turn immediately,
+    with no language-model call -- there is nothing to reason about, per
+    RESEARCH.md Pitfall 3's first case. 260922-woc: the operator still
+    hears something -- `_NO_SPEECH_REPLY` is now spoken, not just emitted
+    as a `reply.text` event with no audio, so silence never looks like a
+    dropped turn.
     """
     from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="")])
     brain = fake_brain(replies=[])
-    tts = fake_tts(chunks=[])
+    tts = fake_tts(chunks=[b"\x01\x02"])
     timings = TurnTimings()
 
     await run_turn(
@@ -186,7 +188,8 @@ async def test_empty_transcript_closes_turn(fake_audio_source, fake_stt, fake_br
     )
 
     assert brain.call_count == 0
-    assert tts.received_text == []
+    assert tts.received_text == [_NO_SPEECH_REPLY]
+    assert source.sent_audio == [b"\x01\x02"]
     assert timings.turn_outcome == "empty_transcript"
 
 
@@ -199,15 +202,16 @@ async def test_silence_timeout_closes_turn(fake_audio_source, fake_stt, fake_bra
     The clock is a test-controlled callable, not real elapsed time: each
     call advances the fake clock by 5 simulated seconds, so the configured
     15-second budget is exceeded on the third check with no real sleep
-    anywhere near that long.
+    anywhere near that long. 260922-woc: this route also now speaks
+    `_NO_SPEECH_REPLY`, the same as the empty-transcript route above.
     """
     from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(hang=True)
     brain = fake_brain(replies=[])
-    tts = fake_tts(chunks=[])
+    tts = fake_tts(chunks=[b"\x01\x02"])
     timings = TurnTimings()
 
     fake_now = [0.0]
@@ -232,7 +236,8 @@ async def test_silence_timeout_closes_turn(fake_audio_source, fake_stt, fake_bra
     )
 
     assert brain.call_count == 0
-    assert tts.received_text == []
+    assert tts.received_text == [_NO_SPEECH_REPLY]
+    assert source.sent_audio == [b"\x01\x02"]
     assert timings.turn_outcome == "timeout"
 
 
@@ -1350,6 +1355,48 @@ async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
     assert preroll_occurrences == 1
 
 
+async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
+    """The second drain can itself end empty -- treated exactly like
+    VOICE-08's own empty-transcript case, not a third attempt."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.sources.runner import PrerollReplayingSource
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+
+    preroll_chunk = b"\xd5" * 8
+    live_source = _FrameCountingLiveSource(frames=[b"\x2a" * 8])
+    source = PrerollReplayingSource(live_source, [preroll_chunk])
+
+    stt = _SequentialDrainingStt(
+        calls=[
+            [FinalTranscript(text="hey spire")],
+            [FinalTranscript(text="")],
+        ]
+    )
+    brain = _RecordingBrain(replies=[])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey spire",
+    )
+
+    assert len(stt.received_by_call) == 2
+    assert brain.received_messages == []
+    assert tts.received_text == [_NO_SPEECH_REPLY]
+    assert live_source.sent_audio == [b"\x01\x02"]
+    assert timings.turn_outcome == "empty_transcript"
+
+
 async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_tts):
     """"hey spire turn on the lights" in a single final transcript is left
     alone -- the LLM copes, and stripping the wake phrase out is out of
@@ -1416,3 +1463,191 @@ async def test_no_wake_phrase_configured_leaves_behavior_unchanged(fake_tts):
     assert brain.received_messages[-1][-1] == {"role": "user", "content": "hey spire"}
     assert tts.received_text == ["i heard the wake word"]
 
+
+
+# --- 260922-woc: never end a turn silent ---
+
+
+async def test_empty_winner_answer_speaks_the_cached_fallback(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """A winning reply can be non-confident with no answer text at all --
+    `TierReply`'s own validator only requires a non-empty `answer` when
+    `confident` is True, and a single-tier list's one tier is always the
+    top tier by index, so it wins the race regardless of its own
+    `confident` flag. Before this fix, that reply reached `_speak` verbatim
+    and the turn ended in silence.
+    """
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+
+    blank_reply = TierReply(answer="", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=blank_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="do something obscure")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+    )
+
+    assert tts.received_text == [_CANNOT_DO_REPLY]
+    assert source.sent_audio == [b"\x01\x02"]
+    assert timings.turn_outcome == "empty_answer"
+
+
+async def test_whitespace_only_winner_answer_speaks_the_cached_fallback(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """The same gap, for a reply whose `answer` is whitespace rather than a
+    bare empty string -- `.strip()` catches both."""
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+
+    blank_reply = TierReply(answer="   ", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=blank_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="do something obscure")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+    )
+
+    assert tts.received_text == [_CANNOT_DO_REPLY]
+    assert timings.turn_outcome == "empty_answer"
+
+
+async def test_empty_and_blank_fallback_prefers_the_cache_when_it_has_the_phrase(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """When the sink's own filler cache actually carries the fallback
+    phrase, it is served from there -- zero calls to the live provider,
+    the same discipline the filler/macro paths already carry."""
+    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+
+    blank_reply = TierReply(answer="", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=blank_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="do something obscure")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    filler_bytes = b"\xfe\xff"
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {_CANNOT_DO_REPLY: filler_bytes}},
+    )
+
+    assert source.sent_audio == [filler_bytes]
+    assert tts.call_count == 0
+    assert timings.turn_outcome == "empty_answer"
+
+
+async def test_brain_slower_than_turn_timeout_speaks_the_cached_fallback_and_cancels(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """A tier race still running past `brain_turn_timeout_s` is cancelled --
+    every tier task cancelled and awaited -- and the turn speaks the cached
+    fallback rather than hanging open indefinitely, per the second live
+    recording 260922-woc's own evidence names (about 55s in tool rounds,
+    then an empty answer).
+    """
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn import brain_race
+    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+
+    # A real delay far longer than the configured timeout below -- this
+    # tier is cancelled well before it would ever resolve on its own.
+    slow_tier = brain_race.TierBrain(
+        index=0,
+        model="slow-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=None, delay_s=10.0),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="do something slow")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[slow_tier],
+        # No filler wait: this test is about the outer bound, not D-08's
+        # own separate deadline.
+        filler_after_ms=0,
+        brain_turn_timeout_s=0.05,
+    )
+
+    assert tts.received_text == [_CANNOT_DO_REPLY]
+    assert timings.turn_outcome == "brain_timeout"
+    # The slow tier's own task was cancelled rather than left running
+    # detached from the turn that started it.
+    assert len(slow_tier.envelope_client.calls) == 1

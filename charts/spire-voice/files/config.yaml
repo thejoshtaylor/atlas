@@ -451,6 +451,12 @@ brain:
   # not a complex request. Stop and say so.
   max_tool_rounds: 3
 
+  # 260922-woc: a ceiling on the whole tier race, seconds. A live turn once
+  # spent about 55s in tool rounds and returned an empty answer with nothing
+  # having bounded the wait -- past this many seconds, the race is cancelled
+  # and a fixed "i can't do that one" is spoken instead of silence.
+  turn_timeout_s: 25.0
+
 tts:
   url: "https://api.x.ai/v1/tts"
   api_key: "${XAI_API_KEY}"
