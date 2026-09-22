@@ -89,6 +89,9 @@ env:
   tapoUser: ""
   tapoPassword: ""
   speakerEnsureUrl: ""
+  # Only used when speaker.backend is set to tapo_talk
+  # (config/config.example.yaml) -- blank is safe on the default go2rtc path.
+  tapoCloudPassword: ""
 
 postgres:
   # D-14: always bundled, plain manifests against the official image --

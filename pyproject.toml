@@ -65,6 +65,14 @@ dependencies = [
     # auto-approved). D-09 names this unconditionally -- it is a default
     # dependency, not an extra.
     "faster-whisper>=1.2,<2",
+    # Human-approved 2026-09-21 after RESEARCH.md's Package Legitimacy Audit --
+    # operator confirmed pypi.org/project/pytapo and github.com/JurajNyiri/pytapo
+    # agree (VOICE-05 quick task, gate="blocking-human", never auto-approved).
+    # This is the client Home Assistant's own Tapo Control integration depends
+    # on, and the only one implementing the encrypt_type=3 / SHA256 8800
+    # media-session auth this camera's firmware now requires -- go2rtc's
+    # built-in tapo:// client cannot satisfy it.
+    "pytapo>=3.4,<4",
 ]
 
 [project.optional-dependencies]

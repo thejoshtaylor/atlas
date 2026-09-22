@@ -592,6 +592,27 @@ def test_speaker_config_rejects_a_non_positive_reopen_timeout():
         SpeakerConfig.from_config({"reopen_timeout_s": -1.0})
 
 
+def test_speaker_config_backend_defaults_to_go2rtc():
+    from spire_voice.config import SpeakerConfig
+
+    assert SpeakerConfig.from_config({}).backend == "go2rtc"
+    assert SpeakerConfig().backend == "go2rtc"
+
+
+def test_speaker_config_accepts_tapo_talk_backend():
+    from spire_voice.config import SpeakerConfig
+
+    assert SpeakerConfig.from_config({"backend": "tapo_talk"}).backend == "tapo_talk"
+
+
+def test_speaker_config_rejects_an_unknown_backend():
+    from spire_voice.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerConfig.from_config({"backend": "sonos"})
+    assert "speaker.backend" in str(exc.value)
+
+
 def test_session_config_rejects_a_non_positive_retention():
     from spire_voice.config import ConfigError, SessionConfig
 

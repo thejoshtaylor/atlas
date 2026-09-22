@@ -56,6 +56,10 @@ services:
       TAPO_USER: "${TAPO_USER:-}"
       TAPO_PASSWORD: "${TAPO_PASSWORD:-}"
       SPEAKER_ENSURE_URL: "${SPEAKER_ENSURE_URL:-}"
+      # Only read by speaker/tapo_talk.py, and only when speaker.backend is
+      # set to tapo_talk in config.yaml -- unused (and safe to leave unset)
+      # on the default go2rtc path.
+      TAPO_CLOUD_PASSWORD: "${TAPO_CLOUD_PASSWORD:-}"
       # D-16: read by deploy/docker-entrypoint.sh, not by config.py's own
       # ${VAR} expansion -- an operator-supplied override takes effect
       # unchanged; left unset, the entrypoint generates and persists one.

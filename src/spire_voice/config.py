@@ -409,6 +409,12 @@ class SpeakerConfig:
     `SpeakerError`. Unbounded here means a reader that never comes back
     hangs the write path forever with no exception and no log line -- the
     exact silent failure this field exists to rule out.
+
+    `backend` selects which FIFO reader owns egress: `go2rtc` (default,
+    `FfmpegSupervisor`) or `tapo_talk` (`TapoTalkSupervisor`, for firmware
+    where go2rtc's built-in `tapo://` client can no longer authenticate).
+    The default stays `go2rtc` so an existing deployment's behaviour is
+    never silently changed by this field's addition.
     """
 
     go2rtc_url: str = "http://frigate:1984"
@@ -417,6 +423,7 @@ class SpeakerConfig:
     fifo_path: str = "/run/spire/speaker.alaw"
     respawn_backoff_s: float = 2.0
     reopen_timeout_s: float = 10.0
+    backend: str = "go2rtc"
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SpeakerConfig":
@@ -435,9 +442,17 @@ class SpeakerConfig:
                 "-- a zero or negative timeout would fail every reopen immediately, "
                 "including one a respawning ffmpeg child was about to win"
             )
+        backend = raw.get("backend", cls.backend)
+        supported_backends = ("go2rtc", "tapo_talk")
+        if backend not in supported_backends:
+            raise ConfigError(
+                f"speaker.backend {backend!r} is not one this codebase implements -- "
+                f"supported values are {supported_backends!r}"
+            )
         return cls(
             go2rtc_url=raw.get("go2rtc_url", cls.go2rtc_url),
             stream=raw.get("stream", cls.stream),
+            backend=backend,
             ensure_url=raw.get("ensure_url", cls.ensure_url),
             fifo_path=raw.get("fifo_path", cls.fifo_path),
             respawn_backoff_s=respawn_backoff_s,

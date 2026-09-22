@@ -154,6 +154,25 @@ camera:
   preroll_ms: 1500
 
 speaker:
+  # go2rtc | tapo_talk
+  #
+  # go2rtc: the long-lived ffmpeg egress below, pushed into go2rtc's own
+  # tapo:// producer for the camera's speaker -- the same path the gesture
+  # beeps use.
+  #
+  # tapo_talk: some firmware's 8800 media session now demands a SHA256 /
+  # encrypt_type=3 digest go2rtc's built-in tapo:// client cannot satisfy,
+  # so every backchannel push through it returns 401. This backend drives
+  # the camera speaker directly through pytapo's authenticated 8800 session
+  # instead. It reads the Tapo cloud-account password from
+  # TAPO_CLOUD_PASSWORD in the process environment (not a ${VAR} in this
+  # file -- read at point of use, never stored on Config), derives the
+  # camera host from camera.rtsp_url above, and connects as admin@host:8800.
+  #
+  # Default stays go2rtc so an existing deployment's behaviour is never
+  # silently changed by this key's addition.
+  backend: go2rtc
+
   # go2rtc, running inside the Frigate pod. It already holds a tapo:// producer
   # for the camera's speaker -- the same path the gesture beeps use.
   go2rtc_url: "http://frigate:1984"
