@@ -12,7 +12,7 @@ same Helm chart those two documents cover, plus the automation layer on top
 of it.
 
 You run every step below once, by hand. CI and Argo CD do not run any of
-these steps. The three manifests in `config/argo/` (applied in the last
+these steps. The four manifests in `config/argo/` (applied in the last
 step) run the rest automatically, forever after.
 
 ## 1. Harbor: create the project and a robot account
@@ -220,7 +220,7 @@ with no further action from you.
 
 Steps 1 through 7 above (the Harbor project, the registry credentials, the
 runtime Secret, the GitHub webhook, the image-updater registration,
-applying the three manifests, and the public ingress) are the one-time,
+applying the four manifests, and the public ingress) are the one-time,
 hand-run setup. This setup makes the automatic sequence above possible.
 None of it repeats on a later push.
 
