@@ -1,0 +1,32 @@
+# jt-spire build cluster values, read by the Argo CD Application through
+# `helm.valueFiles` (config/argo/spire-voice-application.yaml). No
+# credential lives here — every ${VAR} config/config.example.yaml names
+# still arrives through the runtime Secret named by `secretName` (D-2),
+# applied by hand on this cluster.
+
+# argocd-image-updater appends `@sha256:...` to this exact value on every
+# push, so the running tag stays digest-pinned even though the tag reads
+# `latest`.
+image:
+  ref: harbor.tail41bc66.ts.net/spire-voice/app:latest
+
+secretName: spire-voice
+
+# No ingress/TLS yet — matches this project's current working deploy.
+# Reached through the Service directly, on the release's own namespace.
+config:
+  bindHost: "0.0.0.0"
+  cookieSecure: "false"
+
+persistence:
+  data:
+    size: 5Gi
+    # Unset: uses the cluster's default StorageClass. An operator who
+    # wants a specific class (for example, to avoid the root-disk IO
+    # incident this cluster's other projects have hit) sets it here.
+  models:
+    size: 15Gi
+
+postgres:
+  persistence:
+    size: 10Gi

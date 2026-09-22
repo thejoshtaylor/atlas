@@ -1,0 +1,64 @@
+# Submits a spire-voice-ci Workflow on every push to this repo's main
+# branch. One dependency only — Argo Events rejects two dependencies on
+# the same eventSource/event pair, so `main`-only scoping happens in the
+# filters below, not in a second dependency.
+apiVersion: argoproj.io/v1alpha1
+kind: Sensor
+metadata:
+  name: spire-voice-ci
+  namespace: argo-events
+spec:
+  template:
+    serviceAccountName: operate-workflow-sa
+  dependencies:
+    - name: push
+      eventSourceName: git
+      eventName: push
+      filters:
+        data:
+          - path: body.repository.full_name
+            type: string
+            value:
+              - thejoshtaylor/spire-voice
+          - path: body.ref
+            type: string
+            value:
+              - refs/heads/main
+  triggers:
+    - template:
+        name: ci
+        argoWorkflow:
+          operation: submit
+          # `dest` is a positional index into the submitted Workflow's
+          # spec.arguments.parameters below — reordering that list rewires
+          # the wrong field. `repo` is left on the WorkflowTemplate's own
+          # default: the webhook payload's `body.repository.full_name`
+          # field (e.g. "thejoshtaylor/spire-voice") has no `github.com/`
+          # prefix, and building that prefix here would need a data
+          # transform this Sensor does not carry, so only `ref` and `sha`
+          # are passed through.
+          parameters:
+            - dest: spec.arguments.parameters.0.value
+              src:
+                dependencyName: push
+                dataKey: body.ref
+            - dest: spec.arguments.parameters.1.value
+              src:
+                dependencyName: push
+                dataKey: body.after
+          source:
+            resource:
+              apiVersion: argoproj.io/v1alpha1
+              kind: Workflow
+              metadata:
+                generateName: spire-voice-ci-
+                namespace: argo
+              spec:
+                arguments:
+                  parameters:
+                    - name: ref
+                      value: ""
+                    - name: sha
+                      value: ""
+                workflowTemplateRef:
+                  name: spire-voice-ci
