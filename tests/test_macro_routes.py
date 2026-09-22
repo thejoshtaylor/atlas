@@ -113,6 +113,7 @@ class _FakeMacroTts:
         self._chunks = chunks
         self._fail = fail
         self.synthesized_texts: list[str] = []
+        self.sinks: list = []
 
     def browser_sink(self) -> SinkFormat:
         return SinkFormat(codec="pcm", sample_rate=24000)
@@ -120,6 +121,7 @@ class _FakeMacroTts:
     async def synthesize(self, text_deltas, sink=None):
         text = "".join([delta async for delta in text_deltas])
         self.synthesized_texts.append(text)
+        self.sinks.append(sink)
         if self._fail:
             raise RuntimeError("simulated synthesis failure")
         for chunk in self._chunks:
@@ -820,6 +822,43 @@ def test_creating_a_macro_synthesizes_its_reply_before_returning_and_merges_it_i
     # The same dict object the app's filler_cache started as -- proves the
     # merge happened in place, the exact cache a turn reads from.
     assert filler_cache["good night, sleeping now"] == b"good-night-audio"
+
+
+def test_creating_a_macro_also_caches_its_reply_for_the_camera_sink(
+    monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
+):
+    """A macro saved after boot must be speakable on the camera, not only
+    in the browser: the reply is synthesized for every sink in
+    `app.state.filler_caches`, each in that sink's own format."""
+    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    tts = _FakeMacroTts(chunks=(b"reply-audio",))
+    filler_cache: dict = {}
+    camera_cache: dict = {}
+
+    operator = _issue_cookie(security, account_repo, role="operator")
+    token = issue_access_token(user_id=operator.id, role="operator", security=security)
+    app = _build_macro_app(
+        security,
+        account_repo,
+        fake_macro_repository(),
+        policy_repo=fake_policy_repository(),
+        tts=tts,
+        filler_cache=filler_cache,
+        cache_dir=tmp_path,
+    )
+    app.state.filler_caches = {None: filler_cache, ("alaw", 8000): camera_cache}
+    client = TestClient(app, cookies={security.cookie_name: token})
+
+    response = client.post(
+        "/api/macros",
+        json={"phrase": "good night", "aliases": [], "reply": "good night, sleeping now", "actions": [_action_json()]},
+    )
+    assert response.status_code == 201, response.text
+    assert "good night, sleeping now" in filler_cache
+    assert "good night, sleeping now" in camera_cache
+    assert SinkFormat(codec="alaw", sample_rate=8000) in tts.sinks
 
 
 def test_updating_a_macro_with_an_unchanged_reply_does_not_resynthesize(

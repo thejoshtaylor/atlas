@@ -70,7 +70,7 @@ from spire_mcp.safety import Policy
 from spire_voice import config as _config_module
 from spire_voice.auth.dependencies import CurrentUser, Role, require_role
 from spire_voice.db.repository import Macro, MacroRepository
-from spire_voice.providers.tts_cache import precache_all
+from spire_voice.providers.tts_cache import precache_all, precache_other_sinks
 from spire_voice.routes.conflict import (
     ConflictAnnotation,
     annotate_conflict,
@@ -381,6 +381,13 @@ async def _finish_save(request: Request, macro: Macro) -> MacroResponse:
                 request.app.state.tts.browser_sink(),
             )
             filler_cache.update(new_entries)
+            await precache_other_sinks(
+                request.app.state.tts,
+                Path(config.tts.cache_dir),
+                [macro.reply],
+                config.tts.voice_id,
+                getattr(request.app.state, "filler_caches", {}),
+            )
         except Exception:  # noqa: BLE001 -- any synthesis failure degrades, never loses the edit
             degraded = True
             message = _REPLY_SYNTHESIS_DEGRADED_MESSAGE

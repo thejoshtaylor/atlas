@@ -74,7 +74,7 @@ from spire_voice.db.repository import (
     WorkflowStep,
     WorkflowStepSpec,
 )
-from spire_voice.providers.tts_cache import precache_all
+from spire_voice.providers.tts_cache import precache_all, precache_other_sinks
 from spire_voice.routes.conflict import (
     ConflictAnnotation,
     annotate_conflict,
@@ -394,6 +394,13 @@ async def _finish_workflow_save(request: Request, run: WorkflowRun) -> WorkflowR
                 request.app.state.tts.browser_sink(),
             )
             filler_cache.update(new_entries)
+            await precache_other_sinks(
+                request.app.state.tts,
+                Path(config.tts.cache_dir),
+                to_synthesize,
+                config.tts.voice_id,
+                getattr(request.app.state, "filler_caches", {}),
+            )
         except Exception:  # noqa: BLE001 -- any synthesis failure degrades, never loses the edit
             degraded = True
             message = _SPEAK_SYNTHESIS_DEGRADED_MESSAGE

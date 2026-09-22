@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import AsyncIterator, Mapping
+from typing import Any, AsyncIterator, Mapping
 
 from spire_voice.providers.base import TtsError, TtsProvider
 from spire_voice.providers.tts_xai import SinkFormat
@@ -114,6 +114,27 @@ async def precache_all(
         path.write_bytes(audio)
         cache[text] = audio
     return cache
+
+
+async def precache_other_sinks(
+    tts: TtsProvider,
+    cache_dir: Path,
+    texts: list[str],
+    voice_id: str,
+    caches: Mapping[Any, dict[str, bytes]],
+) -> None:
+    """Add `texts` to every non-browser entry of `app.state.filler_caches`
+    (keyed `(codec, sample_rate)`; the `None` key is the browser cache,
+    which the caller already filled). Without this, a macro or workflow
+    saved after boot is cached for the browser only, and a camera turn
+    that speaks it raises `TtsError`."""
+    for key, cache in caches.items():
+        if key is None:
+            continue
+        codec, sample_rate = key
+        cache.update(
+            await precache_all(tts, cache_dir, texts, voice_id, SinkFormat(codec=codec, sample_rate=sample_rate))
+        )
 
 
 def get_cached(cache: Mapping[str, bytes], text: str) -> bytes:

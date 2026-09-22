@@ -1161,19 +1161,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 260922-cts: `app.state.filler_cache` stays the flat, browser-only
     # `{text: bytes}` dict every existing reader already expects
     # (`routes/macros.py`/`routes/workflows.py`'s own save-time precache,
-    # and this same function's own degraded-tts-slot test) -- neither of
-    # those routes is a live turn's speaker, so widening their own cache is
-    # out of this fix's scope. `app.state.filler_caches` is the new,
+    # and this same function's own degraded-tts-slot test).
+    # `app.state.filler_caches` is the new,
     # sink-keyed mapping `run_turn`/`_scheduled_speak` actually read from
     # (`turn/controller.py`'s own `CachedTts`), built once from the same
     # `filler_phrases` list against both sinks this process serves. A macro
-    # created or edited after boot, through those two routes, is precached
-    # into the browser entry only until the next restart -- a known,
-    # narrower gap than the one this fix closes, not a new one this fix
-    # opens (a runtime-added macro already only reached the browser cache
-    # before this fix; camera playback of it now raises `TtsError` naming
-    # the phrase, per `CachedTts`'s own doctrine, instead of silently
-    # playing browser PCM through the camera speaker).
+    # created or edited after boot is added to every sink's cache by those
+    # two routes (`tts_cache.precache_other_sinks`).
     filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in seeded_macros)]
     camera_tts_sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
     if app.state.tts is not None:
