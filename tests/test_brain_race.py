@@ -56,7 +56,10 @@ async def test_tracer_races_tiers_covers_the_wait_and_answers(
     tts = fake_tts(chunks=[b"\x09\x0a"])
     filler_text = FILLER_TEXT[FillerPhrase.STILL_LOOKING]
     filler_bytes = b"\xfe\xff"
-    filler_cache = {filler_text: filler_bytes}
+    # 260922-cts: `run_turn`'s `filler_cache` is keyed by sink now; `None`
+    # is the browser default `fake_audio_source` (no `sink_format`)
+    # resolves to.
+    filler_cache = {None: {filler_text: filler_bytes}}
     timings = TurnTimings()
 
     fake_now = [0.0]

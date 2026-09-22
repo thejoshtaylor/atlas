@@ -996,7 +996,13 @@ async def test_a_macro_saved_through_the_route_matches_on_the_next_turn_with_no_
         max_tool_rounds=3,
         timings=timings,
         macros=(saved_macro,),
-        filler_cache=app.state.filler_cache,
+        # 260922-cts: `run_turn`'s own `filler_cache` is now keyed by
+        # `(codec, sample_rate)`, with `None` for the browser default --
+        # `source` here (`fake_audio_source`) declares no `sink_format`,
+        # so it resolves to `None`, the same key `app.state.filler_cache`
+        # (the flat, browser-only dict the route under test just
+        # populated) belongs under.
+        filler_cache={None: app.state.filler_cache},
     )
 
     assert timings.turn_outcome == "macro"

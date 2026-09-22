@@ -255,7 +255,10 @@ def _fake_run_turn_app_state(registry: ObserverRegistry):
         tools_schema=[],
         catalog_prompt="",
         tier_brains=[],
-        filler_cache={},
+        # 260922-cts: `_make_run_turn_for_source`'s closure now reads
+        # `app.state.filler_caches` (the sink-keyed mapping), not
+        # `app.state.filler_cache` (the flat, browser-only dict).
+        filler_caches={},
         plugin_manager=SimpleNamespace(owners_of_bare_name=lambda name: ()),
         workflow_repo=SimpleNamespace(list_runs=_list_runs),
         speaker_lock=None,

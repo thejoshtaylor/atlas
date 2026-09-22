@@ -205,15 +205,21 @@ def fake_brain():
 
 
 class FakeTts:
-    """Yields a scripted list of audio chunks; records the text it received."""
+    """Yields a scripted list of audio chunks; records the text and sink
+    (260922-cts) it received."""
 
     def __init__(self, chunks: Sequence[bytes] = ()) -> None:
         self._chunks = list(chunks)
         self.received_text: list[str] = []
+        # One entry per `synthesize()` call, in call order -- `None` for a
+        # caller with no sink to declare (every test that predates
+        # 260922-cts), or the `SinkFormat` a source declared otherwise.
+        self.received_sinks: list[Any] = []
 
-    async def synthesize(self, text_deltas) -> AsyncIterator[bytes]:
+    async def synthesize(self, text_deltas, sink: Any = None) -> AsyncIterator[bytes]:
         async for delta in text_deltas:
             self.received_text.append(delta)
+        self.received_sinks.append(sink)
         for chunk in self._chunks:
             yield chunk
 

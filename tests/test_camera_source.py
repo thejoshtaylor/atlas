@@ -105,6 +105,34 @@ async def test_camera_source_declares_its_own_alaw_format():
     assert source.source_format() == SourceFormat("alaw", 8000)
 
 
+async def test_camera_source_declares_the_sink_it_was_constructed_with():
+    """260922-cts: the camera speaker's own playback pair -- `config.tts.codec`/
+    `config.tts.sample_rate`, passed in at construction by `app.py` -- not
+    the browser sink every other transport requests by default. Before
+    this fix, nothing read this pair at all, so a live turn always asked
+    for browser PCM even against the camera speaker."""
+    from spire_voice.providers.tts_xai import SinkFormat
+
+    config = CameraConfig(rtsp_url=_CAMERA_URL, encoding="alaw", sample_rate=8000)
+    source = CameraAudioSource(
+        config, _RecordingSpeaker(), sink=SinkFormat(codec="alaw", sample_rate=8000)
+    )
+
+    assert source.sink_format() == SinkFormat(codec="alaw", sample_rate=8000)
+
+
+async def test_camera_source_defaults_its_sink_when_none_is_given():
+    """Every construction site above builds a `CameraAudioSource` with no
+    `sink=` at all -- this must keep returning a real, usable `SinkFormat`
+    rather than `None` or raising."""
+    from spire_voice.providers.tts_xai import SinkFormat
+
+    config = CameraConfig(rtsp_url=_CAMERA_URL, encoding="alaw", sample_rate=8000)
+    source = CameraAudioSource(config, _RecordingSpeaker())
+
+    assert source.sink_format() == SinkFormat(codec="alaw", sample_rate=8000)
+
+
 async def test_camera_source_yields_bit_identical_alaw_no_transcode(tmp_path):
     """VOICE-04 / PROV-07, the load-bearing case: byte identity alone would
     also pass against a decode-and-re-encode round trip that happened to be

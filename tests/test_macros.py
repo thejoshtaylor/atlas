@@ -323,7 +323,10 @@ async def test_macro_hit_skips_brain(fake_audio_source, fake_stt, fake_brain, fa
         max_tool_rounds=3,
         timings=timings,
         macros=(macro,),
-        filler_cache={"good night": b"\x01\x02"},
+        # 260922-cts: `run_turn`'s `filler_cache` is keyed by sink now;
+        # `None` is the browser default `fake_audio_source` (no
+        # `sink_format`) resolves to.
+        filler_cache={None: {"good night": b"\x01\x02"}},
     )
 
     assert brain.call_count == 0
@@ -357,7 +360,7 @@ async def test_macro_success_speaks_from_the_cache_with_zero_live_tts_calls(
         max_tool_rounds=3,
         timings=timings,
         macros=(macro,),
-        filler_cache={"good night": b"\x01\x02"},
+        filler_cache={None: {"good night": b"\x01\x02"}},
     )
 
     assert len(tts.received_text) == 0
@@ -410,7 +413,7 @@ async def test_macro_failure_speaks_live_exactly_once_and_loses_the_cache(
         # Deliberately does not contain the failure text: a failure reason
         # is composed at turn time and was never precached, so a lookup
         # here would be the wrong path entirely if this branch ever tried it.
-        filler_cache={"good night": b"\x01\x02"},
+        filler_cache={None: {"good night": b"\x01\x02"}},
     )
 
     assert tts.received_text == ["that one is off limits"]

@@ -251,7 +251,7 @@ class _SteppedTts:
     def __init__(self, chunks: list[bytes]) -> None:
         self._chunks = list(chunks)
 
-    async def synthesize(self, text_deltas):
+    async def synthesize(self, text_deltas, sink=None):
         async for _ in text_deltas:
             pass
         for chunk in self._chunks:

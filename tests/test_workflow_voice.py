@@ -655,7 +655,10 @@ async def test_a_macro_turn_cancels_a_started_pending_runs_fetch_without_leaving
         max_tool_rounds=3,
         timings=timings,
         macros=(macro,),
-        filler_cache={"good night": b"\x01\x02"},
+        # 260922-cts: `run_turn`'s `filler_cache` is keyed by sink now;
+        # `None` is the browser default `fake_audio_source` (no
+        # `sink_format`) resolves to.
+        filler_cache={None: {"good night": b"\x01\x02"}},
         pending_runs_fetch=_hanging_pending_runs_fetch,
     )
 

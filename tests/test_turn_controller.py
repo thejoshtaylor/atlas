@@ -14,6 +14,34 @@ from spire_mcp.ha import handle_call_service, handle_list_entities
 from spire_mcp.safety import Denied, Policy
 
 from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
+from spire_voice.providers.tts_xai import SinkFormat
+from spire_voice.transports.base import SourceFormat
+
+
+class _CameraSinkSource:
+    """A `fake_audio_source`-shaped double that also declares the camera's
+    own `sink_format()` (260922-cts) -- proves `_speak`/`CachedTts` route
+    to the sink a real `CameraAudioSource` reports, not the browser
+    default every other fake in this file (no `sink_format` at all)
+    resolves to.
+    """
+
+    def __init__(self, frames=()) -> None:
+        self._frames = list(frames)
+        self.sent_audio: list[bytes] = []
+
+    async def frames(self):
+        for frame in self._frames:
+            yield frame
+
+    async def send_audio(self, chunk: bytes) -> None:
+        self.sent_audio.append(chunk)
+
+    def source_format(self) -> SourceFormat:
+        return SourceFormat("alaw", 8000)
+
+    def sink_format(self) -> SinkFormat:
+        return SinkFormat(codec="alaw", sample_rate=8000)
 
 
 class _FakeToolHost:
@@ -95,6 +123,38 @@ async def test_full_turn_happy_path(fake_audio_source, fake_stt, fake_brain, fak
     assert tts.received_text == ["turned on the fan"]
     assert source.sent_audio == [b"\x01\x02", b"\x03\x04"]
     assert timings.end_of_speech_to_first_audio_ms is not None
+    # 260922-cts: `fake_audio_source` declares no `sink_format` -- the
+    # pre-fix browser default, unchanged for a source that carries none.
+    assert tts.received_sinks == [None]
+
+
+async def test_answer_is_synthesized_against_the_sources_own_sink(fake_stt, fake_brain, fake_tts):
+    """260922-cts: a source that declares a camera sink gets that exact
+    sink passed to `tts.synthesize` -- the camera speaker's A-law/8kHz
+    pair, never the browser default a live camera turn used to hardcode
+    (the bug this plan fixes)."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    source = _CameraSinkSource(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_sinks == [SinkFormat(codec="alaw", sample_rate=8000)]
 
 
 async def test_empty_transcript_closes_turn(fake_audio_source, fake_stt, fake_brain, fake_tts):
@@ -334,11 +394,13 @@ class _CountingTts:
         self._chunks = list(chunks)
         self.call_count = 0
         self.received_text: list[str] = []
+        self.received_sinks: list = []
 
-    async def synthesize(self, text_deltas):
+    async def synthesize(self, text_deltas, sink=None):
         self.call_count += 1
         async for delta in text_deltas:
             self.received_text.append(delta)
+        self.received_sinks.append(sink)
         for chunk in self._chunks:
             yield chunk
 
@@ -370,7 +432,7 @@ async def test_no_filler_played_when_the_race_finishes_before_the_deadline(
         system_prompt="you control a home",
         max_tool_rounds=3,
         timings=timings,
-        filler_cache={"never used": b"\xff"},
+        filler_cache={None: {"never used": b"\xff"}},
     )
 
     assert source.sent_audio == [b"\x01\x02"]
@@ -407,7 +469,7 @@ async def test_filler_plays_once_from_the_cache_when_the_deadline_passes(
     filler_bytes = b"\xfe\xff"
     # No triage tier completes before the deadline in this single-tier
     # scenario, so DEFAULT_FILLER is what the deadline branch falls back to.
-    filler_cache = {FILLER_TEXT[DEFAULT_FILLER]: filler_bytes}
+    filler_cache = {None: {FILLER_TEXT[DEFAULT_FILLER]: filler_bytes}}
     timings = TurnTimings()
 
     fake_now = [0.0]
@@ -492,7 +554,7 @@ async def test_filler_cache_miss_raises_and_never_calls_the_live_provider(
             timings=timings,
             tiers=[top_tier],
             filler_after_ms=600,
-            filler_cache={"some other phrase": b"\xff"},
+            filler_cache={None: {"some other phrase": b"\xff"}},
             clock=clock,
             poll_interval_s=0.01,
         )
@@ -929,11 +991,67 @@ async def test_macro_hit_cancels_a_started_state_fetch_without_leaving_it_dangli
         max_tool_rounds=3,
         timings=timings,
         macros=(macro,),
-        filler_cache={"good night": b"\x01\x02"},
+        filler_cache={None: {"good night": b"\x01\x02"}},
         state_fetch=_hanging_state_fetch,
     )
 
     assert timings.turn_outcome == "macro"
+
+
+async def test_cached_macro_reply_speaks_the_cache_entry_matching_the_sources_sink(
+    fake_stt, fake_brain, fake_ha
+):
+    """260922-cts: a cacheable macro reply speaks the cache entry built for
+    the source's own sink -- the camera-sink entry for a camera-sink
+    source -- never the browser entry, even when both exist for the same
+    text. Before this fix, `CachedTts` ignored `sink` entirely and always
+    played whichever single flat cache it was given, which was the
+    camera-static bug for any camera turn (module docstring's Bug)."""
+    from spire_voice.config import MacroActionConfig, MacroConfig
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    macro = MacroConfig(
+        phrase="good night",
+        aliases=(),
+        reply="good night",
+        actions=(
+            MacroActionConfig(
+                tool="ha_call_service",
+                arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+            ),
+        ),
+    )
+    policy = Policy.from_config(None)
+    source = _CameraSinkSource(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="good night")])
+    brain = fake_brain(replies=[])
+    tts = _CountingTts(chunks=[])  # never called: the reply is cached
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    filler_cache = {
+        None: {"good night": b"browser-bytes"},
+        ("alaw", 8000): {"good night": b"camera-bytes"},
+    }
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=(macro,),
+        filler_cache=filler_cache,
+    )
+
+    assert timings.turn_outcome == "macro"
+    assert source.sent_audio == [b"camera-bytes"]
+    assert tts.call_count == 0
 
 
 # --- VOICE-07: barge-in interrupts _speak's emission loop -------------------
