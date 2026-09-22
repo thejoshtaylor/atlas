@@ -57,6 +57,8 @@ _TALK_START_REQUEST = '{"params":{"talk":{"mode":"aec"},"method":"get"},"type":"
 # timed-out build keeps running until pytapo returns; the loop does not
 # wait for it.
 _CONNECT_TIMEOUT_S = 15.0
+# Ceiling for the exponential backoff in `_supervise`.
+_MAX_BACKOFF_S = 600.0
 
 # 20ms @ 8kHz mono A-law -- the frame size the camera's talk endpoint
 # expects, matching the proven prototype's own pacing.
@@ -160,20 +162,31 @@ class TapoTalkSupervisor:
         return
 
     async def _supervise(self) -> None:
+        # Consecutive failures double the wait, up to _MAX_BACKOFF_S. The
+        # camera's talk port locks out every client after repeated failed
+        # auths, and a fixed short retry can keep that lockout armed with
+        # no end (seen live: 20+ minutes of 401s at a 30 s retry). A session
+        # that ends cleanly resets the wait to `respawn_backoff_s`.
+        failures = 0
         while not self._stopping:
             try:
                 await self._run_once()
+                failures = 0
+                delay = self._config.respawn_backoff_s
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- logged and retried, never crashes the app
+                failures += 1
+                delay = min(self._config.respawn_backoff_s * 2 ** (failures - 1), _MAX_BACKOFF_S)
                 logger.warning(
-                    "tapo_talk session ended (%s); restarting in %.1fs",
+                    "tapo_talk session ended (%s: %s); restarting in %.1fs",
                     type(exc).__name__,
-                    self._config.respawn_backoff_s,
+                    exc,
+                    delay,
                 )
             if self._stopping:
                 return
-            await asyncio.sleep(self._config.respawn_backoff_s)
+            await asyncio.sleep(delay)
 
     async def _run_once(self) -> None:
         cloud_password = os.environ.get(TAPO_CLOUD_PASSWORD_ENV)

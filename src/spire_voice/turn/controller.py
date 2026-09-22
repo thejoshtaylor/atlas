@@ -87,6 +87,7 @@ from spire_voice.providers.base import BrainError
 from spire_voice.transports.base import SourceFormat
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
+from spire_voice.speaker.fifo_writer import SpeakerError
 from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
@@ -1256,6 +1257,7 @@ async def _speak(
     async def _synthesize_and_write() -> None:
         first_audio_marked = False
         interrupted = False
+        speaker_failed = False
         chunks_sent = 0
         chunks_total = 0
         async for chunk in tts.synthesize(_one_delta(), sink=sink):
@@ -1278,7 +1280,18 @@ async def _speak(
                 interrupted = True
                 timings.turn_outcome = "barged_in"
                 continue
-            await source.send_audio(chunk)
+            if speaker_failed:
+                continue
+            try:
+                await source.send_audio(chunk)
+            except SpeakerError as exc:
+                # A dead speaker must not kill the turn: the brain's tool
+                # calls (the actual command) still run and the reply text
+                # still reaches the event stream. Skip the rest of this
+                # reply's audio rather than retrying chunk by chunk.
+                speaker_failed = True
+                logger.warning("speaker unavailable, dropping %s audio: %s", kind, exc)
+                continue
             chunks_sent += 1
             if barge_in is not None and barge_in.enabled:
                 trace = getattr(barge_in, "trace", None)

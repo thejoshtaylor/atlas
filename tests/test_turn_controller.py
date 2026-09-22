@@ -1651,3 +1651,38 @@ async def test_brain_slower_than_turn_timeout_speaks_the_cached_fallback_and_can
     # The slow tier's own task was cancelled rather than left running
     # detached from the turn that started it.
     assert len(slow_tier.envelope_client.calls) == 1
+
+
+async def test_a_dead_speaker_does_not_abort_the_turn(fake_tts):
+    """Seen live: the camera's talk port was locked out, the speaker FIFO
+    write raised `SpeakerError`, and the whole turn died before the brain's
+    tool calls ran. The command must still run and the reply text must
+    still reach the event stream."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.speaker.fifo_writer import SpeakerError
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    class _DeadSpeakerSource(_FrameCountingLiveSource):
+        async def send_audio(self, chunk: bytes) -> None:
+            raise SpeakerError("no reader attached to speaker FIFO")
+
+    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="turn on the lights")]])
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the lights")])
+    source = _DeadSpeakerSource(frames=[b"\x00\x01"])
+    tts = fake_tts(chunks=[b"\x01\x02", b"\x03\x04"])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+    )
+
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights"}
+    assert {"type": "reply.text", "text": "turned on the lights"} in source.sent_events

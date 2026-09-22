@@ -180,3 +180,31 @@ async def test_tapo_talk_supervisor_times_out_a_stalled_connect_into_backoff(tmp
         await supervisor.stop()
 
     assert any("TimeoutError" in record.message for record in caplog.records)
+
+
+async def test_tapo_talk_supervisor_doubles_its_backoff_on_consecutive_failures(tmp_path, monkeypatch):
+    """A fixed short retry kept the camera's talk-port lockout armed for 20+
+    minutes live; consecutive failures must back off exponentially."""
+    monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
+
+    async def failing_build_session(host: str, cloud_password: str):
+        raise RuntimeError("401")
+
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(seconds: float) -> None:
+        if seconds >= 1:  # the supervisor's backoff, not `_wait_for`'s own polling
+            delays.append(seconds)
+        await real_sleep(0)
+
+    import spire_voice.speaker.tapo_talk as tapo_talk_module
+
+    monkeypatch.setattr(tapo_talk_module.asyncio, "sleep", recording_sleep)
+    config = SpeakerConfig(fifo_path=str(tmp_path / "speaker.alaw"), respawn_backoff_s=30.0)
+    supervisor = TapoTalkSupervisor(config, "192.0.2.5", build_session=failing_build_session)
+    supervisor.start()
+    await _wait_for(lambda: len(delays) >= 7)
+    await supervisor.stop()
+
+    assert delays[:7] == [30.0, 60.0, 120.0, 240.0, 480.0, 600.0, 600.0]
