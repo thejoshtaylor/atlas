@@ -352,11 +352,29 @@ class PrerollReplayingSource:
     receives one continuous frame iterator and needs no knowledge that
     part of it is replay. `sink_format()` (260922-cts) delegates the same
     way, conditionally -- see that method's own docstring.
+
+    260922-woc: the pre-roll replay is one-shot across the *lifetime of
+    this wrapper instance*, not per `frames()` call. `run_turn` drains
+    `frames()` a second time when a final transcript turns out to be only
+    the wake phrase (`turn/wake_echo.py::is_wake_only`) -- the command the
+    operator actually spoke is still arriving live. Without this, that
+    second drain would replay the wake word itself before ever reaching
+    the command, because nothing about `frames()`'s pre-fix body remembered
+    a previous call. `_preroll_yielded` is set the instant the first call
+    begins iterating the pre-roll list (before the first `yield`, not
+    after the last one), so even a first drain that ends early -- closed by
+    `is_wake_only`'s own second-drain path, or by any other caller that
+    does not exhaust the generator -- still marks the pre-roll spent for
+    every later call. `preroll_bytes` is unaffected: it is computed from
+    `self._preroll_chunks` directly, which this flag never touches, so a
+    session recorder built after a second drain still reports the same
+    total pre-roll size a first-drain-only turn always has.
     """
 
     def __init__(self, wrapped: Any, preroll_chunks: list[bytes]) -> None:
         self._wrapped = wrapped
         self._preroll_chunks = preroll_chunks
+        self._preroll_yielded = False
 
     @property
     def preroll_bytes(self) -> int:
@@ -370,8 +388,10 @@ class PrerollReplayingSource:
         return sum(len(chunk) for chunk in self._preroll_chunks)
 
     async def frames(self) -> AsyncIterator[bytes]:
-        for chunk in self._preroll_chunks:
-            yield chunk
+        if not self._preroll_yielded:
+            self._preroll_yielded = True
+            for chunk in self._preroll_chunks:
+                yield chunk
         async for chunk in self._wrapped.frames():
             yield chunk
 

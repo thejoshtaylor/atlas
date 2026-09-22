@@ -674,6 +674,11 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             speech_lock=app.state.speaker_lock,
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
+            # 260922-woc: only the camera's wake-word turn ever pauses after
+            # a spoken wake phrase -- the browser and WebRTC routes below
+            # pass no `wake_phrase` at all, which is `run_turn`'s own signal
+            # to skip the wake-only check entirely.
+            wake_phrase=config.wake.phrase,
         )
 
     return _run

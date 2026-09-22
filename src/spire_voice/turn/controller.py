@@ -92,6 +92,7 @@ from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
 from spire_voice.turn.macros import fire_macro, match as match_macro
+from spire_voice.turn.wake_echo import is_wake_only
 
 logger = logging.getLogger("spire_voice.turn.controller")
 
@@ -282,6 +283,7 @@ async def run_turn(
     speech_lock: "asyncio.Lock | None" = None,
     workflow_tool_host: Any | None = None,
     tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
+    wake_phrase: str | None = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -370,6 +372,21 @@ async def run_turn(
     answer to "how many plugins currently publish this bare tool name" it
     passes through. `None` (the default, and every caller that predates
     this plan) reproduces `fire_macro`'s own pre-existing behavior exactly.
+
+    `wake_phrase` (260922-woc): the configured wake phrase
+    (`config.wake.phrase`), threaded through only by the camera's own
+    wake-word caller (`app.py`'s `_make_run_turn_for_source`) -- the
+    browser and WebRTC routes pass nothing, which is what `None` (the
+    default) means: skip `is_wake_only` entirely and behave exactly as
+    every caller that predates this plan does. When given, a first final
+    transcript that is nothing but the wake phrase (or a mangled tail of
+    it -- see `turn/wake_echo.py`) does not close the turn; it drains the
+    STT stream a second time, once only, for the command the operator
+    actually spoke, with whatever's left of `max_utterance_s`'s own
+    deadline. `stt_final`/`barge_in.mark_transcript_done()` are held back
+    until whichever drain turns out to be the last one, so a source's
+    barge-in listener never starts reading `frames()` while this
+    function's own second drain still needs to be its sole reader.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -435,9 +452,27 @@ async def run_turn(
         source = _RecordingAudioSource(source, session_recorder)
 
     try:
+        turn_deadline = clock() + max_utterance_s
         final = await _drain_to_final_transcript(
             source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
         )
+        final_text = getattr(final, "text", "") if final is not None else ""
+
+        if wake_phrase and final_text and is_wake_only(final_text, wake_phrase):
+            # 260922-woc: the operator paused after the wake phrase, and
+            # `stt.endpointing_ms` ended the utterance there -- the command
+            # is still coming. Drain again, once (no loop): a second
+            # wake-only reply here is treated as VOICE-08's empty-transcript
+            # case below, never a third attempt. `remaining_s` is whatever is
+            # left of this turn's own `max_utterance_s` budget, not a fresh
+            # allowance -- an operator who pauses twice as long still cannot
+            # hold this turn open past its original deadline.
+            remaining_s = max(0.0, turn_deadline - clock())
+            final = await _drain_to_final_transcript(
+                source, stt, remaining_s, timings, clock=clock, poll_interval_s=poll_interval_s
+            )
+            final_text = getattr(final, "text", "") if final is not None else ""
+
         timings.mark_stt_final()
 
         if barge_in is not None:
@@ -448,10 +483,13 @@ async def run_turn(
             # returns (whether by a real final transcript or by the
             # timeout branch's `stream.aclose()`), so there is no window
             # here in which two readers are ever active (`sources/runner.py`
-            # module docstring, D-09).
+            # module docstring, D-09). Held back until whichever drain above
+            # is the last one (260922-woc): a wake-only first drain leaves
+            # `source.frames()` still needed by this function's own second
+            # drain, and starting the barge-in listener before that second
+            # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
-        final_text = getattr(final, "text", "") if final is not None else ""
         if not final_text:
             # VOICE-08's two cases end the turn the same way, with no language
             # model call and no text-to-speech call: `final is None` is

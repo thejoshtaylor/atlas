@@ -9,6 +9,7 @@ by plan 01-05.
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import Sequence
 
 from spire_mcp.ha import handle_call_service, handle_list_entities
 from spire_mcp.safety import Denied, Policy
@@ -1239,3 +1240,179 @@ async def test_barge_in_never_starts_a_turn_or_reopens_the_transcript_stream(
     assert source.sent_audio == [b"1", b"2"]
     assert len(stream_calls) == 1
     assert barge_in.transcript_done_marked is True
+
+
+# --- 260922-woc: a wake-only transcript does not end the turn ---
+
+
+class _FrameCountingLiveSource:
+    """The live half of a `PrerollReplayingSource`, matching
+    `tests/test_preroll_alignment.py`'s own `FakeAlawSource` shape: a fixed
+    frame list, replayed identically every call to `frames()` (the fake's
+    own simplification -- the real camera source is a continuous queue, but
+    what this test proves is what `PrerollReplayingSource` itself does with
+    the pre-roll across two calls, not the live source's own replayability).
+    """
+
+    def __init__(self, frames: Sequence[bytes] = ()) -> None:
+        self._frames = list(frames)
+        self.sent_audio: list[bytes] = []
+        self.sent_events: list[dict] = []
+
+    async def frames(self):
+        for frame in self._frames:
+            yield frame
+
+    async def send_audio(self, chunk: bytes) -> None:
+        self.sent_audio.append(chunk)
+
+    async def send_event(self, event: dict) -> None:
+        # `PrerollReplayingSource.send_event` (unlike `_RecordingAudioSource`)
+        # delegates unconditionally, so a live source wrapped in one must
+        # implement this -- the same requirement
+        # `tests/test_preroll_alignment.py`'s own `FakeAlawSource` documents.
+        self.sent_events.append(event)
+
+    def source_format(self) -> SourceFormat:
+        return SourceFormat("alaw", 8000)
+
+
+class _SequentialDrainingStt:
+    """Fully drains `frames` -- recording every chunk it actually
+    received, in order -- before yielding this call's own scripted event
+    list. `FakeStt` never touches `frames` at all and replays the same
+    scripted events on every call, which cannot prove either half of
+    260922-woc's own claim: that a second drain reads live frames only
+    (never a replayed pre-roll), and that it can yield a transcript
+    different from the first drain's.
+    """
+
+    def __init__(self, calls: Sequence[Sequence[object]]) -> None:
+        self._calls = list(calls)
+        self.received_by_call: list[list[bytes]] = []
+
+    async def stream(self, frames, source_format=None):
+        if len(self.received_by_call) >= len(self._calls):
+            raise AssertionError("stream() called more times than scripted")
+        received: list[bytes] = []
+        async for chunk in frames:
+            received.append(chunk)
+        self.received_by_call.append(received)
+        for event in self._calls[len(self.received_by_call) - 1]:
+            yield event
+
+
+async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
+    """Evidence Turn B: STT final "Fire." (the wake word's tail) must not
+    end the turn -- a second drain runs, once, and the brain sees the
+    command the operator actually spoke, never the wake echo. The pre-roll
+    chunk is replayed exactly once across both drains combined.
+    """
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.sources.runner import PrerollReplayingSource
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    preroll_chunk = b"\xd5" * 8
+    live_source = _FrameCountingLiveSource(frames=[b"\x2a" * 8])
+    source = PrerollReplayingSource(live_source, [preroll_chunk])
+
+    stt = _SequentialDrainingStt(
+        calls=[
+            [FinalTranscript(text="Ace Fire.")],
+            [FinalTranscript(text="turn on the lights")],
+        ]
+    )
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the lights")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey spire",
+    )
+
+    assert len(stt.received_by_call) == 2
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights"}
+    assert tts.received_text == ["turned on the lights"]
+
+    preroll_occurrences = sum(
+        received.count(preroll_chunk) for received in stt.received_by_call
+    )
+    assert preroll_occurrences == 1
+
+
+async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_tts):
+    """"hey spire turn on the lights" in a single final transcript is left
+    alone -- the LLM copes, and stripping the wake phrase out is out of
+    scope. Only one drain ever runs."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey spire turn on the lights")]])
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the lights")])
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey spire",
+    )
+
+    assert len(stt.received_by_call) == 1
+    assert brain.received_messages[-1][-1] == {
+        "role": "user",
+        "content": "hey spire turn on the lights",
+    }
+    assert tts.received_text == ["turned on the lights"]
+
+
+async def test_no_wake_phrase_configured_leaves_behavior_unchanged(fake_tts):
+    """`wake_phrase=None` (the default, and every caller that predates this
+    plan) skips `is_wake_only` entirely -- a transcript that would
+    otherwise read as wake-only ends the turn exactly as it always has,
+    with one drain and whatever the brain makes of it."""
+    from spire_voice.providers.base import FinalTranscript
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey spire")]])
+    brain = _RecordingBrain(replies=[BrainReply(text="i heard the wake word")])
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert len(stt.received_by_call) == 1
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "hey spire"}
+    assert tts.received_text == ["i heard the wake word"]
+

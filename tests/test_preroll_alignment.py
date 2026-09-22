@@ -171,6 +171,27 @@ def test_preroll_replaying_source_reports_total_preroll_bytes():
     assert wrapped.preroll_bytes == _PREROLL_TOTAL_BYTES
 
 
+async def test_preroll_replaying_source_replays_the_preroll_only_on_the_first_frames_call():
+    """260922-woc: `run_turn` drains `frames()` a second time when a final
+    transcript is only the wake phrase (`turn/wake_echo.py::is_wake_only`)
+    -- without this, the second drain would replay the wake word itself
+    before ever reaching the command that follows it. `preroll_bytes`
+    (Task 1's own property) stays unaffected: it always reports the same
+    total, computed from the held chunks directly, regardless of how many
+    times `frames()` has been called.
+    """
+    live_source = FakeAlawSource(frames=[_LIVE_BYTE * 4])
+    preroll_chunks = [_PREROLL_BYTE * 4]
+    wrapped = PrerollReplayingSource(live_source, preroll_chunks)
+
+    first_call = [chunk async for chunk in wrapped.frames()]
+    second_call = [chunk async for chunk in wrapped.frames()]
+
+    assert first_call == [preroll_chunks[0], _LIVE_BYTE * 4]
+    assert second_call == [_LIVE_BYTE * 4]
+    assert wrapped.preroll_bytes == len(preroll_chunks[0])
+
+
 def test_bytes_per_ms_is_public_and_matches_the_encodings_it_bounds():
     """`audio/ring.py`'s renamed, public conversion -- the same function
     `preroll_offset_s` inverts, asserted from both encodings the codebase
