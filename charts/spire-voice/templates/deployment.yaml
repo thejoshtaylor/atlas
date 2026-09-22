@@ -6,6 +6,10 @@ metadata:
     {{- include "spire-voice.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  # Recreate, not RollingUpdate: the camera allows one talk session, and an
+  # old and a new pod that both connect to it trigger its auth lockout.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "spire-voice.selectorLabels" . | nindent 6 }}

@@ -150,3 +150,33 @@ async def test_tapo_talk_supervisor_stays_in_backoff_without_the_cloud_password(
 
     assert build_calls == 0
     assert any("not set" in record.message for record in caplog.records)
+
+
+async def test_tapo_talk_supervisor_times_out_a_stalled_connect_into_backoff(tmp_path, monkeypatch, caplog):
+    """A handshake that never returns must fail into the normal backoff and
+    retry, not hang the supervisor loop forever."""
+    monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
+
+    fifo_path = str(tmp_path / "speaker.alaw")
+    os.mkfifo(fifo_path)
+
+    build_calls = 0
+
+    async def stalled_build_session(host: str, cloud_password: str):
+        nonlocal build_calls
+        build_calls += 1
+        await asyncio.Event().wait()  # never set: the camera never answers
+
+    config = SpeakerConfig(fifo_path=fifo_path, respawn_backoff_s=0.01)
+    supervisor = TapoTalkSupervisor(
+        config, "192.0.2.5", build_session=stalled_build_session, connect_timeout_s=0.02
+    )
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.tapo_talk"):
+        supervisor.start()
+        await _wait_for(lambda: build_calls >= 2)
+        await supervisor.stop()
+
+    assert any("TimeoutError" in record.message for record in caplog.records)

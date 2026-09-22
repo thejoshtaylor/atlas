@@ -51,6 +51,12 @@ TAPO_CLOUD_PASSWORD_ENV = "TAPO_CLOUD_PASSWORD"
 _TAPO_PORT = 8800
 _TAPO_USER = "admin"
 _TALK_START_REQUEST = '{"params":{"talk":{"mode":"aec"},"method":"get"},"type":"request"}'
+# Bounds each handshake step (client build, media-session connect, talk
+# start). A stalled camera then fails into the supervisor's normal backoff
+# and does not hang the loop with no end. The executor thread behind a
+# timed-out build keeps running until pytapo returns; the loop does not
+# wait for it.
+_CONNECT_TIMEOUT_S = 15.0
 
 # 20ms @ 8kHz mono A-law -- the frame size the camera's talk endpoint
 # expects, matching the proven prototype's own pacing.
@@ -123,11 +129,13 @@ class TapoTalkSupervisor:
         *,
         build_session: SessionBuilderFn = _default_build_session,
         open_fifo_reader: FifoReaderOpenFn = _default_open_fifo_reader,
+        connect_timeout_s: float = _CONNECT_TIMEOUT_S,
     ) -> None:
         self._config = config
         self._camera_host = camera_host
         self._build_session = build_session
         self._open_fifo_reader = open_fifo_reader
+        self._connect_timeout_s = connect_timeout_s
         self._task: asyncio.Task[None] | None = None
         self._stopping = False
 
@@ -174,11 +182,16 @@ class TapoTalkSupervisor:
             return
 
         loop = asyncio.get_running_loop()
-        session = await self._build_session(self._camera_host, cloud_password)
+        async with asyncio.timeout(self._connect_timeout_s):
+            session = await self._build_session(self._camera_host, cloud_password)
+        # No timeout on the FIFO open: it blocks until a writer attaches,
+        # which is normal idle time, not a stalled handshake.
         fifo_fh = await loop.run_in_executor(None, self._open_fifo_reader, self._config.fifo_path)
         try:
-            async with session:
-                sid = await self._start_talk(session)
+            async with contextlib.AsyncExitStack() as stack:
+                async with asyncio.timeout(self._connect_timeout_s):
+                    await stack.enter_async_context(session)
+                    sid = await self._start_talk(session)
                 if sid is None:
                     logger.warning("tapo_talk: camera returned no talk session id")
                     return
