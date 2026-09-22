@@ -17,9 +17,19 @@ browser sink this phase's only consumer uses is PCM at 24 kHz. A cache built
 for the wrong sink plays as audible noise in the browser rather than failing
 cleanly -- the exact failure `tts_xai.py`'s own module docstring already
 records. Taking `SinkFormat` as an explicit parameter, rather than reading
-config directly, is what keeps a future camera-sink precache (Phase 2) from
-colliding with this one: the codec and sample rate are part of the cache
-key, so both sinks can populate the same directory safely.
+config directly, is what keeps the camera-sink precache (Phase 2) from
+colliding with the browser one: the codec and sample rate are part of the
+on-disk cache key, so both sinks can populate the same directory safely.
+
+260922-cts: that same "the sink is a parameter, never assumed" discipline
+was true of `precache_all`'s on-disk key from Phase 2 onward, but not of
+`CachedTts.synthesize` itself, which ignored the sink it was handed and
+always read the one flat, in-memory cache it was constructed with -- so a
+turn on the camera played back whatever was in the browser's in-memory
+cache, in browser PCM, through the camera's A-law speaker. `CachedTts` now
+takes the same `{(codec, sample_rate): cache}` shape `app.py`'s own
+precache step builds, and its `synthesize` reads the entry matching the
+`sink` it is given, closing the in-memory half of this gap.
 """
 
 from __future__ import annotations
@@ -126,13 +136,27 @@ class CachedTts:
     `XaiTts` exposes, so `_speak` can play a cached phrase through the exact
     code path it already uses for a live utterance -- no second
     audio-sending loop.
+
+    260922-cts: `caches` is a mapping keyed by `(codec, sample_rate)` --
+    one entry per sink format this process actually precached a cache for
+    -- plus a `None` entry for the browser default, the same "no sink
+    declared" meaning `turn/controller.py`'s `_speak` already gives a
+    `None` sink. `synthesize`'s own `sink` argument selects which entry to
+    read from; before this fix, this class ignored the sink entirely and
+    always read the one flat cache it was constructed with, which played
+    browser-format PCM through the camera speaker for every cached phrase
+    (module docstring, RESEARCH.md Pitfall 4).
     """
 
-    def __init__(self, cache: Mapping[str, bytes]) -> None:
-        self._cache = cache
+    def __init__(self, caches: "Mapping[tuple[str, int] | None, Mapping[str, bytes]]") -> None:
+        self._caches = caches
 
-    async def synthesize(self, text_deltas: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    async def synthesize(
+        self, text_deltas: AsyncIterator[str], sink: "SinkFormat | None" = None
+    ) -> AsyncIterator[bytes]:
         text = "".join([delta async for delta in text_deltas])
-        audio = get_cached(self._cache, text)
+        key = (sink.codec, sink.sample_rate) if sink is not None else None
+        cache = self._caches.get(key) or {}
+        audio = get_cached(cache, text)
         for start in range(0, len(audio), _CHUNK_BYTES):
             yield audio[start : start + _CHUNK_BYTES]

@@ -33,7 +33,9 @@ Two small classes:
   shared mutable event is exactly how two consumers come to disagree about
   what happened. `frames()`, `send_audio()`, and `source_format()` forward
   straight through with no tap -- this fan-out only ever touches events,
-  never audio. `barge_in` is exposed as a property reading and writing
+  never audio. `sink_format()` forwards the same way, conditionally
+  (260922-cts): `None` when the wrapped source declares none, never an
+  `AttributeError`. `barge_in` is exposed as a property reading and writing
   through to the wrapped source: `sources/runner.py` attaches a
   `BargeInMonitor` to the *unwrapped* source before this wrapper is ever
   constructed around it, and `run_turn` reads `source.barge_in` off
@@ -49,6 +51,7 @@ import contextlib
 import logging
 from typing import Any, AsyncIterator
 
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.transports.base import SourceFormat
 
 logger = logging.getLogger("spire_voice.session.observers")
@@ -156,6 +159,26 @@ class ObserverPublishingSource:
 
     def source_format(self) -> SourceFormat:
         return self._wrapped.source_format()
+
+    def sink_format(self) -> "SinkFormat | None":
+        """The wrapped source's own playback sink, when it has one.
+
+        260922-cts: forwarded the same conditional way `send_event` above
+        already is -- this method always exists on this wrapper (so
+        `getattr(source, "sink_format", None)` never sees an absent
+        attribute and skips calling it), but returns `None` when
+        `self._wrapped` carries no `sink_format` of its own, which is
+        every browser and WebRTC source today. `turn/controller.py`'s
+        `_speak` already treats a `None` sink as the pre-fix browser
+        default, so this wrapper adds no behavior of its own -- exactly
+        the same "no tap" posture the module docstring states for
+        `frames()`/`send_audio()`/`source_format()`. Without this
+        forward, every camera turn would lose its sink the moment
+        `_make_run_turn_for_source` wraps the source here, and the
+        camera-static bug this plan fixes would still reach the speaker.
+        """
+        wrapped_sink_format = getattr(self._wrapped, "sink_format", None)
+        return wrapped_sink_format() if wrapped_sink_format is not None else None
 
     @property
     def barge_in(self) -> Any:

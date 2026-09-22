@@ -87,6 +87,7 @@ from spire_voice.providers.base import BrainError
 from spire_voice.transports.base import SourceFormat
 from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from spire_voice.providers.tts_cache import CachedTts
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
@@ -152,7 +153,9 @@ class _BrainProvider(Protocol):
 
 
 class _TtsProvider(Protocol):
-    def synthesize(self, text_deltas: AsyncIterator[str]) -> AsyncIterator[bytes]: ...
+    def synthesize(
+        self, text_deltas: AsyncIterator[str], sink: "SinkFormat | None" = None
+    ) -> AsyncIterator[bytes]: ...
 
 
 class _ToolHost(Protocol):
@@ -271,7 +274,7 @@ async def run_turn(
     poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
     tiers: list[brain_race.TierBrain] | None = None,
     filler_after_ms: float = 600.0,
-    filler_cache: Mapping[str, bytes] | None = None,
+    filler_cache: "Mapping[tuple[str, int] | None, Mapping[str, bytes]] | None" = None,
     macros: tuple[MacroConfig, ...] = (),
     state_fetch: Callable[[], Any] | None = None,
     pending_runs_fetch: Callable[[], Any] | None = None,
@@ -308,7 +311,13 @@ async def run_turn(
     (plan 01.1-05) precaches every macro's `reply` into the same dict it
     builds every holding phrase into, so a macro's confirmation is served
     through the exact `CachedTts` adapter the filler already uses -- no
-    second cache, no second miss-handling path.
+    second cache, no second miss-handling path. 260922-cts: it is keyed by
+    `(codec, sample_rate)` -- one entry per sink format `app.py` actually
+    precached, plus a `None` entry for the browser default -- rather than
+    a single flat `{text: bytes}` dict, so `CachedTts.synthesize`'s own
+    `sink` argument (this turn's resolved `sink`, above) reads the entry
+    built for the source that will actually play it back, never whichever
+    one happened to be built.
 
     `state_fetch`, when given, is an awaitable factory the caller supplies
     -- never a tool-host call this function constructs itself, so this
@@ -374,6 +383,20 @@ async def run_turn(
     # source `SourceRunner` did not attach one to -- `_speak`'s own checks
     # below are then no-ops (`_BargeInMonitor`'s docstring).
     barge_in: _BargeInMonitor | None = getattr(source, "barge_in", None)
+
+    # 260922-cts: captured the same way, and for the same reason, as
+    # `barge_in` immediately above -- off the *unwrapped* source, before
+    # `_RecordingAudioSource` wraps it below. `sink_format`, when the
+    # source declares one (a `CameraAudioSource`, or a wrapper that
+    # forwards it), is this turn's own playback pair, resolved once and
+    # threaded into every `_speak` call below so a synthesis call -- and a
+    # `CachedTts` lookup -- asks for the format this source's speaker
+    # actually plays, never the browser default every caller that
+    # predates this plan implicitly asked for (module docstring's Bug).
+    # `None` for every source with no `sink_format` at all (every browser
+    # and WebRTC source today), which is `_speak`'s own pre-fix default.
+    _sink_format_fn = getattr(source, "sink_format", None)
+    sink: SinkFormat | None = _sink_format_fn() if _sink_format_fn is not None else None
 
     # D-15: started here, before the drain below is ever awaited, so the
     # fetch overlaps the operator still speaking and has usually finished by
@@ -490,6 +513,7 @@ async def run_turn(
                 kind="answer",
                 barge_in=barge_in,
                 speech_lock=speech_lock,
+                sink=sink,
             )
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -643,6 +667,7 @@ async def run_turn(
                 kind="filler",
                 barge_in=barge_in,
                 speech_lock=speech_lock,
+                sink=sink,
             )
 
         winner = await race_task
@@ -661,14 +686,14 @@ async def run_turn(
             timings.turn_outcome = "needs_clarification"
             question = _compose_clarifying_question(winner.candidates, friendly_names)
             await _speak(
-                source, tts, timings, question, kind="answer", barge_in=barge_in, speech_lock=speech_lock
+                source, tts, timings, question, kind="answer", barge_in=barge_in, speech_lock=speech_lock, sink=sink
             )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
 
         await _speak(
-            source, tts, timings, winner.answer, kind="answer", barge_in=barge_in, speech_lock=speech_lock
+            source, tts, timings, winner.answer, kind="answer", barge_in=barge_in, speech_lock=speech_lock, sink=sink
         )
         await _emit_event(source, timings.to_event())
         timings.log()
@@ -983,8 +1008,17 @@ async def _speak(
     kind: Literal["filler", "answer"],
     barge_in: "_BargeInMonitor | None" = None,
     speech_lock: "asyncio.Lock | None" = None,
+    sink: "SinkFormat | None" = None,
 ) -> None:
     """Speak one utterance, and mark whichever timing(s) `kind` calls for.
+
+    `sink=None` -- the default, and every caller that predates 260922-cts
+    -- reproduces the exact browser-PCM request `tts.synthesize` always
+    made before this fix. `run_turn` resolves the real value once, from
+    the turn's own source, and passes it to every `_speak` call it makes
+    (filler, clarifying question, and answer alike) so a camera turn's
+    synthesis call -- and a `CachedTts` lookup -- asks for the sink the
+    camera speaker actually plays.
 
     `speech_lock=None` -- the default, and every caller that predates
     plan 05-03 -- runs this function exactly as it always has: nothing
@@ -1055,7 +1089,7 @@ async def _speak(
         interrupted = False
         chunks_sent = 0
         chunks_total = 0
-        async for chunk in tts.synthesize(_one_delta()):
+        async for chunk in tts.synthesize(_one_delta(), sink=sink):
             chunks_total += 1
             if interrupted:
                 # Nothing left to cancel (module docstring) -- the rest of this

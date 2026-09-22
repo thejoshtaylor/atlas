@@ -69,6 +69,15 @@ class BrainProvider(Protocol):
 
 
 class TtsProvider(Protocol):
-    def synthesize(self, text_deltas: AsyncIterator[str]) -> AsyncIterator[bytes]:
-        """Stream audio chunks as reply text arrives."""
+    def synthesize(
+        self, text_deltas: AsyncIterator[str], sink: "Any | None" = None
+    ) -> AsyncIterator[bytes]:
+        """Stream audio chunks as reply text arrives.
+
+        260922-cts: `sink`, when given, is the playback format (codec,
+        sample rate) to render against -- every real implementation
+        (`BatchTtsAdapter`, `CachedTts`) already reads it; `None` (the
+        default) is today's browser-PCM request, unchanged for a caller
+        that predates this fix.
+        """
         ...

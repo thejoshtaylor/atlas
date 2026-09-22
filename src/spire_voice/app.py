@@ -77,6 +77,7 @@ from spire_voice.providers.boot import (
 )
 from spire_voice.providers.tier_reply import FILLER_TEXT
 from spire_voice.providers.tts_cache import CachedTts, precache_all
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.routes import register_routers
 from spire_voice.routes.wake import WAKE_THRESHOLD_SETTING_KEY
 from spire_voice.routes.wizard import resolve_audio_source
@@ -665,7 +666,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             config.stt.max_utterance_s,
             tiers=app.state.tier_brains,
             filler_after_ms=config.brain.filler_after_ms,
-            filler_cache=app.state.filler_cache,
+            filler_cache=app.state.filler_caches,
             macros=await _current_macros(app),
             state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
@@ -1137,36 +1138,68 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Every filler phrase, every operator-configured extra (short
     # confirmations, per `config.example.yaml`'s own `tts.precache` comment),
     # and every database-held macro's `reply` is rendered once, here,
-    # against the browser sink -- Phase 1's only consumer. A macro reply
-    # missing from this list would raise at turn time instead of here
-    # (Pitfall 4, 01.1-RESEARCH.md), the exact silent-REST-call regression
-    # this precache step exists to prevent -- unchanged by the move from
-    # `config.macros` to the database (D-12): the precache source changed,
-    # the guarantee it gives did not. A failure here propagates uncaught,
-    # matching this function's existing posture toward `tool_host.start()`:
-    # a broken startup should stop the process, not start it
-    # half-configured with a filler (or macro-reply) path that will fall
-    # over on the first turn.
+    # against every sink this process actually serves -- the browser sink
+    # (Phase 1's dev-harness consumer) and the camera sink (Phase 2's real
+    # speaker, 260922-cts). A macro reply missing from this list would raise
+    # at turn time instead of here (Pitfall 4, 01.1-RESEARCH.md), the exact
+    # silent-REST-call regression this precache step exists to prevent --
+    # unchanged by the move from `config.macros` to the database (D-12): the
+    # precache source changed, the guarantee it gives did not. A failure
+    # here propagates uncaught, matching this function's existing posture
+    # toward `tool_host.start()`: a broken startup should stop the process,
+    # not start it half-configured with a filler (or macro-reply) path that
+    # will fall over on the first turn.
     #
     # Plan 07-02: a degraded tts slot (D-04, missing credential) leaves
     # `app.state.tts` `None` -- there is no client to precache through,
     # and this must not crash the boot the same way a degraded stt or
     # brain slot does not. The other two slots' own startup work above is
     # already independent of this one, so skipping only this step is
-    # enough; `filler_cache` stays an honest empty dict rather than a
-    # half-populated one.
+    # enough; `filler_cache`/`filler_caches` stay honest empty containers
+    # rather than half-populated ones.
+    #
+    # 260922-cts: `app.state.filler_cache` stays the flat, browser-only
+    # `{text: bytes}` dict every existing reader already expects
+    # (`routes/macros.py`/`routes/workflows.py`'s own save-time precache,
+    # and this same function's own degraded-tts-slot test) -- neither of
+    # those routes is a live turn's speaker, so widening their own cache is
+    # out of this fix's scope. `app.state.filler_caches` is the new,
+    # sink-keyed mapping `run_turn`/`_scheduled_speak` actually read from
+    # (`turn/controller.py`'s own `CachedTts`), built once from the same
+    # `filler_phrases` list against both sinks this process serves. A macro
+    # created or edited after boot, through those two routes, is precached
+    # into the browser entry only until the next restart -- a known,
+    # narrower gap than the one this fix closes, not a new one this fix
+    # opens (a runtime-added macro already only reached the browser cache
+    # before this fix; camera playback of it now raises `TtsError` naming
+    # the phrase, per `CachedTts`'s own doctrine, instead of silently
+    # playing browser PCM through the camera speaker).
     filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in seeded_macros)]
+    camera_tts_sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
     if app.state.tts is not None:
-        app.state.filler_cache = await precache_all(
+        browser_cache = await precache_all(
             app.state.tts,
             Path(config.tts.cache_dir),
             filler_phrases,
             config.tts.voice_id,
             app.state.tts.browser_sink(),
         )
-        logger.info("precached %d phrases", len(app.state.filler_cache))
+        camera_cache = await precache_all(
+            app.state.tts,
+            Path(config.tts.cache_dir),
+            filler_phrases,
+            config.tts.voice_id,
+            camera_tts_sink,
+        )
+        app.state.filler_cache = browser_cache
+        app.state.filler_caches = {
+            None: browser_cache,
+            (camera_tts_sink.codec, camera_tts_sink.sample_rate): camera_cache,
+        }
+        logger.info("precached %d phrases for the browser and camera sinks", len(browser_cache))
     else:
         app.state.filler_cache = {}
+        app.state.filler_caches = {}
         logger.warning(
             "provider slot 'tts' is degraded -- skipping the startup precache for %d phrase(s)",
             len(filler_phrases),
@@ -1228,7 +1261,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (T-02-33's same "audio outlives what nobody noticed" shape, applied
     # to the speaker rather than the recordings). `backoff_s` is left on
     # its own default -- this plan does not change it.
-    camera_source = CameraAudioSource(config.camera, speaker_writer, on_reconnect=ffmpeg_supervisor.handle_reconnect)
+    #
+    # `sink=camera_tts_sink` (260922-cts): the same `SinkFormat` the
+    # precache step above just built both in-memory caches against --
+    # never a second, independently-constructed value that could drift
+    # from it -- so `CameraAudioSource.sink_format()` reports the format
+    # this speaker actually plays, and `turn/controller.py`'s `_speak`
+    # asks the real xAI/Piper provider for that same format on a cache
+    # miss.
+    camera_source = CameraAudioSource(
+        config.camera, speaker_writer, sink=camera_tts_sink, on_reconnect=ffmpeg_supervisor.handle_reconnect
+    )
     camera_source.start()
     app.state.camera_source = camera_source
 
@@ -1347,15 +1390,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # `browser_sink()` calls sit inside a bare `except Exception`). A
         # scheduled step that cannot be spoken is logged by name here,
         # once per firing, rather than raising inside the scheduler.
-        if text not in app.state.filler_cache and app.state.tts is None:
+        #
+        # 260922-cts: this closure always speaks through
+        # `app.state.camera_source` -- there is no other scheduled-speech
+        # sink -- so the cache membership check and the sink handed to
+        # `_speak` both come from that source's own `sink_format()`, never
+        # `app.state.filler_cache` (the flat, browser-only dict). Reading
+        # the browser dict here was the same bug the module docstring's
+        # Fix section names for the filler/macro cache, applied instead to
+        # a scheduled step's own utterance.
+        sink = app.state.camera_source.sink_format()
+        camera_cache = app.state.filler_caches.get((sink.codec, sink.sample_rate), {})
+        if text not in camera_cache and app.state.tts is None:
             logger.warning(
                 "not speaking a scheduled utterance: %s",
                 degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
             )
             return
-        speaking_tts = (
-            CachedTts(app.state.filler_cache) if text in app.state.filler_cache else app.state.tts
-        )
+        speaking_tts = CachedTts(app.state.filler_caches) if text in camera_cache else app.state.tts
         await _speak(
             app.state.camera_source,
             speaking_tts,
@@ -1363,6 +1415,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             text,
             kind="answer",
             speech_lock=app.state.speaker_lock,
+            sink=sink,
         )
 
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
@@ -1733,7 +1786,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             config.stt.max_utterance_s,
             tiers=app.state.tier_brains,
             filler_after_ms=config.brain.filler_after_ms,
-            filler_cache=app.state.filler_cache,
+            filler_cache=app.state.filler_caches,
             macros=macros,
             state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),

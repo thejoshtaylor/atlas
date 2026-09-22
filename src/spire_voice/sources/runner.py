@@ -85,6 +85,7 @@ from spire_voice.audio.ring import PrerollBuffer
 from spire_voice.calibration.record import EchoCalibration
 from spire_voice.config import BargeInConfig, GateConfig, WakeConfig
 from spire_voice.db.repository import WakeEventRepository
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.speaker.output_trace import EmittedAudioTrace
 from spire_voice.wake.base import WakeDetector
 from spire_voice.wake.gate import WakeGate
@@ -349,7 +350,8 @@ class PrerollReplayingSource:
     A full `AudioSource` implementation: `send_audio()`, `send_event()`,
     and `source_format()` all delegate straight to `wrapped`, so `run_turn`
     receives one continuous frame iterator and needs no knowledge that
-    part of it is replay.
+    part of it is replay. `sink_format()` (260922-cts) delegates the same
+    way, conditionally -- see that method's own docstring.
     """
 
     def __init__(self, wrapped: Any, preroll_chunks: list[bytes]) -> None:
@@ -381,6 +383,22 @@ class PrerollReplayingSource:
 
     def source_format(self) -> Any:
         return self._wrapped.source_format()
+
+    def sink_format(self) -> "SinkFormat | None":
+        """The wrapped source's own playback sink, forwarded conditionally
+        the same way `session/observers.py`'s `ObserverPublishingSource`
+        already does (260922-cts): `None` when `self._wrapped` -- always
+        the raw camera source in this runner, but a test double in
+        `tests/test_preroll_buffer.py`/`tests/test_preroll_alignment.py`
+        may carry none -- has no `sink_format` of its own, rather than
+        this method raising `AttributeError` the moment `_speak` calls it.
+        Without this forward, a turn that replays pre-roll (the common
+        case: `config.camera.preroll_ms` defaults on) would lose the
+        camera's sink the instant a hit wraps it here, and the
+        camera-static bug this plan fixes would still reach the speaker.
+        """
+        wrapped_sink_format = getattr(self._wrapped, "sink_format", None)
+        return wrapped_sink_format() if wrapped_sink_format is not None else None
 
 
 class SourceRunner:

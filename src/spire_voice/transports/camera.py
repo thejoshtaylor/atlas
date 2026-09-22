@@ -68,6 +68,7 @@ import av
 from av.audio.resampler import AudioResampler
 
 from spire_voice.config import CameraConfig
+from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.transports.base import SourceFormat
 
 logger = logging.getLogger("spire_voice.transports.camera")
@@ -88,6 +89,16 @@ _DETECTOR_SAMPLE_RATE = 16000
 # slower backoff for no reason. `CameraConfig` carries no backoff field of
 # its own, so this module-level default is this source's only home for it.
 _DEFAULT_BACKOFF_S = 2.0
+
+# 260922-cts: the camera speaker's own playback pair, matching `TtsConfig`'s
+# own default `codec`/`sample_rate` (config.py) -- used only when a caller
+# builds a `CameraAudioSource` without a `sink=` argument at all (every test
+# in `tests/test_camera_source.py` that predates this fix). `app.py`'s real
+# construction call always passes the configured `config.tts.codec`/
+# `config.tts.sample_rate` pair explicitly; this default exists so a test
+# double, or a future caller with no opinion on the sink, still gets today's
+# real production value rather than an unformed one.
+_DEFAULT_SINK = SinkFormat(codec="alaw", sample_rate=8000)
 
 
 class _SpeakerSink(Protocol):
@@ -136,6 +147,7 @@ class CameraAudioSource:
         config: CameraConfig,
         speaker: _SpeakerSink,
         *,
+        sink: SinkFormat = _DEFAULT_SINK,
         open_container: Callable[[CameraConfig], Any] = _open_rtsp_container,
         backoff_s: float = _DEFAULT_BACKOFF_S,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -143,6 +155,7 @@ class CameraAudioSource:
     ) -> None:
         self._config = config
         self._speaker = speaker
+        self._sink = sink
         self._open_container = open_container
         self._backoff_s = backoff_s
         self._sleep = sleep
@@ -197,6 +210,24 @@ class CameraAudioSource:
 
     def source_format(self) -> SourceFormat:
         return SourceFormat(self._config.encoding, self._config.sample_rate)
+
+    def sink_format(self) -> SinkFormat:
+        """The codec and sample rate the camera speaker actually plays.
+
+        260922-cts: this is the transport declaring its own playback
+        format, the same move `source_format()` above already makes for
+        the microphone side -- `turn/controller.py`'s `_speak` reads this
+        with `getattr(source, "sink_format", None)`, duck-typed exactly
+        like `source.barge_in`/`source.send_event` already are, so a
+        browser or WebRTC source with no `sink_format` at all still gets
+        today's browser-PCM default. `CameraConfig` grows no field of its
+        own for this -- `app.py` passes the real `config.tts.codec`/
+        `config.tts.sample_rate` pair in at construction (`sink=`), which
+        is what the module docstring's Fix section calls "a transport
+        declares the audio format it plays," not something this class
+        derives from its own microphone-format config.
+        """
+        return self._sink
 
     def decode_for_detector(self, raw_chunk: bytes) -> bytes:
         """Decode-and-resample `raw_chunk` to 16 kHz mono PCM16, for the
