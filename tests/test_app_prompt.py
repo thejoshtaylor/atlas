@@ -297,3 +297,26 @@ def test_state_message_an_overdue_pending_run_is_flagged_as_overdue(monkeypatch)
     message = _state_message({}, runs)
 
     assert "overdue" in message.lower()
+
+
+def test_tool_result_json_unwraps_the_sdks_result_envelope_for_a_list():
+    """The MCP SDK returns a list-valued tool result as
+    `structuredContent={"result": [...]}`. Live, reading that dict as "no
+    entities" left the brain an empty house (it could not find a switch
+    that Home Assistant listed)."""
+    from types import SimpleNamespace
+
+    from spire_voice.app import _tool_result_json
+
+    entities = [{"entity_id": "switch.example_fan_socket", "friendly_name": "Fan Socket", "state": "off"}]
+    wrapped = SimpleNamespace(structured_content={"result": entities}, content=[])
+    assert _tool_result_json(wrapped) == entities
+
+    plain_object = SimpleNamespace(structured_content={"entity_id": "switch.example_x", "state": "on"}, content=[])
+    assert _tool_result_json(plain_object) == {"entity_id": "switch.example_x", "state": "on"}
+
+
+def test_catalog_prompt_tells_the_brain_to_match_misheard_device_names():
+    prompt = _catalog_prompt([{"entity_id": "switch.example_fan_socket", "friendly_name": "Fan Socket"}])
+    assert "misheard" in prompt
+    assert "- switch.example_fan_socket (Fan Socket)" in prompt

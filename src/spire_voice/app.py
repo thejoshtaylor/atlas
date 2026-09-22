@@ -265,6 +265,11 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
     lines = [
         "You control a home over voice through the tools you are given. "
         "Never invent an entity id that is not listed below.",
+        "The request is transcribed from a low-quality narrowband microphone and "
+        "often contains misheard words. When a named device is not listed, pick the "
+        "listed entity whose friendly name sounds closest (\"living groom light\" "
+        "means the living room light) and act on it; ask only if two entities are "
+        "equally close.",
         "Known entities:",
     ]
     for entity in entities:
@@ -387,6 +392,12 @@ def _tool_result_json(result: Any) -> Any:
     """
     structured = getattr(result, "structuredContent", None) or getattr(result, "structured_content", None)
     if structured is not None:
+        # The MCP SDK wraps a tool's non-object return value (a list, for
+        # `ha_list_entities`) as `{"result": value}`. Without this unwrap
+        # every caller that expects a list got a dict, read it as "no
+        # entities", and the brain saw an empty house.
+        if isinstance(structured, dict) and set(structured) == {"result"}:
+            return structured["result"]
         return structured
     content = getattr(result, "content", None) or []
     if content:
