@@ -383,6 +383,7 @@ _CONFIG_ENV_VARS = (
     "TAPO_USER",
     "TAPO_PASSWORD",
     "SPEAKER_ENSURE_URL",
+    "CAMERA_RTSP_URL",
     "HA_URL",
     "HA_TOKEN",
     # Plan 04-03: config.example.yaml's mcp.servers.weather block adds two
@@ -410,6 +411,10 @@ def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # config.example.yaml, so expansion must produce a real YAML boolean
     # literal, not an arbitrary string.
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    # 260922-cmo: speaker.backend is validated against a fixed allowlist
+    # ({go2rtc, tapo_talk}) -- it cannot share the "test-value" placeholder
+    # the other vars in the tuple above use.
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
 
 
 def _engine_report(

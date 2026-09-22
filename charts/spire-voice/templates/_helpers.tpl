@@ -45,9 +45,21 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 The Secret name every template that reads env vars from it shares -- one
 name, defined once, so the Deployment's envFrom and the Secret's own
 metadata.name can never drift apart.
+
+260922-cmo (D-2): when .Values.secretName is set, this returns that name
+verbatim -- the operator's own hand-applied Secret, holding every
+house-specific credential this public repo never carries. secret.yaml
+itself renders nothing in that case (its own top-level guard), so the
+only Secret the Deployment's envFrom and the Postgres StatefulSet's
+POSTGRES_PASSWORD secretKeyRef ever see is the hand-applied one. Left
+empty, the chart falls back to the templated Secret exactly as before.
 */}}
 {{- define "spire-voice.secretName" -}}
+{{- if .Values.secretName -}}
+{{- .Values.secretName -}}
+{{- else -}}
 {{- printf "%s-secret" (include "spire-voice.fullname" .) -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

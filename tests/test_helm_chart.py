@@ -456,3 +456,48 @@ def test_the_pod_sets_an_fsgroup_so_its_volumes_are_writable() -> None:
     for mount in container["volumeMounts"]:
         if mount["mountPath"] in {"/data", "/models"}:
             assert mount["name"] in claim_backed
+
+
+# --- 260922-cmo: existingSecret model and the runAsUser fix --------------
+
+
+@skip_without_helm
+def test_a_hand_applied_secret_name_renders_no_templated_secret() -> None:
+    """D-2. With `secretName` set, the operator's own hand-applied Secret
+    is what the Deployment's envFrom points at -- this chart must render
+    zero Secret documents of its own in that case (T-CMO-03), and the
+    envFrom's secretRef name must be exactly the name that was set, not
+    the chart's own generated one."""
+    docs = _helm_template("--set", "secretName=spire-voice")
+    secrets = [d for d in docs if d.get("kind") == "Secret"]
+    assert secrets == [], f"expected no Secret to render, found {len(secrets)}"
+
+    deployment = _find_one(docs, "Deployment")
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    app_container = next(c for c in containers if c["name"] == "spire-voice")
+    secret_refs = [
+        entry["secretRef"]["name"]
+        for entry in app_container.get("envFrom", [])
+        if "secretRef" in entry
+    ]
+    assert secret_refs == ["spire-voice"]
+
+
+@skip_without_helm
+def test_the_application_container_names_the_numeric_uid_and_gid() -> None:
+    """T-CMO-06. The kubelet refuses `runAsNonRoot` on a container whose
+    image declares its `USER` by name, not by number -- this is the
+    `CreateContainerConfigError` that stopped the built image from ever
+    running. The application container must name the exact uid/gid the
+    Dockerfile pins (`spire`, uid/gid 1001), under the pod-level
+    `runAsNonRoot`."""
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert pod_spec["securityContext"]["runAsNonRoot"] is True
+
+    containers = pod_spec["containers"]
+    app_container = next(c for c in containers if c["name"] == "spire-voice")
+    security_context = app_container.get("securityContext", {})
+    assert security_context.get("runAsUser") == 1001
+    assert security_context.get("runAsGroup") == 1001

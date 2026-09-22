@@ -93,6 +93,8 @@ def _set_migration_env(monkeypatch) -> None:
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
     monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
     # Phase 7 (D-15): server.bind_host / security.cookie_secure -- the two
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")

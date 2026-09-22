@@ -16,6 +16,17 @@ image:
   repository: spire-voice
   tag: latest
   pullPolicy: IfNotPresent
+  # 260922-cmo: set by argocd-image-updater (never by hand) once the
+  # deploy-on-main-push pipeline is live -- a digest-pinned reference that
+  # overrides repository/tag entirely when non-empty. Left empty, the
+  # chart falls back to the repository:tag pair above, exactly as before.
+  ref: ""
+
+# 260922-cmo (D-2): set this to the name of a Secret the operator applies
+# by hand to switch the chart onto that Secret instead of the templated
+# one this chart generates -- see charts/spire-voice/templates/secret.yaml
+# and docs/runbooks/deploy-build-cluster.md. Left empty, nothing changes.
+secretName: ""
 
 nameOverride: ""
 fullnameOverride: ""
@@ -92,6 +103,13 @@ env:
   # Only used when speaker.backend is set to tapo_talk
   # (config/config.example.yaml) -- blank is safe on the default go2rtc path.
   tapoCloudPassword: ""
+  # 260922-cmo (D-1, T-CMO-02): the whole authenticated camera URL --
+  # config.example.yaml no longer bakes in a host or credentials, so this
+  # must be set (via a values file or the hand-applied Secret named by
+  # secretName) for the camera source to work.
+  cameraRtspUrl: ""
+  # go2rtc | tapo_talk -- see config/config.example.yaml's own comment.
+  speakerBackend: go2rtc
 
 postgres:
   # D-14: always bundled, plain manifests against the official image --

@@ -136,7 +136,12 @@ camera:
   # go2rtc: go2rtc republishes video fine, but consuming the microphone from its
   # tapo:// producer hangs with no error on this setup, and a second direct RTSP
   # connection alongside Frigate is measured-good.
-  rtsp_url: "rtsp://${TAPO_USER}:${TAPO_PASSWORD}@camera.invalid:554/stream1"
+  #
+  # 260922-cmo (D-1, T-CMO-02): the whole authenticated URL, not the host
+  # and credentials interpolated separately -- this repository is public,
+  # and a real camera IP or hostname belongs only on the hand-applied
+  # Secret this deployment reads from, never in this committed file.
+  rtsp_url: "${CAMERA_RTSP_URL}"
 
   # The Tapo C121 emits G.711 A-law, 8 kHz, mono. xAI's STT accepts exactly
   # that, so audio is never transcoded anywhere in this pipeline. If you point
@@ -171,7 +176,12 @@ speaker:
   #
   # Default stays go2rtc so an existing deployment's behaviour is never
   # silently changed by this key's addition.
-  backend: go2rtc
+  #
+  # 260922-cmo (D-1): read from the environment rather than committed as a
+  # literal -- an expanded value still passes SpeakerConfig.from_config's
+  # {go2rtc, tapo_talk} allowlist below, since env expansion runs over raw
+  # text before that validation ever sees this field.
+  backend: "${SPEAKER_BACKEND}"
 
   # go2rtc, running inside the Frigate pod. It already holds a tapo:// producer
   # for the camera's speaker -- the same path the gesture beeps use.
@@ -187,7 +197,14 @@ speaker:
   # reaches the speaker, which is the single largest avoidable delay in the
   # round trip. Instead one long-lived ffmpeg reads this FIFO and stays
   # connected to go2rtc; speaking is then just a write() into the pipe.
-  fifo_path: "/run/spire/speaker.alaw"
+  #
+  # 260922-cmo: under /data, not /run/spire -- nothing creates /run/spire
+  # and it is not a mounted volume on either deployment target, so
+  # fifo_writer.py's own os.mkfifo() (which does not create parent
+  # directories) always failed against this shipped default. /data is the
+  # one writable volume both the Helm chart (a PVC) and Compose (a named
+  # volume) already mount.
+  fifo_path: "/data/speaker.alaw"
   respawn_backoff_s: 2.0
 
   # Opening this FIFO blocks at the OS level until a reader attaches. The

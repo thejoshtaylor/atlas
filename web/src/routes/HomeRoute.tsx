@@ -8,7 +8,7 @@ export function HomeRoute() {
     <div className="flex flex-col gap-2">
       <h1 className="text-display font-semibold">spire-voice</h1>
       <p className="text-body text-muted-foreground">
-        Signed in. Screens for policy, accounts, and settings arrive in later plans.
+        Signed in. Use the navigation to reach policy, accounts, and settings.
       </p>
     </div>
   )

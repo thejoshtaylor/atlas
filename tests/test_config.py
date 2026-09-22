@@ -477,6 +477,15 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # arbitrary string -- "false" keeps the assertion below (cookie_secure
     # is False) true, matching this file's own shipped default.
     monkeypatch.setenv("COOKIE_SECURE", "false")
+    # 260922-cmo (D-1): camera.rtsp_url is a plain string passthrough like
+    # the vars in the loop above, so "test-value" would be as honest a
+    # placeholder as any -- a real rtsp:// string is used instead so this
+    # assertion reads the same as a genuine deployment would produce.
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    # speaker.backend is validated against a fixed allowlist
+    # ({go2rtc, tapo_talk}) -- it cannot share the generic "test-value"
+    # placeholder the loop above uses without failing that validation.
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
     # Plan 04-03: mcp.servers.weather's two placeholders -- a coordinate,
     # not an arbitrary string, since spire_mcp.weather parses these as
     # floats (never exercised by this test, which only loads Config, but
@@ -557,6 +566,42 @@ def test_example_config_loads_end_to_end(monkeypatch):
     assert config.security.access_token_ttl_s == 900
     assert config.security.refresh_token_ttl_s == 1209600
     assert config.security.cookie_secure is False
+
+
+def test_example_config_camera_url_and_speaker_backend_expand_from_env(monkeypatch):
+    """260922-cmo (D-1, T-CMO-02): env expansion runs over raw text before
+    the YAML parse and before SpeakerConfig.from_config's allowlist check
+    -- proving that a ${SPEAKER_BACKEND}-supplied value of `tapo_talk`
+    still passes that allowlist, not only the shipped `go2rtc` default,
+    and that camera.rtsp_url comes through as exactly what the
+    environment supplied, with no embedded host or credential left in
+    the committed file for it to compete with."""
+    from spire_voice.config import load_config
+
+    for name in (
+        "XAI_API_KEY",
+        "TAPO_USER",
+        "TAPO_PASSWORD",
+        "SPEAKER_ENSURE_URL",
+        "HA_URL",
+        "HA_TOKEN",
+        "BIND_HOST",
+    ):
+        monkeypatch.setenv(name, "test-value")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    )
+    camera_url = "rtsp://real-user:real-pass@a-real-camera.invalid:554/stream1"
+    monkeypatch.setenv("CAMERA_RTSP_URL", camera_url)
+    monkeypatch.setenv("SPEAKER_BACKEND", "tapo_talk")
+
+    config = load_config("config/config.example.yaml")
+
+    assert config.camera.rtsp_url == camera_url
+    assert config.speaker.backend == "tapo_talk"
 
 
 # --- Task 3: one rejection test per Phase 2 configuration path ---

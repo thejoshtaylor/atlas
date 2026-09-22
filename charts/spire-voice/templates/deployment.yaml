@@ -78,10 +78,25 @@ spec:
               done
       containers:
         - name: spire-voice
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          # 260922-cmo: .Values.image.ref, when set, is the exact string
+          # argocd-image-updater writes (a digest-pinned reference) --
+          # falls back to the repository:tag pair for a plain
+          # `helm install`/dev deploy that never runs image-updater at
+          # all.
+          image: {{ .Values.image.ref | default (printf "%s:%s" .Values.image.repository .Values.image.tag) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
+            # T-CMO-06: the kubelet refuses runAsNonRoot on a container
+            # whose image declares its USER by name, not by number
+            # (`spire`, not a numeric uid) -- this is the
+            # CreateContainerConfigError that stopped the built image
+            # from ever running. 1001 is the exact uid/gid the Dockerfile
+            # pins for that user (`groupadd --gid 1001` /
+            # `useradd --uid 1001 --gid 1001`), so this cannot drift from
+            # the image it names.
+            runAsUser: 1001
+            runAsGroup: 1001
           command: ["python", "-m", "spire_voice.app"]
           envFrom:
             # D-15: every variable config/config.example.yaml names arrives

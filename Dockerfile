@@ -36,8 +36,11 @@ WORKDIR /app
 # otherwise). libgomp1: onnxruntime/ctranslate2's own OpenMP-parallel
 # native code needs it for the same reason. Neither is a Python
 # dependency pip can install -- both are system shared libraries.
+# ffmpeg: speaker/ffmpeg_supervisor.py spawns this binary for the
+# long-lived speaker egress (VOICE-05) -- without it the speaker path
+# fails at runtime with no code path in this project to catch it first.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libatomic1 libgomp1 \
+    && apt-get install -y --no-install-recommends libatomic1 libgomp1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # alembic.ini's own script_location is %(here)s/alembic -- relative to
