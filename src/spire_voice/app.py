@@ -1577,6 +1577,7 @@ def _calibration_response(calibration: EchoCalibration, now: datetime) -> dict[s
         "placement_note": calibration.placement_note,
         "taken_at": calibration.taken_at.isoformat(),
         "age_days": (now - calibration.taken_at).total_seconds() / 86400.0,
+        "echo_cancelled": calibration.echo_cancelled,
     }
 
 

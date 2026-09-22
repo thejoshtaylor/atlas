@@ -110,6 +110,14 @@ class EchoCalibration:
     channels: int
     placement_note: str
     taken_at: datetime
+    # `True` when this record came from a run that measured no echo at all
+    # (`calibration/runner.py::run_echo_calibration`) -- a camera that
+    # cancels its own speaker output from its microphone before the
+    # recording ever reaches this pipeline. Defaults to `False` so a v1
+    # file written before this field existed still loads (`load` below
+    # passes its payload straight to `cls(**payload)`); LAST field for
+    # that same reason.
+    echo_cancelled: bool = False
 
     def __post_init__(self) -> None:
         _validate_placement_note(self.placement_note)

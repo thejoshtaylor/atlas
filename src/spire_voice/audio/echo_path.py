@@ -90,6 +90,17 @@ class EchoPathMeasurement:
     agc_verdict: str
     segment_levels: tuple[float, ...]
     failure_reason: str | None
+    # `True` exactly for the "no correlation peak" failure -- never for the
+    # "reference or recording is empty" failure, and never on success. The
+    # discriminator a caller checks instead of matching `failure_reason`'s
+    # text (`calibration/runner.py`): a peak this low means the reference
+    # was not found in the recording at all, which is what a camera that
+    # cancels its own echo would produce, but it is equally what a dead
+    # microphone recording nothing but silence would produce -- this field
+    # says only "no correlation was found," not "the camera cancelled its
+    # echo." Telling those apart needs the recording's own energy too,
+    # which this module has no reason to read (module docstring).
+    no_echo: bool
 
 
 def _cross_correlate(reference: np.ndarray, recorded: np.ndarray) -> tuple[int | None, float]:
@@ -187,6 +198,7 @@ def measure_echo_path(
             agc_verdict=AGC_INDETERMINATE,
             segment_levels=(),
             failure_reason="reference or recording is empty",
+            no_echo=False,
         )
 
     peak_idx, confidence = _cross_correlate(reference, recorded)
@@ -204,6 +216,7 @@ def measure_echo_path(
                 "no correlation peak above the usable confidence threshold "
                 f"({CONFIDENCE_USABLE_THRESHOLD}) -- the reference was not found in the recording"
             ),
+            no_echo=True,
         )
 
     overlap_len = min(len(reference), len(recorded) - peak_idx)
@@ -229,4 +242,5 @@ def measure_echo_path(
         agc_verdict=agc_verdict,
         segment_levels=tuple(segment_levels),
         failure_reason=None,
+        no_echo=False,
     )

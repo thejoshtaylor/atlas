@@ -103,6 +103,19 @@ def test_serialized_key_set_is_exactly_the_declared_field_set():
     assert set(payload.keys()) == expected_keys
 
 
+def test_load_of_a_v1_file_with_no_echo_cancelled_key_defaults_it_to_false(tmp_path):
+    record = _make_record()
+    path = tmp_path / "echo_path.json"
+    payload = record._to_json_dict()
+    del payload["echo_cancelled"]  # exactly the shape a file written before this field existed has
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = EchoCalibration.load(path)
+
+    assert loaded is not None
+    assert loaded.echo_cancelled is False
+
+
 def test_placement_note_containing_a_url_scheme_is_rejected():
     with pytest.raises(CalibrationError):
         _make_record(placement_note="see rtsp://camera.invalid:554/stream1")

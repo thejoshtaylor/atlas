@@ -109,6 +109,7 @@ class _LoopbackFake:
         gain_curve: Callable[[int], np.ndarray] | None = None,
         scale: float = 1.0,
         silence: bool = False,
+        uncorrelated_noise_rms: float = 0.0,
     ) -> None:
         self._sample_rate = sample_rate
         self._encoding = encoding
@@ -116,6 +117,7 @@ class _LoopbackFake:
         self._gain_curve = gain_curve
         self._scale = scale
         self._silence = silence
+        self._uncorrelated_noise_rms = uncorrelated_noise_rms
         self.written: bytes | None = None
         self.events: list[tuple[str, object]] = []
 
@@ -146,7 +148,15 @@ class _LoopbackFake:
         n = len(reference)
         total = self._delay_samples + n + self._delay_samples
         recording = np.zeros(total, dtype=np.float64)
-        if not self._silence:
+        if self._uncorrelated_noise_rms > 0:
+            # Independent of the written probe entirely -- room noise the
+            # reference was never found in, not the reference itself plus
+            # noise (that recovers a delay just fine, see
+            # `test_measure_echo_path_with_moderate_noise_still_recovers_delay`
+            # one layer down). A fixed seed keeps this deterministic.
+            rng = np.random.default_rng(20260922)
+            recording = rng.standard_normal(total) * self._uncorrelated_noise_rms
+        elif not self._silence:
             gains = self._gain_curve(n) if self._gain_curve is not None else np.full(n, self._scale)
             recording[self._delay_samples : self._delay_samples + n] = reference * gains
         return np.clip(np.round(recording), -32768, 32767).astype(np.int16)
@@ -235,6 +245,31 @@ async def test_silence_returns_a_named_failure_and_writes_no_record(tmp_path):
     assert result.calibration is None
     assert result.failure_reason
     assert list(Path(calibration_config.dir).glob("*")) == []
+
+
+async def test_uncorrelated_noise_saves_an_echo_cancelled_record_instead_of_a_failure(tmp_path):
+    """A camera that removes its own speaker output from its microphone
+    (`aec` mode) produces exactly this recording: something came back --
+    room noise, not silence -- but none of it is the probe. T-260922-eca:
+    this is the one case that changed meaning from the failure the same
+    recording shape reported before this plan."""
+    fake = _LoopbackFake(uncorrelated_noise_rms=400.0)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+    )
+
+    assert result.failure_reason is None
+    assert result.calibration is not None
+    assert result.calibration.echo_cancelled is True
+    assert result.calibration.delay_s == 0.0
+    assert result.calibration.gain == 0.0
+    assert result.calibration.agc_verdict == "absent"
+    assert result.calibration.echo_level > 0
+    assert find_latest_calibration(calibration_config.dir) is not None
 
 
 async def test_settle_elapses_before_the_probe_is_written_and_window_covers_duration_plus_tail(tmp_path):
@@ -518,6 +553,7 @@ async def test_read_route_returns_the_stored_record_and_its_age_with_no_url_in_t
 
     assert response["agc_verdict"] == run_result.calibration.agc_verdict
     assert response["age_days"] > 0
+    assert response["echo_cancelled"] is run_result.calibration.echo_cancelled
     body = json.dumps(response)
     assert "rtsp://" not in body
     assert "redacted" not in body
@@ -536,6 +572,7 @@ async def test_run_route_returns_measured_numbers_when_enabled_with_no_url_in_th
 
     assert response["gain"] == pytest.approx(0.6, abs=0.05)
     assert response["agc_verdict"] in {"absent", "present", "indeterminate"}
+    assert response["echo_cancelled"] is False
     assert app_module.app.state.calibration_in_progress is False
     body = json.dumps(response)
     assert "rtsp://" not in body

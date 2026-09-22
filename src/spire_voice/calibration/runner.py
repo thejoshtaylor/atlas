@@ -56,7 +56,8 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from spire_voice.audio.alaw import alaw_to_pcm16
-from spire_voice.audio.echo_path import measure_echo_path
+from spire_voice.audio.echo_path import AGC_ABSENT, measure_echo_path
+from spire_voice.audio.energy import rms_amplitude
 from spire_voice.audio.probe import DEFAULT_PROBE_SEED, PROBE_FORMAT_VERSION, build_probe
 from spire_voice.calibration.record import SCHEMA_VERSION, CalibrationError, EchoCalibration
 from spire_voice.config import CalibrationConfig, CameraConfig
@@ -82,6 +83,18 @@ _FILENAME_GLOB = f"{_FILENAME_PREFIX}*.json"
 # module writes, so a test can assert the "no audio persists" claim
 # structurally rather than by inspecting content.
 MAX_RECORD_FILE_SIZE_BYTES = 8192
+
+# The camera's own A-law codec (`audio/alaw.py`) has no code that decodes
+# to exactly zero -- segment 0's smallest-magnitude reconstruction level is
+# 8, an rms of 8/32768 =~ 0.00024. A genuinely silent recording that passed
+# through that codec measures at that floor, never meaningfully above it;
+# actual room tone from a live microphone sits well above it. This
+# threshold sits between the two, so a dead microphone's quantized silence
+# is never mistaken for a camera that merely cancelled its own echo
+# (T-260922-eca) -- the "recording is not digital silence" guard is this
+# threshold, not a literal `> 0`, because `> 0` is never false for anything
+# that passed through A-law at all.
+_DIGITAL_SILENCE_RMS_THRESHOLD = 0.001
 
 
 class CalibrationRunnerError(CalibrationError):
@@ -244,6 +257,43 @@ async def run_echo_calibration(
     )
 
     if measurement.failure_reason is not None:
+        # A camera that cancels its own echo (`aec` mode) produces exactly
+        # this same "no correlation peak" failure a dead microphone would
+        # -- `measurement.no_echo` only narrows it to that one failure
+        # branch, never the "reference or recording is empty" branch. The
+        # recording's own energy is what tells the two apart: a cancelled
+        # echo still recorded *something* (room tone, at minimum), while a
+        # dead microphone recorded digital silence. Checked here, not by
+        # matching `failure_reason`'s text (T-260922-eca).
+        if measurement.no_echo and rms_amplitude(recorded_pcm16) > _DIGITAL_SILENCE_RMS_THRESHOLD:
+            logger.warning(
+                "no echo came back for source=%s (confidence=%.3f) -- "
+                "assuming the camera cancels its own speaker output from its microphone",
+                DEFAULT_SOURCE_NAME,
+                measurement.confidence,
+            )
+            taken_at = now()
+            calibration = EchoCalibration(
+                schema_version=SCHEMA_VERSION,
+                probe_format_version=PROBE_FORMAT_VERSION,
+                probe_seed=probe_seed,
+                source=DEFAULT_SOURCE_NAME,
+                delay_s=0.0,
+                confidence=measurement.confidence,
+                echo_level=rms_amplitude(recorded_pcm16),
+                gain=0.0,
+                agc_verdict=AGC_ABSENT,
+                segment_levels=(),
+                encoding=fmt.encoding,
+                sample_rate=fmt.sample_rate,
+                channels=camera_config.channels,
+                placement_note=placement_note,
+                taken_at=taken_at,
+                echo_cancelled=True,
+            )
+            target = Path(calibration_config.dir) / _timestamped_filename(taken_at)
+            calibration.save(target)
+            return CalibrationRunResult(calibration=calibration, failure_reason=None)
         return CalibrationRunResult(calibration=None, failure_reason=measurement.failure_reason)
 
     taken_at = now()
