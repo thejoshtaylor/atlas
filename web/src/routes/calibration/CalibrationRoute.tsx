@@ -65,7 +65,32 @@ function formatAge(ageDays: number): string {
  * words the operator can act on, never as `delay_s`/`gain`/`agc_verdict`
  * themselves; confidence sits beside them, in the header row above.
  */
+// D-260922-eca: an echo-cancelling camera (`aec` mode) removes its own
+// speaker output before its microphone ever records it, so a run against
+// one measures no delay and no gain to show -- `delay_s`/`gain` are
+// meaningless zeros in that case (`calibration/runner.py`), never a real
+// measurement, and showing them as if they were would read as a passing
+// score for a camera that simply gave the probe nothing to find.
 function CalibrationResults({ result }: { result: EchoCalibrationResult }) {
+  if (result.echo_cancelled) {
+    return (
+      <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-label text-muted-foreground">Confidence</span>
+          <span className="text-label text-muted-foreground">{Math.round(result.confidence * 100)}%</span>
+        </div>
+        <p className="text-body text-foreground">
+          No echo came back. The camera cancels its own speaker from its microphone, so the
+          assistant will not hear itself. If you did not hear the test sound, check the speaker
+          and run the test again.
+        </p>
+        {result.placement_note ? (
+          <p className="text-label text-muted-foreground">Recorded from: {result.placement_note}</p>
+        ) : null}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
       <div className="flex items-baseline justify-between gap-2">

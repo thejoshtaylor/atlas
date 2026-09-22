@@ -31,6 +31,7 @@ const FULL_RESULT_BODY = {
   placement_note: "kitchen counter, 2m from camera",
   taken_at: "2026-09-17T12:00:00+00:00",
   age_days: 0.01,
+  echo_cancelled: false,
 }
 
 describe("fetchLatestCalibration -- the GET route, four distinguishable outcomes (1 of 4: not-found)", () => {
@@ -57,6 +58,7 @@ describe("fetchLatestCalibration -- the GET route, four distinguishable outcomes
         "placement_note",
         "taken_at",
         "age_days",
+        "echo_cancelled",
       ].sort(),
     )
   })

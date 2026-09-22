@@ -35,6 +35,7 @@ export interface EchoCalibrationResult {
   placement_note: string
   taken_at: string
   age_days: number
+  echo_cancelled: boolean
 }
 
 export const CALIBRATION_QUERY_KEY = ["calibration", "echo-path"] as const
