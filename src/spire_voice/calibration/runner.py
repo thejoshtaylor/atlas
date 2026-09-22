@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
+import numpy as np
+
 from spire_voice.audio.alaw import alaw_to_pcm16
 from spire_voice.audio.echo_path import AGC_ABSENT, measure_echo_path
 from spire_voice.audio.energy import rms_amplitude
@@ -84,17 +86,21 @@ _FILENAME_GLOB = f"{_FILENAME_PREFIX}*.json"
 # structurally rather than by inspecting content.
 MAX_RECORD_FILE_SIZE_BYTES = 8192
 
-# The camera's own A-law codec (`audio/alaw.py`) has no code that decodes
-# to exactly zero -- segment 0's smallest-magnitude reconstruction level is
-# 8, an rms of 8/32768 =~ 0.00024. A genuinely silent recording that passed
-# through that codec measures at that floor, never meaningfully above it;
-# actual room tone from a live microphone sits well above it. This
-# threshold sits between the two, so a dead microphone's quantized silence
-# is never mistaken for a camera that merely cancelled its own echo
-# (T-260922-eca) -- the "recording is not digital silence" guard is this
-# threshold, not a literal `> 0`, because `> 0` is never false for anything
-# that passed through A-law at all.
-_DIGITAL_SILENCE_RMS_THRESHOLD = 0.001
+# The camera's A-law codec (`audio/alaw.py`) has no code that decodes to
+# zero: its smallest reconstruction level is +/-8 (int16). Digital silence
+# therefore decodes to samples that are all +/-8. An rms threshold cannot
+# separate that from a real room: a quiet room on a camera that gates its
+# own microphone sits at that same floor (measured live: rms 8 of 32768,
+# and only about 20 while the probe played, well under any useful rms
+# cut-off). The test is whether ANY sample rose above the floor. Pure
+# digital silence never does, and a live room with even a faint residual
+# probe does.
+_ALAW_FLOOR_MAGNITUDE = 8
+
+
+def _has_signal_above_codec_floor(pcm16: bytes) -> bool:
+    samples = np.frombuffer(pcm16, dtype="<i2")
+    return bool(samples.size) and int(np.max(np.abs(samples.astype(np.int32)))) > _ALAW_FLOOR_MAGNITUDE
 
 
 class CalibrationRunnerError(CalibrationError):
@@ -265,7 +271,7 @@ async def run_echo_calibration(
         # echo still recorded *something* (room tone, at minimum), while a
         # dead microphone recorded digital silence. Checked here, not by
         # matching `failure_reason`'s text (T-260922-eca).
-        if measurement.no_echo and rms_amplitude(recorded_pcm16) > _DIGITAL_SILENCE_RMS_THRESHOLD:
+        if measurement.no_echo and _has_signal_above_codec_floor(recorded_pcm16):
             logger.warning(
                 "no echo came back for source=%s (confidence=%.3f) -- "
                 "assuming the camera cancels its own speaker output from its microphone",

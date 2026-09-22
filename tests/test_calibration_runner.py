@@ -272,6 +272,24 @@ async def test_uncorrelated_noise_saves_an_echo_cancelled_record_instead_of_a_fa
     assert find_latest_calibration(calibration_config.dir) is not None
 
 
+async def test_near_floor_room_tone_still_counts_as_an_echo_cancelled_camera(tmp_path):
+    """The live house camera gates its microphone to rms ~8-20 of 32768,
+    right at the A-law floor, so an rms threshold called it silence. Any
+    sample above the codec floor proves the microphone is live."""
+    fake = _LoopbackFake(uncorrelated_noise_rms=12.0)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+    )
+
+    assert result.failure_reason is None
+    assert result.calibration is not None
+    assert result.calibration.echo_cancelled is True
+
+
 async def test_settle_elapses_before_the_probe_is_written_and_window_covers_duration_plus_tail(tmp_path):
     fake = _LoopbackFake(delay_samples=100, scale=0.9)
     camera_config = _make_camera_config()
