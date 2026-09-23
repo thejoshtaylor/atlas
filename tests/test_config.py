@@ -558,8 +558,10 @@ def test_example_config_loads_end_to_end(monkeypatch):
 
     config = load_config("config/config.example.yaml")
 
-    assert len(config.brain.models) == 3
-    assert config.brain.top_tier.model == "grok-4.6"
+    # 260923-spd: one fast non-reasoning model is the shipped default now --
+    # the two slower reasoning tiers hit `turn_timeout_s` on live turns.
+    assert len(config.brain.models) == 1
+    assert config.brain.top_tier.model == "grok-4.20-0309-non-reasoning"
     # Plan 04-05 (D-09): macros: is retired from this file -- Config no
     # longer carries a macros field at all, the same way it carries no
     # safety field (D-11). This is the load-bearing half of the assertion
