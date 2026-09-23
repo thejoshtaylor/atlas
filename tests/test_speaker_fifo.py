@@ -243,3 +243,44 @@ async def test_reopen_with_no_reader_fails_instead_of_hanging_forever(tmp_path):
         await asyncio.wait_for(writer.write(b"second-chunk"), timeout=reopen_timeout_s + 5.0)
 
     first_reader_thread.join(timeout=2)
+
+
+async def test_write_after_a_failed_reopen_retries_and_recovers(tmp_path):
+    """A reopen that timed out must not leave the writer dead for good.
+
+    Before this fix, the timed-out reopen left `_fh` at None, and every
+    later write raised "write called before open()" without looking for a
+    reader again. Live, the speaker then stayed silent after the camera's
+    talk session came back, until the pod restarted.
+    """
+    fifo_path = str(tmp_path / "speaker.alaw")
+    os.mkfifo(fifo_path)
+
+    def _read_once(into: list[bytes], done: threading.Event) -> None:
+        with open(fifo_path, "rb", buffering=0) as fh:
+            into.append(fh.read(64))
+        done.set()
+
+    first: list[bytes] = []
+    first_done = threading.Event()
+    threading.Thread(target=_read_once, args=(first, first_done), daemon=True).start()
+
+    writer = FifoWriter(fifo_path, reopen_timeout_s=0.2)
+    await writer.open()
+    await writer.write(b"first-chunk")
+    await asyncio.get_running_loop().run_in_executor(None, first_done.wait, 2)
+    assert first_done.is_set(), "the first reader never attached/closed"
+
+    with pytest.raises(SpeakerError):
+        await writer.write(b"lost-chunk")
+    assert writer._fh is None
+
+    second: list[bytes] = []
+    second_done = threading.Event()
+    threading.Thread(target=_read_once, args=(second, second_done), daemon=True).start()
+
+    await asyncio.wait_for(writer.write(b"after-recovery"), timeout=5.0)
+    await asyncio.get_running_loop().run_in_executor(None, second_done.wait, 2)
+    assert b"".join(second) == b"after-recovery"
+
+    await writer.close()

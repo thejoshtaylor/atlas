@@ -83,9 +83,15 @@ class FifoWriter:
         better than the caller -- and the executor thread it was
         awaiting on -- never coming back at all.
         """
-        if self._fh is None:
-            raise SpeakerError("FifoWriter.write called before open()")
         loop = asyncio.get_running_loop()
+        if self._fh is None:
+            # A previous reopen gave up. Try again, bounded the same way:
+            # without this, one timed-out reopen left `_fh` at None for the
+            # life of the process, and the speaker stayed silent after the
+            # talk session came back (seen live after a camera lockout).
+            await self._reopen(loop)
+            await loop.run_in_executor(None, self._fh.write, chunk)
+            return
         try:
             await loop.run_in_executor(None, self._fh.write, chunk)
         except BrokenPipeError:
@@ -99,16 +105,19 @@ class FifoWriter:
             # fresh connection it was waiting for.
             self._fh.close()
             self._fh = None
-            try:
-                self._fh = await loop.run_in_executor(
-                    None, self._blocking_reopen, self._reopen_timeout_s
-                )
-            except OSError as exc:
-                raise SpeakerError(
-                    f"speaker FIFO {self._fifo_path!r} found no reader within "
-                    f"{self._reopen_timeout_s:g}s of the last one disappearing: {exc}"
-                ) from exc
+            await self._reopen(loop)
             await loop.run_in_executor(None, self._fh.write, chunk)
+
+    async def _reopen(self, loop: asyncio.AbstractEventLoop) -> None:
+        try:
+            self._fh = await loop.run_in_executor(
+                None, self._blocking_reopen, self._reopen_timeout_s
+            )
+        except OSError as exc:
+            raise SpeakerError(
+                f"speaker FIFO {self._fifo_path!r} found no reader within "
+                f"{self._reopen_timeout_s:g}s: {exc}"
+            ) from exc
 
     async def close(self) -> None:
         if self._fh is not None:
