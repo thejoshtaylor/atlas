@@ -5,6 +5,7 @@ Turned green by plan 01-03. Every entity id below is invented, following the
 rule `safety.py`'s own self-check already states.
 """
 
+import inspect
 import json
 import os
 import subprocess
@@ -140,6 +141,157 @@ async def test_policy_check_runs_once_across_a_return_response_retry(monkeypatch
 
     assert call_count == 1
     assert len(scripted.requests) == 2
+
+
+# CMD-01 follow-up (260923-j8h), continued: a non-2xx reply that is not
+# asking for `?return_response` must never be retried, and every non-2xx
+# reply must carry Home Assistant's own reason, not a bare status code.
+
+
+@pytest.mark.parametrize(
+    "status_code,response_kwargs",
+    [
+        (
+            400,
+            {
+                "json": {
+                    "message": "Service does not support responses. Remove return_response from request."
+                }
+            },
+        ),
+        (400, {"json": {"message": "Invalid JSON specified."}}),
+        (400, {"text": "not json at all"}),
+        (500, {"json": {"message": "Internal Server Error"}}),
+    ],
+    ids=["no-response-support", "bad-json-message", "non-json-body", "server-error"],
+)
+async def test_a_non_2xx_that_does_not_ask_for_responses_is_not_retried(status_code, response_kwargs):
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa([httpx.Response(status_code, **response_kwargs)])
+    try:
+        result = await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "light",
+            "turn_on",
+            "light.kitchen",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert len(scripted.requests) == 1
+    assert set(result) == {"error"}
+
+
+async def test_error_result_carries_home_assistants_message():
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa([httpx.Response(400, json={"message": "Invalid JSON specified."})])
+    try:
+        result = await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "light",
+            "turn_on",
+            "light.kitchen",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert result == {"error": "home assistant returned 400: Invalid JSON specified."}
+
+
+async def test_error_result_cuts_a_non_json_body_to_200_characters():
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa([httpx.Response(502, text="x" * 500)])
+    try:
+        result = await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "light",
+            "turn_on",
+            "light.kitchen",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert result == {"error": "home assistant returned 502: " + "x" * 200}
+
+
+async def test_a_failed_retry_returns_the_second_error_and_does_not_retry_again():
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa(
+        [
+            httpx.Response(400, json={"message": _REQUIRES_RESPONSES}),
+            httpx.Response(500, json={"message": "boom"}),
+        ]
+    )
+    try:
+        result = await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "todo",
+            "get_items",
+            "todo.shopping_list",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert len(scripted.requests) == 2
+    assert result == {"error": "home assistant returned 500: boom"}
+
+
+async def test_plain_success_posts_once_without_return_response(fake_ha):
+    policy = Policy.from_config(None)
+
+    result = await handle_call_service(
+        policy,
+        fake_ha.client,
+        "http://ha.invalid",
+        "test-token",
+        "switch",
+        "turn_on",
+        "switch.example_fan",
+    )
+
+    assert len(fake_ha.requests) == 1
+    request = fake_ha.requests[0]
+    assert "return_response" not in request.url.params
+    assert set(result) == {"changed"}
+    assert isinstance(result["changed"], list)
+
+
+def test_handler_signatures_gain_no_passthrough_parameter():
+    assert list(inspect.signature(handle_call_service).parameters) == [
+        "policy",
+        "client",
+        "base_url",
+        "token",
+        "domain",
+        "service",
+        "entity_id",
+        "area_id",
+        "device_id",
+        "label_id",
+        "registry",
+        "transition",
+    ]
+    assert list(inspect.signature(ha_module.ha_call_service).parameters) == [
+        "domain",
+        "service",
+        "entity_id",
+        "area_id",
+        "device_id",
+        "label_id",
+        "transition",
+    ]
 
 
 async def test_service_call_allowed_entity(fake_ha):

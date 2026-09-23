@@ -178,7 +178,12 @@ async def handle_call_service(
     if response.status_code // 100 != 2:
         # A non-2xx response is surfaced as an error result, never an empty
         # success -- the prior incident on this host hid itself exactly this
-        # way, because nothing recorded the failure (CMD-01).
+        # way, because nothing recorded the failure (CMD-01). The message
+        # names Home Assistant's own reason, so the brain can tell what
+        # went wrong instead of only that something did.
+        message = _ha_message(response)
+        if message:
+            return {"error": f"home assistant returned {response.status_code}: {message}"}
         return {"error": f"home assistant returned {response.status_code}"}
     body = response.json()
     if isinstance(body, dict) and "service_response" in body:
