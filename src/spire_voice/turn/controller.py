@@ -95,6 +95,7 @@ from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
 from spire_voice.turn.local_intent import match_on_off
 from spire_voice.turn.macros import fire_macro, match as match_macro
+from spire_voice.turn.transcript_guard import is_no_command
 from spire_voice.turn.wake_echo import is_wake_only
 
 logger = logging.getLogger("spire_voice.turn.controller")
@@ -537,7 +538,15 @@ async def run_turn(
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
-        if not final_text:
+        # 260923-kao: a wake-only or filler-only final transcript ends the
+        # turn the same way VOICE-08's empty-transcript case does below --
+        # it never reaches a macro, the local on/off matcher, or the tier
+        # race, and it shows as `turn_outcome = "no_command"` in
+        # `timing.json`. This is what makes the second-drain comment above
+        # true for a second wake-only reply: without this guard, that
+        # second drain's own transcript was never checked, and a repeated
+        # wake phrase or a bare "It's" fell straight through to the brain.
+        if not final_text or is_no_command(final_text, wake_phrase):
             # VOICE-08's two cases end the turn the same way, with no language
             # model call: `final is None` is RESEARCH.md Pitfall 3's second
             # case (the provider never sent anything at all, closed here by
@@ -554,7 +563,12 @@ async def run_turn(
             # itself, so this is one call doing what used to be two, not an
             # added step. The no-language-model-call guarantee above is
             # untouched: nothing here reaches `brain`.
-            timings.turn_outcome = "timeout" if final is None else "empty_transcript"
+            if final is None:
+                timings.turn_outcome = "timeout"
+            elif not final_text:
+                timings.turn_outcome = "empty_transcript"
+            else:
+                timings.turn_outcome = "no_command"
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
             no_speech_tts = _tts_for_precached_fallback(filler_cache, sink, _NO_SPEECH_REPLY, tts)

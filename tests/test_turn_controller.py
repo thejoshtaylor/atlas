@@ -193,6 +193,40 @@ async def test_empty_transcript_closes_turn(fake_audio_source, fake_stt, fake_br
     assert timings.turn_outcome == "empty_transcript"
 
 
+async def test_wake_only_or_filler_transcript_never_reaches_the_brain(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """A final transcript that is only the wake phrase (or a near-miss of
+    it) or only filler words ends the turn the same way VOICE-08 does --
+    no macro, no local intent, no brain call (260923-kao)."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+
+    for text in ("Space Spire", "It's"):
+        source = fake_audio_source(frames=[b"\x00\x01"])
+        stt = fake_stt(events=[FinalTranscript(text=text)])
+        brain = fake_brain(replies=[])
+        tts = fake_tts(chunks=[b"\x01\x02"])
+        timings = TurnTimings()
+
+        await run_turn(
+            source,
+            stt,
+            brain,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+        )
+
+        assert brain.call_count == 0
+        assert tts.received_text == [_NO_SPEECH_REPLY]
+        assert source.sent_audio == [b"\x01\x02"]
+        assert timings.turn_outcome == "no_command"
+
+
 async def test_silence_timeout_closes_turn(fake_audio_source, fake_stt, fake_brain, fake_tts):
     """A provider that never emits anything is closed by the client-side
     `max_utterance_s` timeout, never by a provider event -- RESEARCH.md
@@ -1432,17 +1466,19 @@ async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_
     assert tts.received_text == ["turned on the lights"]
 
 
-async def test_no_wake_phrase_configured_leaves_behavior_unchanged(fake_tts):
+async def test_no_wake_phrase_configured_drains_once(fake_tts):
     """`wake_phrase=None` (the default, and every caller that predates this
-    plan) skips `is_wake_only` entirely -- a transcript that would
-    otherwise read as wake-only ends the turn exactly as it always has,
-    with one drain and whatever the brain makes of it."""
+    plan) skips `is_wake_only` entirely, so there is still only one drain.
+    But the transcript guard (260923-kao) checks every final transcript
+    regardless of `wake_phrase` -- with no configured phrase it falls back
+    to the default keyword, "spire", and "hey spire" is wake-only against
+    that default. The turn ends without the brain."""
     from spire_voice.providers.base import FinalTranscript
     from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey spire")]])
-    brain = _RecordingBrain(replies=[BrainReply(text="i heard the wake word")])
+    brain = _RecordingBrain(replies=[])
     source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
     tts = fake_tts(chunks=[b"\x01\x02"])
     timings = TurnTimings()
@@ -1460,8 +1496,9 @@ async def test_no_wake_phrase_configured_leaves_behavior_unchanged(fake_tts):
     )
 
     assert len(stt.received_by_call) == 1
-    assert brain.received_messages[-1][-1] == {"role": "user", "content": "hey spire"}
-    assert tts.received_text == ["i heard the wake word"]
+    assert brain.received_messages == []
+    assert tts.received_text == [_NO_SPEECH_REPLY]
+    assert timings.turn_outcome == "no_command"
 
 
 
