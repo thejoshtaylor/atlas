@@ -418,3 +418,173 @@ def test_read_local_radius_km_rejects_unparseable_negative_and_infinite_values(m
         with pytest.raises(SystemExit) as excinfo:
             _read_local_radius_km()
         assert "WEATHER_LOCAL_RADIUS_KM" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: forecast for a named place, geocode parsing edges, and the schema
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """A fake monotonic clock a test can move forward without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _RecordingTransport:
+    """An `httpx.MockTransport` handler that counts and records requests."""
+
+    def __init__(self, response_body, status_code: int = 200) -> None:
+        self.calls = 0
+        self.requests: list[httpx.Request] = []
+        self.response_body = response_body
+        self.status_code = status_code
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        self.requests.append(request)
+        return httpx.Response(self.status_code, json=self.response_body)
+
+
+async def test_weather_forecast_for_a_qualified_place_reports_its_location():
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_SPRINGFIELD_GEOCODE_BODY, _FORECAST_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        try:
+            result = await weather.weather_forecast(days=2, place="Springfield, Illinois")
+        finally:
+            weather._open_meteo_client = None
+
+    assert result["location"] == "Springfield, Illinois, United States"
+    assert isinstance(result["days"], list) and result["days"]
+
+
+async def test_weather_forecast_refuses_a_bad_day_count_before_any_request():
+    from mcp.server.mcpserver.exceptions import ToolError
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        try:
+            with pytest.raises(ToolError) as excinfo:
+                await weather.weather_forecast(days=17, place="Paris")
+        finally:
+            weather._open_meteo_client = None
+
+    assert "16" in str(excinfo.value)
+    assert router.requests == []
+
+
+async def test_geocode_sends_the_expected_request_shape():
+    recorder = _RecordingTransport(_PARIS_GEOCODE_BODY)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        await client.geocode("Paris")
+
+    assert recorder.calls == 1
+    request = recorder.requests[0]
+    assert request.url.host == "geocoding-api.open-meteo.com"
+    assert request.url.path == "/v1/search"
+    assert request.url.params["name"] == "Paris"
+    assert request.url.params["count"] == "10"
+    assert request.url.params["language"] == "en"
+    assert request.url.params["format"] == "json"
+
+
+async def test_geocode_returns_the_normalized_fields_with_a_missing_admin1_as_empty():
+    body = {
+        "results": [
+            {
+                "name": "Nowhere",
+                "latitude": 1.0,
+                "longitude": 2.0,
+                "country": "Testland",
+                "country_code": "TL",
+                "population": 5,
+            }
+        ]
+    }
+    recorder = _RecordingTransport(body)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        result = await client.geocode("Nowhere")
+
+    assert result == [
+        {
+            "name": "Nowhere",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "country": "Testland",
+            "country_code": "TL",
+            "admin1": "",
+            "population": 5,
+        }
+    ]
+
+
+async def test_geocode_with_no_results_key_or_an_empty_list_gives_no_matches():
+    for body in ({"generationtime_ms": 0.3}, {"results": []}):
+        recorder = _RecordingTransport(body)
+        async with _client_for(recorder) as http_client:
+            client = OpenMeteoClient(http_client)
+            result = await client.geocode("Nowhere")
+        assert result == []
+
+
+async def test_geocode_with_an_unreadable_body_raises_malformed():
+    from spire_mcp.open_meteo import UpstreamMalformedError
+
+    for body in ({"results": [{"name": "Paris"}]}, {"results": "nope"}):
+        recorder = _RecordingTransport(body)
+        async with _client_for(recorder) as http_client:
+            client = OpenMeteoClient(http_client)
+            with pytest.raises(UpstreamMalformedError):
+                await client.geocode("Paris")
+
+
+async def test_geocode_with_a_503_raises_unreachable():
+    from spire_mcp.open_meteo import UpstreamUnreachableError
+
+    recorder = _RecordingTransport({"error": "internal"}, status_code=503)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        with pytest.raises(UpstreamUnreachableError):
+            await client.geocode("Paris")
+
+
+async def test_a_second_geocode_inside_the_ttl_makes_one_request_in_total():
+    recorder = _RecordingTransport(_PARIS_GEOCODE_BODY)
+    clock = _Clock()
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client, ttl_seconds=600.0, clock=clock)
+        await client.geocode("Paris")
+        clock.advance(60.0)
+        await client.geocode("Paris")
+
+    assert recorder.calls == 1
+
+
+async def test_both_tools_advertise_an_optional_place_in_their_schema():
+    from spire_mcp import weather
+
+    listed = await weather.mcp_server.list_tools()
+    tools_by_name = {tool.name: tool for tool in listed}
+
+    for name in ("weather_current", "weather_forecast"):
+        schema = tools_by_name[name].input_schema
+        assert "place" in schema["properties"]
+        assert "place" not in schema.get("required", [])
