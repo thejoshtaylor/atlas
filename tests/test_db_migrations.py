@@ -467,6 +467,12 @@ async def test_seeded_plugins_match_the_mcp_servers_block_they_came_from(
     assert weather_values["WEATHER_LATITUDE"].secret is False
     assert weather_values["WEATHER_LATITUDE"].value == "51.5"
     assert weather_values["WEATHER_LONGITUDE"].value == "-0.1"
+    # Migration 0013 seeds WEATHER_UNITS on every fresh install too --
+    # 0008 always seeds the builtin weather row first, and 0013 runs
+    # after it, so a fresh install and an upgraded one both end at the
+    # same state (260923-lmg-PLAN.md's planner finding 2).
+    assert weather_values["WEATHER_UNITS"].secret is False
+    assert weather_values["WEATHER_UNITS"].value == "celsius"
 
 
 async def _fetch_workflow_step_index_and_constraint_names(async_url: str) -> tuple[set, set]:
@@ -667,6 +673,142 @@ async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_read
 
     # Idempotent, like every other migration in this file.
     _run_upgrade_head()
+
+
+@skip_without_postgres
+async def test_migration_0013_seeds_weather_units_without_overwriting_an_operators_value(
+    tmp_path: Path, monkeypatch
+):
+    """260923-lmg-PLAN.md's planner finding 1: nothing at boot syncs the
+    plugin catalog into an existing install's stored config rows -- the
+    catalog is read only at install time and by the catalog route, and
+    both the config editor and the child env are built from stored rows
+    only. Adding WEATHER_UNITS to the catalog therefore never reaches an
+    existing install without a migration to carry it. This migration must
+    seed a fresh weather row with "celsius", never overwrite a value an
+    operator already saved (T-lmg-05), and do nothing at all when there
+    is no weather plugin to seed.
+    """
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    await _reset_schema(_TEST_DB_URL)
+
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "mcp": {
+            "servers": {
+                "ha": {
+                    "args": ["-m", "spire_mcp.ha"],
+                    "env": {
+                        "HA_URL": "http://ha.invalid:8123",
+                        "HA_TOKEN": "a-plainly-fictional-migration-test-token",
+                    },
+                },
+            },
+        },
+        "database": {"url": _TEST_DB_URL},
+        "security": {},
+    }
+    config_path = tmp_path / "weather-units-migration-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    async def _weather_units_rows():
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                return (
+                    await conn.execute(
+                        text(
+                            "SELECT v.secret, v.value, v.ciphertext "
+                            "FROM plugin_config_values v JOIN plugins p ON p.id = v.plugin_id "
+                            "WHERE p.slug = 'weather' AND v.key = 'WEATHER_UNITS'"
+                        )
+                    )
+                ).fetchall()
+        finally:
+            await engine.dispose()
+
+    def _downgrade_to_0012() -> None:
+        cfg = AlembicConfig("alembic.ini")
+        cfg.set_main_option("sqlalchemy.url", _migration_url(_TEST_DB_URL))
+        command.downgrade(cfg, "0012")
+
+    # 1. Before 0013 runs: 0008 seeded the weather plugin, but no
+    # WEATHER_UNITS row exists yet.
+    _run_upgrade_to("0012")
+    assert await _weather_units_rows() == []
+
+    # 2. Upgrade to head: exactly one row, plain-stored "celsius".
+    _run_upgrade_head()
+    rows = await _weather_units_rows()
+    assert len(rows) == 1
+    assert rows[0].secret is False
+    assert rows[0].value == "celsius"
+    assert rows[0].ciphertext is None
+
+    # 3. Downgrade: the seeded row is removed.
+    _downgrade_to_0012()
+    assert await _weather_units_rows() == []
+
+    # 4. An operator's own saved value is never overwritten by a later
+    # upgrade (T-lmg-05).
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            plugin_id = (
+                await conn.execute(text("SELECT id FROM plugins WHERE slug = 'weather'"))
+            ).scalar_one()
+            await conn.execute(
+                text(
+                    "INSERT INTO plugin_config_values "
+                    "(plugin_id, key, secret, value, ciphertext, key_version, updated_at) "
+                    "VALUES (:plugin_id, 'WEATHER_UNITS', false, 'fahrenheit', NULL, NULL, now())"
+                ),
+                {"plugin_id": plugin_id},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_upgrade_head()
+    rows = await _weather_units_rows()
+    assert len(rows) == 1, "the migration must keep the operator's row, never add a second one"
+    assert rows[0].value == "fahrenheit", "an operator's saved value must never be overwritten"
+
+    # 5. No weather plugin at all: the migration does nothing, and the
+    # upgrade still succeeds.
+    _downgrade_to_0012()
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            weather_plugin_id = (
+                await conn.execute(text("SELECT id FROM plugins WHERE slug = 'weather'"))
+            ).scalar_one()
+            await conn.execute(
+                text("DELETE FROM plugin_config_values WHERE plugin_id = :plugin_id"),
+                {"plugin_id": weather_plugin_id},
+            )
+            await conn.execute(text("DELETE FROM plugins WHERE id = :plugin_id"), {"plugin_id": weather_plugin_id})
+    finally:
+        await engine.dispose()
+
+    _run_upgrade_head()
+    assert await _weather_units_rows() == []
+
+    # 6. Idempotent, like every other migration in this file.
+    _run_upgrade_head()
+    assert await _weather_units_rows() == []
 
 
 @skip_without_postgres
@@ -949,7 +1091,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # The real migration runner `lifespan` calls -- not a fake, not a
         # second reimplementation of it (the plan's own key link).
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0012"
+        assert get_current_revision(migration_url) == "0013"
 
         async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
             reread_rules = {r.id: r for r in await policy_repo.list_rules()}
@@ -980,7 +1122,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # A second run at head: no-op. The stamped revision is unchanged
         # and nothing is added, removed, or rewritten -- old data or new.
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0012"
+        assert get_current_revision(migration_url) == "0013"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
 
         # A downgrade of this phase's own migration, and a re-upgrade,
@@ -993,7 +1135,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         assert get_current_revision(migration_url) == "0010"
 
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0012"
+        assert get_current_revision(migration_url) == "0013"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
     finally:
         await engine.dispose()

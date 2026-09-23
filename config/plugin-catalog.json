@@ -19,7 +19,8 @@
       "url": null,
       "config_keys": [
         {"key": "WEATHER_LATITUDE", "label": "Latitude", "secret": false},
-        {"key": "WEATHER_LONGITUDE", "label": "Longitude", "secret": false}
+        {"key": "WEATHER_LONGITUDE", "label": "Longitude", "secret": false},
+        {"key": "WEATHER_UNITS", "label": "Units (celsius or fahrenheit)", "secret": false}
       ]
     }
   ]

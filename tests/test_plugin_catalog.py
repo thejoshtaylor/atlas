@@ -40,8 +40,15 @@ def test_the_shipped_catalog_parses_and_seeds_the_two_builtin_plugins():
     assert weather.transport == "stdio"
     assert weather.args == ("-m", "spire_mcp.weather")
     assert weather.url is None
-    assert {ck.key for ck in weather.config_keys} == {"WEATHER_LATITUDE", "WEATHER_LONGITUDE"}
+    assert [ck.key for ck in weather.config_keys] == [
+        "WEATHER_LATITUDE",
+        "WEATHER_LONGITUDE",
+        "WEATHER_UNITS",
+    ]
     assert all(not ck.secret for ck in weather.config_keys)
+    assert weather.config_keys[2] == CatalogConfigKey(
+        key="WEATHER_UNITS", label="Units (celsius or fahrenheit)", secret=False
+    )
 
 
 def test_no_entry_declares_a_secret_value_only_which_keys_are_secret():
