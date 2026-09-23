@@ -40,6 +40,13 @@ _MAX_FORECAST_DAYS = 16
 _DEFAULT_FORECAST_DAYS = 3
 _DEFAULT_LOCAL_RADIUS_KM = 300.0
 
+# WEATHER_UNITS aliases, matched case-insensitively with surrounding spaces
+# stripped. Kept as two closed sets, the same "add an entry, never guess"
+# posture _COUNTRY_ALIASES already takes -- any value outside both refuses
+# to start rather than being interpreted as one or the other.
+_FAHRENHEIT_UNIT_ALIASES = {"f", "fahrenheit", "imperial", "us"}
+_CELSIUS_UNIT_ALIASES = {"c", "celsius", "metric"}
+
 # Common spoken aliases for a country, mapped to open-meteo's own
 # `country_code`. Kept small and closed on purpose -- see
 # `_qualifier_matches`. This is not a general alias system; add an entry
@@ -199,14 +206,21 @@ async def handle_weather_current(
     *,
     place: str | None = None,
     local_radius_km: float = _DEFAULT_LOCAL_RADIUS_KM,
+    units: str = "celsius",
 ) -> dict[str, Any]:
     """Answer a question about the current outdoor weather, from an
     external service (open-meteo) -- never a room's own temperature sensor.
 
     Resolves `place` first (see `resolve_place`), then returns a dict
-    already close to speech: a temperature in Celsius, a short condition
-    phrase, the location's local time, and the resolved `location`.
-    Rounded to one decimal place, the precision a person says out loud.
+    already close to speech: a temperature in the configured unit (`unit`
+    names it), a short condition phrase, the location's local time, and
+    the resolved `location`. Rounded to one decimal place, the precision a
+    person says out loud.
+
+    Reads the unit only from its own `units` parameter, never from the
+    `_units` module global -- keeps this handler pure, the same property
+    `test_no_handler_body_references_a_module_level_client_name` already
+    proves for the client.
     """
     resolved_latitude, resolved_longitude, location = await resolve_place(
         client,
@@ -215,9 +229,12 @@ async def handle_weather_current(
         home_longitude=longitude,
         local_radius_km=local_radius_km,
     )
-    result = await client.current_conditions(resolved_latitude, resolved_longitude)
+    result = await client.current_conditions(
+        resolved_latitude, resolved_longitude, temperature_unit=units
+    )
     return {
-        "temperature_c": round(result["temperature_c"], 1),
+        "temperature": round(result["temperature"], 1),
+        "unit": _unit_symbol(units),
         "condition": result["condition"],
         "local_time": result["local_time"],
         "location": location,
@@ -278,6 +295,7 @@ _open_meteo_client: OpenMeteoClient | None = None
 _latitude: float = 0.0
 _longitude: float = 0.0
 _local_radius_km: float = _DEFAULT_LOCAL_RADIUS_KM
+_units: str = "celsius"
 
 
 @mcp_server.tool()
@@ -290,7 +308,9 @@ async def weather_current(place: str | None = None) -> dict[str, Any]:
     region, add it after a comma, for example "Paris, France" or
     "Springfield, Illinois". Do not add a qualifier the user did not say.
     The result's `location` names the place the answer is for, or "home".
-    Say that place in the reply.
+    Say that place in the reply. The result's `temperature` is in the unit
+    its `unit` field names: "F" means Fahrenheit and "C" means Celsius.
+    Say that unit in the reply.
     """
     assert _open_meteo_client is not None, "weather_current invoked before startup"
     try:
@@ -300,6 +320,7 @@ async def weather_current(place: str | None = None) -> dict[str, Any]:
             _longitude,
             place=place,
             local_radius_km=_local_radius_km,
+            units=_units,
         )
     except (UpstreamUnreachableError, UpstreamMalformedError, ValueError) as exc:
         # The exception's own sentence crosses this boundary unchanged --
@@ -392,11 +413,43 @@ def _read_local_radius_km() -> float:
     return value
 
 
+def _read_units() -> str:
+    """Read WEATHER_UNITS from this process's own environment.
+
+    Missing or blank means celsius -- a catalog install stores an empty
+    string and migration 0013 seeds the literal "celsius", and both mean
+    the same thing. Matching ignores case and surrounding spaces. Any
+    value outside the two closed alias sets stops startup, naming the
+    variable and the raw value -- the same refuse-rather-than-guess
+    posture `_read_coordinate` already takes.
+    """
+    raw = os.environ.get("WEATHER_UNITS")
+    if raw is None or not raw.strip():
+        return "celsius"
+    normalized = raw.strip().casefold()
+    if normalized in _FAHRENHEIT_UNIT_ALIASES:
+        return "fahrenheit"
+    if normalized in _CELSIUS_UNIT_ALIASES:
+        return "celsius"
+    raise SystemExit(f"WEATHER_UNITS must be celsius or fahrenheit, got {raw!r}")
+
+
+def _unit_symbol(units: str) -> str:
+    """The one-letter label a spoken reply names -- "F" or "C".
+
+    "fahrenheit" gives "F"; any other value gives "C". The one definition
+    of this label, so a handler's returned `unit` and the request
+    parameter it sent can never disagree.
+    """
+    return "F" if units == "fahrenheit" else "C"
+
+
 def _startup() -> None:
-    global _http_client, _open_meteo_client, _latitude, _longitude, _local_radius_km
+    global _http_client, _open_meteo_client, _latitude, _longitude, _local_radius_km, _units
     _latitude = _read_coordinate("WEATHER_LATITUDE")
     _longitude = _read_coordinate("WEATHER_LONGITUDE")
     _local_radius_km = _read_local_radius_km()
+    _units = _read_units()
     _http_client = httpx.AsyncClient()
     _open_meteo_client = OpenMeteoClient(_http_client)
 

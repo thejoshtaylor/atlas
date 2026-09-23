@@ -220,6 +220,47 @@ async def test_weather_current_without_a_place_reports_home():
     assert geocode_requests == []
 
 
+async def test_weather_current_in_fahrenheit_sends_temperature_unit_and_labels_f(monkeypatch):
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        monkeypatch.setattr(weather, "_units", "fahrenheit")
+        try:
+            result = await weather.weather_current()
+        finally:
+            weather._open_meteo_client = None
+
+    non_geocoding_requests = [r for r in router.requests if r.url.host != "geocoding-api.open-meteo.com"]
+    assert len(non_geocoding_requests) == 1
+    assert non_geocoding_requests[0].url.params["temperature_unit"] == "fahrenheit"
+    assert result["temperature"] == 24.4
+    assert result["unit"] == "F"
+    assert not any(key.endswith("_c") for key in result)
+
+
+async def test_weather_current_default_units_sends_no_temperature_unit_param():
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        try:
+            result = await weather.weather_current()
+        finally:
+            weather._open_meteo_client = None
+
+    non_geocoding_requests = [r for r in router.requests if r.url.host != "geocoding-api.open-meteo.com"]
+    assert len(non_geocoding_requests) == 1
+    assert "temperature_unit" not in non_geocoding_requests[0].url.params
+    assert result["unit"] == "C"
+
+
 # ---------------------------------------------------------------------------
 # Task 2: locale-biased selection, the global fallback, and a named refusal
 # ---------------------------------------------------------------------------

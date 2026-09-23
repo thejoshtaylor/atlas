@@ -128,14 +128,22 @@ class OpenMeteoClient:
         self._clock = clock
         self._cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
-    async def current_conditions(self, latitude: float, longitude: float) -> dict[str, Any]:
+    async def current_conditions(
+        self, latitude: float, longitude: float, *, temperature_unit: str = "celsius"
+    ) -> dict[str, Any]:
         """Fetch (or serve from cache) the current temperature and condition.
+
+        `temperature_unit` is "celsius" or "fahrenheit". Only "fahrenheit"
+        adds a request parameter -- open-meteo defaults to celsius, so a
+        celsius request stays byte-identical to before this parameter
+        existed. The number that comes back is already in the unit asked
+        for; this client never converts a number locally.
 
         Returns a plain dict -- no SDK object, no ORM row -- carrying a
         temperature, a condition, the location's local time, and its
         timezone name.
         """
-        key = ("current", latitude, longitude, 0)
+        key = ("current", latitude, longitude, 0, temperature_unit)
         cached = self._cached(key)
         if cached is not None:
             return cached
@@ -145,6 +153,8 @@ class OpenMeteoClient:
             "current": "temperature_2m,weather_code,is_day",
             "timezone": "auto",
         }
+        if temperature_unit == "fahrenheit":
+            params["temperature_unit"] = "fahrenheit"
         body = await self._fetch(params)
         result = self._parse_current(body)
         self._store(key, result)
@@ -229,7 +239,7 @@ class OpenMeteoClient:
     def _parse_current(self, body: Any) -> dict[str, Any]:
         try:
             current = body["current"]
-            temperature_c = current["temperature_2m"]
+            temperature = current["temperature_2m"]
             weather_code = current["weather_code"]
             local_time = current["time"]
             timezone = body["timezone"]
@@ -238,7 +248,7 @@ class OpenMeteoClient:
                 "The weather service sent back something I couldn't read."
             ) from exc
         return {
-            "temperature_c": temperature_c,
+            "temperature": temperature,
             "condition": _condition_for(weather_code),
             "local_time": local_time,
             "timezone": timezone,

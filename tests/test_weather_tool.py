@@ -123,7 +123,7 @@ async def test_current_conditions_returns_a_plain_dict_with_temperature_and_cond
         result = await client.current_conditions(_FAKE_LATITUDE, _FAKE_LONGITUDE)
 
     assert type(result) is dict
-    assert result["temperature_c"] == 24.4
+    assert result["temperature"] == 24.4
     assert result["condition"] == "overcast"
     assert result["local_time"] == "2026-09-18T16:00"
     assert result["timezone"] == "Etc/GMT"
@@ -228,7 +228,7 @@ async def test_live_current_conditions_has_the_fields_the_parser_reads():
         client = OpenMeteoClient(http_client)
         result = await client.current_conditions(_FAKE_LATITUDE, _FAKE_LONGITUDE)
 
-    assert isinstance(result["temperature_c"], (int, float))
+    assert isinstance(result["temperature"], (int, float))
     assert isinstance(result["condition"], str) and result["condition"]
     assert isinstance(result["local_time"], str) and result["local_time"]
     assert isinstance(result["timezone"], str) and result["timezone"]
@@ -247,7 +247,8 @@ async def test_current_conditions_handler_returns_a_speech_ready_dict():
         client = OpenMeteoClient(http_client)
         result = await handle_weather_current(client, _FAKE_LATITUDE, _FAKE_LONGITUDE)
 
-    assert result["temperature_c"] == 24.4
+    assert result["temperature"] == 24.4
+    assert result["unit"] == "C"
     assert result["condition"] == "overcast"
     assert "local_time" in result
 
@@ -385,6 +386,70 @@ def test_a_child_started_with_no_coordinate_variables_refuses_to_start():
         raise
     assert proc.returncode != 0, "a child with no coordinates must not serve a default location"
     assert "WEATHER_LATITUDE" in stderr or "WEATHER_LONGITUDE" in stderr
+
+
+def test_read_units_table(monkeypatch):
+    from spire_mcp.weather import _read_units
+
+    monkeypatch.delenv("WEATHER_UNITS", raising=False)
+    assert _read_units() == "celsius"
+    for blank_value in ("", "   "):
+        monkeypatch.setenv("WEATHER_UNITS", blank_value)
+        assert _read_units() == "celsius"
+
+    for celsius_value in ("celsius", "C", " Metric "):
+        monkeypatch.setenv("WEATHER_UNITS", celsius_value)
+        assert _read_units() == "celsius"
+
+    for fahrenheit_value in ("f", "F", "Fahrenheit", "IMPERIAL", "us", "US", " fahrenheit "):
+        monkeypatch.setenv("WEATHER_UNITS", fahrenheit_value)
+        assert _read_units() == "fahrenheit"
+
+    for bad_value in ("kelvin", "farenheit", "u.s."):
+        monkeypatch.setenv("WEATHER_UNITS", bad_value)
+        with pytest.raises(SystemExit) as excinfo:
+            _read_units()
+        assert "WEATHER_UNITS" in str(excinfo.value)
+        assert bad_value in str(excinfo.value)
+
+
+async def test_startup_sets_units_from_weather_units_env(monkeypatch):
+    from spire_mcp import weather
+
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_UNITS", "F")
+    monkeypatch.setattr(weather, "_http_client", None)
+    monkeypatch.setattr(weather, "_open_meteo_client", None)
+    monkeypatch.setattr(weather, "_latitude", 0.0)
+    monkeypatch.setattr(weather, "_longitude", 0.0)
+    monkeypatch.setattr(weather, "_local_radius_km", weather._DEFAULT_LOCAL_RADIUS_KM)
+    monkeypatch.setattr(weather, "_units", "celsius")
+
+    weather._startup()
+    try:
+        assert weather._units == "fahrenheit"
+    finally:
+        assert weather._http_client is not None
+        await weather._http_client.aclose()
+
+
+def test_a_child_started_with_an_invalid_weather_units_value_refuses_to_start():
+    proc = _spawn_weather_child(
+        {
+            "WEATHER_LATITUDE": "0.0",
+            "WEATHER_LONGITUDE": "0.0",
+            "WEATHER_UNITS": "kelvin",
+        }
+    )
+    try:
+        _, stderr = proc.communicate(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, stderr = proc.communicate()
+        raise
+    assert proc.returncode != 0, "a child with an invalid WEATHER_UNITS must not start"
+    assert "WEATHER_UNITS" in stderr
 
 
 def test_weather_module_imports_no_policy_and_holds_no_credential_shaped_name():
