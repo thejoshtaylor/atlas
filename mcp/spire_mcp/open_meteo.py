@@ -11,7 +11,8 @@ This module also reads no environment variable and holds no credential.
 open-meteo's free, non-commercial forecast endpoint needs no key, which is
 the whole point: a plugin scoped to exactly what it needs holds nothing
 else, and the absence of any environment lookup anywhere in this file is
-that scoping made checkable by `grep`.
+that scoping made checkable by `grep`. The geocoding endpoint this module
+also calls needs no key either, so this remains true across both.
 
 The `httpx.AsyncClient` and the cache TTL both arrive as constructor
 arguments, never constructed internally -- dependency injection over
@@ -38,6 +39,7 @@ from typing import Any
 import httpx
 
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+_GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 
 # WMO weather interpretation codes, as documented at open-meteo.com/en/docs.
 # An unrecognised code is not a malformed response -- open-meteo may add a
@@ -124,7 +126,7 @@ class OpenMeteoClient:
         self._client = client
         self._ttl_seconds = ttl_seconds
         self._clock = clock
-        self._cache: dict[tuple[str, float, float, int], tuple[float, dict[str, Any]]] = {}
+        self._cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
 
     async def current_conditions(self, latitude: float, longitude: float) -> dict[str, Any]:
         """Fetch (or serve from cache) the current temperature and condition.
@@ -172,7 +174,29 @@ class OpenMeteoClient:
         self._store(key, result)
         return result
 
-    def _cached(self, key: tuple[str, float, float, int]) -> dict[str, Any] | None:
+    async def geocode(self, name: str) -> list[dict[str, Any]]:
+        """Look up open-meteo's geocoding matches for a spoken place name.
+
+        Returns a list of plain dicts, one for each candidate, in the
+        geocoder's own order. An empty list means no match -- that is not
+        an error. `select_place` in `weather.py` picks one of them.
+        """
+        key = ("geocode", name)
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+        params = {
+            "name": name,
+            "count": 10,
+            "language": "en",
+            "format": "json",
+        }
+        body = await self._fetch(params, url=_GEOCODING_URL)
+        result = self._parse_geocode(body)
+        self._store(key, result)
+        return result
+
+    def _cached(self, key: tuple[Any, ...]) -> Any | None:
         entry = self._cache.get(key)
         if entry is None:
             return None
@@ -181,12 +205,12 @@ class OpenMeteoClient:
             return None
         return value
 
-    def _store(self, key: tuple[str, float, float, int], value: dict[str, Any]) -> None:
+    def _store(self, key: tuple[Any, ...], value: Any) -> None:
         self._cache[key] = (self._clock(), value)
 
-    async def _fetch(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def _fetch(self, params: dict[str, Any], *, url: str = _FORECAST_URL) -> dict[str, Any]:
         try:
-            response = await self._client.get(_FORECAST_URL, params=params)
+            response = await self._client.get(url, params=params)
         except httpx.RequestError as exc:
             raise UpstreamUnreachableError("I can't reach the weather service right now.") from exc
         if response.status_code // 100 != 2:
@@ -246,3 +270,40 @@ class OpenMeteoClient:
             for date, high, low, code in zip(dates, highs, lows, codes)
         ]
         return {"days": days, "timezone": timezone}
+
+    def _parse_geocode(self, body: Any) -> list[dict[str, Any]]:
+        if not isinstance(body, dict):
+            raise UpstreamMalformedError(
+                "The weather service sent back something I couldn't read."
+            )
+        results = body.get("results")
+        if results is None:
+            return []
+        if not isinstance(results, list):
+            raise UpstreamMalformedError(
+                "The weather service sent back something I couldn't read."
+            )
+        matches: list[dict[str, Any]] = []
+        for entry in results:
+            try:
+                name = entry["name"]
+                if not isinstance(name, str):
+                    raise TypeError("a geocoding match's name must be a string")
+                latitude = float(entry["latitude"])
+                longitude = float(entry["longitude"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise UpstreamMalformedError(
+                    "The weather service sent back something I couldn't read."
+                ) from exc
+            matches.append(
+                {
+                    "name": name,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "country": entry.get("country") or "",
+                    "country_code": entry.get("country_code") or "",
+                    "admin1": entry.get("admin1") or "",
+                    "population": entry.get("population"),
+                }
+            )
+        return matches
