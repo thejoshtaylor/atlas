@@ -89,11 +89,13 @@ def _parse_command(text: str) -> "tuple[str, Literal['on', 'off']] | None":
     """The spoken entity name and the on/off signal, or `None` for anything
     that is not a plain on/off command at all.
 
-    Recognizes "turn|switch|shut on|off <name>", "turn <name> on|off", and
-    bare "<name> on|off" -- a leading or trailing on/off token plus whatever
-    is left over once every verb-noise word is stripped. "shut" alone (no
-    explicit on/off word) also signals off. Nothing else matches: no dim, no
-    set, no question.
+    Recognizes "turn|switch|shut on|off <name>" and "turn <name> on|off"
+    -- a leading or trailing on/off token plus whatever is left over once
+    every verb-noise word is stripped. "shut" alone (no explicit on/off
+    word) also signals off. A verb is required: a bare "<name> off" is
+    exactly what speech-to-text keyterm biasing makes of unclear
+    background speech, so it goes to the brain instead. Nothing else
+    matches: no dim, no set, no question.
     """
     normalized = _strip_wake_prefix(_normalize(text))
     tokens = [word for word in normalized.split() if word not in _FILLER_WORDS]
@@ -104,6 +106,9 @@ def _parse_command(text: str) -> "tuple[str, Literal['on', 'off']] | None":
     for i in range(1, len(tokens)):
         if tokens[i] == "of" and tokens[i - 1] in ("turn", "switch", "shut"):
             tokens[i] = "off"
+
+    if not _VERB_NOISE_WORDS.intersection(tokens):
+        return None
 
     on_off_index = next((i for i, word in enumerate(tokens) if word in _ON_OFF_WORDS), None)
 

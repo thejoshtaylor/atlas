@@ -33,7 +33,7 @@ import yaml
 from spire_voice.calibration.record import DEFAULT_CALIBRATION_DIR
 from spire_voice.turn.macros import normalize
 
-_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 class ConfigError(Exception):
@@ -47,6 +47,8 @@ def expand_env(raw_text: str) -> str:
     expanded value that itself contains `${` is not expanded a second
     time. A `${NAME}` naming a variable absent from the environment raises
     `ConfigError` naming that variable, rather than expanding to `""`.
+    `${NAME:-default}` expands to `default` instead when NAME is absent,
+    for an optional value only an operator sets.
 
     A whole-line YAML comment is left untouched. This file's own header
     documents the `${NAME}` contract in prose (see the top of
@@ -56,10 +58,12 @@ def expand_env(raw_text: str) -> str:
     """
 
     def _replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+        name, default = match.group(1), match.group(2)
         try:
             return os.environ[name]
         except KeyError:
+            if default is not None:
+                return default
             raise ConfigError(f"missing required environment variable: {name}") from None
 
     lines = raw_text.splitlines(keepends=True)
@@ -128,6 +132,21 @@ class ServerConfig:
 _LOCAL_STT_COMPUTE_TYPES = ("int8", "int8_float32", "float32")
 
 
+def _parse_keyterms(raw: object) -> tuple[str, ...]:
+    """`stt.keyterms`: a YAML list, or one comma-separated string (the form
+    an environment variable arrives in). xAI takes at most 100 terms of at
+    most 50 characters each."""
+    if raw is None or raw == "":
+        return ()
+    items = raw.split(",") if isinstance(raw, str) else raw
+    if not isinstance(items, list):
+        raise ConfigError("stt.keyterms must be a list or a comma-separated string")
+    terms = tuple(t for t in (str(i).strip() for i in items) if t)
+    if len(terms) > 100 or any(len(t) > 50 for t in terms):
+        raise ConfigError("stt.keyterms allows at most 100 terms of at most 50 characters")
+    return terms
+
+
 @dataclass(frozen=True)
 class SttConfig:
     """The `stt:` block, carried under its own config key names.
@@ -159,6 +178,7 @@ class SttConfig:
     local_model_dir: str = "/models/faster-whisper"
     local_model_size: str = "small"
     local_compute_type: str = "int8"
+    keyterms: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SttConfig":
@@ -183,6 +203,7 @@ class SttConfig:
             local_model_dir=raw.get("local_model_dir", cls.local_model_dir),
             local_model_size=raw.get("local_model_size", cls.local_model_size),
             local_compute_type=local_compute_type,
+            keyterms=_parse_keyterms(raw.get("keyterms")),
         )
 
 

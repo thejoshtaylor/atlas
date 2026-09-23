@@ -61,7 +61,10 @@ class XaiStt:
             "interim_results": str(self._config.interim_results).lower(),
             "language": self._config.language,
         }
-        return f"{self._config.url}?{urlencode(params)}"
+        # `keyterm` repeats once per term: biases recognition toward the
+        # words this house actually says ("Spire", a device name).
+        query = urlencode([*params.items(), *(("keyterm", t) for t in self._config.keyterms)])
+        return f"{self._config.url}?{query}"
 
     async def stream(
         self, frames: AsyncIterator[bytes], source_format: SourceFormat

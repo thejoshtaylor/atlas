@@ -70,6 +70,13 @@ def test_missing_env_var_is_a_startup_error(monkeypatch):
     assert "SPIRE_TEST_MISSING_VAR" in str(exc_info.value)
 
 
+def test_a_missing_env_var_with_a_default_expands_to_the_default(monkeypatch):
+    monkeypatch.delenv("SPIRE_TEST_MISSING_VAR", raising=False)
+    assert expand_env("key: ${SPIRE_TEST_MISSING_VAR:-a, b}\n") == "key: a, b\n"
+    monkeypatch.setenv("SPIRE_TEST_MISSING_VAR", "set")
+    assert expand_env("key: ${SPIRE_TEST_MISSING_VAR:-a}\n") == "key: set\n"
+
+
 def test_unknown_transport_value_is_a_startup_error():
     with pytest.raises(ConfigError):
         ServerConfig.from_config({"transport": "carrier-pigeon"})

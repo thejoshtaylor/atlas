@@ -66,6 +66,8 @@ services:
       # 260922-fmi (D-15, D-20): the calibration echo-path route's on/off
       # switch. Safe default false, same as the shipped config.
       CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"
+      # Comma-separated words speech-to-text is biased toward (stt.keyterms).
+      STT_KEYTERMS: "${STT_KEYTERMS:-Spire}"
       # Only read by speaker/tapo_talk.py, and only when speaker.backend is
       # set to tapo_talk in config.yaml -- unused (and safe to leave unset)
       # on the default go2rtc path.

@@ -403,6 +403,15 @@ stt:
   interim_results: true
   language: "en"
 
+  # Words to bias recognition toward, comma-separated: the wake word and the
+  # device names and phrases this house actually says. Replaying recorded
+  # camera turns, this took a noisy narrowband command from about 5 of 13
+  # to 12 of 13 transcribed right. List only names you say out loud: a
+  # listed name also pulls unclear background speech toward itself. At most
+  # 100 terms, 50 characters each. House names belong in STT_KEYTERMS, not
+  # in this file.
+  keyterms: "${STT_KEYTERMS:-Spire}"
+
   # Give up on a session that produces nothing, so a stuck socket cannot hold
   # the pipeline open forever.
   max_utterance_s: 15

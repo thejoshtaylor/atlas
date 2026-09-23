@@ -56,6 +56,12 @@ def test_a_question_never_matches():
     assert match_on_off("what time is it", _ENTITIES) is None
 
 
+def test_a_bare_name_and_off_with_no_verb_never_matches():
+    """Keyterm biasing turned unclear television speech into a bare
+    "<device> off" on the live camera; with no verb it goes to the brain."""
+    assert match_on_off("example cooler off", _ENTITIES) is None
+
+
 def test_an_unsupported_verb_never_matches():
     """"dim" is not turn/switch/shut, and there is no on/off token at all --
     the brain handles dimming, this matcher does not."""

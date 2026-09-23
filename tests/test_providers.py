@@ -46,6 +46,25 @@ def test_stt_url_uses_wire_parameter_names():
     assert not any(name.endswith("_ms") for name in query)
 
 
+def test_stt_url_repeats_keyterm_once_per_configured_term():
+    from dataclasses import replace
+
+    from spire_voice.providers.stt_xai import XaiStt
+
+    stt = XaiStt(replace(_stt_cfg(), keyterms=("Spire", "example cooler")))
+    query = parse_qs(urlparse(stt.build_url(SourceFormat("alaw", 8000))).query)
+    assert query["keyterm"] == ["Spire", "example cooler"]
+
+
+def test_stt_keyterms_parse_from_a_comma_separated_string_or_a_list():
+    assert SttConfig.from_config({"keyterms": "Spire, example cooler,"}).keyterms == (
+        "Spire",
+        "example cooler",
+    )
+    assert SttConfig.from_config({"keyterms": ["Spire"]}).keyterms == ("Spire",)
+    assert SttConfig.from_config({}).keyterms == ()
+
+
 def test_stt_url_renders_the_16khz_pcm_source_it_is_given():
     """`build_url` reads `source_format` rather than assuming Phase 1's one
     source -- a 16 kHz PCM `AudioSource` renders exactly that pair."""
