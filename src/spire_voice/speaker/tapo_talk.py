@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import select
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
@@ -65,6 +66,44 @@ _MAX_BACKOFF_S = 600.0
 _FRAME_BYTES = 160
 _FRAME_S = 0.02
 _PTS_STEP = 90000 * _FRAME_BYTES // 8000  # the PES clock runs at 90kHz
+
+# 260923-spd: how often `_blocking_read_or_stop` re-checks its
+# `should_stop` callback, via `select.select`'s own timeout, while no
+# frame is available yet. Short enough that `stop()` notices a stop
+# request quickly; long enough not to spin the reader thread.
+_STREAM_STOP_POLL_S = 0.1
+
+
+def _blocking_read_or_stop(fifo_fh: Any, size: int, should_stop: Callable[[], bool]) -> bytes:
+    """Block on `fifo_fh.read(size)`, but poll `should_stop()` every
+    `_STREAM_STOP_POLL_S` via `select.select` on the FIFO's own file
+    descriptor, rather than trusting asyncio task cancellation to reach
+    an OS-level blocking read.
+
+    260923-spd: cancelling the `_stream` task while a bare
+    `loop.run_in_executor(None, fifo_fh.read, size)` is in flight does not
+    interrupt the underlying syscall -- the worker thread keeps blocking
+    until a frame arrives or the write end closes, so `stop()` could hang
+    indefinitely with the camera's talk session (and its TCP connection to
+    the camera) still open. A live pod restart hit exactly this: the
+    session's `close()` never ran before the shutdown grace period
+    expired, and the camera held the stale session until a power cycle.
+    `select` lets one executor call notice a stop request on its own,
+    inside the same thread, instead of spawning a fresh executor call
+    (and a fresh blocked thread) on every poll tick.
+
+    Returns `b""` both on a genuine EOF (the write end closed) and on a
+    stop request -- `_stream`'s `if not chunk: break` already treats
+    either the same way, so this needs no separate signal for which one
+    happened.
+    """
+    fd = fifo_fh.fileno()
+    while not should_stop():
+        ready, _, _ = select.select([fd], [], [], _STREAM_STOP_POLL_S)
+        if ready:
+            return fifo_fh.read(size)
+    return b""
+
 
 SessionBuilderFn = Callable[[str, str], Awaitable[Any]]
 FifoReaderOpenFn = Callable[[str], Any]
@@ -152,6 +191,11 @@ class TapoTalkSupervisor:
             self._task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
+        # 260923-spd: WARNING, not INFO, so this line survives whatever
+        # log level a deploy runs at -- the one signal, at shutdown time,
+        # that the talk session actually closed rather than being
+        # SIGKILLed out from under the camera.
+        logger.warning("tapo_talk: session closed for shutdown")
 
     async def handle_reconnect(self) -> None:
         """No-op: `_supervise`'s own loop already restarts the talk session
@@ -242,9 +286,11 @@ class TapoTalkSupervisor:
         ts = 0
         buffer = bytearray()
         while not self._stopping:
-            chunk = await loop.run_in_executor(None, fifo_fh.read, _FRAME_BYTES)
+            chunk = await loop.run_in_executor(
+                None, _blocking_read_or_stop, fifo_fh, _FRAME_BYTES, lambda: self._stopping
+            )
             if not chunk:
-                break  # every writer has closed -- a clean EOF, not an error
+                break  # every writer has closed, or a stop request arrived -- either way, done
             buffer.extend(chunk)
             while len(buffer) >= _FRAME_BYTES:
                 frame = bytes(buffer[:_FRAME_BYTES])

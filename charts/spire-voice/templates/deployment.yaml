@@ -51,6 +51,19 @@ spec:
         runAsNonRoot: true
         fsGroup: 1001
         fsGroupChangePolicy: OnRootMismatch
+      # 260923-spd: explicit, matching Kubernetes' own default -- named
+      # here rather than left implicit so the number is visible next to
+      # the reason it matters. `lifespan`'s shutdown now stops the speaker
+      # supervisor (the camera's talk session) FIRST and bounds that call
+      # at 5s, specifically so it cannot eat this whole budget the way the
+      # old, last-in-line ordering did -- a live pod restart once spent so
+      # long on source-runner teardown and RTSP close before ever reaching
+      # the speaker that this grace period expired, the pod was SIGKILLed,
+      # and the camera held a stale talk session (401 on port 8800) until
+      # a power cycle. No `preStop` hook: the reordering above is what
+      # actually fixes the race, and a fixed `sleep` here would only add
+      # latency to every restart without addressing it.
+      terminationGracePeriodSeconds: 30
       initContainers:
         # Waits for the bundled database rather than restarting the whole
         # pod until it happens to be up -- a StatefulSet's own pod can take

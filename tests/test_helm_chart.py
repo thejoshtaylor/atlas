@@ -458,6 +458,21 @@ def test_the_pod_sets_an_fsgroup_so_its_volumes_are_writable() -> None:
             assert mount["name"] in claim_backed
 
 
+@skip_without_helm
+def test_the_pod_declares_an_explicit_termination_grace_period() -> None:
+    """260923-spd: named explicitly, not left to Kubernetes' own default,
+    so the number sits next to the reason it matters -- `lifespan`'s
+    shutdown now stops the speaker supervisor (the camera's talk session)
+    FIRST and bounds that call at 5s specifically so it cannot eat this
+    whole budget the way the old, last-in-line ordering did (a live pod
+    restart once left the camera holding a stale talk session, refusing
+    port 8800 with 401 until a power cycle)."""
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert pod_spec.get("terminationGracePeriodSeconds") == 30
+
+
 # --- 260922-cmo: existingSecret model and the runAsUser fix --------------
 
 

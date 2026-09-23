@@ -815,6 +815,61 @@ def test_camera_reconnect_is_wired_to_the_speaker_backchannel(tmp_path, monkeypa
         )
 
 
+def test_shutdown_stops_the_speaker_supervisor_before_the_camera_and_wake_detector(tmp_path, monkeypatch):
+    """260923-spd: a live pod restart left the camera holding a stale talk
+    session and refusing port 8800 with 401 until a power cycle, because
+    the old shutdown order stopped the speaker supervisor LAST -- after the
+    source runners, `drain_pending_wake_events()`, and `camera_source.
+    close()` had already spent most of the 30s termination grace period,
+    so a SIGKILL could remove the pod's network namespace before the
+    camera ever saw the talk connection close. This runs the real
+    `lifespan` teardown and proves `ffmpeg_supervisor.stop()` -- the
+    `TapoTalkSupervisor`/`FfmpegSupervisor` that owns the speaker -- is
+    called before either `camera_source.close()` or `wake_detector.
+    close()`, not merely that all three eventually run somewhere in
+    teardown."""
+    order: list[str] = []
+
+    class _OrderedFfmpegSupervisor(_FakeFfmpegSupervisor):
+        async def stop(self) -> None:
+            order.append("ffmpeg_supervisor.stop")
+            await super().stop()
+
+    class _OrderedWakeDetector(_FakeWakeDetector):
+        def close(self) -> None:
+            order.append("wake_detector.close")
+            super().close()
+
+    class _OrderedCameraSource(_FakeCameraSource):
+        async def close(self) -> None:
+            order.append("camera_source.close")
+            await super().close()
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", lambda wake_config: _OrderedWakeDetector())
+    monkeypatch.setattr(
+        app_module, "_build_ffmpeg_supervisor", lambda config, http_client: _OrderedFfmpegSupervisor()
+    )
+    monkeypatch.setattr(app_module, "CameraAudioSource", _OrderedCameraSource)
+
+    with TestClient(app_module.app):
+        pass
+
+    assert order, "none of the tracked shutdown calls ran -- lifespan teardown never reached them"
+    assert order.index("ffmpeg_supervisor.stop") < order.index("camera_source.close"), (
+        f"ffmpeg_supervisor.stop() must run before camera_source.close(): {order}"
+    )
+    assert order.index("ffmpeg_supervisor.stop") < order.index("wake_detector.close"), (
+        f"ffmpeg_supervisor.stop() must run before wake_detector.close(): {order}"
+    )
+
+
 def test_camera_runner_is_wired_with_the_configured_gate_and_barge_in_policy(tmp_path, monkeypatch):
     """CR-01 fix (code review): `app.py`'s only production `SourceRunner`
     used to be built with none of `wake_config`/`gate_config`/

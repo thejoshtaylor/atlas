@@ -125,6 +125,80 @@ async def test_tapo_talk_supervisor_frames_header_then_alaw_to_the_fake_session(
     assert b"X-If-Encrypt: 0" in frame_part
 
 
+async def test_tapo_talk_supervisor_stop_closes_the_session_while_blocked_on_a_fifo_read(
+    tmp_path, monkeypatch, caplog
+):
+    """260923-spd: a live pod restart left the camera holding a stale talk
+    session and refusing port 8800 with 401 until a power cycle, because
+    `stop()` relied on task cancellation reaching `_stream`'s blocking
+    `fifo_fh.read()` -- cancelling a task blocked on an OS-level read in an
+    executor thread does not interrupt that read; the thread keeps
+    blocking until a frame arrives or the write end closes. This attaches
+    a real writer (so the supervisor's own reader unblocks and the talk
+    session starts) that then sends nothing -- the exact "idle turn, no
+    TTS audio in flight" shape the live bug hit -- and proves `stop()`
+    still closes the session (and returns) within a bounded time."""
+    monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
+
+    fifo_path = str(tmp_path / "speaker.alaw")
+    os.mkfifo(fifo_path)
+
+    fake_session = _FakeMediaSession()
+
+    async def fake_build_session(host: str, cloud_password: str):
+        return fake_session
+
+    config = SpeakerConfig(fifo_path=fifo_path, respawn_backoff_s=0.05)
+    supervisor = TapoTalkSupervisor(config, "192.0.2.5", build_session=fake_build_session)
+    supervisor.start()
+
+    # Opening the write end blocks until the supervisor's own reader
+    # attaches (real pipe rendezvous, matching the first test above) --
+    # once open, it is never written to, so `_stream`'s read blocks
+    # exactly like an idle turn with no TTS audio queued.
+    writer_fh = await asyncio.get_running_loop().run_in_executor(None, open, fifo_path, "wb", 0)
+    try:
+        await _wait_for(lambda: fake_session.entered)
+        # Let `_stream`'s executor thread actually reach its blocking
+        # `fifo_fh.read()` call before `stop()` runs -- without this, a
+        # `task.cancel()` that lands before the executor thread has picked
+        # up the read from its queue can succeed trivially (the work item
+        # never started), which would make this test pass against the old,
+        # buggy code by sheer timing luck rather than exercising the case
+        # it names.
+        await asyncio.sleep(0.3)
+
+        import logging
+        import time
+
+        # `asyncio.wait_for` here is a safety net only, generous enough
+        # (5s) that it never fires against correct code -- it must not be
+        # the thing that proves `stop()` is bounded. `wait_for` itself
+        # forces a cancellation into whatever `stop()` is awaiting once
+        # ITS OWN deadline arrives, so wrapping a hanging `stop()` in
+        # `wait_for(..., timeout=2)` would make `stop()` return (via the
+        # `contextlib.suppress(asyncio.CancelledError)` already inside it)
+        # right around that 2s mark even with the bug still present --
+        # passing this test for the wrong reason. Measuring elapsed time
+        # directly, against a threshold far below the safety net, is what
+        # actually distinguishes "closed promptly on its own" from
+        # "only closed because this test's own timeout forced it."
+        with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.tapo_talk"):
+            started = time.monotonic()
+            await asyncio.wait_for(supervisor.stop(), timeout=5)
+            elapsed = time.monotonic() - started
+
+        assert fake_session.exited, "stop() must close the session even while _stream is blocked on a FIFO read"
+        assert elapsed < 1.0, (
+            f"stop() took {elapsed:.2f}s -- it must notice a stop request within "
+            "one poll interval of the blocked FIFO read, not rely on this test's "
+            "own safety-net timeout to force it through"
+        )
+        assert any("session closed for shutdown" in record.message for record in caplog.records)
+    finally:
+        writer_fh.close()
+
+
 async def test_tapo_talk_supervisor_stays_in_backoff_without_the_cloud_password(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv(TAPO_CLOUD_PASSWORD_ENV, raising=False)
 

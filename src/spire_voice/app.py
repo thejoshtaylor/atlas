@@ -1467,6 +1467,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
+    # 260923-spd: the speaker supervisor stops FIRST, before anything else
+    # in this function -- a live pod restart left the camera holding a
+    # stale talk session and refusing port 8800 with 401 until a power
+    # cycle, because the old order stopped it LAST, after the source
+    # runners, `drain_pending_wake_events()` (DB writes), and
+    # `camera_source.close()` (RTSP) had already spent most of the 30 s
+    # termination grace period. `asyncio.wait_for(..., 5)` bounds this call
+    # so a stuck supervisor still leaves the rest of shutdown its own share
+    # of the grace period, rather than eating all of it and getting
+    # SIGKILLed mid-close anyway.
+    try:
+        await asyncio.wait_for(ffmpeg_supervisor.stop(), timeout=5)
+    except TimeoutError:
+        logger.warning("ffmpeg_supervisor.stop() did not finish within 5s during shutdown; continuing shutdown")
     # CR-03 fix (code review): `SourceRunner.run()` now contains a
     # per-chunk exception rather than letting it end the task (see that
     # method's own docstring), but a task can still end with a stored
@@ -1475,10 +1489,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # possibility from mattering here: `task.cancel()` on an already-done
     # task is a no-op, and `await task` on one that ended with a
     # non-cancellation exception used to re-raise it, aborting every
-    # cleanup call below (`camera_source.close()`, `ffmpeg_supervisor.
-    # stop()`, `retention_scheduler.stop()`, `speaker_writer.close()`,
-    # `plugin_manager.stop_all()`) and leaving the ffmpeg child, every MCP
-    # child, and the FIFO's open handle behind uncleanly on process exit.
+    # cleanup call below (`camera_source.close()`, `retention_scheduler.
+    # stop()`, `speaker_writer.close()`, `plugin_manager.stop_all()`) and
+    # leaving every MCP child and the FIFO's open handle behind uncleanly
+    # on process exit.
     for task in app.state.source_runner_tasks:
         task.cancel()
     await asyncio.gather(*app.state.source_runner_tasks, return_exceptions=True)
@@ -1493,7 +1507,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await runner.drain_pending_wake_events()
     await camera_source.close()
     wake_detector.close()
-    await ffmpeg_supervisor.stop()
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
     await speaker_http_client.aclose()
