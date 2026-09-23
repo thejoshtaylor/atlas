@@ -41,6 +41,15 @@ spec:
   templates:
     - name: buildctl
       activeDeadlineSeconds: 3600
+      # Builds fail intermittently (2 of about 9 on 2026-09-22), and a
+      # manual resubmit of the same commit then succeeds. Without a retry,
+      # a failed build leaves the old image running with no signal.
+      retryStrategy:
+        limit: "2"
+        retryPolicy: Always
+        backoff:
+          duration: "30s"
+          factor: "2"
       initContainers:
         - name: clone
           image: alpine/git:latest
