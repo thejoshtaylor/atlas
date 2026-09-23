@@ -471,11 +471,11 @@ brain:
   max_tokens: 400
 
   # A command that needs more than this many tool calls is a misunderstanding,
-  # not a complex request. Stop and say so. Lowered from 3 to 2 alongside the
-  # single-model default above (260923-spd): the top tier is now the only
-  # tier in the race, so its own tool rounds are the entire turn's latency
-  # budget, not just the tail of a race two other tiers already lost.
-  max_tool_rounds: 2
+  # not a complex request. Stop and say so. Back to 3: two rounds allow only
+  # one tool step before the reply, so a turn that must
+  # read a sensor, then call a service
+  # hits the old cap of two. turn_timeout_s below still limits the worst case.
+  max_tool_rounds: 3
 
   # 260922-woc: a ceiling on the whole tier race, seconds. A live turn once
   # spent about 55s in tool rounds and returned an empty answer with nothing
