@@ -215,9 +215,33 @@ async def test_forecast_returns_bounded_days_with_high_low_and_condition():
     assert len(result["days"]) == 3
     first = result["days"][0]
     assert first["date"] == "2026-09-18"
-    assert first["high_c"] == 24.5
-    assert first["low_c"] == 23.5
+    assert first["high"] == 24.5
+    assert first["low"] == 23.5
     assert first["condition"] == "light drizzle"
+
+
+async def test_current_conditions_caches_apart_by_unit():
+    recorder = _RecordingTransport(_CURRENT_BODY)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        await client.current_conditions(_FAKE_LATITUDE, _FAKE_LONGITUDE)
+        await client.current_conditions(
+            _FAKE_LATITUDE, _FAKE_LONGITUDE, temperature_unit="fahrenheit"
+        )
+        assert recorder.calls == 2, "a celsius and a fahrenheit answer must not share a cache entry"
+        await client.current_conditions(
+            _FAKE_LATITUDE, _FAKE_LONGITUDE, temperature_unit="fahrenheit"
+        )
+        assert recorder.calls == 2, "the second fahrenheit call must be served from cache"
+
+
+async def test_forecast_caches_apart_by_unit():
+    recorder = _RecordingTransport(_FORECAST_BODY)
+    async with _client_for(recorder) as http_client:
+        client = OpenMeteoClient(http_client)
+        await client.forecast(_FAKE_LATITUDE, _FAKE_LONGITUDE, days=3)
+        await client.forecast(_FAKE_LATITUDE, _FAKE_LONGITUDE, days=3, temperature_unit="fahrenheit")
+        assert recorder.calls == 2, "a celsius and a fahrenheit forecast must not share a cache entry"
 
 
 @pytest.mark.integration
@@ -261,8 +285,9 @@ async def test_forecast_handler_returns_bounded_days_and_refuses_an_out_of_range
         client = OpenMeteoClient(http_client)
         result = await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=3)
         assert len(result["days"]) == 3
+        assert result["unit"] == "C"
         for day in result["days"]:
-            assert set(day) >= {"date", "high_c", "low_c", "condition"}
+            assert set(day) == {"date", "high", "low", "condition"}
 
         with pytest.raises(ValueError):
             await handle_weather_forecast(client, _FAKE_LATITUDE, _FAKE_LONGITUDE, days=0)

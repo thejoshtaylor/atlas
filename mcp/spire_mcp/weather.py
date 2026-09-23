@@ -21,6 +21,11 @@ Both tools also take an optional `place`. The geocoder resolves a spoken
 place with a local-first rule and a global fallback (`select_place`), and
 every result names its `location`, so a missing place still says "home"
 rather than staying silent about where the answer is for.
+
+WEATHER_UNITS (an operator setting, never a model argument) chooses
+celsius or fahrenheit. open-meteo itself does the conversion -- this
+module never converts a number locally -- and every result names its
+unit, so the spoken reply can say it too.
 """
 
 from __future__ import annotations
@@ -249,17 +254,21 @@ async def handle_weather_forecast(
     *,
     place: str | None = None,
     local_radius_km: float = _DEFAULT_LOCAL_RADIUS_KM,
+    units: str = "celsius",
 ) -> dict[str, Any]:
     """Answer a question about the outdoor weather forecast, from an
     external service (open-meteo) -- never a room's own temperature sensor.
 
     Checks `days` before resolving `place`, so a bad day count makes no
-    network call at all. Returns up to `days` days, each with a high, a
-    low (Celsius), and a short condition phrase, plus the resolved
-    `location`. `days` must be between 1 and 16 -- the range open-meteo
-    itself accepts -- and a count outside that range is refused rather
-    than clamped, so a mistaken request never silently answers a different
-    question than the one asked.
+    network call at all. Returns up to `days` days, each with a high and a
+    low in the configured unit, and a short condition phrase, plus one
+    top-level `unit` and the resolved `location`. `days` must be between 1
+    and 16 -- the range open-meteo itself accepts -- and a count outside
+    that range is refused rather than clamped, so a mistaken request never
+    silently answers a different question than the one asked.
+
+    Reads the unit only from its own `units` parameter, the same purity
+    rule `handle_weather_current` follows.
     """
     if not (_MIN_FORECAST_DAYS <= days <= _MAX_FORECAST_DAYS):
         raise ValueError(
@@ -273,17 +282,18 @@ async def handle_weather_forecast(
         home_longitude=longitude,
         local_radius_km=local_radius_km,
     )
-    result = await client.forecast(resolved_latitude, resolved_longitude, days)
+    result = await client.forecast(resolved_latitude, resolved_longitude, days, temperature_unit=units)
     return {
         "days": [
             {
                 "date": day["date"],
-                "high_c": round(day["high_c"], 1),
-                "low_c": round(day["low_c"], 1),
+                "high": round(day["high"], 1),
+                "low": round(day["low"], 1),
                 "condition": day["condition"],
             }
             for day in result["days"]
         ],
+        "unit": _unit_symbol(units),
         "location": location,
     }
 
@@ -342,7 +352,9 @@ async def weather_forecast(
     after a comma, for example "Paris, France" or "Springfield, Illinois".
     Do not add a qualifier the user did not say. The result's `location`
     names the place the answer is for, or "home". Say that place in the
-    reply.
+    reply. Each day's `high` and `low` are in the unit the result's `unit`
+    field names: "F" means Fahrenheit and "C" means Celsius. Say that unit
+    in the reply.
     """
     assert _open_meteo_client is not None, "weather_forecast invoked before startup"
     try:
@@ -353,6 +365,7 @@ async def weather_forecast(
             days,
             place=place,
             local_radius_km=_local_radius_km,
+            units=_units,
         )
     except (UpstreamUnreachableError, UpstreamMalformedError, ValueError) as exc:
         # LOW-01 fix (phase 4 code review): `handle_weather_forecast` raises

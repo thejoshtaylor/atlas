@@ -160,15 +160,21 @@ class OpenMeteoClient:
         self._store(key, result)
         return result
 
-    async def forecast(self, latitude: float, longitude: float, days: int) -> dict[str, Any]:
+    async def forecast(
+        self, latitude: float, longitude: float, days: int, *, temperature_unit: str = "celsius"
+    ) -> dict[str, Any]:
         """Fetch (or serve from cache) a `days`-day forecast.
 
         `days` is passed straight through to open-meteo's own
         `forecast_days` parameter; bounding it to a range a person would
         actually ask for is the handler's job (`weather.py`), not this
         client's -- this client's job is fetching and parsing, nothing more.
+
+        `temperature_unit` follows the same rule as `current_conditions`:
+        "fahrenheit" adds a request parameter, anything else adds none, and
+        the numbers that come back are already in the unit asked for.
         """
-        key = ("forecast", latitude, longitude, days)
+        key = ("forecast", latitude, longitude, days, temperature_unit)
         cached = self._cached(key)
         if cached is not None:
             return cached
@@ -179,6 +185,8 @@ class OpenMeteoClient:
             "forecast_days": days,
             "timezone": "auto",
         }
+        if temperature_unit == "fahrenheit":
+            params["temperature_unit"] = "fahrenheit"
         body = await self._fetch(params)
         result = self._parse_forecast(body)
         self._store(key, result)
@@ -273,8 +281,8 @@ class OpenMeteoClient:
         days = [
             {
                 "date": date,
-                "high_c": high,
-                "low_c": low,
+                "high": high,
+                "low": low,
                 "condition": _condition_for(code),
             }
             for date, high, low, code in zip(dates, highs, lows, codes)

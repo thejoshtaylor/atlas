@@ -629,3 +629,58 @@ async def test_both_tools_advertise_an_optional_place_in_their_schema():
         schema = tools_by_name[name].input_schema
         assert "place" in schema["properties"]
         assert "place" not in schema.get("required", [])
+
+
+async def test_weather_forecast_in_fahrenheit_sends_temperature_unit_and_labels_f(monkeypatch):
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        monkeypatch.setattr(weather, "_units", "fahrenheit")
+        try:
+            result = await weather.weather_forecast(days=2)
+        finally:
+            weather._open_meteo_client = None
+
+    non_geocoding_requests = [r for r in router.requests if r.url.host != "geocoding-api.open-meteo.com"]
+    assert len(non_geocoding_requests) == 1
+    assert non_geocoding_requests[0].url.params["temperature_unit"] == "fahrenheit"
+    assert result["unit"] == "F"
+    for day in result["days"]:
+        assert set(day) == {"date", "high", "low", "condition"}
+
+
+async def test_weather_forecast_default_units_sends_no_temperature_unit_param():
+    from spire_mcp import weather
+
+    router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
+    async with _client_for(router) as http_client:
+        weather._open_meteo_client = OpenMeteoClient(http_client)
+        weather._latitude = 0.0
+        weather._longitude = 0.0
+        try:
+            result = await weather.weather_forecast(days=2)
+        finally:
+            weather._open_meteo_client = None
+
+    non_geocoding_requests = [r for r in router.requests if r.url.host != "geocoding-api.open-meteo.com"]
+    assert len(non_geocoding_requests) == 1
+    assert "temperature_unit" not in non_geocoding_requests[0].url.params
+    assert result["unit"] == "C"
+
+
+async def test_both_tool_descriptions_mention_unit_and_neither_schema_takes_one():
+    from spire_mcp import weather
+
+    listed = await weather.mcp_server.list_tools()
+    tools_by_name = {tool.name: tool for tool in listed}
+
+    for name in ("weather_current", "weather_forecast"):
+        tool = tools_by_name[name]
+        assert "`unit`" in tool.description
+        properties = tool.input_schema["properties"]
+        assert "unit" not in properties
+        assert "units" not in properties
