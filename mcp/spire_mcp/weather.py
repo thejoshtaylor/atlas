@@ -119,11 +119,13 @@ def select_place(
 ) -> dict[str, Any] | None:
     """Pick one geocoding match from several matches sharing a name.
 
-    The qualifier, when given, narrows the candidates first (see
-    `_qualifier_matches`). This interim version then returns the first
-    surviving candidate, or None when none survive. Task 2 replaces "first
-    survivor" with a nearby rule and a population rule; this pick is not a
-    shipped behavior.
+    The qualifier, when given, narrows the candidates first: a candidate
+    survives only when `_qualifier_matches` accepts it. Among the
+    survivors, the nearest one within `local_radius_km` of home wins. When
+    none is that close, the one with the highest population wins,
+    treating a missing population as 0. `min` and `max` both keep the
+    geocoder's own first result on a tie, so an exact tie favors the
+    geocoder's own ranking. Returns None when no candidate is left.
     """
     candidates = matches
     if qualifier is not None:
@@ -131,7 +133,14 @@ def select_place(
         candidates = [match for match in candidates if _qualifier_matches(qualifier_key, match)]
     if not candidates:
         return None
-    return candidates[0]
+
+    def _distance_from_home(match: dict[str, Any]) -> float:
+        return haversine_km(home_latitude, home_longitude, match["latitude"], match["longitude"])
+
+    nearby = [match for match in candidates if _distance_from_home(match) <= local_radius_km]
+    if nearby:
+        return min(nearby, key=_distance_from_home)
+    return max(candidates, key=lambda match: match.get("population") or 0)
 
 
 def format_location(match: dict[str, Any]) -> str:
