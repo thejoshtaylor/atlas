@@ -39,6 +39,28 @@ from spire_mcp.safety import Denied, Policy, allow_call, allow_read
 _TARGET_KINDS: tuple[str, ...] = ("area", "device", "label")
 
 
+def _ha_message(response: httpx.Response) -> str:
+    """Pull Home Assistant's own explanation out of a reply.
+
+    Home Assistant answers a rejected call with a JSON body carrying a
+    `message` key. This returns that message, stripped, when the body
+    parses as a dict with a usable one. A body that is not JSON, is JSON
+    but not a dict, or has no usable `message`, falls back to the
+    response's own text, stripped and cut to 200 characters -- a bound
+    that keeps a large or malformed body from swelling the tool result the
+    brain reads.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        message = body.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return response.text.strip()[:200]
+
+
 async def _resolve_target(
     registry: "HaRegistryClient | None",
     kind: str,
@@ -119,6 +141,15 @@ async def handle_call_service(
     so this project refuses at its own layer regardless of the hub's
     leniency. A negative or non-finite value is refused the same way: a
     fade cannot run backwards or forever.
+
+    A response-only service, such as `todo.get_items`, is always rejected
+    the first time: Home Assistant refuses to run it at all unless the
+    caller already asked for the response, and it says so with a 400. On
+    exactly that reply, this function posts once more with
+    `?return_response` on the same URL, and returns both the changed
+    states and the service's own response. The flag is never sent on the
+    first post, because Home Assistant rejects it on services that give no
+    response.
     """
     if transition is not None:
         if domain != "light":
@@ -135,17 +166,24 @@ async def handle_call_service(
     service_data: dict[str, Any] = {"entity_id": checked_entity_ids}
     if transition is not None:
         service_data["transition"] = transition
-    response = await client.post(
-        f"{base_url}/api/services/{domain}/{service}",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json=service_data,
-    )
+    url = f"{base_url}/api/services/{domain}/{service}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    response = await client.post(url, headers=headers, json=service_data)
+    if response.status_code == 400 and "requires responses" in _ha_message(response).lower():
+        # Home Assistant rejected the first request before the service ran.
+        # The service cannot run twice, so this retry is safe. The flag is
+        # not sent on the first post, or on every post: Home Assistant
+        # rejects it on services that give no response at all.
+        response = await client.post(f"{url}?return_response", headers=headers, json=service_data)
     if response.status_code // 100 != 2:
         # A non-2xx response is surfaced as an error result, never an empty
         # success -- the prior incident on this host hid itself exactly this
         # way, because nothing recorded the failure (CMD-01).
         return {"error": f"home assistant returned {response.status_code}"}
-    return {"changed": response.json()}
+    body = response.json()
+    if isinstance(body, dict) and "service_response" in body:
+        return {"changed": body.get("changed_states", []), "response": body["service_response"]}
+    return {"changed": body}
 
 
 async def handle_get_state(

@@ -11,13 +11,135 @@ import subprocess
 import sys
 import textwrap
 
+import httpx
 import pytest
 from mcp.client.stdio import get_default_environment
 
+import spire_mcp.ha as ha_module
 from spire_mcp.ha import handle_call_service, handle_get_state
 from spire_mcp.safety import Denied, Policy
 
+# The exact text Home Assistant answers with when a response-only service is
+# called without `?return_response` (verified live against a real hub, see
+# 260923-j8h-PLAN.md). Kept as one constant so every test that scripts this
+# reply says the same thing HA actually says.
+_REQUIRES_RESPONSES = (
+    "Service call requires responses but caller did not ask for responses. "
+    "Add ?return_response to query parameters."
+)
+
+
+class _ScriptedHa:
+    """A Home Assistant stand-in that answers a fixed, ordered script of
+    responses, one per request.
+
+    An unbounded retry is a real bug this project must never ship quietly.
+    Asking this stand-in for a response past the end of its script raises
+    loudly, so a retry loop that got out of hand fails the test instead of
+    hanging or silently wrapping around.
+    """
+
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self._responses = list(responses)
+        self.requests: list[httpx.Request] = []
+        self.client = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self._responses:
+            raise AssertionError("unexpected extra request to home assistant")
+        return self._responses.pop(0)
+
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# CMD-01 follow-up (260923-j8h): a response-only service (for example
+# `todo.get_items`) is always rejected the first time, because Home
+# Assistant refuses to run one at all unless the caller asked for the
+# response up front. The bounded retry below is what makes such a service
+# reachable at all.
+
+
+async def test_response_only_service_is_retried_once_with_return_response():
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa(
+        [
+            httpx.Response(400, json={"message": _REQUIRES_RESPONSES}),
+            httpx.Response(
+                200,
+                json={
+                    "changed_states": [],
+                    "service_response": {
+                        "todo.shopping_list": {
+                            "items": [{"summary": "milk", "status": "needs_action"}]
+                        }
+                    },
+                },
+            ),
+        ]
+    )
+    try:
+        result = await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "todo",
+            "get_items",
+            "todo.shopping_list",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert len(scripted.requests) == 2
+    first, second = scripted.requests
+    assert first.url.path == "/api/services/todo/get_items"
+    assert second.url.path == "/api/services/todo/get_items"
+    assert "return_response" not in first.url.params
+    assert "return_response" in second.url.params
+    assert json.loads(first.read()) == {"entity_id": ["todo.shopping_list"]}
+    assert json.loads(second.read()) == {"entity_id": ["todo.shopping_list"]}
+    assert result == {
+        "changed": [],
+        "response": {
+            "todo.shopping_list": {"items": [{"summary": "milk", "status": "needs_action"}]}
+        },
+    }
+
+
+async def test_policy_check_runs_once_across_a_return_response_retry(monkeypatch):
+    real_allow_call = ha_module.allow_call
+    call_count = 0
+
+    def _counting_allow_call(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_allow_call(*args, **kwargs)
+
+    monkeypatch.setattr(ha_module, "allow_call", _counting_allow_call)
+
+    policy = Policy.from_config(None)
+    scripted = _ScriptedHa(
+        [
+            httpx.Response(400, json={"message": _REQUIRES_RESPONSES}),
+            httpx.Response(200, json={"changed_states": [], "service_response": {}}),
+        ]
+    )
+    try:
+        await handle_call_service(
+            policy,
+            scripted.client,
+            "http://ha.invalid",
+            "test-token",
+            "todo",
+            "get_items",
+            "todo.shopping_list",
+        )
+    finally:
+        await scripted.client.aclose()
+
+    assert call_count == 1
+    assert len(scripted.requests) == 2
 
 
 async def test_service_call_allowed_entity(fake_ha):
