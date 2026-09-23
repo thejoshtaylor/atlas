@@ -1733,3 +1733,158 @@ async def test_no_wake_cue_when_disabled_or_when_the_source_has_no_speaker(fake_
     browser = _FrameCountingLiveSource(frames=[b"\x00\x01"])
     await _run_cue_turn(fake_tts, browser, wake_cue=True)
     assert browser.sent_audio == [b"\x01\x02"]
+
+
+# --- 260922-lim-02: the local on/off matcher wired into run_turn -----------
+
+_LOCAL_INTENT_FILLER_CACHE = {None: {"done": b"done-bytes", "i can't do that one": b"cant-bytes"}}
+
+
+async def _local_intent_state_fetch():
+    return [{"entity_id": "switch.example_fan", "friendly_name": "Example Fan", "state": "off"}]
+
+
+async def test_a_matched_local_intent_calls_the_tool_and_speaks_done(
+    fake_audio_source, fake_stt, fake_brain, fake_ha
+):
+    """A matched on/off command calls `ha_call_service` with the right
+    args, never calls the brain, and speaks the cached "done" phrase."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    policy = Policy.from_config(None)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the example fan")])
+    brain = fake_brain(replies=[])
+    tts = _CountingTts(chunks=[])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_local_intent_state_fetch,
+        filler_cache=_LOCAL_INTENT_FILLER_CACHE,
+        local_intents=True,
+    )
+
+    assert brain.call_count == 0
+    assert len(fake_ha.requests) == 1
+    assert fake_ha.requests[0].method == "POST"
+    assert source.sent_audio == [b"done-bytes"]
+    assert tts.call_count == 0
+    assert timings.turn_outcome == "local_intent"
+
+
+async def test_a_denied_local_intent_speaks_cannot_do_that_one_and_never_reaches_the_brain(
+    fake_audio_source, fake_stt, fake_brain, fake_ha
+):
+    """A tool error (here, a policy denial) speaks the cached "i can't do
+    that one" phrase and never falls back to the brain -- the denial may
+    have been on purpose."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    policy = Policy.from_config({"deny_entities": ["switch.example_fan"]})
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the example fan")])
+    brain = fake_brain(replies=[])
+    tts = _CountingTts(chunks=[])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_local_intent_state_fetch,
+        filler_cache=_LOCAL_INTENT_FILLER_CACHE,
+        local_intents=True,
+    )
+
+    assert brain.call_count == 0
+    assert source.sent_audio == [b"cant-bytes"]
+    assert tts.call_count == 0
+    assert timings.turn_outcome == "local_intent_failed"
+
+
+async def test_no_local_intent_match_falls_through_to_the_brain(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """A transcript the matcher does not recognize reaches the brain
+    exactly as it would with `local_intents` disabled."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    policy = Policy.from_config(None)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what time is it")])
+    brain = fake_brain(replies=[BrainReply(text="it is three pm")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_local_intent_state_fetch,
+        local_intents=True,
+    )
+
+    assert brain.call_count == 1
+    assert tts.received_text == ["it is three pm"]
+    assert len(fake_ha.requests) == 0
+
+
+async def test_local_intents_disabled_by_default_falls_through_to_the_brain(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """`local_intents` defaults to `False` -- a caller that never passes it
+    (every caller that predates this plan) reaches the brain exactly as
+    before, even for a transcript the matcher would otherwise recognize."""
+    from spire_voice.timing import TurnTimings
+    from spire_voice.turn.controller import run_turn
+
+    policy = Policy.from_config(None)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the example fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned off the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_local_intent_state_fetch,
+    )
+
+    assert brain.call_count == 1
+    assert tts.received_text == ["turned off the fan"]

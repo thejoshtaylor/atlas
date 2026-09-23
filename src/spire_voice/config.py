@@ -249,6 +249,13 @@ class BrainConfig:
     # cancels the race and speaks a fixed "i can't do that one" rather than
     # holding the turn open indefinitely.
     turn_timeout_s: float = 25.0
+    # 260922-lim: a plain on/off command ("turn off the swamp cooler") is
+    # matched against live entity state locally (`turn/local_intent.py`),
+    # before the tier race ever starts -- no model round trip, no garbled
+    # transcript passed to a language model at all. `True` by default; an
+    # operator who wants every command to go through the brain (for example,
+    # to debug a matcher false negative) sets this to `false`.
+    local_intents: bool = True
 
     @property
     def top_tier(self) -> BrainTierConfig:
@@ -288,6 +295,9 @@ class BrainConfig:
                 f"brain.turn_timeout_s must be positive, got {turn_timeout_s!r} -- a zero or "
                 "negative bound would cancel the tier race before it could ever answer"
             )
+        local_intents = raw.get("local_intents", cls.local_intents)
+        if not isinstance(local_intents, bool):
+            raise ConfigError(f"brain.local_intents must be true or false, got {local_intents!r}")
         return cls(
             base_url=raw.get("base_url", cls.base_url),
             api_key=raw.get("api_key", cls.api_key),
@@ -298,6 +308,7 @@ class BrainConfig:
             max_tokens=raw.get("max_tokens", cls.max_tokens),
             max_tool_rounds=raw.get("max_tool_rounds", cls.max_tool_rounds),
             turn_timeout_s=turn_timeout_s,
+            local_intents=local_intents,
         )
 
 

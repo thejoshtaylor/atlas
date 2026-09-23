@@ -93,6 +93,7 @@ from spire_voice.providers.tts_xai import SinkFormat
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.timing import TurnTimings
 from spire_voice.turn import brain_race
+from spire_voice.turn.local_intent import match_on_off
 from spire_voice.turn.macros import fire_macro, match as match_macro
 from spire_voice.turn.wake_echo import is_wake_only
 
@@ -120,6 +121,12 @@ _DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to te
 # every sink's cache, never a live synthesis call on top of a turn that has
 # already run long or failed to answer.
 _CANNOT_DO_REPLY = "i can't do that one"
+
+# 260922-lim: spoken after a local on/off intent's tool call succeeds --
+# "done" is the operator's own confirmation, not a restatement of what was
+# asked for, and it is precached at startup (`tts.precache` in
+# `config.example.yaml`) for exactly this fast path.
+_DONE_REPLY = "done"
 
 # The fixed phrase `_compose_mixed_outcome_reply` speaks for one action that
 # succeeded, in a batch where at least one other action did not (CMD-07,
@@ -299,6 +306,7 @@ async def run_turn(
     wake_phrase: str | None = None,
     wake_cue: bool = False,
     brain_turn_timeout_s: float = 25.0,
+    local_intents: bool = False,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -412,6 +420,15 @@ async def run_turn(
     `race_tiers`' `except Exception` does not catch) -- and the turn
     speaks the cached "i can't do that one" phrase rather than sitting
     silent forever, with `turn_outcome = "brain_timeout"`.
+
+    `local_intents` (260922-lim, default `False`) gates the local on/off
+    matcher (`turn/local_intent.py`): when `True` and a `tool_host` is
+    given, a plain on/off command is matched against this turn's own live
+    entity fetch and, on a match, calls the tool directly -- no tier race,
+    no language model round trip at all. `False` for every caller that
+    predates this plan, so nothing about an existing caller's behavior
+    changes until it opts in (`app.py`'s camera `run_turn` call passes
+    `config.brain.local_intents`).
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -605,6 +622,98 @@ async def run_turn(
             await _emit_event(source, timings.to_event())
             timings.log()
             return
+
+        # 260922-lim: after the macro check (macros win) and before the tier
+        # race -- a plain on/off command needs neither a tier race nor a
+        # language model round trip at all. `local_intents=False` (the
+        # default, and every caller that predates this plan) skips this
+        # block entirely, at no observable cost. `tool_host is None` skips
+        # it too: there would be nowhere to send the matched call.
+        if local_intents and tool_host is not None:
+            # `state_task` was started before the drain above (D-15), so by
+            # now it has usually already finished -- this rarely actually
+            # waits. Bounded here, separately from the un-timed await this
+            # function's own tier-race setup makes further down: a slow
+            # state fetch must not hold a local-intent turn open
+            # indefinitely, and `asyncio.shield` keeps a timeout here from
+            # cancelling `state_task` itself, so a command this fast path
+            # cannot serve in time still falls through to the tier race
+            # below, which awaits the same task with no timeout of its own.
+            entities: list[dict[str, Any]] = []
+            if state_task is not None:
+                try:
+                    states_payload = await asyncio.wait_for(
+                        asyncio.shield(state_task), timeout=1.5
+                    )
+                except asyncio.TimeoutError:
+                    states_payload = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "state fetch raised; skipping local intent matching"
+                    )
+                    states_payload = None
+                if isinstance(states_payload, list):
+                    entities = states_payload
+
+            local_intent = match_on_off(final_text, entities) if entities else None
+            if local_intent is not None:
+                # A local-intent turn never builds the message list and
+                # never consumes the pending-runs fetch's result -- same
+                # cancel-then-await cleanup the macro path above already
+                # uses for the identical reason. `state_task` is left
+                # alone: it is either already done (the await above
+                # resolved it) or still needed by nothing here, and
+                # `_cancel_state_task` is a no-op on an already-done task.
+                await _cancel_state_task(pending_runs_task)
+                try:
+                    tool_result = await tool_host.call_tool(
+                        "ha_call_service",
+                        {
+                            "domain": local_intent.domain,
+                            "service": local_intent.service,
+                            "entity_id": local_intent.entity_id,
+                        },
+                    )
+                except Exception:
+                    # The call itself never reached a verdict -- logged and
+                    # treated as a failure, never a silent fall-through to
+                    # the brain: a tool call already in flight is not
+                    # cancellable, and retrying it through a second path
+                    # risks a double action (D-05's whole reasoning, one
+                    # level up from the tier race this path bypasses).
+                    logger.exception(
+                        "local intent tool call raised for %s", local_intent.entity_id
+                    )
+                    intent_failed = True
+                else:
+                    intent_failed = _is_error(tool_result)
+
+                if intent_failed:
+                    timings.turn_outcome = "local_intent_failed"
+                    reply_text = _CANNOT_DO_REPLY
+                else:
+                    timings.turn_outcome = "local_intent"
+                    reply_text = _DONE_REPLY
+                # Never falls back to the brain after a tool call was
+                # attempted -- a policy denial may have been on purpose
+                # (CMD-08's own doctrine, applied here the same way the
+                # macro path already applies it above).
+                speaking_tts = _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
+                await _speak(
+                    source,
+                    speaking_tts,
+                    timings,
+                    reply_text,
+                    kind="answer",
+                    barge_in=barge_in,
+                    speech_lock=speech_lock,
+                    sink=sink,
+                )
+                await _emit_event(source, timings.to_event())
+                timings.log()
+                return
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         # CMD-09/D-07: a candidate id is what `TierReply.candidates` carries

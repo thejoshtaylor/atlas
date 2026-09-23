@@ -461,6 +461,13 @@ brain:
   # and a fixed "i can't do that one" is spoken instead of silence.
   turn_timeout_s: 25.0
 
+  # 260922-lim: a plain on/off command ("turn off the lamp") is matched
+  # against live entity state locally, before the tier race ever starts --
+  # no model round trip, no garbled transcript ever reaching a language
+  # model at all. Set to false to send every command through the brain
+  # instead.
+  local_intents: true
+
 tts:
   url: "https://api.x.ai/v1/tts"
   api_key: "${XAI_API_KEY}"

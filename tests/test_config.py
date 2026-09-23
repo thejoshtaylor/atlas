@@ -282,6 +282,33 @@ def test_brain_turn_timeout_s_must_be_positive():
         BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": -1})
 
 
+# --- 260922-lim: brain.local_intents gates the local on/off matcher ---
+
+
+def test_brain_local_intents_defaults_to_true():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
+    assert brain.local_intents is True
+
+
+def test_brain_local_intents_is_configurable():
+    from spire_voice.config import BrainConfig
+
+    brain = BrainConfig.from_config(
+        {"models": [{"model": "grok-4.6"}], "local_intents": False}
+    )
+    assert brain.local_intents is False
+
+
+def test_brain_local_intents_must_be_a_bool():
+    from spire_voice.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "local_intents": "yes"})
+    assert "local_intents" in str(exc.value)
+
+
 # --- Task 2: macros: block and the normalization that decides sameness ---
 
 

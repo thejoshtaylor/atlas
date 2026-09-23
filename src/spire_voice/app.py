@@ -692,6 +692,11 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             wake_phrase=config.wake.phrase,
             wake_cue=config.wake.cue,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
+            # 260922-lim: only the camera's wake-word turn skips the tier
+            # race for a plain on/off command -- the browser and WebRTC
+            # routes below pass nothing, which is `run_turn`'s own
+            # `local_intents=False` default.
+            local_intents=config.brain.local_intents,
         )
 
     return _run
