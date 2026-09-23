@@ -151,12 +151,18 @@ camera:
   sample_rate: 8000
   channels: 1
 
-  # How much audio to keep before the wake word fires. The wake detector reports
-  # a hit slightly after the phrase completes, and a speaker usually runs
-  # straight from "hey spire" into the command with no pause, so the first
-  # syllables of the command are already in the past by the time we know to
-  # listen. Replaying this buffer into the transcriber recovers them.
-  preroll_ms: 1500
+  # How much audio to keep before the wake word fires. The wake detector
+  # reports a hit about 0.2-0.3 s after the phrase ends (260923-spd, measured
+  # against six live camera turns), and a speaker usually runs straight from
+  # "hey spire" into the command with no pause, so the first syllables of the
+  # command are already in the past by the time we know to listen. Replaying
+  # this buffer into the transcriber recovers them. 300 ms covers that
+  # detector lag with room to spare; audio that keeps arriving while STT
+  # connects is queued by the source, not lost, so there is no need to hold
+  # more than the lag itself -- a bigger window only replays more of the wake
+  # word itself back into STT. The wake-only continuation (260922-woc) stays
+  # as the safety net for a transcript that turns out to be wake-word-only.
+  preroll_ms: 300
 
 speaker:
   # go2rtc | tapo_talk

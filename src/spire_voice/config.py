@@ -396,7 +396,11 @@ class CameraConfig:
     encoding: str = "alaw"
     sample_rate: int = 8000
     channels: int = 1
-    preroll_ms: int = 1500
+    # 260923-spd: 300 ms covers the wake detector's ~0.2-0.3 s report lag
+    # (measured against six live camera turns) without replaying the wake
+    # word itself back into STT -- see config.example.yaml's `preroll_ms`
+    # comment for the full rationale.
+    preroll_ms: int = 300
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "CameraConfig":
