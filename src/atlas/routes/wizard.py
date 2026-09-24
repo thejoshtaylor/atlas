@@ -116,6 +116,32 @@ class AudioSourceRequest(BaseModel):
     source: str
 
 
+class TimezoneRequest(BaseModel):
+    """`PUT /api/wizard/timezone`'s own body -- one field, the zone name
+    an admin typed. Never trimmed here (260924-h2f Task 2's own
+    instruction): a name with leading/trailing whitespace is simply not a
+    `zoneinfo` key, and `PUT` refuses it the same way it refuses any other
+    unknown name, rather than silently correcting a typo."""
+
+    zone: str
+
+
+class TimezoneStatusResponse(BaseModel):
+    """`GET`/`PUT /api/wizard/timezone`'s own shape -- `zone`/`resolved_from`/
+    `warning` are always the boot's own `TimezoneResolution` (never
+    re-resolved per request, per that dataclass's own docstring);
+    `stored` is the current `settings` row (`None` when nothing has been
+    saved through the webapp yet); `applies_live` is always `False` --
+    a saved zone applies on the next restart, matching `audio_source`'s
+    own `detail.applies_live` (this file's own precedent)."""
+
+    zone: str
+    resolved_from: str
+    stored: "str | None"
+    warning: "str | None"
+    applies_live: bool
+
+
 def _unknown_audio_source_error(source: str) -> HTTPException:
     return HTTPException(
         status_code=400,
@@ -526,6 +552,62 @@ async def set_audio_source(
         updated_at=datetime.now(timezone.utc),
     )
     return await _audio_source_status(config, settings_repo)
+
+
+async def _timezone_status(request: Request) -> TimezoneStatusResponse:
+    """`request.app.state.timezone_resolution` -- the boot's own value,
+    read here and never re-resolved per request (`TimezoneResolution`'s
+    own docstring) -- paired with whatever `TIMEZONE_SETTING_KEY` reads
+    right now, so a `PUT` a moment ago is reflected in `stored` even
+    though `zone`/`resolved_from`/`warning` stay the boot's own values
+    until the next restart (`applies_live` is always `False`, matching
+    `audio_source`)."""
+    resolution: TimezoneResolution = request.app.state.timezone_resolution
+    settings_repo: SettingsRepository = request.app.state.settings_repo
+    setting = await settings_repo.get_setting(TIMEZONE_SETTING_KEY)
+    stored = setting.value if (setting is not None and isinstance(setting.value, str) and setting.value) else None
+    return TimezoneStatusResponse(
+        zone=resolution.name,
+        resolved_from=resolution.resolved_from,
+        stored=stored,
+        warning=resolution.warning,
+        applies_live=False,
+    )
+
+
+def _unknown_timezone_error(zone: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=f"unknown time zone {zone!r} -- use an IANA name such as 'Europe/Berlin'",
+    )
+
+
+@router.get("/timezone")
+async def get_timezone(
+    request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> TimezoneStatusResponse:
+    return await _timezone_status(request)
+
+
+@router.put("/timezone")
+async def set_timezone(
+    payload: TimezoneRequest,
+    request: Request,
+    admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> TimezoneStatusResponse:
+    try:
+        ZoneInfo(payload.zone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise _unknown_timezone_error(payload.zone) from exc
+
+    settings_repo: SettingsRepository = request.app.state.settings_repo
+    await settings_repo.set_setting(
+        TIMEZONE_SETTING_KEY,
+        payload.zone,
+        updated_by_user_id=admin.id,
+        updated_at=datetime.now(timezone.utc),
+    )
+    return await _timezone_status(request)
 
 
 @router.post("/finish")
