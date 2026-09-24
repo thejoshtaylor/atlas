@@ -541,3 +541,183 @@ async def test_batch_tts_adapter_skips_the_provider_call_entirely_for_empty_text
 
     assert [c async for c in adapter.synthesize(nothing())] == []
     assert calls == [], "the provider must not be called at all for whitespace-only text"
+
+
+# --- 260924-4iv (item c): cache_routing_headers / brain warm --------------
+
+
+def test_cache_routing_headers_true_returns_one_stable_atlas_prefixed_id():
+    from atlas.config import BrainConfig
+    from atlas.providers.brain_xai import cache_routing_headers
+
+    config = BrainConfig(cache_system_prompt=True, api_key="test-key", models=())
+    first = cache_routing_headers(config)
+    second = cache_routing_headers(config)
+
+    assert set(first) == {"x-grok-conv-id"}
+    assert first["x-grok-conv-id"].startswith("atlas-")
+    assert first == second, "the id is stable within one process"
+    assert config.api_key not in first["x-grok-conv-id"]
+    assert config.base_url not in first["x-grok-conv-id"]
+
+
+def test_cache_routing_headers_false_returns_no_header():
+    from atlas.config import BrainConfig
+    from atlas.providers.brain_xai import cache_routing_headers
+
+    config = BrainConfig(cache_system_prompt=False, models=())
+    assert cache_routing_headers(config) == {}
+
+
+def test_xai_brain_default_headers_carry_the_routing_header_when_enabled():
+    from atlas.config import BrainConfig, BrainTierConfig
+    from atlas.providers.brain_xai import XaiBrain
+
+    enabled_config = BrainConfig(
+        api_key="test-key", cache_system_prompt=True, models=(BrainTierConfig(model="grok"),)
+    )
+    brain_a = XaiBrain(enabled_config)
+    brain_b = XaiBrain(enabled_config)
+
+    header_a = brain_a._client.default_headers.get("x-grok-conv-id")
+    header_b = brain_b._client.default_headers.get("x-grok-conv-id")
+    assert header_a is not None
+    assert header_a == header_b, "two instances in one process share the same id"
+
+    disabled_config = BrainConfig(
+        api_key="test-key", cache_system_prompt=False, models=(BrainTierConfig(model="grok"),)
+    )
+    disabled_brain = XaiBrain(disabled_config)
+    assert "x-grok-conv-id" not in disabled_brain._client.default_headers
+
+
+def test_build_http_client_passes_the_shared_provider_keepalive_limits():
+    import atlas.providers.brain_xai as mod
+    from atlas.providers.base import PROVIDER_KEEPALIVE_EXPIRY_S
+
+    captured = {}
+    real_cls = mod.DefaultAsyncHttpxClient
+
+    class _CapturingClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    mod.DefaultAsyncHttpxClient = _CapturingClient
+    try:
+        mod.build_http_client()
+    finally:
+        mod.DefaultAsyncHttpxClient = real_cls
+
+    assert captured["limits"].keepalive_expiry == PROVIDER_KEEPALIVE_EXPIRY_S
+
+
+@pytest.mark.asyncio
+async def test_xai_brain_warm_calls_models_list_once_and_never_raises():
+    from types import SimpleNamespace
+
+    from atlas.config import BrainConfig, BrainTierConfig
+    from atlas.providers.brain_xai import XaiBrain
+
+    config = BrainConfig(api_key="test-key", models=(BrainTierConfig(model="grok"),))
+    brain = XaiBrain(config)
+
+    calls = []
+
+    async def _list():
+        calls.append(True)
+        return SimpleNamespace(data=[])
+
+    brain._client.models.list = _list
+    await brain.warm()
+    assert calls == [True]
+
+    async def _raising_list():
+        raise RuntimeError("no route to xAI")
+
+    brain._client.models.list = _raising_list
+    await brain.warm()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_xai_tts_warm_sends_one_head_with_auth_and_swallows_every_error():
+    import httpx as _httpx
+
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import XaiTts
+
+    requests: list = []
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        requests.append(request)
+        return _httpx.Response(405)
+
+    transport = _httpx.MockTransport(handler)
+    real_client = _httpx.AsyncClient
+
+    def _client(*a, **k):
+        k.pop("timeout", None)
+        k.pop("limits", None)
+        return real_client(transport=transport)
+
+    import atlas.providers.tts_xai as mod
+
+    mod.httpx.AsyncClient = _client
+    try:
+        tts = XaiTts(TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}))
+        await tts.warm()
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    assert len(requests) == 1
+    assert requests[0].method == "HEAD"
+    assert requests[0].headers.get("authorization") == "Bearer k"
+
+    def raising_handler(request: _httpx.Request) -> _httpx.Response:
+        raise _httpx.ConnectError("no route")
+
+    mod.httpx.AsyncClient = lambda *a, **k: real_client(
+        transport=_httpx.MockTransport(raising_handler)
+    )
+    try:
+        tts2 = XaiTts(TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}))
+        await tts2.warm()  # must not raise
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+
+def test_xai_tts_shared_client_keepalive_meets_the_provider_floor():
+    from atlas.providers.base import PROVIDER_KEEPALIVE_EXPIRY_S
+    from atlas.providers.tts_xai import _KEEPALIVE_EXPIRY_S
+
+    assert _KEEPALIVE_EXPIRY_S >= PROVIDER_KEEPALIVE_EXPIRY_S
+
+
+@pytest.mark.asyncio
+async def test_warm_providers_starts_exactly_two_tasks_and_swallows_a_raising_warm():
+    from atlas.app import _warm_providers
+
+    class _FakeWarmable:
+        def __init__(self, should_raise: bool = False):
+            self.should_raise = should_raise
+            self.called = False
+
+        async def warm(self) -> None:
+            self.called = True
+            if self.should_raise:
+                raise RuntimeError("warm failed")
+
+    class _NoWarmProvider:
+        pass
+
+    good = _FakeWarmable()
+    raising = _FakeWarmable(should_raise=True)
+    keep_alive: set = set()
+
+    tasks = _warm_providers([good, _NoWarmProvider(), None, raising], keep_alive)
+
+    assert len(tasks) == 2
+    await asyncio.gather(*tasks)
+
+    assert good.called is True
+    assert raising.called is True
+    assert keep_alive == set(), "every task discards itself from keep_alive once done"

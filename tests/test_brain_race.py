@@ -206,6 +206,66 @@ async def test_build_tiers_gives_the_top_tier_no_envelope_client():
     assert tiers[0].envelope_client is None
 
 
+async def test_build_tiers_shares_one_http_client_and_one_set_of_routing_headers():
+    """260924-4iv (items c, d): one pool, one header set, built exactly
+    once -- every tier's own `XaiBrain` and the shared envelope client all
+    receive the same `http_client`/headers, so a warm call on any one tier
+    warms the whole pool."""
+    from atlas.config import BrainConfig, BrainTierConfig
+    from atlas.turn import brain_race
+
+    build_calls = []
+    real_build_http_client = brain_race.build_http_client
+
+    def _counting_build_http_client():
+        client = real_build_http_client()
+        build_calls.append(client)
+        return client
+
+    captured_openai_kwargs = []
+    real_async_openai = brain_race.AsyncOpenAI
+
+    class _RecordingAsyncOpenAI(real_async_openai):
+        """A real `AsyncOpenAI` subclass -- `instructor.from_openai` checks
+        `isinstance(client, (openai.OpenAI, openai.AsyncOpenAI))`, so a
+        wrapper that is not itself one would fail that check. Subclassing
+        (rather than composing) keeps every real behavior and only adds
+        the one thing this test needs: the exact kwargs each construction
+        received."""
+
+        def __init__(self, **kwargs):
+            captured_openai_kwargs.append(kwargs)
+            super().__init__(**kwargs)
+
+    brain_race.build_http_client = _counting_build_http_client
+    brain_race.AsyncOpenAI = _RecordingAsyncOpenAI
+    try:
+        config = BrainConfig(
+            api_key="test-key",
+            cache_system_prompt=True,
+            models=(BrainTierConfig(model="triage-model"), BrainTierConfig(model="top-model")),
+        )
+        tiers = brain_race.build_tiers(config)
+    finally:
+        brain_race.build_http_client = real_build_http_client
+        brain_race.AsyncOpenAI = real_async_openai
+
+    assert len(build_calls) == 1, "build_http_client must be called exactly once"
+    shared_client = build_calls[0]
+
+    # Both tier brains received the one shared client.
+    assert tiers[0].brain._client._client is shared_client
+    assert tiers[1].brain._client._client is shared_client
+
+    # The envelope client's own AsyncOpenAI construction received it too,
+    # plus the same routing headers.
+    assert len(captured_openai_kwargs) == 1
+    assert captured_openai_kwargs[0]["http_client"] is shared_client
+    assert captured_openai_kwargs[0]["default_headers"] == {
+        "x-grok-conv-id": tiers[0].brain._client.default_headers["x-grok-conv-id"]
+    }
+
+
 async def test_a_denied_call_on_a_two_tier_turn_reaches_speech_verbatim(
     fake_audio_source, fake_stt, fake_brain, fake_tts, fake_envelope_client
 ):
