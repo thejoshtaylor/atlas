@@ -46,6 +46,7 @@
   --color-ring: var(--ring);
   --color-denied-bg: var(--denied-bg);
   --color-denied-fg: var(--denied-fg);
+  --color-voice: var(--voice);
 
   --font-sans: "Manrope Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
@@ -109,6 +110,9 @@
    * destructive red -- a normal, legible, safe state, not a warning. */
   --denied-bg: oklch(0.3 0.06 300);
   --denied-fg: oklch(0.88 0.06 300);
+  /* ATLAS's own voice on the listen dial. Gold is what it hears; this
+   * cool meridian blue is what it says. Used nowhere else. */
+  --voice: oklch(0.78 0.1 230);
 
   /* 44px minimum touch targets stay (touch-target utility below). */
   --radius: 0.625rem;
@@ -197,6 +201,19 @@ h3 {
 .atlas-globe--spinning .atlas-globe__ecliptic {
   animation: atlas-ecliptic 4s ease-in-out infinite alternate;
 }
+/* The listener's dial: the globe turns four times faster while ATLAS is
+ * thinking, and the ecliptic holds still at full strength while it hears. */
+.listen-dial[data-status="thinking"] .atlas-globe__meridian {
+  animation-duration: 3s;
+}
+.listen-dial[data-status="hearing"] .atlas-globe__ecliptic {
+  animation: none;
+  opacity: 1;
+}
+/* A live listener's dot in the shell breathes, slowly. */
+.listen-dot {
+  animation: atlas-ecliptic 1.6s ease-in-out infinite alternate;
+}
 @keyframes atlas-meridian {
   0% {
     transform: scaleX(1);
@@ -220,7 +237,8 @@ h3 {
 }
 @media (prefers-reduced-motion: reduce) {
   .atlas-globe--spinning .atlas-globe__meridian,
-  .atlas-globe--spinning .atlas-globe__ecliptic {
+  .atlas-globe--spinning .atlas-globe__ecliptic,
+  .listen-dot {
     animation: none;
   }
 }

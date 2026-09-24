@@ -522,6 +522,8 @@ async def run_turn(
             final_text = getattr(final, "text", "") if final is not None else ""
 
         timings.mark_stt_final()
+        # The boundary between hearing and thinking, for a page that shows it.
+        await _emit_event(source, {"type": "transcript.final", "text": final_text})
 
         if barge_in is not None:
             # The exact moment `sources/runner.py`'s own listener may safely

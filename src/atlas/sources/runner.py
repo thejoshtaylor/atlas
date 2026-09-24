@@ -574,6 +574,11 @@ class SourceRunner:
         self._last_hit_at = now
         logger.info("wake hit on source %r (score=%.3f)", self._name, hit.score)
         self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
+        # Tells a source with a screen (the browser listener) that a turn is
+        # starting. The camera's own `send_event` is a logged no-op.
+        send_event = getattr(self._source, "send_event", None)
+        if send_event is not None:
+            await send_event({"type": "wake.heard"})
 
         turn_source = self._source
         if self._preroll is not None:

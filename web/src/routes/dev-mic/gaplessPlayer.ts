@@ -8,11 +8,18 @@
 export class GaplessPlayer {
   private readonly ctx: AudioContext
   private readonly sampleRate: number
+  private readonly destination: AudioNode
   private nextStartTime = 0
 
-  constructor(ctx: AudioContext, sampleRate: number) {
+  constructor(ctx: AudioContext, sampleRate: number, destination: AudioNode = ctx.destination) {
     this.ctx = ctx
     this.sampleRate = sampleRate
+    this.destination = destination
+  }
+
+  /** Seconds until everything scheduled so far has finished playing. */
+  endsIn(): number {
+    return Math.max(0, this.nextStartTime - this.ctx.currentTime)
   }
 
   playChunk(int16Array: Int16Array): void {
@@ -21,7 +28,7 @@ export class GaplessPlayer {
     buffer.copyToChannel(float32, 0)
     const src = this.ctx.createBufferSource()
     src.buffer = buffer
-    src.connect(this.ctx.destination)
+    src.connect(this.destination)
     const startAt = Math.max(this.ctx.currentTime, this.nextStartTime)
     src.start(startAt)
     this.nextStartTime = startAt + buffer.duration

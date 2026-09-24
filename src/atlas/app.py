@@ -114,7 +114,10 @@ logger = logging.getLogger("atlas.app")
 #   - the camera's wake-word listener (`_make_run_turn_for_source`),
 #   - the browser microphone behind `/ws/turn`,
 #   - the browser's WebRTC transport behind `POST /webrtc/offer`, which
-#     `GET /transport` can select instead of `/ws/turn`.
+#     `GET /transport` can select instead of `/ws/turn`,
+#   - the always-on browser listener behind `/ws/listen`, which reuses the
+#     camera's own `_make_run_turn_for_source` path, so it adds no fourth
+#     `run_turn` call site.
 #
 # The third was missing until the Phase 8 review found it: its turns were
 # recorded and appeared in the Sessions list while `/live` sat on the idle
@@ -127,10 +130,11 @@ logger = logging.getLogger("atlas.app")
 CAMERA_SOURCE_NAME = "camera"
 BROWSER_MIC_SOURCE_NAME = "browser_mic"
 WEBRTC_SOURCE_NAME = "browser_webrtc"
+LISTEN_SOURCE_NAME = "browser_listen"
 
 # What `observer.opened` advertises: every name above, in one place, so the
 # opening message cannot drift from the set of paths that actually publish.
-OBSERVED_SOURCE_NAMES = (CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME, WEBRTC_SOURCE_NAME)
+OBSERVED_SOURCE_NAMES = (CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME, WEBRTC_SOURCE_NAME, LISTEN_SOURCE_NAME)
 
 CONFIG_PATH = os.environ.get("ATLAS_CONFIG", "config/config.example.yaml")
 # The repository's own `mcp/` directory -- three levels up from this file
@@ -627,7 +631,9 @@ async def _refuse_turn_if_any_slot_is_degraded(app: FastAPI, source: Any) -> boo
     return True
 
 
-def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) -> Callable[[Any], Any]:
+def _make_run_turn_for_source(
+    app: FastAPI, config: Config, source_name: str, *, room_speaker: bool = True
+) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
     A fresh `TurnTimings()` per call -- never shared across turns, the same
@@ -641,6 +647,10 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
     turn, here, which is what makes the turn boundary explicit rather than
     inferred by an observer from the first transcript that happens to
     arrive.
+
+    `room_speaker=False` is for a source that plays its reply somewhere
+    other than the room speaker (the browser listener): its turns must not
+    wait on `app.state.speaker_lock` behind a camera reply.
     """
 
     # CR-03: one warning per process for the camera path, not one per wake
@@ -705,7 +715,7 @@ def _make_run_turn_for_source(app: FastAPI, config: Config, source_name: str) ->
             state_fetch=_make_state_fetch(app.state.plugin_manager),
             pending_runs_fetch=_make_pending_runs_fetch(app.state.workflow_repo),
             session_recorder=session_recorder,
-            speech_lock=app.state.speaker_lock,
+            speech_lock=app.state.speaker_lock if room_speaker else None,
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
             # 260922-woc: only the camera's wake-word turn ever pauses after
@@ -2000,6 +2010,53 @@ async def turn_ws(websocket: WebSocket) -> None:
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
         brain_turn_timeout_s=config.brain.turn_timeout_s,
     )
+
+
+@app.websocket(
+    "/ws/listen",
+    dependencies=[Depends(require_setup_complete), Depends(require_role(Role.OPERATOR))],
+)
+async def listen_ws(websocket: WebSocket) -> None:
+    """An always-on browser microphone: the page streams 16 kHz PCM16 for
+    as long as it stays open, and each connection gets its own
+    `SourceRunner` and its own wake detector -- the same pipeline the
+    camera runs. VOICE-03 holds here for the same reason it holds for the
+    camera: nothing reaches speech-to-text until this connection's own
+    detector fires and the gate allows it.
+
+    A fresh detector per connection, never `app.state.wake_detector`: a
+    Vosk recognizer carries decode state across chunks, and two streams
+    fed into one would corrupt both. The threshold starts at the camera
+    runner's live value, so a tuned threshold applies here too.
+    """
+    await websocket.accept()
+    app_ = websocket.app
+    source = WebSocketAudioSource(websocket)
+    if await _refuse_turn_if_any_slot_is_degraded(app_, source):
+        return
+    config: Config = app_.state.config
+    # Loading a wake model blocks for up to a second -- off the event loop.
+    detector = await asyncio.to_thread(_build_wake_detector, config.wake.resolve(LISTEN_SOURCE_NAME))
+    runner = SourceRunner(
+        LISTEN_SOURCE_NAME,
+        source,
+        detector,
+        lambda chunk: chunk,  # already 16 kHz PCM16, the detector's own format
+        _make_run_turn_for_source(app_, config, LISTEN_SOURCE_NAME, room_speaker=False),
+        wake_config=config.wake,
+        gate_config=config.gate,
+        # ponytail: reuses the camera's pre-roll length, add a listener key if they ever need to differ.
+        preroll=PrerollBuffer(source.source_format(), config.camera.preroll_ms),
+        wake_event_repo=getattr(app_.state, "wake_event_repo", None),
+    )
+    camera_runners = getattr(app_.state, "source_runners", None) or []
+    if camera_runners:
+        runner.set_wake_threshold(camera_runners[0].wake_threshold)
+    await source.send_event({"type": "listen.ready", "wake_phrase": config.wake.phrase})
+    try:
+        await runner.run()
+    finally:
+        detector.close()
 
 
 @app.websocket(

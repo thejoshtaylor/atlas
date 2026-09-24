@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query"
-import { ArrowRight } from "lucide-react"
-import { Link } from "react-router-dom"
+import { ArrowRight, AudioLines, Mic } from "lucide-react"
+import { Link, useNavigate } from "react-router-dom"
 import { AtlasGlobe } from "@/components/brand/AtlasGlobe"
+import { Button } from "@/components/ui/button"
+import { isListening, startListening, useListenStore } from "@/lib/listener"
 import { useSession } from "@/hooks/useSession"
 import { formatMs } from "@/lib/format"
 import { SESSIONS_QUERY_KEY, fetchSessions, type SessionSummary } from "@/lib/sessions"
@@ -38,6 +40,8 @@ export function HomeRoute() {
   const recent = useQuery({ queryKey: SESSIONS_QUERY_KEY, queryFn: fetchSessions, enabled: canObserve })
   const firstName = (session.data?.display_name || "").split(" ")[0]
   const turns = recent.data?.slice(0, RECENT_TURNS) ?? []
+  const listening = isListening(useListenStore((state) => state.status))
+  const navigate = useNavigate()
 
   return (
     <div className="flex flex-col gap-12">
@@ -49,12 +53,29 @@ export function HomeRoute() {
             ATLAS listens on every configured source. Say the wake phrase near one to start a turn.
           </p>
           {canObserve ? (
-            <Link
-              to="/live"
-              className="touch-target mt-2 inline-flex w-fit items-center gap-2 text-label font-semibold text-primary underline-offset-4 hover:underline"
-            >
-              Watch it live <ArrowRight className="size-4" aria-hidden />
-            </Link>
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
+              {/* Started from the click itself: browsers only open a
+                  microphone and an audio context inside a user gesture. */}
+              <Button
+                type="button"
+                size="lg"
+                variant={listening ? "outline" : "default"}
+                className="h-11 w-full gap-2 sm:w-auto sm:px-6"
+                onClick={() => {
+                  if (!listening) void startListening()
+                  navigate("/listen")
+                }}
+              >
+                {listening ? <AudioLines className="size-4" aria-hidden /> : <Mic className="size-4" aria-hidden />}
+                {listening ? "Open the listener" : "Listen on this device"}
+              </Button>
+              <Link
+                to="/live"
+                className="touch-target inline-flex w-fit items-center gap-2 text-label font-semibold text-primary underline-offset-4 hover:underline"
+              >
+                Watch it live <ArrowRight className="size-4" aria-hidden />
+              </Link>
+            </div>
           ) : null}
         </div>
       </section>

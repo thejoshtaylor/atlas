@@ -1,5 +1,6 @@
 import * as React from "react"
 import {
+  AudioLines,
   Blocks,
   CalendarClock,
   Cpu,
@@ -20,6 +21,7 @@ import { NavLink, Outlet } from "react-router-dom"
 import { AtlasGlobe } from "@/components/brand/AtlasGlobe"
 import { Button } from "@/components/ui/button"
 import { useSession } from "@/hooks/useSession"
+import { isListening, useListenStore, type ListenStatus } from "@/lib/listener"
 import { cn } from "@/lib/utils"
 
 type Role = "viewer" | "operator" | "admin"
@@ -39,6 +41,8 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     items: [
       { to: "/", label: "Home", minimumRole: "viewer", icon: House },
       // Phase 8, WEB-06/D-05: the live observer feed.
+      // The always-on browser listener: this device as mic and speaker.
+      { to: "/listen", label: "Listen", minimumRole: "operator", icon: AudioLines },
       { to: "/live", label: "Live", minimumRole: "operator", icon: Radio },
       // Phase 8, WEB-07/D-01: past recorded turns. `/sessions/:id` is
       // reached by a link from this list, never from the nav.
@@ -122,6 +126,38 @@ function NavList({ role, onNavigate }: { role: string; onNavigate?: () => void }
   )
 }
 
+const LISTEN_WORD: Partial<Record<ListenStatus, string>> = {
+  connecting: "Connecting",
+  armed: "Listening",
+  hearing: "Hearing you",
+  thinking: "Working",
+  speaking: "Replying",
+}
+
+/** Present on every page while this device is listening, so the operator
+ * never forgets the microphone is open. Links back to the dial. */
+function ListenIndicator({ className, onNavigate }: { className?: string; onNavigate?: () => void }) {
+  const status = useListenStore((state) => state.status)
+  if (!isListening(status)) return null
+  return (
+    <NavLink
+      to="/listen"
+      onClick={onNavigate}
+      className={cn(
+        "touch-target inline-flex items-center gap-2 rounded-md px-3 text-label text-foreground transition-colors hover:bg-accent",
+        className,
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn("listen-dot size-2 rounded-full", status === "speaking" ? "bg-voice" : "bg-primary")}
+      />
+      {LISTEN_WORD[status]}
+      <span className="sr-only">on this device. Open the listener.</span>
+    </NavLink>
+  )
+}
+
 function Identity({ name, role }: { name?: string; role: string }) {
   if (!name) return null
   return (
@@ -162,12 +198,14 @@ export function AppShell() {
         <nav aria-label="Main" className="flex-1">
           <NavList role={role} />
         </nav>
+        <ListenIndicator className="lg:min-h-9" />
         <Identity name={name} role={role} />
       </aside>
 
       <div className="flex min-w-0 flex-col">
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background/95 px-4 py-2 backdrop-blur lg:hidden">
           <Wordmark />
+          <ListenIndicator className="ml-auto" />
           <Button
             type="button"
             variant="ghost"

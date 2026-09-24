@@ -430,7 +430,7 @@ def test_an_operator_receives_the_opening_message_naming_the_wake_phrase_and_sou
             opening = websocket.receive_json()
         assert opening["type"] == "observer.opened"
         assert opening["wake_phrase"] == app_module.app.state.config.wake.phrase
-        assert set(opening["sources"]) == {"camera", "browser_mic", "browser_webrtc"}
+        assert set(opening["sources"]) == {"camera", "browser_mic", "browser_webrtc", "browser_listen"}
     finally:
         client.__exit__(None, None, None)
 
@@ -636,6 +636,7 @@ def test_every_run_turn_call_site_in_app_py_is_wrapped_for_the_observer_feed():
         "camera",
         "browser_mic",
         "browser_webrtc",
+        "browser_listen",
     }
 
 
@@ -665,3 +666,31 @@ def test_a_text_frame_alongside_a_null_bytes_key_is_discarded_not_closed(tmp_pat
             assert _receive_json_within(observer) == {"type": "reply.text", "text": "still here"}
     finally:
         client.__exit__(None, None, None)
+
+
+def test_the_listener_waits_for_the_wake_word_before_starting_a_turn(tmp_path, monkeypatch):
+    """`/ws/listen`: the connection announces itself ready, and a turn
+    starts only once its own wake detector fires -- announced to the page
+    as `wake.heard` before any transcript."""
+    import atlas.app as app_module
+    from tests.conftest import FakeWakeDetector
+
+    client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
+    detectors: list[FakeWakeDetector] = []
+
+    def build(_wake_config):
+        detectors.append(FakeWakeDetector(fire_at_call=1))
+        return detectors[-1]
+
+    monkeypatch.setattr(app_module, "_build_wake_detector", build)
+    try:
+        with client.websocket_connect("/ws/listen") as listener:
+            ready = listener.receive_json()
+            assert ready == {"type": "listen.ready", "wake_phrase": app_module.app.state.config.wake.phrase}
+            listener.send_bytes(b"\x00" * 320)  # call 0: no hit, nothing sent
+            listener.send_bytes(b"\x00" * 320)  # call 1: the hit
+            assert listener.receive_json() == {"type": "wake.heard"}
+        assert len(detectors) == 1
+    finally:
+        client.__exit__(None, None, None)
+    assert detectors[0].closed

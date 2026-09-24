@@ -11,6 +11,7 @@ import { SignInRoute } from "@/routes/auth/SignInRoute"
 import { AccountsRoute } from "@/routes/accounts/AccountsRoute"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
 import { DevMicRoute } from "@/routes/dev-mic/DevMicRoute"
+import { ListenRoute } from "@/routes/listen/ListenRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
 import { LiveRoute } from "@/routes/live/LiveRoute"
 import { MacroEditorRoute } from "@/routes/macros/MacroEditorRoute"
@@ -76,6 +77,7 @@ function AppRoutes() {
             <Route path="/workflows/new" element={<WorkflowEditorRoute />} />
             <Route path="/workflows/:id" element={<WorkflowEditorRoute />} />
             <Route path="/dev-mic" element={<DevMicRoute />} />
+            <Route path="/listen" element={<ListenRoute />} />
             <Route path="/live" element={<LiveRoute />} />
             <Route path="/sessions" element={<SessionsRoute />} />
             <Route path="/sessions/:id" element={<SessionDetailRoute />} />

@@ -47,6 +47,26 @@ Where the globe appears:
 - Sign-in page and wizard step header: spinning.
 - Home: large and spinning.
 - Live idle state: spinning while the observer socket is connected, static while it is not.
+- Listen dial: see below.
+
+## The listen dial
+
+`ListenDial` (`routes/listen/`) puts the globe inside a graduated ring of 120 ticks, with a longer tick every tenth. Two waveforms pulse round the ring, each drawn from its own live spectrum and mirrored left to right:
+
+- **Gold** (`--primary`) is incoming audio: the microphone, while the server reads it (armed at half reach, hearing at full reach).
+- **Voice blue** (`--voice`, `oklch(0.78 0.1 230)`) is outgoing audio: ATLAS's reply and the wake chime playing on this device. This token is used only on the dial and the shell's listening dot.
+
+| State | Dial | Globe |
+|---|---|---|
+| Off | Porcelain ticks, faint, at rest | Static |
+| Armed | Gold pulse at half reach, following the room | Spinning |
+| Hearing | Gold pulse at full reach, following the voice | Spinning, ecliptic held at full strength |
+| Thinking | No audio. A porcelain sweep runs round the dial once every 1.4 s | Spinning four times faster |
+| Speaking | Blue pulse, following the reply audio | Spinning |
+
+Under `prefers-reduced-motion`, the sweep becomes a steady raised porcelain ring, and the pulses still follow the audio level but settle slower.
+
+While the listener is on, the shell shows it on every page: a dot (gold, or voice blue while replying) and the state word, in the sidebar above the user's identity and in the phone header. The dot breathes slowly and stops under reduced motion.
 
 `web/public/favicon.svg` is the static mark on an ink tile.
 
