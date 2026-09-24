@@ -45,6 +45,7 @@ from atlas.db.repository import Plugin, PluginConfigValue, PluginRepository
 from atlas.mcp_client import (
     McpToolHost,
     McpToolHostLookup,
+    PingTimeoutError,
     RenamedToolHostView,
     mcp_tools_to_openai_tools,
 )
@@ -106,6 +107,13 @@ REMOTE_AUTH_KEY = "AUTH_TOKEN"
 # a `atlas_mcp/safety.py` would have let an admin-supplied policy module
 # replace the one in-child boundary this system has.
 RESERVED_ENV_KEYS = frozenset({"PYTHONPATH", "ATLAS_SAFETY"})
+
+# Quick task 260924-4is (D4): at the default `timeout_ms` of 5000, `_ping_
+# interval_s` is about 1.7s, so a wedged child loses its tools after about
+# 20s (3 * (1.7s + 5s)). A loop stall that costs one or two pings no
+# longer withdraws every plugin's tools and respawns every child at the
+# same moment, which is what the prod evidence for this task showed.
+PING_MISSES_BEFORE_RESPAWN = 3
 
 
 @dataclass
@@ -640,8 +648,14 @@ class PluginManager:
         recovery -- with no wall-clock sleep of its own. `stop_all()`
         additionally cancels this coroutine's own task directly, so a
         sleep or a ping in progress is interrupted rather than waited out.
+
+        Quick task 260924-4is (D4): `consecutive_misses` counts
+        `PingTimeoutError` only -- `PING_MISSES_BEFORE_RESPAWN` of them in
+        a row withdraws the tools, exactly as one used to; any other
+        ping failure still withdraws at once, unchanged.
         """
         backoff = self._plugins_config.respawn_backoff_min_s
+        consecutive_misses = 0
         while not self._stopping:
             current = self._plugins[plugin.id]
             if current.state is PluginState.RUNNING:
@@ -656,6 +670,7 @@ class PluginManager:
                     else:
                         if not future.done():
                             future.set_result(None)
+                    consecutive_misses = 0
                     continue
                 await self._sleep(self._ping_interval_s(plugin))
                 if self._stopping:
@@ -664,6 +679,30 @@ class PluginManager:
                 assert current.host is not None
                 try:
                     await current.host.ping()
+                except PingTimeoutError as exc:
+                    consecutive_misses += 1
+                    if consecutive_misses < PING_MISSES_BEFORE_RESPAWN:
+                        logger.warning(
+                            "plugin %r missed ping %d of %d (%s) -- keeping its "
+                            "tools; respawning only after %d in a row",
+                            plugin.slug,
+                            consecutive_misses,
+                            PING_MISSES_BEFORE_RESPAWN,
+                            exc,
+                            PING_MISSES_BEFORE_RESPAWN,
+                        )
+                        continue
+                    logger.warning(
+                        "plugin %r ping failed (%s) after %d consecutive missed "
+                        "pings -- withdrawing its tools and scheduling a respawn",
+                        plugin.slug,
+                        exc,
+                        consecutive_misses,
+                    )
+                    await self._withdraw_and_schedule_respawn(plugin, current.host)
+                    backoff = self._plugins_config.respawn_backoff_min_s
+                    consecutive_misses = 0
+                    continue
                 except BaseException as exc:  # noqa: BLE001 -- see below for why BaseException
                     # Plan 06-03: verified directly against the installed SDK -- a
                     # remote connection's own internal task group can surface a
@@ -686,25 +725,18 @@ class PluginManager:
                         plugin.slug,
                         exc,
                     )
-                    await current.host.aclose()
-                    self._plugins[plugin.id] = RunningPlugin(
-                        plugin=plugin, host=None, state=PluginState.CRASHED_RETRYING
-                    )
-                    # CR-02 (code review): this loop only services a
-                    # pending respawn while the plugin is `RUNNING`, and
-                    # the host that request named is now closed. The
-                    # backoff loop below will start a genuinely new child
-                    # carrying a freshly read policy block, but that is not
-                    # this request succeeding -- the caller is told its
-                    # write did not land rather than waiting out however
-                    # long the recovery takes.
-                    self._fail_pending_respawn(
-                        plugin.id,
-                        f"plugin {plugin.slug!r} died before its respawn could be "
-                        "performed -- this write did not reach the enforcing process",
-                    )
-                    self.rebuild()
+                    await self._withdraw_and_schedule_respawn(plugin, current.host)
                     backoff = self._plugins_config.respawn_backoff_min_s
+                    consecutive_misses = 0
+                    continue
+                else:
+                    if consecutive_misses > 0:
+                        logger.info(
+                            "plugin %r answered its ping again after %d missed",
+                            plugin.slug,
+                            consecutive_misses,
+                        )
+                    consecutive_misses = 0
                 continue
 
             # CRASHED_RETRYING: wait out the current backoff, then attempt
@@ -732,6 +764,33 @@ class PluginManager:
                 )
                 self.rebuild()
                 backoff = self._plugins_config.respawn_backoff_min_s
+                # Quick task 260924-4is (D4): already 0 by construction
+                # (every withdrawal path resets it before this state is
+                # ever reached) -- explicit here so the invariant is
+                # stated, not just implied.
+                consecutive_misses = 0
+
+    async def _withdraw_and_schedule_respawn(self, plugin: Plugin, host: McpToolHost) -> None:
+        """The shared withdrawal body both `_run_watchdog` ping-failure
+        paths above use -- close the dead/wedged host, mark the plugin
+        `CRASHED_RETRYING`, fail any pending respawn request, and rebuild
+        the merged schema. The caller logs its own reason first: the
+        immediate path and the consecutive-miss threshold path (quick
+        task 260924-4is, D4) word their own WARNING differently."""
+        await host.aclose()
+        self._plugins[plugin.id] = RunningPlugin(plugin=plugin, host=None, state=PluginState.CRASHED_RETRYING)
+        # CR-02 (code review): this loop only services a pending respawn
+        # while the plugin is `RUNNING`, and the host that request named
+        # is now closed. The backoff loop below will start a genuinely
+        # new child carrying a freshly read policy block, but that is not
+        # this request succeeding -- the caller is told its write did not
+        # land rather than waiting out however long the recovery takes.
+        self._fail_pending_respawn(
+            plugin.id,
+            f"plugin {plugin.slug!r} died before its respawn could be "
+            "performed -- this write did not reach the enforcing process",
+        )
+        self.rebuild()
 
     async def _start_one(self, plugin: Plugin) -> McpToolHost:
         safety_block = (

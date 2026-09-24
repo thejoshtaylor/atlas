@@ -546,13 +546,26 @@ class McpToolHost:
         the same `PingRequest`/`EmptyResult` pair it does and passes the
         deadline the SDK already knows how to honour -- never an
         `asyncio.wait_for` wrapper, per `call_tool`'s own reasoning.
+
+        Quick task 260924-4is (D4): a `REQUEST_TIMEOUT` here is
+        re-raised as `PingTimeoutError`, never as the bare `MCPError` --
+        the plugin watchdog (`plugins/manager.py`) counts these
+        separately from every other failure, because a stalled parent
+        loop times out a ping exactly the same way a dead child does.
+        Every other `MCPError` code propagates unchanged.
         """
         async with self._as_reader() as session:
-            await session.send_request(
-                PingRequest(params=RequestParams(_meta=None)),
-                EmptyResult,
-                request_read_timeout_seconds=self._timeout_s,
-            )
+            try:
+                await session.send_request(
+                    PingRequest(params=RequestParams(_meta=None)),
+                    EmptyResult,
+                    request_read_timeout_seconds=self._timeout_s,
+                )
+            except MCPError as exc:
+                if exc.code != REQUEST_TIMEOUT:
+                    raise
+                timeout_ms = int((self._timeout_s or 0.0) * 1000)
+                raise PingTimeoutError(f"ping did not answer within {timeout_ms}ms") from exc
 
     async def aclose(self) -> None:
         """Tear this host down for good -- whatever it currently holds
@@ -589,6 +602,17 @@ class McpToolHost:
             # `respawn()` does not come through here: it closes and
             # rebuilds its stack directly and assigns a fresh session.
             self.session = None
+
+
+class PingTimeoutError(Exception):
+    """Raised by `McpToolHost.ping()` when the plugin's own `timeout_ms`
+    passes with no answer.
+
+    This does not prove the child is dead: a stalled event loop in this
+    process times out a ping exactly the same way a wedged or dead child
+    does. `plugins/manager.py`'s watchdog counts these and does not act
+    on a single one -- see `PING_MISSES_BEFORE_RESPAWN`.
+    """
 
 
 class UnknownToolError(Exception):
