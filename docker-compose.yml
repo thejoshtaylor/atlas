@@ -66,6 +66,11 @@ services:
       # Only read when SPEAKER_BACKEND is tcp -- blank is safe on every
       # other backend.
       SPEAKER_TCP_URL: "${SPEAKER_TCP_URL:-}"
+      # 260923-pyj: the reply audio format tts.codec/tts.sample_rate read.
+      # Non-empty defaults -- an empty value here would reach TtsConfig as
+      # "" and stop startup.
+      TTS_CODEC: "${TTS_CODEC:-alaw}"
+      TTS_SAMPLE_RATE: "${TTS_SAMPLE_RATE:-8000}"
       # 260922-fmi (D-15, D-20): the calibration echo-path route's on/off
       # switch. Safe default false, same as the shipped config.
       CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"

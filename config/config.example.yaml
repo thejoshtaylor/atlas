@@ -180,13 +180,18 @@ speaker:
   # file -- read at point of use, never stored on Config), derives the
   # camera host from camera.rtsp_url above, and connects as admin@host:8800.
   #
-  # tcp (260923-pds): the same long-lived ffmpeg egress as go2rtc above, but
-  # it pushes raw 8 kHz A-law over plain TCP to tcp_url below, to a listener
-  # on another machine (for example a Raspberry Pi) that plays it. go2rtc_url,
-  # stream, and ensure_url are not used on this path. respawn_backoff_s also
-  # sets the wait before the pod reconnects to a listener that went away.
-  # Example listener command, on the Pi:
-  #   ffmpeg -f alaw -ar 8000 -ac 1 -listen 1 -i tcp://0.0.0.0:5701 -f pulse default
+  # tcp (260923-pds, reply format 260923-pyj): the same long-lived ffmpeg
+  # egress as go2rtc above, but it pushes the reply audio over plain TCP to
+  # tcp_url below, to a listener on another machine (for example a
+  # Raspberry Pi) that plays it. The stream is NUT, and its header carries
+  # the codec and the sample rate (tts.codec and tts.sample_rate, further
+  # down this file), so the listener needs no format flags of its own. Set
+  # TTS_CODEC=pcm and TTS_SAMPLE_RATE=24000 for better sound than the
+  # camera's narrowband A-law. go2rtc_url, stream, and ensure_url are not
+  # used on this path. respawn_backoff_s also sets the wait before the pod
+  # reconnects to a listener that went away. Example listener command, on
+  # the Pi:
+  #   ffmpeg -f nut -listen 1 -i tcp://0.0.0.0:5701 -f pulse default
   #
   # Default stays go2rtc so an existing deployment's behaviour is never
   # silently changed by this key's addition.
@@ -511,12 +516,18 @@ tts:
   voice_id: "eve"
   language: "en"
 
-  # Matching the camera speaker exactly means the bytes go from the HTTP
-  # response into the FIFO with no resampling step.
-  codec: alaw
-  sample_rate: 8000
+  # This is the format of the reply audio that goes into the speaker FIFO,
+  # with no resampling step. go2rtc and tapo_talk drive the camera speaker,
+  # which plays only 8 kHz A-law -- startup stops with a ConfigError if
+  # these values are anything else on those two backends. On speaker.backend
+  # tcp, pcm at 24000 sounds much better than the camera's narrowband A-law.
+  # Both values come from TTS_CODEC and TTS_SAMPLE_RATE (260923-pyj); the
+  # defaults are the camera pair, so an existing deployment needs no new
+  # value.
+  codec: "${TTS_CODEC:-alaw}"
+  sample_rate: "${TTS_SAMPLE_RATE:-8000}"
 
-  # The camera-facing codec above is A-law at 8 kHz, and a browser cannot
+  # The speaker codec above defaults to A-law at 8 kHz, and a browser cannot
   # decode that through the Web Audio API at all -- it plays as noise, not
   # silence-then-error, which looks like a working-but-garbled pipeline in
   # manual testing. The browser dev harness (Phase 1) requests raw PCM at

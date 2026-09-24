@@ -113,6 +113,11 @@ env:
   # Only used when speakerBackend is tcp: the tcp://host:port of the
   # listener that plays reply audio. Blank is safe on every other backend.
   speakerTcpUrl: ""
+  # 260923-pyj: the reply audio format. alaw and 8000 for go2rtc and
+  # tapo_talk, which is all the camera plays; pcm and 24000 sound better
+  # on tcp.
+  ttsCodec: alaw
+  ttsSampleRate: "8000"
   # 260922-fmi (D-15, D-20): public safe default. The house turns the
   # calibration echo-path route on by setting this true in its own
   # hand-applied Secret (D-2), never in this chart.
