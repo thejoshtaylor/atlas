@@ -724,6 +724,55 @@ def test_speaker_config_rejects_an_unknown_backend():
     assert "speaker.backend" in str(exc.value)
 
 
+# --- 260923-pds: the tcp backend, a Raspberry Pi speaker over plain TCP ---
+
+
+@pytest.mark.parametrize(
+    "raw, expected_backend, expected_tcp_url",
+    [
+        ({"backend": "tcp", "tcp_url": "tcp://speaker.invalid:5701"}, "tcp", "tcp://speaker.invalid:5701"),
+        ({"backend": "go2rtc"}, "go2rtc", ""),
+        ({"backend": "tapo_talk", "tcp_url": "not-a-url"}, "tapo_talk", "not-a-url"),
+    ],
+)
+def test_speaker_config_tcp_backend_accepts_a_valid_url(raw, expected_backend, expected_tcp_url):
+    """tcp_url is only validated on the tcp backend -- tapo_talk and go2rtc
+    both accept it unchecked (or absent) since neither reads it."""
+    from spire_voice.config import SpeakerConfig
+
+    config = SpeakerConfig.from_config(raw)
+    assert config.backend == expected_backend
+    assert config.tcp_url == expected_tcp_url
+
+
+@pytest.mark.parametrize(
+    "raw, error_substring",
+    [
+        ({"backend": "tcp"}, "speaker.tcp_url"),
+        ({"backend": "tcp", "tcp_url": ""}, "speaker.tcp_url"),
+        ({"backend": "tcp", "tcp_url": None}, "speaker.tcp_url"),
+        ({"backend": "tcp", "tcp_url": "tcp://"}, "speaker.tcp_url"),
+        ({"backend": "tcp", "tcp_url": "http://speaker.invalid:5701"}, "speaker.tcp_url"),
+        ({"backend": "sonos"}, "speaker.backend"),
+    ],
+)
+def test_speaker_config_tcp_backend_rejects_a_bad_url(raw, error_substring):
+    """A missing, empty, None, bare, or non-tcp:// tcp_url on the tcp
+    backend must stop startup naming speaker.tcp_url -- the existing
+    unknown-backend rejection (naming speaker.backend) must still hold too."""
+    from spire_voice.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerConfig.from_config(raw)
+    assert error_substring in str(exc.value)
+
+
+def test_speaker_config_tcp_url_defaults_to_empty_string():
+    from spire_voice.config import SpeakerConfig
+
+    assert SpeakerConfig().tcp_url == ""
+
+
 def test_session_config_rejects_a_non_positive_retention():
     from spire_voice.config import ConfigError, SessionConfig
 

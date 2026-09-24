@@ -596,6 +596,68 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
             assert status.state == "running", f"{slot_name} unexpectedly degraded: {status.reason}"
 
 
+async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
+    """260923-pds (T-pds-02): the tcp egress supervisor is the existing
+    FfmpegSupervisor wired to build_tcp_argv, with no HTTP client --
+    proving the go2rtc ensure_url PUT (which holds the camera password)
+    can never be sent on this path, even when ensure_url is set."""
+    from spire_voice.config import SpeakerConfig
+    from spire_voice.speaker.ffmpeg_supervisor import build_tcp_argv
+
+    config = SimpleNamespace(
+        speaker=SpeakerConfig(
+            backend="tcp",
+            tcp_url="tcp://speaker.invalid:5701",
+            ensure_url="http://go2rtc.invalid/api/streams",
+        )
+    )
+    supervisor = app_module._build_tcp_supervisor(config)
+    assert supervisor._build_argv is build_tcp_argv
+    assert supervisor._http_client is None
+
+    # _ensure_backchannel returns at once when there is no http client --
+    # this is the assertion that no PUT is ever attempted.
+    await supervisor.handle_reconnect()
+
+
+def test_lifespan_dispatches_tcp_backend_through_build_tcp_supervisor(tmp_path, monkeypatch):
+    """260923-pds: with speaker.backend tcp, lifespan must build the egress
+    supervisor through _build_tcp_supervisor, never through
+    _build_ffmpeg_supervisor or _build_tapo_talk_supervisor."""
+    config_path = _write_fake_config(
+        tmp_path, extra={"speaker": {"backend": "tcp", "tcp_url": "tcp://speaker.invalid:5701"}}
+    )
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+
+    calls: list[object] = []
+    fake_supervisor = _FakeFfmpegSupervisor()
+
+    def _fake_build_tcp_supervisor(config: object) -> _FakeFfmpegSupervisor:
+        calls.append(config)
+        return fake_supervisor
+
+    def _raising_build_ffmpeg_supervisor(config: object, http_client: object) -> None:
+        raise AssertionError("tcp backend must not build the go2rtc ffmpeg supervisor")
+
+    def _raising_build_tapo_talk_supervisor(config: object) -> None:
+        raise AssertionError("tcp backend must not build the tapo_talk supervisor")
+
+    monkeypatch.setattr(app_module, "_build_tcp_supervisor", _fake_build_tcp_supervisor)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _raising_build_ffmpeg_supervisor)
+    monkeypatch.setattr(app_module, "_build_tapo_talk_supervisor", _raising_build_tapo_talk_supervisor)
+
+    with TestClient(app_module.app):
+        assert len(calls) == 1
+        assert app_module.app.state.ffmpeg_supervisor is fake_supervisor
+
+
 def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_application(
     tmp_path, monkeypatch
 ):

@@ -81,6 +81,39 @@ def _drain_forever(path: str, out: list[bytes], stop: threading.Event) -> None:
             out.append(chunk)
 
 
+def test_build_tcp_argv_pushes_raw_alaw_over_tcp_with_no_transcode():
+    """260923-pds: the tcp backend's ffmpeg invocation -- same -c copy, no
+    re-encode, as build_ffmpeg_argv, but pushed to a plain tcp:// listener
+    instead of go2rtc's rtsp:// producer."""
+    from spire_voice.speaker.ffmpeg_supervisor import build_tcp_argv
+
+    argv = build_tcp_argv(
+        SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
+    )
+    assert argv == [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-f",
+        "alaw",
+        "-ar",
+        "8000",
+        "-ac",
+        "1",
+        "-i",
+        "/data/speaker.alaw",
+        "-c",
+        "copy",
+        "-flush_packets",
+        "1",
+        "-f",
+        "alaw",
+        "tcp://speaker.invalid:5701",
+    ]
+    assert "rtsp" not in argv
+
+
 async def test_speaker_fifo_reuses_one_subprocess_across_two_utterances(tmp_path):
     """VOICE-05: two consecutive utterances through the writer must not
     cost a second `ffmpeg` spawn -- asserted by counting spawns, not by
