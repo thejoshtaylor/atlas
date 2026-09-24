@@ -606,6 +606,37 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
         assert speaker_writer._pad_idle_s == 0.15
 
 
+def test_shutdown_closes_the_tts_provider_client(tmp_path, monkeypatch):
+    """260924-4iu (a): lifespan shutdown awaits `app.state.tts`'s `aclose`
+    through `BatchTtsAdapter`'s forwarding to `XaiTts`. Recorded rather
+    than asserted on the client's own internal state -- `test_providers.py`
+    already covers what `aclose()` itself does to a real client -- so this
+    proves only that shutdown reaches it exactly once."""
+    from atlas.providers.tts_xai import XaiTts
+
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(app_module, "_build_repositories", _fake_build_repositories)
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    calls: list[object] = []
+
+    async def _recording_aclose(self) -> None:
+        calls.append(self)
+
+    monkeypatch.setattr(XaiTts, "aclose", _recording_aclose)
+
+    with TestClient(app_module.app):
+        pass
+
+    assert len(calls) == 1, f"expected aclose() exactly once, got {len(calls)}"
+
+
 async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
     """260923-pds (T-pds-02), extended 260923-pyj (D1): the tcp egress
     supervisor is the existing FfmpegSupervisor wired to build_tcp_argv

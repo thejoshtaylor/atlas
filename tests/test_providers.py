@@ -359,6 +359,160 @@ async def test_tts_synthesize_once_posts_rest_and_returns_the_whole_buffer():
 
 
 @pytest.mark.asyncio
+async def test_xai_tts_reuses_one_http_client_across_calls():
+    """260924-4iu (a): one `XaiTts` instance builds its client once, on the
+    first call, and reuses it -- not a fresh client, and a fresh TCP and
+    TLS handshake, per call."""
+    import httpx as _httpx
+
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import XaiTts
+
+    request_count = 0
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return _httpx.Response(200, content=b"\x01\x02", headers={"content-type": "audio/pcm"})
+
+    transport = _httpx.MockTransport(handler)
+    real_client = _httpx.AsyncClient
+    build_count = 0
+
+    def _counting_client(*a, **k):
+        nonlocal build_count
+        build_count += 1
+        k.pop("timeout", None)
+        k.pop("limits", None)
+        return real_client(transport=transport)
+
+    import atlas.providers.tts_xai as mod
+
+    mod.httpx.AsyncClient = _counting_client
+    try:
+        tts = XaiTts(TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}))
+        await tts.synthesize_once("one")
+        await tts.synthesize_once("two")
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    assert build_count == 1, "the client must be built once, not once per call"
+    assert request_count == 2, "both calls must reach the transport through the one client"
+
+
+@pytest.mark.asyncio
+async def test_xai_tts_aclose_closes_the_owned_client_and_is_idempotent():
+    """260924-4iu (a): `aclose()` closes the client the instance built,
+    does nothing on a second call, does nothing when no call was ever
+    made, and never closes a client the caller injected."""
+    import httpx as _httpx
+
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import XaiTts
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        return _httpx.Response(200, content=b"\x01\x02", headers={"content-type": "audio/pcm"})
+
+    transport = _httpx.MockTransport(handler)
+    real_client = _httpx.AsyncClient
+
+    def _client(*a, **k):
+        k.pop("timeout", None)
+        k.pop("limits", None)
+        return real_client(transport=transport)
+
+    import atlas.providers.tts_xai as mod
+
+    mod.httpx.AsyncClient = _client
+    try:
+        config = TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"})
+
+        tts = XaiTts(config)
+        await tts.synthesize_once("hi")
+        built_client = tts._client
+        await tts.aclose()
+        assert built_client.is_closed, "aclose() must close the client the instance built"
+        await tts.aclose()  # idempotent: must not raise
+
+        never_called = XaiTts(config)
+        await never_called.aclose()  # must not raise, and must build no client
+        assert never_called._client is None
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    injected = real_client(transport=transport)
+    try:
+        config = TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"})
+        injected_tts = XaiTts(config, http_client=injected)
+        await injected_tts.synthesize_once("hi")
+        await injected_tts.aclose()
+        assert not injected.is_closed, "aclose() must never close a client the caller injected"
+    finally:
+        await injected.aclose()
+
+
+@pytest.mark.asyncio
+async def test_xai_tts_retries_once_on_a_dropped_keepalive_connection():
+    """260924-4iu (a): a pooled keep-alive connection the server closed at
+    the moment of reuse raises `httpx.RemoteProtocolError`. A render has
+    no side effect, so `synthesize_once` retries the POST exactly once and
+    returns the retry's audio. A handler that raises on every request
+    still makes `synthesize_once` raise, after exactly two attempts."""
+    import httpx as _httpx
+
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import XaiTts
+
+    real_client = _httpx.AsyncClient
+
+    def _client_over(transport: _httpx.MockTransport):
+        def _build(*a, **k):
+            k.pop("timeout", None)
+            k.pop("limits", None)
+            return real_client(transport=transport)
+
+        return _build
+
+    import atlas.providers.tts_xai as mod
+
+    call_count = 0
+
+    def flaky_handler(request: _httpx.Request) -> _httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _httpx.RemoteProtocolError("connection dropped")
+        return _httpx.Response(200, content=b"\x01\x02", headers={"content-type": "audio/pcm"})
+
+    mod.httpx.AsyncClient = _client_over(_httpx.MockTransport(flaky_handler))
+    try:
+        tts = XaiTts(TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}))
+        audio = await tts.synthesize_once("hi")
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    assert audio == b"\x01\x02"
+    assert call_count == 2, "the second attempt is the one whose audio reaches the caller"
+
+    always_fail_count = 0
+
+    def always_fails(request: _httpx.Request) -> _httpx.Response:
+        nonlocal always_fail_count
+        always_fail_count += 1
+        raise _httpx.RemoteProtocolError("connection dropped")
+
+    mod.httpx.AsyncClient = _client_over(_httpx.MockTransport(always_fails))
+    try:
+        tts2 = XaiTts(TtsConfig.from_config({"url": "https://api.x.ai/v1/tts", "api_key": "k", "voice_id": "eve"}))
+        with pytest.raises(_httpx.RemoteProtocolError):
+            await tts2.synthesize_once("hi")
+    finally:
+        mod.httpx.AsyncClient = real_client
+
+    assert always_fail_count == 2, "exactly two attempts: the retry is not retried again"
+
+
+@pytest.mark.asyncio
 async def test_batch_tts_adapter_skips_the_provider_call_entirely_for_empty_text():
     """An empty reply must not bill a synthesis request or emit silence.
 
