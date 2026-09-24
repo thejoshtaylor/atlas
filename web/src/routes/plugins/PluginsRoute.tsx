@@ -52,20 +52,22 @@ function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) 
   const rowControlsDisabled = disabled || setEnabled.isPending || remove.isPending
 
   return (
-    <li className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4">
-      <div className="flex items-center justify-between gap-3">
-        <Link to={`/plugins/${plugin.id}`} className="min-w-0 flex-1 truncate text-body font-medium text-foreground">
-          {plugin.display_name}
-        </Link>
-        <Badge variant={status.badgeVariant} className="shrink-0">
-          {status.badgeText}
-        </Badge>
-      </div>
+    <li className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_auto] sm:items-center sm:gap-x-6">
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-3">
+          <Link to={`/plugins/${plugin.id}`} className="min-w-0 flex-1 truncate text-body font-medium text-foreground">
+            {plugin.display_name}
+          </Link>
+          <Badge variant={status.badgeVariant} className="shrink-0">
+            {status.badgeText}
+          </Badge>
+        </div>
 
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-label text-muted-foreground">{plugin.transport}</span>
-        {plugin.builtin ? <Badge variant="outline">Built-in</Badge> : null}
-        {collisions > 0 ? <Badge variant="denied">{formatCollisionSummary(collisions)}</Badge> : null}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="readout text-label text-muted-foreground">{plugin.transport}</span>
+          {plugin.builtin ? <Badge variant="outline">Built-in</Badge> : null}
+          {collisions > 0 ? <Badge variant="denied">{formatCollisionSummary(collisions)}</Badge> : null}
+        </div>
       </div>
 
       <div className="flex items-center justify-end gap-2">
@@ -125,7 +127,7 @@ function PluginRow({ plugin, disabled }: { plugin: Plugin; disabled: boolean }) 
         ) : null}
       </div>
 
-      {rowError ? <p className="text-body text-destructive">{rowError}</p> : null}
+      {rowError ? <p className="text-body text-destructive sm:col-span-2">{rowError}</p> : null}
     </li>
   )
 }
@@ -151,7 +153,7 @@ export function PluginsRoute() {
       ) : null}
 
       {screen.kind === "ready" ? (
-        <ul className="flex flex-col gap-2">
+        <ul className="panel-list">
           {screen.plugins.map((plugin) => (
             <PluginRow key={plugin.id} plugin={plugin} disabled={controlsDisabled} />
           ))}

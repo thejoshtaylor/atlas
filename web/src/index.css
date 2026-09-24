@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "@fontsource-variable/manrope";
+@import "@fontsource-variable/jetbrains-mono";
 
 /* ---------------------------------------------------------------------
  * Design tokens -- 03-UI-SPEC.md's Design System, Spacing Scale,
@@ -45,77 +47,100 @@
   --color-denied-bg: var(--denied-bg);
   --color-denied-fg: var(--denied-fg);
 
+  --font-sans: "Manrope Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
   /* Typography -- exactly 4 sizes, exactly 2 weights (400, 600). */
-  --font-size-label: 0.875rem; /* 14px */
-  --font-size-label--line-height: 1.5;
-  --font-size-body: 1rem; /* 16px */
-  --font-size-body--line-height: 1.5;
-  --font-size-heading: 1.25rem; /* 20px */
-  --font-size-heading--line-height: 1.2;
-  --font-size-display: 1.75rem; /* 28px */
-  --font-size-display--line-height: 1.2;
+  --text-label: 0.875rem; /* 14px */
+  --text-label--line-height: 1.5;
+  --text-body: 1rem; /* 16px */
+  --text-body--line-height: 1.5;
+  --text-heading: 1.25rem; /* 20px */
+  --text-heading--line-height: 1.2;
+  --text-display: 1.75rem; /* 28px */
+  --text-display--line-height: 1.2;
 }
 
+/* Night-ink instrument theme (dark only; .impeccable/surfaces/web-src.md).
+ * Ground is blue-black ink, never pure black. Surfaces step up in
+ * lightness, separated by hairline rules. Porcelain text. The ecliptic
+ * gold accent is reserved for primary actions, the active nav item,
+ * focus, links, and the live globe -- nothing else. */
 :root {
-  /* Dominant (60%): page background, wizard canvas. */
-  --background: #ffffff;
-  --foreground: oklch(0.145 0 0);
+  color-scheme: dark;
 
-  /* Secondary (30%): cards, top nav/sidebar, every card-list row. */
-  --card: #f1f5f9;
-  --card-foreground: oklch(0.145 0 0);
-  --secondary: #f1f5f9;
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: #f1f5f9;
-  --muted-foreground: oklch(0.556 0 0);
+  /* Dominant (60%): page background. */
+  --background: oklch(0.165 0.022 258);
+  --foreground: oklch(0.95 0.008 85);
 
-  --popover: #ffffff;
-  --popover-foreground: oklch(0.145 0 0);
+  /* Secondary (30%): cards, sidebar, every card-list row. */
+  --card: oklch(0.2 0.024 258);
+  --card-foreground: oklch(0.95 0.008 85);
+  --secondary: oklch(0.25 0.024 258);
+  --secondary-foreground: oklch(0.93 0.008 85);
+  --muted: oklch(0.25 0.024 258);
+  --muted-foreground: oklch(0.74 0.02 250);
 
-  /* Accent (10%): primary CTAs, the active nav item, the focused input
-   * ring/border, and links. Nothing else uses this color. */
-  --primary: #4f46e5;
-  --primary-foreground: #ffffff;
-  --ring: #4f46e5;
+  --popover: oklch(0.22 0.026 258);
+  --popover-foreground: oklch(0.95 0.008 85);
 
-  /* shadcn's own --accent token: hover-state backgrounds inside
-   * components only (ghost button hover, menu item hover, ...) -- kept
-   * neutral so it is never confused with 03-UI-SPEC.md's "Accent" role
-   * above. */
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  /* Accent (10%): ecliptic gold. */
+  --primary: oklch(0.84 0.12 84);
+  --primary-foreground: oklch(0.2 0.03 258);
+  --ring: oklch(0.84 0.12 84);
 
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  /* Hover-state backgrounds inside components only -- neutral ink. */
+  --accent: oklch(0.27 0.026 258);
+  --accent-foreground: oklch(0.95 0.008 85);
 
-  /* Destructive: the three confirm-button cases 03-UI-SPEC.md's Color
-   * section names -- never a merely "undo-able" action. */
-  --destructive: #dc2626;
-  --destructive-foreground: #ffffff;
+  --border: oklch(0.3 0.022 258);
+  --input: oklch(0.36 0.024 258);
 
-  /* Denied-state badge (5th, custom): deliberately distinct from
-   * Destructive red -- a normal, legible, safe state, not a warning. */
-  --denied-bg: #fef3c7;
-  --denied-fg: #92400e;
+  /* Destructive: confirm buttons for irreversible actions only. */
+  --destructive: oklch(0.58 0.19 25);
+  --destructive-foreground: oklch(0.99 0 0);
 
-  /* Exceptions: 03-UI-SPEC.md's Spacing Scale exception paragraph --
-   * every button, icon-only control, and denylist/allowlist row action
-   * gets a 44px minimum touch target even where the visual element is
-   * smaller (WEB-08, verified at 375px). */
-  --radius: 0.5rem;
+  /* Denied-state badge: calm lilac, deliberately distinct from
+   * destructive red -- a normal, legible, safe state, not a warning. */
+  --denied-bg: oklch(0.3 0.06 300);
+  --denied-fg: oklch(0.88 0.06 300);
+
+  /* 44px minimum touch targets stay (touch-target utility below). */
+  --radius: 0.625rem;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font: var(--font-size-body) / var(--font-size-body--line-height) system-ui,
-    "Segoe UI", Roboto, sans-serif;
+  font: var(--text-body) / var(--text-body--line-height) var(--font-sans);
   margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Browser surfaces carry the palette too. */
+::selection {
+  background: oklch(0.84 0.12 84 / 0.35);
+  color: var(--foreground);
+}
+* {
+  scrollbar-color: var(--input) transparent;
+}
+input[type="range"] {
+  accent-color: var(--primary);
+}
+:focus-visible {
+  outline-color: var(--ring);
+}
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+  letter-spacing: -0.02em;
 }
 
 /* The 44px minimum touch target as a reusable class (03-UI-SPEC.md's
@@ -140,4 +165,77 @@ body {
 @utility scroll-field {
   overflow-x: auto;
   white-space: nowrap;
+}
+
+/* Every measured reading (ms, counts, timestamps) sets in the mono face
+ * with tabular figures so columns of numbers line up. Measurement only --
+ * never a "technical" costume for prose. */
+@utility readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* Wide-set caps for group labels (sidebar sections). */
+@utility caps-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* AtlasGlobe (components/brand/AtlasGlobe.tsx). A meridian's x-scale runs
+ * through cos(t): 1 -> -1 -> 1 with sine easing per half turn. */
+.atlas-globe__meridian {
+  transform-box: view-box;
+  transform-origin: 50px 50px;
+  transform: scaleX(var(--static-scale));
+}
+.atlas-globe--spinning .atlas-globe__meridian {
+  animation: atlas-meridian 12s infinite;
+}
+.atlas-globe--spinning .atlas-globe__ecliptic {
+  animation: atlas-ecliptic 4s ease-in-out infinite alternate;
+}
+@keyframes atlas-meridian {
+  0% {
+    transform: scaleX(1);
+    animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
+  }
+  50% {
+    transform: scaleX(-1);
+    animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
+  }
+  100% {
+    transform: scaleX(1);
+  }
+}
+@keyframes atlas-ecliptic {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .atlas-globe--spinning .atlas-globe__meridian,
+  .atlas-globe--spinning .atlas-globe__ecliptic {
+    animation: none;
+  }
+}
+
+/* One panel, hairline-divided rows: every card list (policy, macros,
+ * sessions, accounts, ...) reads as a single instrument readout rather
+ * than a stack of separate cards. */
+@utility panel-list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 4px);
+  background: var(--card);
+  & > li + li {
+    border-top: 1px solid var(--border);
+  }
 }

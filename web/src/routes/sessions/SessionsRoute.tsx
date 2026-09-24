@@ -15,10 +15,10 @@ import { deriveSessionsScreenState, formatSessionDuration, summarizeSessionOutco
 
 function SessionRow({ session }: { session: SessionSummary }) {
   return (
-    <li className="rounded-lg border border-border bg-card p-4">
+    <li className="px-4 py-3">
       <Link to={`/sessions/${session.id}`} className="flex flex-col gap-1 touch-target">
         <span className="truncate text-body text-foreground">{summarizeSessionOutcome(session)}</span>
-        <span className="text-label text-muted-foreground">{formatSessionDuration(session.duration_ms)}</span>
+        <span className="readout text-label text-muted-foreground">{formatSessionDuration(session.duration_ms)}</span>
       </Link>
     </li>
   )
@@ -55,7 +55,7 @@ export function SessionsRoute() {
       ) : null}
 
       {screen.kind === "ready" ? (
-        <ul className="flex flex-col gap-2">
+        <ul className="panel-list">
           {screen.sessions.map((session) => (
             <SessionRow key={session.id} session={session} />
           ))}

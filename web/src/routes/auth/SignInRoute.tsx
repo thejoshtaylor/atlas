@@ -1,6 +1,7 @@
 import * as React from "react"
 import { useMutation } from "@tanstack/react-query"
 import { Navigate, useLocation } from "react-router-dom"
+import { AtlasGlobe } from "@/components/brand/AtlasGlobe"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { SubmitButton } from "@/components/state/SubmitButton"
@@ -56,9 +57,9 @@ export function SignInRoute() {
         className="flex w-full max-w-sm flex-col gap-4"
         onSubmit={(event) => event.preventDefault()}
       >
-        <div className="flex flex-col gap-1">
-          <p className="text-body text-muted-foreground">ATLAS</p>
-          <h1 className="text-display font-semibold">Sign in</h1>
+        <div className="flex flex-col items-start gap-5 pb-2">
+          <AtlasGlobe spinning label="ATLAS" className="size-16 text-foreground" />
+          <h1 className="text-display font-semibold">Sign in to ATLAS</h1>
         </div>
 
         <div className="flex flex-col gap-1.5">

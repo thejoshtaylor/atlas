@@ -38,7 +38,7 @@ function TimelineRow({ entry, isActive, onSelect }: { entry: TimelineEntry; isAc
           isActive ? "bg-accent" : "bg-card"
         }`}
       >
-        <span className="text-label text-muted-foreground">{offset}</span>
+        <span className="readout text-label text-muted-foreground">{offset}</span>
         <span className="text-body text-foreground">{label}</span>
       </button>
     </li>

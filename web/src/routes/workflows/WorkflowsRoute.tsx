@@ -42,7 +42,7 @@ function WorkflowRow({ run, now, disabled }: { run: WorkflowRun; now: Date; disa
   const caption = lateCaption(run, now)
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
       <Link to={`/workflows/${run.id}`} className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="truncate text-body font-medium text-foreground">{run.summary}</span>
         <span className="truncate text-label text-muted-foreground">{formatStepCount(run.step_count)}</span>
@@ -141,7 +141,7 @@ export function WorkflowsRoute() {
             action={newWorkflowButton}
           />
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="panel-list">
             {screen.runs.map((run) => (
               <WorkflowRow key={run.id} run={run} now={now} disabled={controlsDisabled} />
             ))}

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react"
+import { AtlasGlobe } from "@/components/brand/AtlasGlobe"
 import { WIZARD_STEP_ORDER, type WizardStepName } from "@/lib/wizard"
 
 /**
@@ -23,9 +24,22 @@ export function WizardStepShell({
   return (
     <main className="flex min-h-svh flex-col items-center justify-center p-6">
       <div className="flex w-full max-w-sm flex-col gap-6">
-        <p className="text-label text-muted-foreground">
-          Step {stepIndex + 1} of {WIZARD_STEP_ORDER.length}
-        </p>
+        <div className="flex items-center gap-4">
+          <AtlasGlobe spinning label="ATLAS" className="size-10 text-foreground" />
+          <div className="flex flex-1 flex-col gap-1.5">
+            <p className="readout text-label text-muted-foreground">
+              Step {stepIndex + 1} of {WIZARD_STEP_ORDER.length}
+            </p>
+            <div className="flex gap-1" aria-hidden>
+              {WIZARD_STEP_ORDER.map((name, index) => (
+                <span
+                  key={name}
+                  className={index <= stepIndex ? "h-0.5 flex-1 rounded-full bg-primary" : "h-0.5 flex-1 rounded-full bg-border"}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
         <h1 className="text-display font-semibold">{title}</h1>
         {children}
       </div>

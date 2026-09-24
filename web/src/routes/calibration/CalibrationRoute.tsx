@@ -99,11 +99,11 @@ function CalibrationResults({ result }: { result: EchoCalibrationResult }) {
       </div>
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-body text-foreground">Round-trip delay</span>
-        <span className="text-heading font-semibold">{formatDelay(result.delay_s)}</span>
+        <span className="readout text-heading font-semibold">{formatDelay(result.delay_s)}</span>
       </div>
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-body text-foreground">Arrival level</span>
-        <span className="text-heading font-semibold">{result.gain.toFixed(2)}</span>
+        <span className="readout text-heading font-semibold">{result.gain.toFixed(2)}</span>
       </div>
       <div className="flex flex-col gap-1">
         <span className="text-body text-foreground">Automatic gain control</span>

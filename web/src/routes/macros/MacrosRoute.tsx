@@ -36,7 +36,7 @@ function MacroRow({ macro, disabled }: { macro: Macro; disabled: boolean }) {
   const conflicted = conflictedActionCount(macro)
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
       <Link to={`/macros/${macro.id}`} className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="truncate text-body font-medium text-foreground">{macro.phrase}</span>
         <span className="truncate text-label text-muted-foreground">{formatActionCount(macro.actions.length)}</span>
@@ -114,7 +114,7 @@ export function MacrosRoute() {
             action={newMacroButton}
           />
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="panel-list">
             {screen.macros.map((macro) => (
               <MacroRow key={macro.id} macro={macro} disabled={controlsDisabled} />
             ))}

@@ -1,5 +1,6 @@
 import * as React from "react"
 import { Link } from "react-router-dom"
+import { AtlasGlobe } from "@/components/brand/AtlasGlobe"
 import { Badge } from "@/components/ui/badge"
 import {
   connect as connectObserverSocket,
@@ -46,7 +47,7 @@ function ConnectionBadge({ state }: ConnectionBadgeProps) {
 
 function TurnCardRow({ card }: { card: TurnCard }) {
   return (
-    <li className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4">
+    <li className="flex flex-col gap-2 px-4 py-3">
       <Badge variant="outline">{sourceBadgeLabel(card.source)}</Badge>
       {card.transcript ? <p className="text-body text-foreground">{card.transcript}</p> : null}
       {card.reply ? <p className="text-body text-foreground">{card.reply}</p> : null}
@@ -120,7 +121,12 @@ export function LiveRoute({ connect = connectObserverSocket }: LiveRouteProps) {
       <ConnectionBadge state={connectionState} />
 
       {screen.kind === "idle" ? (
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col items-start gap-6 sm:flex-row sm:items-center sm:gap-10">
+          <AtlasGlobe
+            spinning={connectionState === "connected"}
+            className="size-32 shrink-0 text-foreground/75 sm:size-40"
+          />
+          <div className="flex flex-col gap-2">
           <h2 className="text-heading font-semibold">Listening for &quot;{screen.wakePhrase}&quot;.</h2>
           <p className="text-body text-muted-foreground">
             Say it near any source to start a turn. This page updates as it happens.
@@ -131,11 +137,12 @@ export function LiveRoute({ connect = connectObserverSocket }: LiveRouteProps) {
               ? ` — ${screen.sources.map(humanizeSourceName).join(", ")}.`
               : "."}
           </p>
+          </div>
         </div>
       ) : null}
 
       {screen.kind === "feed" ? (
-        <ul className="flex flex-col gap-2">
+        <ul className="panel-list">
           {screen.cards.map((card) => (
             <TurnCardRow key={card.turnId} card={card} />
           ))}

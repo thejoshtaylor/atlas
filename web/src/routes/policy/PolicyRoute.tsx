@@ -55,9 +55,9 @@ function PolicyRuleRow({
   const open = pendingRemovalId === rule.id
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
       <div className="flex min-w-0 flex-col gap-1">
-        <span className="truncate text-body font-medium text-foreground">{rule.value}</span>
+        <span className="readout truncate text-label text-foreground">{rule.value}</span>
         <div className="flex flex-wrap gap-1.5">
           {mode === "allow_all_except_denylist" ? (
             <Badge variant="denied">Denied for control · readable</Badge>
@@ -174,7 +174,7 @@ export function PolicyRoute() {
               />
             )
           ) : (
-            <ul className="flex flex-col gap-2">
+            <ul className="panel-list">
               {rules.map((rule) => (
                 <PolicyRuleRow key={rule.id} rule={rule} mode={currentMode} disabled={controlsDisabled} />
               ))}

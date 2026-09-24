@@ -51,7 +51,7 @@ describe("PluginsRoute -- disable/enable act with no confirmation; delete always
   })
 
   test("the row renders whichever of the two failures happened", () => {
-    expect(SOURCE).toMatch(/\{rowError \? <p className="text-body text-destructive">\{rowError\}<\/p> : null\}/)
+    expect(SOURCE).toMatch(/\{rowError \? <p className="text-body text-destructive[^"]*">\{rowError\}<\/p> : null\}/)
   })
 
   test("delete is a three-part destructive confirmation with the contract's exact text", () => {
@@ -87,7 +87,7 @@ describe("PluginsRoute -- every interactive row meets the touch-target floor", (
 
 describe("PluginsRoute -- built from the enumerated inventory only, no data table", () => {
   test("cards are a hand-styled <li>, matching MacroRow's own precedent, not the Card primitive", () => {
-    expect(SOURCE).toMatch(/<li className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4">/)
+    expect(SOURCE).toMatch(/<li className="grid gap-3 px-4 py-3 sm:grid-cols-\[1fr_auto\][^"]*">/)
   })
 
   test("no @/components/ui/table import", () => {

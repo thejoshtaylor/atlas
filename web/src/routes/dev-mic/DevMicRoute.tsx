@@ -178,7 +178,7 @@ export function DevMicRoute() {
                 {STAGE_ORDER.map((stage) => (
                   <div key={stage} className="flex items-baseline justify-between gap-2">
                     <span className="text-label text-muted-foreground">{STAGE_LABELS[stage]}</span>
-                    <span className="text-label text-foreground">
+                    <span className="readout text-label text-foreground">
                       {formatMs(entry.stage_durations_ms[stage])}
                     </span>
                   </div>

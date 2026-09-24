@@ -60,7 +60,7 @@ function AccountRow({
   const remove = useMutation(removeAccountMutationOptions)
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-body font-medium text-foreground">{account.display_name}</span>
         <span className="truncate text-label text-muted-foreground">{account.email}</span>
@@ -100,7 +100,7 @@ function InviteRow({ invite, disabled }: { invite: Invite; disabled: boolean }) 
   const revoke = useMutation(revokeInviteMutationOptions)
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">
+    <li className="flex items-center justify-between gap-3 px-4 py-3">
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-body font-medium text-foreground">
           {invite.email ?? "Untargeted invite link"}
@@ -238,7 +238,7 @@ export function AccountsRoute() {
                 <p className="text-label text-muted-foreground">
                   {formatPendingInviteCount(screen.invites.length)}
                 </p>
-                <ul className="flex flex-col gap-2">
+                <ul className="panel-list">
                   {screen.invites.map((invite) => (
                     <InviteRow key={invite.id} invite={invite} disabled={controlsDisabled} />
                   ))}
@@ -249,7 +249,7 @@ export function AccountsRoute() {
 
           <div className="flex flex-col gap-2">
             <p className="text-heading font-semibold text-foreground">People with access</p>
-            <ul className="flex flex-col gap-2">
+            <ul className="panel-list">
               {screen.accounts.map((account) => (
                 <AccountRow key={account.id} account={account} disabled={controlsDisabled} />
               ))}

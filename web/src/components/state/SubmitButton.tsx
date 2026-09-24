@@ -1,5 +1,6 @@
 import * as React from "react"
 import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 import { createSubmitGuard } from "@/lib/submitGuard"
 import type { VariantProps } from "class-variance-authority"
 import type { buttonVariants } from "@/components/ui/button"
@@ -28,6 +29,7 @@ export function SubmitButton({
   disabled,
   variant,
   size = "default",
+  className,
   ...props
 }: SubmitButtonProps) {
   const [pending, setPending] = React.useState(false)
@@ -74,6 +76,9 @@ export function SubmitButton({
       disabled={disabled || pending}
       aria-busy={pending}
       onClick={handleClick}
+      // A full-width bar only on a phone; from `sm` up a primary action
+      // sits at its own width at the start of its form.
+      className={cn("sm:self-start sm:px-6", className)}
       {...props}
     >
       {pending && pendingLabel !== undefined ? pendingLabel : children}

@@ -151,7 +151,7 @@ describe("App.tsx -- all three plugin paths sit inside the admin-gated route blo
 
 describe("AppShell.tsx -- a Plugins navigation entry exists at admin level", () => {
   test("nav item points at /plugins with minimumRole admin", () => {
-    expect(SHELL_SOURCE).toMatch(/\{ to: "\/plugins", label: "Plugins", minimumRole: "admin" \}/)
+    expect(SHELL_SOURCE).toMatch(/\{ to: "\/plugins", label: "Plugins", minimumRole: "admin"[,} ]/)
   })
 })
 

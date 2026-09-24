@@ -69,7 +69,7 @@ describe("MacrosRoute -- a macro with a denied/unresolved action shows the list-
 
 describe("MacrosRoute -- built from the enumerated inventory only, no data table", () => {
   test("cards are a hand-styled <li>, matching PolicyRuleRow's own precedent, not the Card primitive", () => {
-    expect(SOURCE).toMatch(/<li className="flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-4">/)
+    expect(SOURCE).toMatch(/<li className="flex items-center justify-between gap-3 px-4 py-3">/)
   })
 
   test("no @/components/ui/table import", () => {
@@ -86,6 +86,6 @@ describe("App.tsx -- the macros list is mounted inside the authenticated shell a
 
 describe("AppShell.tsx -- a Macros navigation entry exists at operator level", () => {
   test("nav item points at /macros with minimumRole operator", () => {
-    expect(SHELL_SOURCE).toMatch(/\{ to: "\/macros", label: "Macros", minimumRole: "operator" \}/)
+    expect(SHELL_SOURCE).toMatch(/\{ to: "\/macros", label: "Macros", minimumRole: "operator"[,} ]/)
   })
 })

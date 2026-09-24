@@ -55,9 +55,9 @@ function formatRecordedAt(recordedAt: string): string {
 
 function EventRow({ event }: { event: WakeEventDisplay }) {
   return (
-    <li className="flex flex-col gap-2 rounded-lg border border-border bg-card p-4">
+    <li className="flex flex-col gap-2 px-4 py-3">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="text-label text-muted-foreground">{formatRecordedAt(event.recordedAt)}</span>
+        <span className="readout text-label text-muted-foreground">{formatRecordedAt(event.recordedAt)}</span>
         <Badge variant="outline">{event.source}</Badge>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -160,7 +160,7 @@ export function WakeTuningRoute() {
       {screen.kind === "ready" ? (
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">
-            <div className="flex h-24 items-end gap-1" aria-hidden="true">
+            <div className="flex h-28 items-end gap-1 border-b border-border" aria-hidden="true">
               {/* One column per bucket, split where the threshold falls
                   inside it: the clearing part and the below part are two
                   segments of the same bar, sized by their own counts. A
@@ -173,9 +173,9 @@ export function WakeTuningRoute() {
                   className="flex flex-1 flex-col justify-end"
                   style={{ height: `${Math.max(4, (bucket.count / maxBucketCount) * 100)}%` }}
                 >
-                  {bucket.count === 0 ? <div className="w-full flex-1 bg-border" /> : null}
+                  {bucket.count === 0 ? <div className="w-full flex-1 rounded-t-sm bg-border" /> : null}
                   {bucket.clearingCount > 0 ? (
-                    <div className="w-full bg-foreground" style={{ flexGrow: bucket.clearingCount }} />
+                    <div className="w-full rounded-t-sm bg-primary" style={{ flexGrow: bucket.clearingCount }} />
                   ) : null}
                   {bucket.belowCount > 0 ? (
                     <div className="w-full bg-border" style={{ flexGrow: bucket.belowCount }} />
@@ -230,7 +230,8 @@ export function WakeTuningRoute() {
             <Input
               id="wake-threshold-value"
               type="number"
-              className="scroll-field"
+              aria-label="Threshold value"
+              className="scroll-field readout w-28"
               min={0}
               max={1}
               step={0.01}
@@ -263,7 +264,7 @@ export function WakeTuningRoute() {
 
           <div className="flex flex-col gap-2">
             <h2 className="text-heading font-semibold">Recorded wake attempts</h2>
-            <ul className="flex flex-col gap-2">
+            <ul className="panel-list">
               {visibleEvents.map((event) => (
                 <EventRow key={event.id} event={event} />
               ))}
