@@ -135,6 +135,17 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Startup runs migrations, starts every plugin child, and loads
+          # local models. On a CPU-starved node that takes longer than the
+          # liveness window below, and liveness then kills the pod before it
+          # can finish. Kubernetes holds liveness and readiness back until
+          # this probe passes, so startup gets up to 10 minutes.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
           livenessProbe:
             httpGet:
               path: /health

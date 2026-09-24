@@ -534,3 +534,13 @@ def test_the_application_container_names_the_numeric_uid_and_gid() -> None:
     security_context = app_container.get("securityContext", {})
     assert security_context.get("runAsUser") == 1001
     assert security_context.get("runAsGroup") == 1001
+
+
+def test_a_slow_start_is_not_killed_by_the_liveness_probe() -> None:
+    """Liveness alone (20 s + 3 x 30 s) killed the pod mid-startup on a
+    CPU-starved node. The startup probe must allow several minutes."""
+    deployment = _find_one(_helm_template(), "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    probe = container["startupProbe"]
+    assert probe["httpGet"]["path"] == "/health"
+    assert probe["periodSeconds"] * probe["failureThreshold"] >= 300
