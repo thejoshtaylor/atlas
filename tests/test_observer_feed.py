@@ -233,7 +233,14 @@ def _fake_run_turn_config(tmp_path):
         # `config.brain.turn_timeout_s` and `config.wake.phrase`.
         # 260922-lim: and `config.brain.local_intents`.
         brain=SimpleNamespace(
-            max_tool_rounds=3, filler_after_ms=600.0, turn_timeout_s=25.0, local_intents=True
+            max_tool_rounds=3,
+            filler_after_ms=600.0,
+            turn_timeout_s=25.0,
+            local_intents=True,
+            # 260924-4iv: `_make_run_turn_for_source`'s closure now also
+            # reads `config.brain.state_timeout_ms`/`state_domains`.
+            state_timeout_ms=500.0,
+            state_domains=None,
         ),
         stt=SimpleNamespace(max_utterance_s=15.0),
         wake=SimpleNamespace(phrase="hey atlas", cue=True),
@@ -272,6 +279,11 @@ def _fake_run_turn_app_state(registry: ObserverRegistry):
         macro_repo=SimpleNamespace(list_macros=_list_macros),
         observer_registry=registry,
         provider_slots=None,
+        # 260924-4iv (item d): `_make_run_turn_for_source`'s closure now
+        # calls `_warm_providers` before building `TurnTimings` -- needs
+        # somewhere to keep its background tasks alive, the same set the
+        # real `lifespan` builds (`app.state.background_turns`).
+        background_turns=set(),
     )
 
 

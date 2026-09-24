@@ -30,7 +30,7 @@ from openai import AsyncOpenAI
 
 from atlas.config import BrainConfig
 from atlas.providers.base import BrainError
-from atlas.providers.brain_xai import XaiBrain
+from atlas.providers.brain_xai import XaiBrain, build_http_client, cache_routing_headers
 from atlas.providers.tier_reply import DEFAULT_FILLER, TierReply
 
 logger = logging.getLogger("atlas.turn.brain_race")
@@ -93,10 +93,28 @@ def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
     by `response_format`, a channel xAI's own docs describe as combinable
     with tool calling, unlike `Mode.TOOLS`, which re-enters the exact wire
     channel the top tier's tool rounds just used.
+
+    260924-4iv (items c, d): every tier's own `XaiBrain` and the shared
+    envelope client are built against the same `build_http_client()` pool
+    and the same `cache_routing_headers(brain_config)` headers -- built
+    exactly once here, not once per tier. One pool means a warm call on
+    any tier's own client also warms the envelope client's connection
+    (`app.py::_warm_providers` only calls `warm()` on each tier's
+    `XaiBrain`, never on the envelope client directly, since they share a
+    pool). `registry.py::_build_local_brain` reaches this same function
+    against a local server's `base_url`; the routing header is harmless
+    there -- a local server simply never reads it.
     """
+    http_client = build_http_client()
+    routing_headers = cache_routing_headers(brain_config)
     envelope_client = (
         instructor.from_openai(
-            AsyncOpenAI(api_key=brain_config.api_key, base_url=brain_config.base_url),
+            AsyncOpenAI(
+                api_key=brain_config.api_key,
+                base_url=brain_config.base_url,
+                http_client=http_client,
+                default_headers=routing_headers,
+            ),
             mode=instructor.Mode.JSON,
         )
         if brain_config.triage_tiers
@@ -106,7 +124,7 @@ def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
         TierBrain(
             index=index,
             model=entry.model,
-            brain=XaiBrain(brain_config, model=entry.model),
+            brain=XaiBrain(brain_config, model=entry.model, http_client=http_client),
             envelope_client=None if entry is brain_config.top_tier else envelope_client,
             calls_tools=(entry is brain_config.top_tier),
         )

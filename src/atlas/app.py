@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Iterable
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -699,6 +699,43 @@ async def _refuse_turn_if_any_slot_is_degraded(app: FastAPI, source: Any) -> boo
     return True
 
 
+def _warm_providers(providers: Iterable[Any], keep_alive: set[asyncio.Task]) -> list[asyncio.Task]:
+    """Start a background `warm()` call on every provider in `providers`
+    that has one, and return the tasks started (260924-4iv, item d).
+
+    `None` entries (a degraded slot) and a provider with no `warm`
+    attribute (`getattr(..., "warm", None)` -- Piper has none) are skipped
+    silently, never raising: this function's whole job is to make a wake
+    faster when it can, never to decide which providers exist. Each task
+    is added to `keep_alive` (the same `app.state.background_turns` set
+    every other detached task in this file already uses) with
+    `add_done_callback(keep_alive.discard)`, so asyncio never garbage-
+    collects a still-running warm call -- and a small wrapper coroutine
+    swallows any exception `warm()` itself did not, so a third-party
+    provider whose `warm()` raises can never reach a turn or log an
+    unretrieved-exception warning.
+    """
+
+    async def _warm_one(provider: Any) -> None:
+        try:
+            await provider.warm()
+        except Exception:
+            logger.debug("provider warm() raised for %r", provider, exc_info=True)
+
+    tasks: list[asyncio.Task] = []
+    for provider in providers:
+        if provider is None:
+            continue
+        warm = getattr(provider, "warm", None)
+        if warm is None:
+            continue
+        task = asyncio.create_task(_warm_one(provider))
+        keep_alive.add(task)
+        task.add_done_callback(keep_alive.discard)
+        tasks.append(task)
+    return tasks
+
+
 def _make_run_turn_for_source(
     app: FastAPI, config: Config, source_name: str, *, room_speaker: bool = True
 ) -> Callable[[Any], Any]:
@@ -739,6 +776,16 @@ def _make_run_turn_for_source(
                     degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
                 )
             return
+
+        # 260924-4iv (item d): warm the chat and TTS pools in the
+        # background, right at wake -- in parallel with the wake cue, the
+        # STT socket opening, and the operator still speaking, so a turn
+        # minutes after the last one skips the TLS handshake on both. This
+        # is the wake path only (the camera source and the /ws/listen
+        # browser listener, both built through this same closure); the
+        # browser push-to-talk and WebRTC routes are not wake paths and are
+        # left unchanged.
+        _warm_providers((*(tier.brain for tier in app.state.tier_brains), app.state.tts), app.state.background_turns)
 
         timings = TurnTimings()
         session_recorder = SessionRecorder(config.session, timings)

@@ -25,6 +25,7 @@ through `BatchTtsAdapter`'s forwarding.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,8 @@ import httpx
 
 from atlas.config import TtsConfig
 from atlas.providers.base import TtsError
+
+logger = logging.getLogger("atlas.providers.tts_xai")
 
 
 # 20 ms of 16 kHz mono PCM16. Matches the frame size the browser plays and
@@ -46,6 +49,13 @@ CHUNK_BYTES = 640
 # per-call client. 120 s keeps one TLS connection alive across a normal
 # conversation's pauses. httpx checks an idle pooled socket before it
 # reuses one and reconnects on its own when the server already closed it.
+#
+# 260924-4iv (item d): `providers/base.py::PROVIDER_KEEPALIVE_EXPIRY_S` is
+# 60 s -- the floor a wake-time warm call needs to still be useful by the
+# time a turn reaches this provider. 120 s already clears that floor
+# (chosen for a different, longer-lived reason above), so this value is
+# left exactly as 260924-4iu set it rather than swapped for
+# `provider_http_limits()`.
 _KEEPALIVE_EXPIRY_S = 120.0
 
 
@@ -100,6 +110,26 @@ class XaiTts:
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    async def warm(self) -> None:
+        """Open (or reuse) this instance's pooled connection at wake, so a
+        turn that starts moments later skips the TLS handshake (260924-4iv,
+        item d).
+
+        One `HEAD` to `self._config.url`, through `_get_client()` -- the
+        same client accessor `synthesize_once` uses, so the pool this warms
+        is the one the next synthesis call reuses. `tts.url` answers `POST`
+        only, so a `405` here is expected and still counts as warmed: any
+        status code proves the connection opened and the server answered.
+        Every `Exception` is swallowed, logged at debug -- a warm call must
+        never reach a turn or raise past the background task
+        `app.py::_warm_providers` runs it in.
+        """
+        try:
+            headers = {"Authorization": f"Bearer {self._config.api_key}"}
+            await self._get_client().head(self._config.url, headers=headers, timeout=5.0)
+        except Exception:
+            logger.debug("xAI TTS warm call failed", exc_info=True)
 
     def browser_sink(self) -> SinkFormat:
         """The Phase 1 dev-harness sink: Web Audio-playable PCM, never A-law."""

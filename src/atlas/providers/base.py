@@ -13,6 +13,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
+import httpx
+
+# 260924-4iv (item d): httpx's own default `keepalive_expiry` is 5 s. A
+# wake-time warm call opens a connection this many seconds before a
+# typical camera turn (about 5 s, wake to final transcript) even reaches
+# the provider it warmed -- at httpx's default, the connection is already
+# closed again by the time the turn would reuse it, making the warm call
+# pure waste. 60 s covers a full turn's own latency budget with room to
+# spare, and keeps a second, closely-following turn on the same pooled
+# connection too.
+PROVIDER_KEEPALIVE_EXPIRY_S = 60.0
+
+
+def provider_http_limits() -> httpx.Limits:
+    """The one `httpx.Limits` every warmed provider pool shares (260924-4iv,
+    item d). `max_connections`/`max_keepalive_connections` are given
+    explicitly because `httpx.Limits`' own defaults for both are
+    unlimited -- an explicit, bounded pool here rather than inheriting
+    that default.
+    """
+    return httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=PROVIDER_KEEPALIVE_EXPIRY_S)
+
 
 @dataclass
 class PartialTranscript:
