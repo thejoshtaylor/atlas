@@ -16,7 +16,7 @@ reads it.
 
 This file holds no house name, no real Home Assistant URL, and no real
 token of its own. It reads them, if any exist, at run time from a file that
-is not part of this repository: the one `SPIRE_CONFIG` names, the same
+is not part of this repository: the one `ATLAS_CONFIG` names, the same
 environment variable and the same default (`config/config.example.yaml`)
 `app.py` already reads.
 
@@ -72,8 +72,8 @@ import sqlalchemy as sa
 import yaml
 from alembic import op
 
-from spire_voice.config import McpServerConfig, SecurityConfig, expand_env
-from spire_voice.crypto.credentials import encrypt_credential
+from atlas.config import McpServerConfig, SecurityConfig, expand_env
+from atlas.crypto.credentials import encrypt_credential
 
 logger = logging.getLogger("alembic.plugin_seed")
 
@@ -95,14 +95,14 @@ _BUILTIN_PLUGINS = (
     {
         "slug": "ha",
         "display_name": "Home Assistant",
-        "args": ["-m", "spire_mcp.ha"],
+        "args": ["-m", "atlas_mcp.ha"],
         "enforces_policy": True,
         "declared_keys": ("HA_URL", "HA_TOKEN"),
     },
     {
         "slug": "weather",
         "display_name": "Weather",
-        "args": ["-m", "spire_mcp.weather"],
+        "args": ["-m", "atlas_mcp.weather"],
         "enforces_policy": False,
         "declared_keys": ("WEATHER_LATITUDE", "WEATHER_LONGITUDE"),
     },
@@ -162,7 +162,7 @@ def _create_tables() -> None:
 
 
 def _read_config_text(config_path: str) -> str:
-    """Read `config_path` (the file `SPIRE_CONFIG` names), raising rather
+    """Read `config_path` (the file `ATLAS_CONFIG` names), raising rather
     than seeding nothing silently when it cannot be opened or read --
     matching `0001_policy_tables.py::_read_safety_block`'s and
     `0005_macro_tables.py::_read_macros_block`'s identical rule.
@@ -173,9 +173,9 @@ def _read_config_text(config_path: str) -> str:
     except OSError as exc:
         raise RuntimeError(
             f"the plugin seed migration could not read {config_path!r} (named by "
-            "SPIRE_CONFIG, or its default) to seed plugins -- refusing to seed "
+            "ATLAS_CONFIG, or its default) to seed plugins -- refusing to seed "
             "nothing silently. Either make the file readable at that path, or "
-            "point SPIRE_CONFIG at the file that holds the mcp.servers: block to "
+            "point ATLAS_CONFIG at the file that holds the mcp.servers: block to "
             "carry forward."
         ) from exc
 
@@ -235,7 +235,7 @@ def _config_values_rows(
 
 
 def _seed_plugins() -> None:
-    config_path = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
+    config_path = os.environ.get("ATLAS_CONFIG", "config/config.example.yaml")
     servers_raw = dict(_read_mcp_servers_block(config_path) or {})
     security = _security_config(config_path)
 

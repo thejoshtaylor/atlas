@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from spire_voice.session.observers import ObserverPublishingSource, ObserverRegistry
-from spire_voice.transports.base import SourceFormat
+from atlas.session.observers import ObserverPublishingSource, ObserverRegistry
+from atlas.transports.base import SourceFormat
 
 
 # --- Task 1: the fan-out -----------------------------------------------
@@ -225,7 +225,7 @@ def test_barge_in_defaults_to_none_when_the_wrapped_source_never_set_one():
 def _fake_run_turn_config(tmp_path):
     from types import SimpleNamespace
 
-    from spire_voice.config import SessionConfig
+    from atlas.config import SessionConfig
 
     return SimpleNamespace(
         session=SessionConfig(dir=str(tmp_path)),
@@ -236,7 +236,7 @@ def _fake_run_turn_config(tmp_path):
             max_tool_rounds=3, filler_after_ms=600.0, turn_timeout_s=25.0, local_intents=True
         ),
         stt=SimpleNamespace(max_utterance_s=15.0),
-        wake=SimpleNamespace(phrase="hey spire", cue=True),
+        wake=SimpleNamespace(phrase="hey atlas", cue=True),
     )
 
 
@@ -283,7 +283,7 @@ async def test_a_camera_turn_publishes_a_labelled_turn_started_event_and_wraps_t
     real provider is ever reached. Proves the turn-start boundary message
     and the wrapping, not `run_turn`'s own behavior (already covered by
     `tests/test_turn_controller.py`)."""
-    import spire_voice.app as app_module
+    import atlas.app as app_module
     from types import SimpleNamespace
 
     from tests.conftest import FakeAudioSource
@@ -336,14 +336,14 @@ async def test_a_camera_turn_publishes_a_labelled_turn_started_event_and_wraps_t
 def _boot_authenticated_client(tmp_path, monkeypatch, role: str):
     from fastapi.testclient import TestClient
 
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
-    from spire_voice.plugins import manager as plugin_manager_module
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
+    from atlas.plugins import manager as plugin_manager_module
 
-    import spire_voice.app as app_module
+    import atlas.app as app_module
     from tests import test_startup_smoke as smoke
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     # `debug.dir` -- real `SessionConfig`'s own default is `/data/sessions`,
     # unwritable outside a container; `SessionRecorder`'s real constructor
     # (both turn paths still call it unconditionally, session_recorder=None
@@ -378,7 +378,7 @@ def _boot_authenticated_client(tmp_path, monkeypatch, role: str):
         else:
             from datetime import datetime, timezone
 
-            from spire_voice.db.repository import User
+            from atlas.db.repository import User
 
             account_repo = app_module.app.state.account_repo
             user_id = account_repo._next_user_id
@@ -552,7 +552,7 @@ def test_a_turn_started_from_the_webrtc_route_is_labelled_on_the_feed(tmp_path, 
     shows up in the Sessions list -- and published nothing at all, so `/live`
     sat on the idle state through the whole turn and a session then appeared
     from nowhere."""
-    import spire_voice.app as app_module
+    import atlas.app as app_module
 
     client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
 
@@ -607,7 +607,7 @@ def test_every_run_turn_call_site_in_app_py_is_wrapped_for_the_observer_feed():
     import ast
     from pathlib import Path
 
-    import spire_voice.app as app_module
+    import atlas.app as app_module
 
     tree = ast.parse(Path(app_module.__file__).read_text(encoding="utf-8"))
     calls = [
@@ -645,7 +645,7 @@ def test_a_text_frame_alongside_a_null_bytes_key_is_discarded_not_closed(tmp_pat
     None` would have closed every observer on its first text frame. Driven
     against the handler's own receive, not through the installed server,
     because the installed server is precisely what hides this."""
-    import spire_voice.app as app_module
+    import atlas.app as app_module
 
     client, _ = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
     try:

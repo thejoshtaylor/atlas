@@ -15,8 +15,8 @@ from typing import AsyncIterator
 
 import pytest
 
-from spire_voice.providers.base import TtsError
-from spire_voice.providers.batch_tts_adapter import CHUNK_BYTES, BatchTtsAdapter
+from atlas.providers.base import TtsError
+from atlas.providers.batch_tts_adapter import CHUNK_BYTES, BatchTtsAdapter
 
 
 class _FakeBatchProvider:
@@ -148,7 +148,7 @@ async def test_default_chunk_size_is_the_one_definition_tts_xai_owns():
     """The adapter imports the chunk size from `tts_xai` rather than
     restating the integer -- this pins the import, not a duplicated
     literal, as the source of truth."""
-    from spire_voice.providers.tts_xai import CHUNK_BYTES as XAI_CHUNK_BYTES
+    from atlas.providers.tts_xai import CHUNK_BYTES as XAI_CHUNK_BYTES
 
     assert CHUNK_BYTES == XAI_CHUNK_BYTES
 
@@ -158,8 +158,8 @@ async def test_precache_all_through_the_adapter_populates_the_measured_figure(tm
     """Must-have: one adapter instance serves both the startup precache
     and every live turn, and the precache is what populates D-08's
     figure the first time an uncached phrase is actually synthesized."""
-    from spire_voice.providers.tts_cache import precache_all
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.providers.tts_cache import precache_all
+    from atlas.providers.tts_xai import SinkFormat
 
     provider = _FakeBatchProvider(audio=b"\x01" * 100)
     adapter = BatchTtsAdapter(provider)
@@ -179,8 +179,8 @@ async def test_the_adapter_forwards_unknown_attributes_to_the_wrapped_provider()
     (Task 1's own action); the adapter forwards to them so a caller
     holding the wrapped object -- `app.state.tts`, once xAI's tts entry
     is batch -- can still reach them with no special case."""
-    from spire_voice.config import TtsConfig
-    from spire_voice.providers.tts_xai import SinkFormat, XaiTts
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import SinkFormat, XaiTts
 
     xai = XaiTts(TtsConfig(browser_codec="pcm", browser_sample_rate=24000))
     adapter = BatchTtsAdapter(xai)

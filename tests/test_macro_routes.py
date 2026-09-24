@@ -4,7 +4,7 @@ flag a conflict with the running safety policy at authoring time, using
 the exact same check the fire path uses (D-10, Pitfall 5).
 
 Every test here builds a small, throwaway `FastAPI()` app carrying only
-`spire_voice.routes.macros`'s own router -- the same "primitives in
+`atlas.routes.macros`'s own router -- the same "primitives in
 isolation" shape `tests/test_policy_routes.py` already uses, since this
 file's whole point is the macro routes themselves, not the rest of the
 application.
@@ -18,10 +18,10 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig
-from spire_voice.providers.tts_xai import SinkFormat
-from spire_voice.routes.macros import router as macros_router
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig
+from atlas.providers.tts_xai import SinkFormat
+from atlas.routes.macros import router as macros_router
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -41,7 +41,7 @@ def _build_macro_app(
     app.state.config = SimpleNamespace(
         security=security,
         tts=SimpleNamespace(
-            cache_dir=str(cache_dir) if cache_dir is not None else "/tmp/spire-test-tts-cache",
+            cache_dir=str(cache_dir) if cache_dir is not None else "/tmp/atlas-test-tts-cache",
             voice_id="eve",
         ),
     )
@@ -157,7 +157,7 @@ def _macro_kwargs(
 def test_listing_macros_returns_phrase_aliases_reply_and_ordered_actions(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -199,7 +199,7 @@ def test_listing_macros_returns_phrase_aliases_reply_and_ordered_actions(
 def test_reading_one_macro_by_id(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -221,7 +221,7 @@ def test_reading_one_macro_by_id(
 def test_reading_an_unknown_macro_id_returns_a_named_404(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -241,7 +241,7 @@ def test_reading_an_unknown_macro_id_returns_a_named_404(
 def test_an_action_targeting_a_denied_entity_is_annotated_denied(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -273,7 +273,7 @@ def test_an_action_targeting_a_denied_entity_is_annotated_denied(
 def test_an_action_targeting_an_entity_absent_from_the_catalog_is_annotated_not_found(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -310,7 +310,7 @@ def test_an_action_targeting_an_entity_absent_from_the_catalog_is_annotated_not_
 def test_the_unknown_annotation_is_returned_when_the_catalog_cannot_be_read_and_differs_from_no_conflict(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -344,7 +344,7 @@ def test_the_unknown_annotation_is_returned_when_the_catalog_cannot_be_read_and_
 def test_the_unknown_annotation_is_returned_when_the_policy_cannot_be_read(
     monkeypatch, fake_account_repository, fake_macro_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -377,7 +377,7 @@ def test_the_unknown_annotation_is_returned_when_the_policy_cannot_be_read(
 def test_reading_and_listing_reject_an_unauthenticated_request_and_a_viewer(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs()])
@@ -403,7 +403,7 @@ def _action_json(tool: str = "ha_call_service", **arguments) -> dict:
 def test_creating_a_macro_with_a_phrase_reply_and_actions_returns_it_stored_in_order(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -440,7 +440,7 @@ def test_creating_a_macro_with_a_phrase_reply_and_actions_returns_it_stored_in_o
 def test_creating_a_macro_with_no_actions_is_refused(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -467,7 +467,7 @@ def test_creating_a_macro_with_a_blank_phrase_is_refused(
     file parser) has always refused a blank `phrase` -- this route did
     not, so an operator could save a macro `normalize("")` matches no
     transcript against, silently dead with no error at save time."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -494,7 +494,7 @@ def test_creating_a_macro_with_a_blank_reply_is_refused(
     """MED-01 fix (phase 4 code review): the file parser's identical
     refusal for a blank `reply` -- a blank reply is handed to
     `precache_all` on save, attempting to synthesize zero-length speech."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -521,7 +521,7 @@ def test_updating_a_macro_with_a_blank_phrase_or_reply_is_refused(
     """MED-01 fix: the same two checks apply to `update_macro`, not only
     `create_macro` -- an operator clearing the Phrase or Reply field while
     editing an existing macro must be refused the same way."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -555,7 +555,7 @@ def test_updating_a_macro_with_a_blank_phrase_or_reply_is_refused(
 def test_creating_a_macro_whose_phrase_collides_with_an_existing_one_is_refused_naming_both(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="Good Night")])
@@ -585,7 +585,7 @@ def test_creating_a_macro_whose_phrase_collides_with_an_existing_one_is_refused_
 def test_creating_a_macro_action_with_no_tool_name_is_refused(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -613,7 +613,7 @@ def test_creating_a_macro_action_with_no_tool_name_is_refused(
 def test_updating_a_macro_replaces_actions_wholesale_and_a_reorder_persists(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -658,7 +658,7 @@ def test_updating_a_macro_replaces_actions_wholesale_and_a_reorder_persists(
 def test_updating_a_macro_to_a_phrase_that_collides_with_a_different_macro_is_refused(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -691,7 +691,7 @@ def test_updating_a_macro_to_a_phrase_that_collides_with_a_different_macro_is_re
 def test_updating_a_macro_to_its_own_existing_phrase_succeeds(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -720,7 +720,7 @@ def test_updating_a_macro_to_its_own_existing_phrase_succeeds(
 def test_deleting_a_macro_removes_it_and_deleting_again_is_not_an_error(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -745,7 +745,7 @@ def test_deleting_a_macro_removes_it_and_deleting_again_is_not_an_error(
 def test_every_write_route_rejects_a_viewer(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -783,7 +783,7 @@ def test_every_write_route_rejects_a_viewer(
 def test_creating_a_macro_synthesizes_its_reply_before_returning_and_merges_it_into_the_turn_cache(
     monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -830,7 +830,7 @@ def test_creating_a_macro_also_caches_its_reply_for_the_camera_sink(
     """A macro saved after boot must be speakable on the camera, not only
     in the browser: the reply is synthesized for every sink in
     `app.state.filler_caches`, each in that sink's own format."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     tts = _FakeMacroTts(chunks=(b"reply-audio",))
@@ -864,7 +864,7 @@ def test_creating_a_macro_also_caches_its_reply_for_the_camera_sink(
 def test_updating_a_macro_with_an_unchanged_reply_does_not_resynthesize(
     monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(
@@ -906,7 +906,7 @@ def test_updating_a_macro_with_an_unchanged_reply_does_not_resynthesize(
 def test_a_synthesis_failure_returns_a_degraded_success_and_the_macro_is_still_readable(
     monkeypatch, tmp_path, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -966,11 +966,11 @@ async def test_a_macro_saved_through_the_route_matches_on_the_next_turn_with_no_
     a real `run_turn` call, in the same test, with no restart in between
     -- driven from the exact `Macro` the repository now holds and the
     exact `filler_cache` dict the save route updated in place."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository()
@@ -1052,7 +1052,7 @@ async def test_a_macro_saved_through_the_route_matches_on_the_next_turn_with_no_
 async def test_deleting_a_macro_removes_it_from_what_the_next_turn_can_match(
     monkeypatch, fake_account_repository, fake_macro_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     macro_repo = fake_macro_repository(macros=[_macro_kwargs(phrase="good night")])
@@ -1073,7 +1073,7 @@ async def test_deleting_a_macro_removes_it_from_what_the_next_turn_can_match(
     response = client.delete(f"/api/macros/{macro_id}")
     assert response.status_code == 204
 
-    from spire_voice.turn.macros import match
+    from atlas.turn.macros import match
 
     remaining = await macro_repo.list_macros()
     assert match(remaining, "good night") is None

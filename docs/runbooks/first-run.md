@@ -1,11 +1,11 @@
 # First run: from a clean install to a working assistant
 
-This is the walk a stranger takes the first time they open spire-voice. Deploying it
+This is the walk a stranger takes the first time they open atlas. Deploying it
 with Helm or Docker Compose is a separate step, covered by Phase 7's own documentation
 -- this runbook starts once the process is up and you open it in a browser.
 
 The wizard is at `/setup`. It has no other entry point, and it is the only screen a
-clean install offers: every other address in the application answers "spire-voice
+clean install offers: every other address in the application answers "atlas
 isn't set up yet" until an admin exists. There is no default password and no printed
 setup token anywhere -- the admin account you create in the first step is the only way
 in.

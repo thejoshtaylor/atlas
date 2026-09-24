@@ -8,7 +8,7 @@
 //
 // Session, fetchSession, and login used to live in `./api.ts`, pointed at
 // `/auth/session`/`/auth/login` -- routes that were never real
-// (`src/spire_voice/routes/auth.py` serves `/api/auth/me` and
+// (`src/atlas/routes/auth.py` serves `/api/auth/me` and
 // `/api/auth/login`). Both `03-03-SUMMARY.md` and `03-05-SUMMARY.md`
 // flagged this exact gap as owed to whichever plan landed the session
 // surface; this is that plan.
@@ -18,7 +18,7 @@ import { queryClient } from "./queryClient"
 
 export type Role = "admin" | "operator" | "viewer"
 
-/** `SessionResponse`'s exact shape (`src/spire_voice/routes/auth.py`). */
+/** `SessionResponse`'s exact shape (`src/atlas/routes/auth.py`). */
 export interface Session {
   id: number
   email: string

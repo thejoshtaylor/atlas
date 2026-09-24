@@ -36,7 +36,7 @@ export function RoomStep() {
       // instruction) -- a toast rather than a change to `HomeRoute.tsx`
       // (outside this task's declared file scope), since `Toaster` is
       // mounted at the App root and survives the navigation below.
-      toast.success("spire-voice is set up.", {
+      toast.success("atlas is set up.", {
         description: "Say the wake phrase to try it. Sign in again any time to change settings.",
       })
       navigate("/", { replace: true })

@@ -26,9 +26,9 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
-from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
-from spire_voice.timing import TurnTimings
-from spire_voice.turn.controller import run_turn
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.timing import TurnTimings
+from atlas.turn.controller import run_turn
 
 
 class _RecordingToolHost:

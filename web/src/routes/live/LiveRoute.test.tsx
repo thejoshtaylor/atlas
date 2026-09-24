@@ -75,9 +75,9 @@ test("the idle heading names the server-reported wake phrase and the caption nam
   const fake = fakeConnection()
   renderLive(fake.connect)
 
-  fake.emit({ type: "observer.opened", wake_phrase: "hey spire", sources: ["camera", "browser_mic"] })
+  fake.emit({ type: "observer.opened", wake_phrase: "hey atlas", sources: ["camera", "browser_mic"] })
 
-  expect(screen.getByText('Listening for "hey spire".')).toBeTruthy()
+  expect(screen.getByText('Listening for "hey atlas".')).toBeTruthy()
   expect(
     screen.getByText("Say it near any source to start a turn. This page updates as it happens."),
   ).toBeTruthy()
@@ -106,7 +106,7 @@ test("the whole turn sequence: start, partials, reply, timing, and a second turn
   const fake = fakeConnection()
   renderLive(fake.connect)
 
-  fake.emit({ type: "observer.opened", wake_phrase: "hey spire", sources: ["camera"] })
+  fake.emit({ type: "observer.opened", wake_phrase: "hey atlas", sources: ["camera"] })
   fake.emit({ type: "turn.started", source: "camera", turn_id: "t1", session_id: "20260101T000000000000Z-t1" })
 
   expect(screen.getByText("Camera")).toBeTruthy()
@@ -144,7 +144,7 @@ test("empty_transcript renders the fixed outcome copy, not the raw outcome strin
   const fake = fakeConnection()
   renderLive(fake.connect)
 
-  fake.emit({ type: "observer.opened", wake_phrase: "hey spire", sources: ["camera"] })
+  fake.emit({ type: "observer.opened", wake_phrase: "hey atlas", sources: ["camera"] })
   fake.emit({ type: "turn.started", source: "camera", turn_id: "t1", session_id: "20260101T000000000000Z-t1" })
   fake.emit({ type: "turn.timing", turn_outcome: "empty_transcript", source: "camera" })
 
@@ -166,7 +166,7 @@ test("unmounting closes the underlying connection", () => {
 test("the raw message buffer is bounded, so a tab left open does not accumulate household speech without limit (WR-11)", () => {
   const fake = fakeConnection()
   renderLive(fake.connect)
-  fake.emit({ type: "observer.opened", wake_phrase: "hey spire", sources: ["camera"] })
+  fake.emit({ type: "observer.opened", wake_phrase: "hey atlas", sources: ["camera"] })
 
   const emitTurn = (turnId: string, reply: string) => {
     fake.emit({ type: "turn.started", source: "camera", turn_id: turnId, session_id: null })

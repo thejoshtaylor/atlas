@@ -23,7 +23,7 @@ import sys
 import httpx
 import pytest
 
-from spire_mcp.open_meteo import (
+from atlas_mcp.open_meteo import (
     OpenMeteoClient,
     UpstreamMalformedError,
     UpstreamUnreachableError,
@@ -264,7 +264,7 @@ async def test_live_current_conditions_has_the_fields_the_parser_reads():
 
 
 async def test_current_conditions_handler_returns_a_speech_ready_dict():
-    from spire_mcp.weather import handle_weather_current
+    from atlas_mcp.weather import handle_weather_current
 
     recorder = _RecordingTransport(_CURRENT_BODY)
     async with _client_for(recorder) as http_client:
@@ -278,7 +278,7 @@ async def test_current_conditions_handler_returns_a_speech_ready_dict():
 
 
 async def test_forecast_handler_returns_bounded_days_and_refuses_an_out_of_range_count():
-    from spire_mcp.weather import handle_weather_forecast
+    from atlas_mcp.weather import handle_weather_forecast
 
     recorder = _RecordingTransport(_FORECAST_BODY)
     async with _client_for(recorder) as http_client:
@@ -308,7 +308,7 @@ async def test_the_decorated_forecast_tool_refuses_an_out_of_range_count_as_a_to
     surfaced as an error, but in a different voice than every other
     refusal in this turn."""
     from mcp.server.mcpserver.exceptions import ToolError
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     recorder = _RecordingTransport(_FORECAST_BODY)
     async with _client_for(recorder) as http_client:
@@ -324,7 +324,7 @@ async def test_the_decorated_forecast_tool_refuses_an_out_of_range_count_as_a_to
 
 
 async def test_handlers_take_their_client_as_a_parameter_and_propagate_upstream_errors():
-    from spire_mcp.weather import handle_weather_current
+    from atlas_mcp.weather import handle_weather_current
 
     def _raise_connect_error(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
@@ -336,7 +336,7 @@ async def test_handlers_take_their_client_as_a_parameter_and_propagate_upstream_
 
 
 def test_handler_docstrings_are_non_empty_tool_descriptions():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     assert weather.handle_weather_current.__doc__
     assert weather.handle_weather_forecast.__doc__
@@ -345,7 +345,7 @@ def test_handler_docstrings_are_non_empty_tool_descriptions():
 def test_no_handler_body_references_a_module_level_client_name():
     import inspect
 
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     for name in ("handle_weather_current", "handle_weather_forecast"):
         source = inspect.getsource(getattr(weather, name))
@@ -365,7 +365,7 @@ def _spawn_weather_child(env_extra: dict[str, str]) -> subprocess.Popen:
         **env_extra,
     }
     return subprocess.Popen(
-        [sys.executable, "-m", "spire_mcp.weather"],
+        [sys.executable, "-m", "atlas_mcp.weather"],
         env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -381,7 +381,7 @@ async def test_the_real_child_lists_exactly_the_two_weather_tools():
 
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "spire_mcp.weather"],
+        args=["-m", "atlas_mcp.weather"],
         env={
             "PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": f"{REPO}/mcp",
@@ -414,7 +414,7 @@ def test_a_child_started_with_no_coordinate_variables_refuses_to_start():
 
 
 def test_read_units_table(monkeypatch):
-    from spire_mcp.weather import _read_units
+    from atlas_mcp.weather import _read_units
 
     monkeypatch.delenv("WEATHER_UNITS", raising=False)
     assert _read_units() == "celsius"
@@ -439,7 +439,7 @@ def test_read_units_table(monkeypatch):
 
 
 async def test_startup_sets_units_from_weather_units_env(monkeypatch):
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
@@ -480,11 +480,11 @@ def test_a_child_started_with_an_invalid_weather_units_value_refuses_to_start():
 def test_weather_module_imports_no_policy_and_holds_no_credential_shaped_name():
     import re
 
-    weather_path = os.path.join(REPO, "mcp", "spire_mcp", "weather.py")
-    open_meteo_path = os.path.join(REPO, "mcp", "spire_mcp", "open_meteo.py")
+    weather_path = os.path.join(REPO, "mcp", "atlas_mcp", "weather.py")
+    open_meteo_path = os.path.join(REPO, "mcp", "atlas_mcp", "open_meteo.py")
 
     for path in (weather_path, open_meteo_path):
         with open(path, encoding="utf-8") as handle:
             source = handle.read()
-        assert not re.search(r"from spire_mcp\.safety|import safety|allow_call|allow_read", source)
+        assert not re.search(r"from atlas_mcp\.safety|import safety|allow_call|allow_read", source)
         assert not re.search(r"HA_TOKEN|HA_URL|XAI_API_KEY|api_key", source)

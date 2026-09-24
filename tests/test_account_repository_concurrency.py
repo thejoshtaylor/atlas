@@ -24,16 +24,16 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.db.postgres import PostgresAccountRepository
+from atlas.db.postgres import PostgresAccountRepository
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -80,11 +80,11 @@ def _run_upgrade_head(async_url: str) -> None:
 
 
 def _set_migration_env(monkeypatch) -> None:
-    """`config/config.example.yaml` (Alembic's own default `SPIRE_CONFIG`
+    """`config/config.example.yaml` (Alembic's own default `ATLAS_CONFIG`
     target, per `0001_policy_tables.py`'s own docstring) expands
     `${NAME}` placeholders for every provider -- the same env vars
     `tests/test_db_migrations.py`'s own tests set, invented values only."""
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -228,8 +228,8 @@ async def test_concurrent_set_selection_calls_for_an_unseeded_slot_do_not_500(mo
     """
     from sqlalchemy import delete, select
 
-    from spire_voice.db.models import ProviderSelectionRow
-    from spire_voice.db.postgres import PostgresProviderSelectionRepository
+    from atlas.db.models import ProviderSelectionRow
+    from atlas.db.postgres import PostgresProviderSelectionRepository
 
     _set_migration_env(monkeypatch)
     await _reset_schema(_TEST_DB_URL)
@@ -289,8 +289,8 @@ async def test_set_selection_updates_the_existing_row_rather_than_adding_a_secon
     in place, and `set_selection` still returns the stored state."""
     from sqlalchemy import select
 
-    from spire_voice.db.models import ProviderSelectionRow
-    from spire_voice.db.postgres import PostgresProviderSelectionRepository
+    from atlas.db.models import ProviderSelectionRow
+    from atlas.db.postgres import PostgresProviderSelectionRepository
 
     _set_migration_env(monkeypatch)
     await _reset_schema(_TEST_DB_URL)

@@ -15,10 +15,10 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import BrainConfig, SecurityConfig, SttConfig, TtsConfig
-from spire_voice.providers.boot import ProviderSlotStatus
-from spire_voice.routes.providers import router as providers_router
+from atlas.auth.tokens import issue_access_token
+from atlas.config import BrainConfig, SecurityConfig, SttConfig, TtsConfig
+from atlas.providers.boot import ProviderSlotStatus
+from atlas.routes.providers import router as providers_router
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -96,7 +96,7 @@ def test_get_providers_reports_all_three_slots_in_the_fixed_order(
     """07-UI-SPEC.md: speech to text, text to speech, language model --
     this order never changes, so returning to the page after a restart
     lands the admin's eye on the same slot in the same place."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -120,7 +120,7 @@ def test_get_providers_reports_all_three_slots_in_the_fixed_order(
 def test_get_providers_reports_the_stt_slot_with_its_options(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -158,7 +158,7 @@ def test_get_providers_reports_the_tts_slot_wrapped_with_no_measured_figure_yet(
     """D-08: a wrapped slot with nothing synthesized since the last
     restart reports `wrapped: true` and `measured_ms: null` -- an honest
     absence, not an invented zero."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -188,7 +188,7 @@ def test_get_providers_reports_a_real_measured_figure_off_the_live_tts_client(
     """D-08: `measured_ms` is a live read off `app.state.tts` at
     response-build time, never a stored copy -- a client that has
     synthesized something reports the real figure."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -211,7 +211,7 @@ def test_get_providers_reports_a_real_measured_figure_off_the_live_tts_client(
 def test_get_providers_reports_the_brain_slot(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -235,13 +235,13 @@ def test_get_providers_reports_the_brain_slot(
 def test_get_providers_reports_credential_set_from_the_credential_repository(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
     credential_repo = fake_credential_repository()
 
-    from spire_voice.crypto.credentials import encrypt_credential
+    from atlas.crypto.credentials import encrypt_credential
 
     ciphertext, key_version = encrypt_credential("a-real-secret-token", security)
     asyncio.run(
@@ -262,7 +262,7 @@ def test_get_providers_reports_credential_set_from_the_credential_repository(
 def test_get_providers_reports_credential_unset_when_nothing_is_stored(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -283,13 +283,13 @@ def test_get_providers_reports_tts_and_brain_credential_set_from_their_own_slot(
     its own credential slot (`CredentialSlot.TTS`/`CredentialSlot.BRAIN`),
     never the speech-to-text one, even though all three share the same
     registered provider name."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
     credential_repo = fake_credential_repository()
 
-    from spire_voice.crypto.credentials import encrypt_credential
+    from atlas.crypto.credentials import encrypt_credential
 
     ciphertext, key_version = encrypt_credential("a-real-secret-token", security)
     asyncio.run(
@@ -315,7 +315,7 @@ def test_get_providers_reports_needs_server_url_and_measured_note_from_the_regis
     (07-04-PLAN.md) reach the wire unchanged -- the flag the screen uses to
     reveal a "Server URL" field and the local-set latency caption, from
     data rather than a hardcoded provider name."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -346,7 +346,7 @@ def test_get_providers_reports_needs_server_url_and_measured_note_from_the_regis
 def test_put_providers_saves_a_new_choice_and_a_reload_finds_it_still_chosen(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -371,7 +371,7 @@ def test_put_providers_accepts_all_three_slots_in_one_request(
     """07-UI-SPEC.md's probe addendum: one request carrying all three
     choices, one outcome -- no per-slot save and no partial-success
     state to render."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -404,7 +404,7 @@ def test_put_providers_refuses_an_unrecognized_provider_name_and_leaves_the_row_
     naming the value and the known set, and the stored row is untouched
     afterwards -- a partial write across a save is the state 07-UI-SPEC.md's
     probe addendum explicitly refuses to render."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -429,7 +429,7 @@ def test_put_providers_refuses_an_unrecognized_provider_name_and_leaves_the_row_
 def test_put_providers_refuses_an_unknown_slot(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -446,7 +446,7 @@ def test_put_providers_refuses_an_unknown_slot(
 def test_put_providers_is_admin_only(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -477,7 +477,7 @@ def test_get_providers_reports_selected_and_active_diverging_after_a_stored_chan
     client from at last boot -- the divergence itself is what a "needs
     restart" badge is built from, and this route must never paper over it
     by reporting only one of the two facts."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -504,7 +504,7 @@ def test_get_providers_reports_selected_and_active_diverging_after_a_stored_chan
 def test_get_providers_reports_a_degraded_slot_honestly(
     monkeypatch, fake_account_repository, fake_provider_selection_repository, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -541,7 +541,7 @@ def test_get_providers_reports_a_degraded_tts_slot_with_no_measured_figure(
 ):
     """A degraded tts slot has no client at all -- `measured_ms` must
     read `None` rather than erroring on a missing attribute."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -593,7 +593,7 @@ def test_a_degraded_slot_whose_settings_changed_since_boot_reports_it(
     server knows what configuration the boot actually used, and can
     compare it against a fresh read.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()
@@ -657,7 +657,7 @@ def test_a_provider_name_changed_since_boot_reports_it_too(
 ):
     """The running case still works through the same field, so a slot
     that is not degraded reports the change from both directions."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     provider_selection_repo = fake_provider_selection_repository()

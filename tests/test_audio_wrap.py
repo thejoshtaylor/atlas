@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from spire_voice.audio.alaw import alaw_to_pcm16
-from spire_voice.session.audio_wrap import (
+from atlas.audio.alaw import alaw_to_pcm16
+from atlas.session.audio_wrap import (
     DEFAULT_ALAW_WRAPPING,
     AudioWrapError,
     wrap_alaw_as_wav,

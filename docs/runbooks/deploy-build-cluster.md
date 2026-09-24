@@ -17,39 +17,39 @@ step) run the rest automatically, forever after.
 
 ## 1. Harbor: create the project and a robot account
 
-Create a Harbor project named `spire-voice`. Create a robot account scoped
+Create a Harbor project named `atlas`. Create a robot account scoped
 to that project with push and pull permission. The build pushes to this
 project. No other part of this pipeline needs a different registry.
 
-## 2. Registry credentials: `regcred-spire-voice`, in three namespaces
+## 2. Registry credentials: `regcred-atlas`, in three namespaces
 
-Create a Kubernetes `dockerconfigjson` Secret named `regcred-spire-voice`
+Create a Kubernetes `dockerconfigjson` Secret named `regcred-atlas`
 from that robot account's credentials. Create it in all three of these
 namespaces:
 
 - `argo` — the CI build (`buildctl`, inside the WorkflowTemplate) pushes
   with it.
 - `argocd` — `argocd-image-updater` pulls image metadata with it, through
-  the `pullsecret:argocd/regcred-spire-voice` annotation on the Application.
+  the `pullsecret:argocd/regcred-atlas` annotation on the Application.
 - `home` — the running pod pulls the image itself with it. The Harbor
-  `spire-voice` project is private, so without this Secret (and the
+  `atlas` project is private, so without this Secret (and the
   ServiceAccount patch below) the pod fails to start with
   `ImagePullBackOff: no basic auth credentials`.
 
 ```bash
-kubectl create secret docker-registry regcred-spire-voice \
+kubectl create secret docker-registry regcred-atlas \
   --docker-server=harbor.tail41bc66.ts.net \
   --docker-username='<robot account name>' \
   --docker-password '<robot account token>' \
   --namespace argo
 
-kubectl create secret docker-registry regcred-spire-voice \
+kubectl create secret docker-registry regcred-atlas \
   --docker-server=harbor.tail41bc66.ts.net \
   --docker-username='<robot account name>' \
   --docker-password '<robot account token>' \
   --namespace argocd
 
-kubectl create secret docker-registry regcred-spire-voice \
+kubectl create secret docker-registry regcred-atlas \
   --docker-server=harbor.tail41bc66.ts.net \
   --docker-username='<robot account name>' \
   --docker-password '<robot account token>' \
@@ -62,7 +62,7 @@ Secret until you patch it:
 
 ```bash
 kubectl -n home patch serviceaccount default \
-  -p '{"imagePullSecrets":[{"name":"regcred-spire-voice"}]}'
+  -p '{"imagePullSecrets":[{"name":"regcred-atlas"}]}'
 ```
 
 Apply this patch by hand. Do not add it to the chart or to an Argo CD
@@ -77,7 +77,7 @@ hand for the same reason.
 ## 3. The runtime Secret, in the `home` namespace
 
 Create the Secret the application runs against. Name it to match
-`values-build.yaml`'s `secretName: spire-voice`. Create it in the `home`
+`values-build.yaml`'s `secretName: atlas`. Create it in the `home`
 namespace. This is the hand-applied Secret D-2 describes. This repository
 carries no default for any key below. None of these values belong in git.
 This repository is public.
@@ -95,7 +95,7 @@ The shipped configuration needs every key below.
 | `COOKIE_SECURE` | Set `COOKIE_SECURE=true` once the public ingress at `voice.jtlabs.co` is enabled (section 7 below) — public HTTPS in front of this release means the session cookie must be Secure. `false` is only correct for a deploy with no ingress and no TLS in front of it at all. |
 | `DATABASE_URL` | See the pairing rule below. |
 | `POSTGRES_PASSWORD` | See the pairing rule below. |
-| `SPIRE_SECRET_KEY` | See the generation command below. |
+| `ATLAS_SECRET_KEY` | See the generation command below. |
 
 Two keys are optional legacy holdovers. Keep them only if your own config
 still builds the camera URL from them the old way:
@@ -117,10 +117,10 @@ exact same password. It must also point at this release's own headless
 Postgres Service:
 
 ```text
-postgresql+asyncpg://spire:<the same POSTGRES_PASSWORD value>@<release-name>-postgres:5432/spire
+postgresql+asyncpg://atlas:<the same POSTGRES_PASSWORD value>@<release-name>-postgres:5432/atlas
 ```
 
-Generate `SPIRE_SECRET_KEY` with this command:
+Generate `ATLAS_SECRET_KEY` with this command:
 
 ```bash
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -132,13 +132,13 @@ annotation that `deploy-helm.md` describes does not apply to a hand-applied
 Secret. You own its lifecycle entirely. If you delete this Secret while the
 database volume survives, Kubernetes regenerates `POSTGRES_PASSWORD`. The
 already-initialized database rejects that new password. A new
-`SPIRE_SECRET_KEY` also makes every credential the database already holds
+`ATLAS_SECRET_KEY` also makes every credential the database already holds
 permanently unreadable. Treat the Secret and the volume as one unit
 whenever you delete either.
 
 ## 4. GitHub webhook
 
-Add a webhook on the `thejoshtaylor/spire-voice` repository. Point it at
+Add a webhook on the `thejoshtaylor/atlas` repository. Point it at
 the cluster's shared `git` EventSource — the same one the Sensor manifest
 under `config/argo/` declares a dependency on. Send push events. The
 Sensor's own filters (`body.repository.full_name`, `body.ref`) narrow this
@@ -152,14 +152,14 @@ stay a generic push hook.
 nothing. Without this object, a push to `main` builds and pushes an image,
 but the running pod never changes.
 
-`config/argo/spire-voice-image-updater.yaml` is this project's own
+`config/argo/atlas-image-updater.yaml` is this project's own
 `ImageUpdater` object. Step 6 applies it with the other manifests. Do not
-add `spire-voice` to another project's shared `ImageUpdater` object.
+add `atlas` to another project's shared `ImageUpdater` object.
 
 To make sure that the updater found the application:
 
 ```bash
-kubectl -n argocd get imageupdater spire-voice
+kubectl -n argocd get imageupdater atlas
 ```
 
 The `APPS` column must show `1`.
@@ -180,7 +180,7 @@ Application and the ImageUpdater go into `argocd`.
 `values-build.yaml` enables the chart's ingress. Once it is applied, this
 webapp is reachable at `https://voice.jtlabs.co` over public HTTPS
 (Cloudflare-terminated, in "Full" mode). A session cookie served over
-public HTTPS must be Secure, so the hand-applied `home/spire-voice`
+public HTTPS must be Secure, so the hand-applied `home/atlas`
 Secret must set `COOKIE_SECURE=true` — see the table in section 3.
 
 Set it there, not in `values-build.yaml`. `config.cookieSecure` in that
@@ -204,14 +204,14 @@ with no further action from you.
 
 1. The GitHub webhook fires. The Sensor's filters accept it (this
    repository, this branch) and submit a Workflow from the
-   `spire-voice-ci` WorkflowTemplate.
+   `atlas-ci` WorkflowTemplate.
 2. The Workflow clones the repository over plain HTTPS. This step needs no
    credential, because the repository is public. The Workflow then builds
    the repo-root `Dockerfile`'s `runtime` stage with `buildctl`. It pushes
-   `harbor.tail41bc66.ts.net/spire-voice/app` at both `:latest` and `:sha`
+   `harbor.tail41bc66.ts.net/atlas/app` at both `:latest` and `:sha`
    to Harbor.
 3. `argocd-image-updater` notices the new digest on `:latest`. It writes
-   that digest into the `spire-voice` Application's `image.ref` Helm
+   that digest into the `atlas` Application's `image.ref` Helm
    value.
 4. Argo CD's `syncPolicy.automated` (with `prune: true` and `selfHeal:
    true`) applies that change to the cluster. The running pod is replaced

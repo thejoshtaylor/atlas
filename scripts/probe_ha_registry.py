@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ask a real, running Home Assistant whether its area/device/label/entity
 registries answer over the WebSocket API -- the transport SAFE-03's
-expansion in `mcp/spire_mcp/ha.py` depends on, and the one claim in
+expansion in `mcp/atlas_mcp/ha.py` depends on, and the one claim in
 03-RESEARCH.md never confirmed against a live instance (MEDIUM confidence:
 corroborated by official documentation and by the community, but not
 falsified against a real house).
@@ -12,11 +12,11 @@ healthy answer looks like and what to do if this script reports a
 rejection instead.
 
 Follows `scripts/calibrate_echo_path.py`'s own shape: a thin caller of the
-real client (`spire_mcp.registry.HaRegistryClient`) and nothing else. This
+real client (`atlas_mcp.registry.HaRegistryClient`) and nothing else. This
 script reads no environment variable it did not already need --
-`HA_URL`/`HA_TOKEN` are the same two the running child (`spire_mcp.ha`)
+`HA_URL`/`HA_TOKEN` are the same two the running child (`atlas_mcp.ha`)
 already requires, read directly from the environment the same way
-`spire_mcp.ha._startup()` does. Run it through
+`atlas_mcp.ha._startup()` does. Run it through
 `scripts/dev-probe-ha-registry.sh`, which sources `.env` the way
 `dev-run.sh`/`dev-calibrate-echo.sh` do.
 
@@ -34,7 +34,7 @@ import os
 import sys
 from pathlib import Path
 
-# `spire_mcp` lives under `mcp/`, not `src/` -- it is the package the MCP
+# `atlas_mcp` lives under `mcp/`, not `src/` -- it is the package the MCP
 # child process runs, and this probe is a second, standalone caller of its
 # registry client. Inserted here so the script also runs bare
 # (`.venv/bin/python scripts/probe_ha_registry.py`), not only through
@@ -43,7 +43,7 @@ _MCP_ROOT = Path(__file__).resolve().parents[1] / "mcp"
 if str(_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(_MCP_ROOT))
 
-from spire_mcp.registry import (
+from atlas_mcp.registry import (
     HaRegistryClient,
     RegistryAuthError,
     RegistryUnavailableError,

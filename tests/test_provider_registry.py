@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from spire_voice.config import BrainConfig, BrainTierConfig, SttConfig, TtsConfig
-from spire_voice.providers import registry
-from spire_voice.providers.batch_tts_adapter import BatchTtsAdapter
-from spire_voice.providers.boot import ProviderSlotStatus, ProviderUnavailable, resolve_slot
+from atlas.config import BrainConfig, BrainTierConfig, SttConfig, TtsConfig
+from atlas.providers import registry
+from atlas.providers.batch_tts_adapter import BatchTtsAdapter
+from atlas.providers.boot import ProviderSlotStatus, ProviderUnavailable, resolve_slot
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,7 +29,7 @@ def _brain_config() -> BrainConfig:
 
 
 def test_build_stt_builds_the_registered_xai_provider():
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     client = registry.build_stt("xai", _stt_config(), "test-key")
 
@@ -49,7 +49,7 @@ def test_build_stt_builds_the_registered_local_provider_with_no_credential(tmp_p
     """D-04's needs-a-credential gate is opt-in per entry (`requires_credential`)
     -- the local entry must build with an empty api_key, never raise
     `ProviderUnavailable` for a "missing" credential it never needed."""
-    from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
+    from atlas.providers.stt_faster_whisper import FasterWhisperStt
 
     model_dir = tmp_path / "faster-whisper"
     model_dir.mkdir()
@@ -79,7 +79,7 @@ def test_known_entries_returns_every_registered_option_for_the_slot():
 
 
 def test_build_tts_builds_the_registered_xai_provider():
-    from spire_voice.providers.tts_xai import XaiTts
+    from atlas.providers.tts_xai import XaiTts
 
     client = registry.build_tts("xai", _tts_config(), "test-key")
 
@@ -123,7 +123,7 @@ def test_build_brain_builds_the_tier_tuple_build_tiers_produces():
     """D-01, D-03: the language-model entry's factory is `brain_race.
     build_tiers` itself, called with the credential-substituted config --
     not a second, parallel construction of the same tiers."""
-    from spire_voice.turn.brain_race import TierBrain
+    from atlas.turn.brain_race import TierBrain
 
     tiers = registry.build_brain("xai", _brain_config(), "test-key")
 
@@ -174,7 +174,7 @@ def test_build_brain_local_builds_the_same_tier_structure_pointed_at_the_server_
     """The self-hosted entry needs no new provider class: `XaiBrain`'s
     constructor already takes exactly a base URL and an API key, which is
     why the config was shaped that way in the first place."""
-    from spire_voice.turn.brain_race import TierBrain
+    from atlas.turn.brain_race import TierBrain
 
     tiers = registry.build_brain(
         "local", _brain_config(), "", {"server_url": "http://localhost:8080/v1"}
@@ -232,7 +232,7 @@ def test_build_stt_raises_provider_unavailable_when_the_credential_is_missing():
 
 
 def test_build_stt_with_a_credential_present_builds_normally():
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     client = registry.build_stt("xai", _stt_config(), "a-real-looking-key")
     assert isinstance(client, XaiStt)
@@ -432,7 +432,7 @@ def test_the_registry_self_check_survives_python_optimize(tmp_path):
     import sys
 
     program = (
-        "import spire_voice.providers.registry as r\n"
+        "import atlas.providers.registry as r\n"
         "r._REGISTRIES['stt'] = {}\n"
         "try:\n"
         "    r.check_registries_non_empty()\n"

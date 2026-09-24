@@ -15,8 +15,8 @@ in-file-stub convention `tests/test_policy_routes.py` already uses for
 its own `_RecordingToolHost`.
 
 The MCP child that enforces `allow_call` holds a policy *snapshot*,
-captured once at spawn from `SPIRE_SAFETY` and refreshed only by
-`respawn()` (`mcp/spire_mcp/ha.py::_load_policy`). SAFE-08's "re-checks
+captured once at spawn from `ATLAS_SAFETY` and refreshed only by
+`respawn()` (`mcp/atlas_mcp/ha.py::_load_policy`). SAFE-08's "re-checks
 the policy when it fires" is therefore only as current as the last
 respawn -- so the policy change below goes through the real route
 (`POST /api/policy/rules`, `routes/policy.py`) against a real,
@@ -47,15 +47,15 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig, WorkflowConfig
-from spire_voice.db.models import WorkflowRunRow, WorkflowStepRow
-from spire_voice.db.repository import WorkflowRun, WorkflowStep, WorkflowStepSpec, assign_step_due_ats, push_out_due_at
-from spire_voice.mcp_client import McpToolHost
-from spire_voice.policy_snapshot import safety_block_from_policy
-from spire_voice.routes.policy import router as policy_router
-from spire_voice.workflow.scheduler import WorkflowScheduler
-from spire_voice.workflow.steps import execute_step
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig, WorkflowConfig
+from atlas.db.models import WorkflowRunRow, WorkflowStepRow
+from atlas.db.repository import WorkflowRun, WorkflowStep, WorkflowStepSpec, assign_step_due_ats, push_out_due_at
+from atlas.mcp_client import McpToolHost
+from atlas.policy_snapshot import safety_block_from_policy
+from atlas.routes.policy import router as policy_router
+from atlas.workflow.scheduler import WorkflowScheduler
+from atlas.workflow.steps import execute_step
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -83,7 +83,7 @@ def _naive_utc(dt: datetime) -> datetime:
 
 
 class _StubWorkflowRepository:
-    """An in-memory `WorkflowRepository` (`spire_voice.db.repository`'s
+    """An in-memory `WorkflowRepository` (`atlas.db.repository`'s
     own Protocol), built for this file alone -- see the module docstring
     for why this is not `tests/conftest.py`'s `FakeWorkflowRepository`.
 
@@ -293,7 +293,7 @@ async def _make_run(repo: _StubWorkflowRepository, *, entity_id: str, due_at: da
 async def test_a_run_scheduled_before_the_entity_was_denied_is_refused_when_it_fires(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()  # default mode, no rules -- the target is NOT denied yet
@@ -351,7 +351,7 @@ async def test_a_run_scheduled_before_the_entity_was_denied_is_refused_when_it_f
         await scheduler._poll_once()
 
         # 3. The step was refused, carrying the boundary's own wording
-        #    (`Denied`'s own text, `mcp/spire_mcp/safety.py`) -- the same
+        #    (`Denied`'s own text, `mcp/atlas_mcp/safety.py`) -- the same
         #    "off limits" substring `test_policy_routes.py`'s own
         #    end-to-end respawn test asserts against, the installed MCP
         #    SDK's own "Error executing tool {name}: {message}" prefix
@@ -375,7 +375,7 @@ async def test_the_control_the_same_run_and_poll_with_no_policy_change_is_not_de
     refusal in the test above came from the deny rule, not from anything
     else (the target Home Assistant host is unreachable by design, so
     this step fails for its own, unrelated reason)."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()  # no rules -- and none are ever added in this test
 
@@ -414,7 +414,7 @@ async def test_a_denied_first_step_does_not_stop_the_runs_second_step_from_firin
     silently drop the door because the light was refused. The second
     step is policy-checked at its own fire time too, the same as the
     first."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()

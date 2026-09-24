@@ -1,5 +1,6 @@
-# spire-voice
+# ATLAS
 
+**A**ssistant for **T**asks, **L**ogistics, **A**utomation, and **S**cheduling.
 A self-hosted voice assistant for the home.
 
 A local wake word starts it. Speech recognition, reasoning, and speech synthesis
@@ -116,7 +117,7 @@ Piper, the optional local text-to-speech package (`piper-tts`), is licensed
 under GPL-3.0, not MIT. It is not installed by default:
 
 ```bash
-pip install 'spire-voice[piper]'
+pip install 'atlas[piper]'
 ```
 
 If you install it, and you redistribute a build that includes it, GPL-3.0

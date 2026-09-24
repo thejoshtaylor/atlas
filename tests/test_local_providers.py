@@ -10,14 +10,14 @@ from typing import AsyncIterator
 import numpy as np
 import pytest
 
-from spire_voice.audio.alaw import pcm16_to_alaw
-from spire_voice.config import SttConfig, TtsConfig
-from spire_voice.providers.base import FinalTranscript, PartialTranscript, SttError
-from spire_voice.providers.boot import ProviderUnavailable
-from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
-from spire_voice.providers.tts_piper import PiperTts
-from spire_voice.providers.tts_xai import SinkFormat
-from spire_voice.transports.base import SourceFormat
+from atlas.audio.alaw import pcm16_to_alaw
+from atlas.config import SttConfig, TtsConfig
+from atlas.providers.base import FinalTranscript, PartialTranscript, SttError
+from atlas.providers.boot import ProviderUnavailable
+from atlas.providers.stt_faster_whisper import FasterWhisperStt
+from atlas.providers.tts_piper import PiperTts
+from atlas.providers.tts_xai import SinkFormat
+from atlas.transports.base import SourceFormat
 
 
 class _FakeSegment:
@@ -348,7 +348,7 @@ def test_the_two_local_registry_entries_carry_the_measured_note_verbatim():
     verbatim, as data -- never a paraphrase, and never present on the
     cloud (xAI) entries, which are not part of the local set D-12
     measures."""
-    from spire_voice.providers import registry
+    from atlas.providers import registry
 
     faster_whisper = registry.STT_REGISTRY["faster-whisper"]
     piper = registry.TTS_REGISTRY["piper"]
@@ -402,7 +402,7 @@ def test_a_loader_failure_reaches_resolve_slot_as_a_degraded_slot_not_a_dead_boo
     than only the exception type."""
     import asyncio
 
-    from spire_voice.providers.boot import resolve_slot
+    from atlas.providers.boot import resolve_slot
 
     class _NoSelectionRepo:
         async def get_selection(self, slot: str):
@@ -504,7 +504,7 @@ def test_the_published_local_figure_states_what_it_was_measured_against():
     places an operator actually reads the number did not."""
     from pathlib import Path
 
-    from spire_voice.providers import registry
+    from atlas.providers import registry
 
     note = registry.STT_REGISTRY["faster-whisper"].measured_note
     assert note.startswith("Measured on this project's CPU-only host:")

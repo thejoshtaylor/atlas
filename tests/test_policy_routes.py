@@ -16,7 +16,7 @@ is exactly the kind of admin action this project's own prior incident makes
 worth a permanent, named record.
 
 Every test here builds a small, throwaway `FastAPI()` app carrying only
-`spire_voice.routes.policy`'s own router -- the same "primitives in
+`atlas.routes.policy`'s own router -- the same "primitives in
 isolation" shape `tests/test_auth_roles.py`'s first two tests use, since
 this file's whole point is the policy routes themselves, not the rest of
 the application.
@@ -31,10 +31,10 @@ import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig
-from spire_voice.mcp_client import McpToolHost
-from spire_voice.routes.policy import router as policy_router
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig
+from atlas.mcp_client import McpToolHost
+from atlas.routes.policy import router as policy_router
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -130,7 +130,7 @@ class _FailingToolHost:
 def test_adding_a_rule_respawns_the_tool_child_with_the_new_policy(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -173,7 +173,7 @@ def test_the_route_respawns_through_the_manager_never_the_host_directly(
     in` -- every policy write in the webapp would fail. The host below
     fails the test loudly if the route ever reaches it directly again.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -221,7 +221,7 @@ def test_the_route_respawns_through_the_manager_never_the_host_directly(
 def test_the_route_awaits_respawn_before_returning(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -247,7 +247,7 @@ def test_the_route_awaits_respawn_before_returning(
 def test_removing_a_rule_respawns_the_tool_child_with_the_updated_policy(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository(deny_entities=["switch.example_to_remove"])
@@ -276,7 +276,7 @@ def test_switching_mode_writes_an_audit_row_naming_who_and_when(
     """Changing `mode` between `allow_all_except_denylist` and
     `allowlist_only` must write an audit row naming the admin and the
     timestamp (D-13)."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository(mode="allow_all_except_denylist")
@@ -310,7 +310,7 @@ def test_switching_mode_writes_an_audit_row_naming_who_and_when(
 def test_an_unknown_mode_value_is_refused(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -334,7 +334,7 @@ def test_an_invalid_entity_value_is_refused_on_write(
 ):
     """An entity value the boundary's own matcher (`safety.allow_read`)
     would not accept is refused before it is ever stored."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -358,7 +358,7 @@ def test_an_invalid_entity_value_is_refused_on_write(
 def test_rule_reads_and_edits_require_an_operator(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -384,7 +384,7 @@ def test_rule_reads_and_edits_require_an_operator(
 def test_the_mode_switch_requires_an_admin(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -405,7 +405,7 @@ def test_the_mode_switch_requires_an_admin(
 def test_a_respawn_failure_produces_a_named_error_telling_the_operator_to_retry(
     monkeypatch, fake_account_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -448,7 +448,7 @@ async def test_a_denylist_rule_added_through_the_route_is_refused_end_to_end_by_
     second event loop. `ASGITransport` runs the app in-process on the
     caller's own loop, exactly like every other call this test makes.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -463,7 +463,7 @@ async def test_a_denylist_rule_added_through_the_route_is_refused_end_to_end_by_
 
     denied_entity = "switch.example_route_denied_entity"
 
-    from spire_voice.policy_snapshot import safety_block_from_policy
+    from atlas.policy_snapshot import safety_block_from_policy
 
     initial_block = safety_block_from_policy(await policy_repo.load_policy())
 
@@ -531,7 +531,7 @@ def test_get_policy_flags_a_rule_whose_entity_no_longer_resolves(
     longer resolves in Home Assistant shows that it does not, rather than
     disappearing.' `GET /api/policy` is where that fact has to come
     from -- the row must still be present."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository(
@@ -565,7 +565,7 @@ def test_get_policy_leaves_every_rule_resolved_when_the_catalog_cannot_be_fetche
     """A transient failure to reach Home Assistant must never make a real
     policy row look like it vanished -- `resolved` stays `True` for every
     rule when the catalog itself could not be retrieved."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository(deny_entities=["switch.example_unrelated"])

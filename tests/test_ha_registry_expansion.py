@@ -2,7 +2,7 @@
 `allow_call` runs, or the call is refused -- never guessed at (SAFE-03,
 SAFE-04).
 
-`mcp/spire_mcp/ha.py`'s `handle_call_service` already forwards
+`mcp/atlas_mcp/ha.py`'s `handle_call_service` already forwards
 `area_id`/`device_id`/`label_id` to `allow_call` as `unresolved_targets`,
 which are always refused today -- Phase 1 never built expansion at all.
 03-RESEARCH.md's Pitfall 2 names the specific way a naive expansion fails
@@ -20,7 +20,7 @@ entity inside an otherwise-allowed area must refuse the *whole* call, not
 silently operate every other entity and skip the denied one.
 
 Every id and entity id below is invented, following the rule `safety.py`'s
-own self-check already states. `mcp/spire_mcp/registry.py`'s
+own self-check already states. `mcp/atlas_mcp/registry.py`'s
 `HaRegistryClient` answers over a real WebSocket connection this test
 suite has no server for -- `tests/test_ha_registry_client.py` already
 covers that client directly against a fake connection. Here, a
@@ -35,15 +35,15 @@ import json
 
 import pytest
 
-from spire_mcp.ha import handle_call_service
-from spire_mcp.registry import (
+from atlas_mcp.ha import handle_call_service
+from atlas_mcp.registry import (
     RegistryDevice,
     RegistryEntity,
     RegistrySnapshot,
     RegistryUnavailableError,
     expand_area,
 )
-from spire_mcp.safety import Denied, Policy
+from atlas_mcp.safety import Denied, Policy
 
 
 class _FakeRegistryClient:

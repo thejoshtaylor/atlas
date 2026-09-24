@@ -16,16 +16,16 @@ to be denied is not.
 
 Both tests are marked `integration` and need a real Postgres. This
 repository has no prior conditional-skip precedent, so the mechanics here
-are new: `pytest.mark.skipif` reads `SPIRE_TEST_DATABASE_URL` from the
+are new: `pytest.mark.skipif` reads `ATLAS_TEST_DATABASE_URL` from the
 environment and skips, naming that variable, when it is absent -- matching
 D-04's "the suite runs with no Postgres reachable at all." To make these two
 tests run instead of skip: `eval "$(scripts/dev-postgres.sh)"` (starts a
 throwaway local Postgres and exports both `DATABASE_URL` and
-`SPIRE_TEST_DATABASE_URL`), then re-run the suite.
+`ATLAS_TEST_DATABASE_URL`), then re-run the suite.
 
 Neither test touches an operator's real configuration file or real database.
 Both write their own, invented `safety:` block to a temporary file and point
-`SPIRE_CONFIG` at that -- the same `switch.example_*`/`light.example_*`
+`ATLAS_CONFIG` at that -- the same `switch.example_*`/`light.example_*`
 naming `tests/conftest.py` and `tests/test_repo_hygiene.py` already enforce
 project-wide.
 """
@@ -40,14 +40,14 @@ import yaml
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these two tests instead of skipping them"
     ),
@@ -56,7 +56,7 @@ skip_without_postgres = pytest.mark.skipif(
 
 def _migration_url(async_url: str) -> str:
     """The synchronous `psycopg` connection string Alembic needs, derived
-    the same way `spire_voice.config.DatabaseConfig.migration_url` derives
+    the same way `atlas.config.DatabaseConfig.migration_url` derives
     it from the async runtime URL -- a driver swap, nothing else."""
     return "postgresql+psycopg://" + async_url[len("postgresql+asyncpg://") :]
 
@@ -95,8 +95,8 @@ async def _reset_schema(async_url: str) -> None:
 
 
 def _run_upgrade_head() -> None:
-    """Run every migration up to `head` against `SPIRE_TEST_DATABASE_URL`,
-    reading `SPIRE_CONFIG` (already set by the caller) the same way `app.py`
+    """Run every migration up to `head` against `ATLAS_TEST_DATABASE_URL`,
+    reading `ATLAS_CONFIG` (already set by the caller) the same way `app.py`
     will at real startup (Task 4)."""
     from alembic import command
     from alembic.config import Config as AlembicConfig
@@ -166,7 +166,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     reaches a running assistant with no file editing"), which is what the
     plugin assertion below proves for the "absent key" case."""
     await _reset_schema(_TEST_DB_URL)
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -178,7 +178,7 @@ async def test_migrations_run_from_empty_and_are_idempotent(monkeypatch):
     # new ${VAR} placeholders config.example.yaml expands.
     monkeypatch.setenv("BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("COOKIE_SECURE", "false")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -228,7 +228,7 @@ async def test_seeded_policy_matches_the_config_block_it_came_from(tmp_path: Pat
         "mcp": {
             "servers": {
                 "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
+                    "args": ["-m", "atlas_mcp.ha"],
                     "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-key"},
                 },
             },
@@ -239,7 +239,7 @@ async def test_seeded_policy_matches_the_config_block_it_came_from(tmp_path: Pat
     config_path = tmp_path / "seed-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -308,7 +308,7 @@ async def test_seeded_macros_match_the_config_block_they_came_from(tmp_path: Pat
         "mcp": {
             "servers": {
                 "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
+                    "args": ["-m", "atlas_mcp.ha"],
                     "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-key"},
                 },
             },
@@ -319,7 +319,7 @@ async def test_seeded_macros_match_the_config_block_they_came_from(tmp_path: Pat
     config_path = tmp_path / "macro-seed-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -388,14 +388,14 @@ async def test_seeded_plugins_match_the_mcp_servers_block_they_came_from(
         "mcp": {
             "servers": {
                 "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
+                    "args": ["-m", "atlas_mcp.ha"],
                     "env": {
                         "HA_URL": "http://ha.invalid:8123",
                         "HA_TOKEN": ha_token_plaintext,
                     },
                 },
                 "weather": {
-                    "args": ["-m", "spire_mcp.weather"],
+                    "args": ["-m", "atlas_mcp.weather"],
                     "env": {"WEATHER_LATITUDE": "51.5", "WEATHER_LONGITUDE": "-0.1"},
                 },
             },
@@ -406,8 +406,8 @@ async def test_seeded_plugins_match_the_mcp_servers_block_they_came_from(
     config_path = tmp_path / "plugin-seed-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -445,10 +445,10 @@ async def test_seeded_plugins_match_the_mcp_servers_block_they_came_from(
     by_slug = {row.slug: row for row in plugin_rows}
     assert set(by_slug) == {"ha", "weather"}
 
-    assert by_slug["ha"].args == ["-m", "spire_mcp.ha"]
+    assert by_slug["ha"].args == ["-m", "atlas_mcp.ha"]
     assert by_slug["ha"].builtin is True
     assert by_slug["ha"].enforces_policy is True
-    assert by_slug["weather"].args == ["-m", "spire_mcp.weather"]
+    assert by_slug["weather"].args == ["-m", "atlas_mcp.weather"]
     assert by_slug["weather"].builtin is True
     assert by_slug["weather"].enforces_policy is False
 
@@ -510,7 +510,7 @@ async def test_workflow_tables_upgrade_from_empty_with_index_and_constraint_and_
     the same idempotency guarantee `test_migrations_run_from_empty_and_are_
     idempotent` above already proves for 0001-0005, extended to 0006."""
     await _reset_schema(_TEST_DB_URL)
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -587,8 +587,8 @@ async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_read
     database wins over one the configuration file's environment expansion
     produced), and deletes it afterwards so one token has one home.
     """
-    from spire_voice.config import SecurityConfig
-    from spire_voice.crypto.credentials import decrypt_credential, encrypt_credential
+    from atlas.config import SecurityConfig
+    from atlas.crypto.credentials import decrypt_credential, encrypt_credential
 
     await _reset_schema(_TEST_DB_URL)
 
@@ -606,7 +606,7 @@ async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_read
         "mcp": {
             "servers": {
                 "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
+                    "args": ["-m", "atlas_mcp.ha"],
                     "env": {"HA_URL": "http://ha.invalid:8123", "HA_TOKEN": file_seeded_value},
                 },
             },
@@ -617,8 +617,8 @@ async def test_a_stored_ha_token_credential_is_carried_into_the_plugin_that_read
     config_path = tmp_path / "ha-token-carry-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     # Stand where a real deployment stood: plugins seeded from the file,
@@ -706,7 +706,7 @@ async def test_migration_0013_seeds_weather_units_without_overwriting_an_operato
         "mcp": {
             "servers": {
                 "ha": {
-                    "args": ["-m", "spire_mcp.ha"],
+                    "args": ["-m", "atlas_mcp.ha"],
                     "env": {
                         "HA_URL": "http://ha.invalid:8123",
                         "HA_TOKEN": "a-plainly-fictional-migration-test-token",
@@ -720,8 +720,8 @@ async def test_migration_0013_seeds_weather_units_without_overwriting_an_operato
     config_path = tmp_path / "weather-units-migration-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     async def _weather_units_rows():
@@ -838,8 +838,8 @@ async def test_a_plugins_config_key_cannot_be_stored_twice(tmp_path, monkeypatch
     }
     config_path = tmp_path / "config-value-uniqueness-test-config.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
     _run_upgrade_head()
 
@@ -901,7 +901,7 @@ async def test_provider_selections_seed_all_three_slots_with_xai_and_are_idempot
     the second time, the same idempotency guarantee this file's other
     migration tests already prove."""
     await _reset_schema(_TEST_DB_URL)
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -917,7 +917,7 @@ async def test_provider_selections_seed_all_three_slots_with_xai_and_are_idempot
     monkeypatch.setenv("HA_TOKEN", "test-value")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     _run_upgrade_head()
@@ -939,7 +939,7 @@ async def test_provider_selections_slot_is_unique(monkeypatch):
     from sqlalchemy.exc import IntegrityError
 
     await _reset_schema(_TEST_DB_URL)
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -955,7 +955,7 @@ async def test_provider_selections_slot_is_unique(monkeypatch):
     monkeypatch.setenv("HA_TOKEN", "test-value")
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
     _run_upgrade_head()
 
@@ -997,19 +997,19 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
     from alembic.config import Config as AlembicConfig
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from spire_voice.config import SecurityConfig
-    from spire_voice.crypto.credentials import decrypt_credential, encrypt_credential
-    from spire_voice.db.engine import get_current_revision, run_migrations
-    from spire_voice.db.postgres import (
+    from atlas.config import SecurityConfig
+    from atlas.crypto.credentials import decrypt_credential, encrypt_credential
+    from atlas.db.engine import get_current_revision, run_migrations
+    from atlas.db.postgres import (
         PostgresAccountRepository,
         PostgresCredentialRepository,
         PostgresPluginRepository,
         PostgresPolicyRepository,
     )
-    from spire_voice.db.repository import PluginConfigValue
+    from atlas.db.repository import PluginConfigValue
 
     await _reset_schema(_TEST_DB_URL)
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -1026,7 +1026,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     test_secret_key = "test-secret-key-not-a-real-generated-value"
-    monkeypatch.setenv("SPIRE_SECRET_KEY", test_secret_key)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", test_secret_key)
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
 
     migration_url = _migration_url(_TEST_DB_URL)

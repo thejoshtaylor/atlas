@@ -53,10 +53,10 @@ RUN apt-get update \
 # file location, the same PYTHONPATH-style contract scripts/dev-run.sh
 # already uses for the same two paths.
 #
-# mcp/spire_mcp is a second top-level source directory, never installed
+# mcp/atlas_mcp is a second top-level source directory, never installed
 # by pip (pytest.ini's own pythonpath=["src", "mcp"] and dev-run.sh's
 # PYTHONPATH=src:mcp already treat it this way) -- db/repository.py
-# imports it directly (`from spire_mcp.safety import Policy`), so the
+# imports it directly (`from atlas_mcp.safety import Policy`), so the
 # main process needs it on PYTHONPATH too, not only the MCP child
 # processes app.py spawns with their own explicit env.
 ENV PYTHONPATH=/app/mcp
@@ -91,10 +91,10 @@ COPY docs/ ./docs/
 # waiting to happen. 1001 is above Debian's system range, so nothing the
 # base image installs later can collide with it.
 # tests/test_deployment_config.py asserts the chart and this line agree.
-RUN groupadd --system --gid 1001 spire \
-    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home spire \
+RUN groupadd --system --gid 1001 atlas \
+    && useradd --system --uid 1001 --gid 1001 --home-dir /app --no-create-home atlas \
     && mkdir -p /data /models \
-    && chown -R spire:spire /app /data /models
+    && chown -R atlas:atlas /app /data /models
 
 RUN pip install --no-cache-dir --upgrade pip
 
@@ -126,7 +126,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements-no-oww.txt \
 # The actual proof this Dockerfile's own docstring above promises: install
 # the dev extra and run the real backend suite on the Python this image
 # ships, not the Python this project develops on. A database-backed test
-# skips itself when SPIRE_TEST_DATABASE_URL is unset (see
+# skips itself when ATLAS_TEST_DATABASE_URL is unset (see
 # tests/test_db_migrations.py's own skip_without_postgres) -- this build
 # has no Postgres to reach, so those tests skip here and run for real in
 # CI/dev against a live database instead. Everything else -- every import,
@@ -151,11 +151,11 @@ RUN pip install --no-cache-dir -r /tmp/requirements-no-oww.txt \
 FROM python-base AS test
 
 # pytest/pytest-asyncio directly, not `-e ".[dev]"` -- the extras syntax
-# re-resolves spire-voice's whole dependency graph, including
+# re-resolves atlas's whole dependency graph, including
 # openwakeword, undoing the --no-deps workaround python-base already
 # applied above.
 RUN pip install --no-cache-dir pytest pytest-asyncio
-COPY --chown=spire:spire tests/ ./tests/
+COPY --chown=atlas:atlas tests/ ./tests/
 # tests/test_deployment_config.py and tests/test_repo_hygiene.py's own
 # DEP-05 extension read these deployment artifacts directly -- never
 # needed by the application itself, so they land only in this stage, not
@@ -169,26 +169,26 @@ COPY --chown=spire:spire tests/ ./tests/
 # tests/test_deployment_config.py's uid/gid agreement check, which reads
 # this file. A test stage that cannot see what the tests read is not the
 # proof this Dockerfile's comment claims it is.
-COPY --chown=spire:spire deploy/ ./deploy/
-COPY --chown=spire:spire charts/ ./charts/
+COPY --chown=atlas:atlas deploy/ ./deploy/
+COPY --chown=atlas:atlas charts/ ./charts/
 # README.md joins them for the same reason: tests/test_repo_hygiene.py's
 # entity-id scan now covers Markdown (IN-04), and
 # tests/test_local_providers.py checks that the published local-set
 # latency figure states what it was measured against (IN-05). Both read
 # this file by path.
-COPY --chown=spire:spire docker-compose.yml .env.example Dockerfile README.md ./
+COPY --chown=atlas:atlas docker-compose.yml .env.example Dockerfile README.md ./
 # Non-root, matching the runtime stage: a test asserting that an
 # unwritable directory is actually unwritable is meaningless as root,
 # since root ignores ordinary permission bits.
-USER spire
+USER atlas
 RUN python -m pytest -q
 
 ### Stage: runtime #############################################################
 FROM python-base AS runtime
 
-COPY --from=frontend --chown=spire:spire /web/dist ./web/dist
+COPY --from=frontend --chown=atlas:atlas /web/dist ./web/dist
 
-USER spire
+USER atlas
 
 EXPOSE 8080
 
@@ -199,4 +199,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3).read()" || exit 1
 
-CMD ["python", "-m", "spire_voice.app"]
+CMD ["python", "-m", "atlas.app"]

@@ -5,7 +5,7 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# spire-voice: this is the plain (sync) Alembic template, not `-t async`
+# atlas: this is the plain (sync) Alembic template, not `-t async`
 # (D-02) -- the runtime process uses an async `asyncpg` engine, but Alembic
 # runs its own, fully separate synchronous `psycopg` connection, never
 # bridged through the async engine's `run_sync()`. See 03-RESEARCH.md
@@ -13,7 +13,7 @@ from alembic import context
 # object that must itself be explicitly disposed, and a single un-awaited
 # `create_task` anywhere in that chain lets `lifespan` continue past a
 # migration that never actually ran, with no error.
-from spire_voice.db.models import Base
+from atlas.db.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -22,7 +22,7 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 #
-# spire-voice: `disable_existing_loggers=False` is not Alembic's generated
+# atlas: `disable_existing_loggers=False` is not Alembic's generated
 # default -- it is required here. `run_migrations` (db/engine.py) runs
 # `command.upgrade()` inside this application's own long-lived process
 # (D-02), not a short-lived CLI invocation Alembic's template assumes.
@@ -38,7 +38,7 @@ if config.config_file_name is not None:
 
 # `Base.metadata` is the single import that makes every model this project
 # ever adds visible to `alembic revision --autogenerate` -- a model class
-# that does not subclass `spire_voice.db.models.Base` is a model this
+# that does not subclass `atlas.db.models.Base` is a model this
 # environment cannot see.
 target_metadata = Base.metadata
 

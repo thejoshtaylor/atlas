@@ -26,12 +26,12 @@ import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.shared._httpx_utils import create_mcp_http_client
 
-from spire_voice.config import PluginsConfig, SecurityConfig
-from spire_voice.crypto.credentials import encrypt_credential
-from spire_voice.db.repository import Plugin, PluginConfigValue
-from spire_voice.mcp_client import McpToolHost
-from spire_voice.plugins.host import validate_remote_url
-from spire_voice.plugins.manager import PluginManager, PluginState
+from atlas.config import PluginsConfig, SecurityConfig
+from atlas.crypto.credentials import encrypt_credential
+from atlas.db.repository import Plugin, PluginConfigValue
+from atlas.mcp_client import McpToolHost
+from atlas.plugins.host import validate_remote_url
+from atlas.plugins.manager import PluginManager, PluginState
 
 _REPO_ROOT = __file__.rsplit("/tests/", 1)[0]
 _MCP_ROOT = f"{_REPO_ROOT}/mcp"
@@ -41,7 +41,7 @@ _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
 @pytest.fixture(autouse=True)
 def _secret_key(monkeypatch):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
 
 
 def _free_port() -> int:
@@ -104,7 +104,7 @@ async def _start_test_mcp_server(*, port: int | None = None) -> _RunningTestServ
     number of seconds before answering) -- `slow` is what proves a call
     over its own deadline fails alone (D-06, PLUG-06) without tearing the
     session down."""
-    server = MCPServer("spire-voice-test-remote-plugin")
+    server = MCPServer("atlas-test-remote-plugin")
 
     @server.tool()
     def echo(text: str) -> str:
@@ -481,7 +481,7 @@ async def test_a_dead_remote_plugin_recovers_once_a_respawn_attempt_succeeds(
     production code, for an analogous reason)."""
     from mcp.types import Tool as MCPTool
 
-    from spire_voice.plugins import manager as manager_module
+    from atlas.plugins import manager as manager_module
 
     class _FakeHost:
         def __init__(self) -> None:

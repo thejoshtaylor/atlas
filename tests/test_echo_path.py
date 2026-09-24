@@ -13,15 +13,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from spire_voice.audio.alaw import AlawError, alaw_to_pcm16, bytes_per_sample, pcm16_to_alaw
-from spire_voice.audio.echo_path import (
+from atlas.audio.alaw import AlawError, alaw_to_pcm16, bytes_per_sample, pcm16_to_alaw
+from atlas.audio.echo_path import (
     AGC_ABSENT,
     AGC_INDETERMINATE,
     AGC_PRESENT,
     CONFIDENCE_USABLE_THRESHOLD,
     measure_echo_path,
 )
-from spire_voice.audio.probe import DEFAULT_PROBE_SEED, MIN_DURATION_S, ProbeError, build_probe
+from atlas.audio.probe import DEFAULT_PROBE_SEED, MIN_DURATION_S, ProbeError, build_probe
 
 SAMPLE_RATE = 8000
 

@@ -12,8 +12,8 @@ from typing import Callable
 
 import pytest
 
-from spire_voice.config import GateConfig, WakeConfig
-from spire_voice.sources.runner import SourceRunnerSpec, assemble_source_runners
+from atlas.config import GateConfig, WakeConfig
+from atlas.sources.runner import SourceRunnerSpec, assemble_source_runners
 
 from tests.conftest import FakeAudioSource, FakeWakeHit
 

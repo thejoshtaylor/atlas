@@ -5,7 +5,7 @@ disk, timestamped -- **no wake engine anywhere near it**.
 That is the whole point (D-05). A threshold is needed to *detect*, not to
 *record* -- a capture path with a detector in it would only record what
 some threshold already accepted, which is the bootstrap problem restated
-rather than solved. This module imports nothing from `spire_voice.wake`,
+rather than solved. This module imports nothing from `atlas.wake`,
 and never will.
 
 **The recorded metadata shape (D-05, this plan's Task 1 checkpoint) is the
@@ -29,7 +29,7 @@ something discovered short afterward.
 
 Follows `scripts/measure_turns.py`'s conventions: this script reads no
 environment variable directly and prints no credential value, length, or
-prefix. Camera connectivity comes from `spire_voice.config.load_config`,
+prefix. Camera connectivity comes from `atlas.config.load_config`,
 the one place `${TAPO_USER}`/`${TAPO_PASSWORD}` are ever expanded from the
 environment -- run this script through `scripts/dev-capture-corpus.sh`,
 which sources `.env` the way `dev-run.sh`/`dev-measure.sh` do. The RTSP URL
@@ -56,8 +56,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from spire_voice.config import CameraConfig, ConfigError, load_config
-from spire_voice.transports.camera import CameraAudioSource
+from atlas.config import CameraConfig, ConfigError, load_config
+from atlas.transports.camera import CameraAudioSource
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"

@@ -30,19 +30,19 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 
-import spire_voice.app as app_module
+import atlas.app as app_module
 
-from spire_voice.audio.alaw import alaw_to_pcm16, pcm16_to_alaw
-from spire_voice.calibration.record import EchoCalibration
-from spire_voice.calibration.runner import (
+from atlas.audio.alaw import alaw_to_pcm16, pcm16_to_alaw
+from atlas.calibration.record import EchoCalibration
+from atlas.calibration.runner import (
     MAX_RECORD_FILE_SIZE_BYTES,
     CalibrationRunResult,
     CalibrationRunnerError,
     find_latest_calibration,
     run_echo_calibration,
 )
-from spire_voice.config import CalibrationConfig, CameraConfig
-from spire_voice.transports.base import SourceFormat
+from atlas.config import CalibrationConfig, CameraConfig
+from atlas.transports.base import SourceFormat
 
 # `scripts/` is not on `pythonpath` (only `src`/`mcp` are, per
 # `pyproject.toml`) -- loaded by file path, the same mechanism
@@ -370,21 +370,21 @@ async def test_find_latest_calibration_of_an_empty_or_missing_directory_is_none(
 
 
 async def test_decoding_an_unsupported_encoding_is_a_named_error():
-    from spire_voice.calibration.runner import _decode_native
+    from atlas.calibration.runner import _decode_native
 
     with pytest.raises(CalibrationRunnerError):
         _decode_native(b"\x00\x00", "opus")
 
 
 def test_runner_module_contains_no_reference_to_the_camera_url_field():
-    source = Path("src/spire_voice/calibration/runner.py").read_text(encoding="utf-8")
+    source = Path("src/atlas/calibration/runner.py").read_text(encoding="utf-8")
     hits = [line.strip() for line in source.splitlines() if not line.lstrip().startswith("#") and "rtsp_url" in line]
     assert hits == []
 
 
 # ---------------------------------------------------------------------------
 # Task 2 seam: the command-line caller imports run_echo_calibration and
-# nothing from spire_voice.audio.echo_path -- the mechanism that makes the
+# nothing from atlas.audio.echo_path -- the mechanism that makes the
 # "one implementation" claim checkable rather than aspirational (D-20).
 # ---------------------------------------------------------------------------
 
@@ -475,12 +475,12 @@ async def test_handle_result_of_a_successful_run_exits_zero_and_names_every_meas
 
 # ---------------------------------------------------------------------------
 # Task 3 seam: app.py's two routes both call run_echo_calibration and
-# never spire_voice.audio.echo_path directly.
+# never atlas.audio.echo_path directly.
 # ---------------------------------------------------------------------------
 
 
 def test_app_module_imports_the_runner_and_never_the_measurement_module_for_calibration():
-    imports = _imported_module_names(Path("src/spire_voice/app.py"))
+    imports = _imported_module_names(Path("src/atlas/app.py"))
     assert any(name.endswith("calibration.runner") for name in imports)
     assert not any("audio.echo_path" in name for name in imports)
 
@@ -501,13 +501,13 @@ def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_
     import test_startup_smoke as smoke
     from fastapi.testclient import TestClient
 
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
 
     # `test_startup_smoke.py`'s own autouse fixture only applies within
     # that module -- this file needs the same structurally-valid test key
     # (`validate_secret_key_strength`, plan 03-05) set explicitly.
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
     monkeypatch.setattr(smoke.plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)

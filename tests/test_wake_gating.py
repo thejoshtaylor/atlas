@@ -16,9 +16,9 @@ import math
 
 import pytest
 
-from spire_voice.config import GateConfig, WakeConfig
-from spire_voice.sources.runner import SourceRunner
-from spire_voice.wake.gate import WakeGate
+from atlas.config import GateConfig, WakeConfig
+from atlas.sources.runner import SourceRunner
+from atlas.wake.gate import WakeGate
 
 from tests.conftest import FakeAudioSource, FakeWakeHit
 
@@ -124,7 +124,7 @@ async def test_blocked_hit_below_threshold_produces_a_record_not_a_silent_drop(c
         gate_config=gate_config,
     )
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.INFO, logger="atlas.sources.runner"):
         await runner.run()
 
     assert turns_started == []
@@ -165,7 +165,7 @@ async def test_hit_inside_refractory_window_is_suppressed_and_recorded(caplog):
         clock=clock,
     )
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.INFO, logger="atlas.sources.runner"):
         await runner.run()
 
     assert len(turns_started) == 2  # the first and the third hit
@@ -197,7 +197,7 @@ async def test_hit_blocked_while_media_player_playing_is_recorded(caplog):
         is_media_playing=lambda players: True,
     )
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.INFO, logger="atlas.sources.runner"):
         await runner.run()
 
     assert turns_started == []
@@ -307,7 +307,7 @@ async def test_an_exception_processing_one_chunk_is_logged_and_the_loop_keeps_li
         gate_config=gate_config,
     )
 
-    with caplog.at_level(logging.ERROR, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.ERROR, logger="atlas.sources.runner"):
         await runner.run()
 
     assert len(turns_started) == 1, (

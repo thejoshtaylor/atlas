@@ -19,6 +19,6 @@ set -a
 set +a
 
 export PYTHONPATH=src:mcp
-export SPIRE_CONFIG="${SPIRE_CONFIG:-config/config.example.yaml}"
+export ATLAS_CONFIG="${ATLAS_CONFIG:-config/config.example.yaml}"
 
-exec .venv/bin/python scripts/fetch_models.py --config "$SPIRE_CONFIG" "$@"
+exec .venv/bin/python scripts/fetch_models.py --config "$ATLAS_CONFIG" "$@"

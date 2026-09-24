@@ -21,9 +21,9 @@ import threading
 
 import pytest
 
-from spire_voice.config import SpeakerConfig
-from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
-from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
+from atlas.config import SpeakerConfig
+from atlas.speaker.ffmpeg_supervisor import FfmpegSupervisor
+from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 
 
 class _FakeProcess:
@@ -85,7 +85,7 @@ def test_build_tcp_argv_pushes_raw_alaw_over_tcp_with_no_transcode():
     """260923-pds: the tcp backend's ffmpeg invocation -- same -c copy, no
     re-encode, as build_ffmpeg_argv, but pushed to a plain tcp:// listener
     instead of go2rtc's rtsp:// producer."""
-    from spire_voice.speaker.ffmpeg_supervisor import build_tcp_argv
+    from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
     argv = build_tcp_argv(
         SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
@@ -160,7 +160,7 @@ async def test_dead_child_restarts_after_backoff_and_logs_exit_status(tmp_path, 
     config = SpeakerConfig(fifo_path=fifo_path, respawn_backoff_s=0.01)
     supervisor = FfmpegSupervisor(config, spawn=spawner)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.ffmpeg_supervisor"):
+    with caplog.at_level(logging.WARNING, logger="atlas.speaker.ffmpeg_supervisor"):
         supervisor.start()
         await _wait_for(lambda: spawner.spawn_count == 1)
 

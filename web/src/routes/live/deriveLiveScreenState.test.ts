@@ -13,7 +13,7 @@ import {
 function opened(overrides: Partial<RawObserverMessage> = {}): RawObserverMessage {
   return {
     type: "observer.opened",
-    wake_phrase: "hey spire",
+    wake_phrase: "hey atlas",
     sources: ["camera", "browser_mic"],
     ...overrides,
   }
@@ -30,7 +30,7 @@ test("with no messages at all, the screen is idle with no wake phrase known yet"
 
 test("the opening message alone carries the wake phrase and sources into the idle state", () => {
   const screen = deriveLiveScreenState([opened()])
-  expect(screen).toEqual({ kind: "idle", wakePhrase: "hey spire", sources: ["camera", "browser_mic"] })
+  expect(screen).toEqual({ kind: "idle", wakePhrase: "hey atlas", sources: ["camera", "browser_mic"] })
 })
 
 test("a turn.started message opens a card and switches the screen to feed", () => {
@@ -133,7 +133,7 @@ test("an event for a source with no open card is ignored, not crashed on", () =>
     opened(),
     { type: "transcript.partial", text: "orphaned", source: "camera" },
   ])
-  expect(screen).toEqual({ kind: "idle", wakePhrase: "hey spire", sources: ["camera", "browser_mic"] })
+  expect(screen).toEqual({ kind: "idle", wakePhrase: "hey atlas", sources: ["camera", "browser_mic"] })
 })
 
 test("formatElapsed renders seconds alone under a minute, minutes and seconds at or above it", () => {
@@ -185,7 +185,7 @@ test("the buffer bound is large enough that a full buffer still reconstructs a f
 })
 
 test("the opening message survives truncation, so a long-lived tab never forgets the wake phrase", () => {
-  let messages: RawObserverMessage[] = [opened({ wake_phrase: "hey spire", sources: ["camera"] })]
+  let messages: RawObserverMessage[] = [opened({ wake_phrase: "hey atlas", sources: ["camera"] })]
   for (let i = 0; i < MAX_FEED_CARDS * 10; i += 1) {
     messages = appendTurn(messages, `turn-${i}`)
   }
@@ -194,7 +194,7 @@ test("the opening message survives truncation, so a long-lived tab never forgets
   expect(messages[0]!.type).toBe("observer.opened")
 
   const screen = deriveLiveScreenState(messages)
-  expect(screen.wakePhrase).toBe("hey spire")
+  expect(screen.wakePhrase).toBe("hey atlas")
   expect(screen.sources).toEqual(["camera"])
 })
 

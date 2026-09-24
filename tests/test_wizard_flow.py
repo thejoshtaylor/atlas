@@ -33,18 +33,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import conftest
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.calibration.record import EchoCalibration
-from spire_voice.config import SecurityConfig
-from spire_voice.crypto.credentials import CredentialSlot, encrypt_credential
-from spire_voice.db.repository import Plugin, PluginConfigValue
-from spire_voice.routes.auth import router as auth_router, setup_router
-from spire_voice.routes.wizard import router as wizard_router
-import spire_voice.routes.wizard as wizard_module
+from atlas.auth.tokens import issue_access_token
+from atlas.calibration.record import EchoCalibration
+from atlas.config import SecurityConfig
+from atlas.crypto.credentials import CredentialSlot, encrypt_credential
+from atlas.db.repository import Plugin, PluginConfigValue
+from atlas.routes.auth import router as auth_router, setup_router
+from atlas.routes.wizard import router as wizard_router
+import atlas.routes.wizard as wizard_module
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 _HA_URL = "http://ha.invalid:8123"
-_NO_SUCH_CALIBRATION_DIR = "/tmp/spire-test-no-such-calibration-dir-wizard-flow"
+_NO_SUCH_CALIBRATION_DIR = "/tmp/atlas-test-no-such-calibration-dir-wizard-flow"
 
 
 def _fake_config(*, calibration_dir: str = _NO_SUCH_CALIBRATION_DIR) -> SimpleNamespace:
@@ -83,7 +83,7 @@ def _ha_plugin_repo(
         slug="ha",
         display_name="Home Assistant",
         transport="stdio",
-        args=("-m", "spire_mcp.ha"),
+        args=("-m", "atlas_mcp.ha"),
         url=None,
         enabled=True,
         builtin=True,
@@ -180,7 +180,7 @@ def test_an_abandoned_wizard_resumes_at_the_first_unfinished_step(monkeypatch):
     """Closing the wizard partway through and returning later must resume
     at the first step that was not yet completed, not restart from the
     beginning."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = conftest.FakeAccountRepository()
     credential_repo = conftest.FakeCredentialRepository()
@@ -228,7 +228,7 @@ def test_the_wizard_cannot_finish_before_the_microphone_and_speaker_test_runs(mo
     microphone/speaker test (Phase 2's echo-path calibration) has actually
     run and returned a result -- every other step complete, room still
     missing, finish refused naming exactly `room`."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = conftest.FakeAccountRepository()
     credential_repo = conftest.FakeCredentialRepository()
@@ -296,7 +296,7 @@ def _authed_app(
     plugin_repo: conftest.FakePluginRepository | None = None,
     ha_http_client=None,
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = conftest.FakeAccountRepository()
     credential_repo = conftest.FakeCredentialRepository()
@@ -352,7 +352,7 @@ def test_the_hub_check_route_never_returns_the_decrypted_home_assistant_token(mo
     decrypt; the environment-fallback path this file's other hub tests
     use never calls it, and would pass this assertion vacuously.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     # The one placeholder value `tests/test_repo_hygiene.py`'s own
     # credential-literal check already allowlists (see that file's
@@ -586,7 +586,7 @@ def test_wizard_routes_answer_while_setup_is_incomplete_and_are_not_locked_out(m
     session, 409 while steps are outstanding), but the setup gate itself
     must never be what stops them, which is exactly what the lockout WEB-02
     forbids would look like."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = conftest.FakeAccountRepository()
     credential_repo = conftest.FakeCredentialRepository()

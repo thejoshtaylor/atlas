@@ -40,7 +40,7 @@ export const WIZARD_STEP_TITLES: Record<WizardStepName, string> = {
   room: "Test the microphone and speaker",
 }
 
-/** `WizardStepStatus`'s exact shape (`src/spire_voice/routes/wizard.py`). */
+/** `WizardStepStatus`'s exact shape (`src/atlas/routes/wizard.py`). */
 export interface WizardStepStatus {
   name: WizardStepName
   complete: boolean

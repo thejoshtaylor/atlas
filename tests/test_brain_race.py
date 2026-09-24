@@ -7,7 +7,7 @@ to explicit files for exactly this reason.
 
 import pytest
 
-from spire_voice.providers.base import BrainReply
+from atlas.providers.base import BrainReply
 
 
 async def test_tracer_races_tiers_covers_the_wait_and_answers(
@@ -25,11 +25,11 @@ async def test_tracer_races_tiers_covers_the_wait_and_answers(
     which is what gives the fast triage tier a chance to complete before the
     deadline fires -- mirroring `test_silence_timeout_closes_turn`'s idiom.
     """
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.providers.tier_reply import FILLER_TEXT, FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.providers.tier_reply import FILLER_TEXT, FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="what time is it")])
@@ -112,9 +112,9 @@ async def test_a_one_entry_tier_list_still_resolves_through_the_list(
     at its default (`None`) -- the exact seam a future single-model bypass
     would have to skip past.
     """
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
@@ -148,8 +148,8 @@ async def test_two_confident_tiers_in_one_batch_resolve_to_the_lower_index():
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     low_reply = TierReply(answer="low", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
     high_reply = TierReply(answer="high", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
@@ -174,8 +174,8 @@ async def test_losers_are_cancelled_and_their_unwind_is_awaited():
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     winner_reply = TierReply(answer="fast", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
     loser_finally_ran = False
@@ -208,8 +208,8 @@ async def test_three_tiers_the_middle_one_confident_first_wins_and_cancels_the_r
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     middle_reply = TierReply(answer="middle", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
 
@@ -239,11 +239,11 @@ async def test_a_needs_tool_triage_reply_never_reaches_the_tool_host(
     it. `fake_envelope_client` itself fails the test if a `tools` keyword
     ever reaches an envelope call (see `tests/conftest.py`).
     """
-    from spire_voice.providers.base import FinalTranscript, ToolCall
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript, ToolCall
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     class _RecordingToolHost:
         def __init__(self) -> None:
@@ -310,8 +310,8 @@ async def test_a_raising_triage_tier_is_dropped_and_the_race_still_resolves():
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     top_reply = TierReply(answer="fine without it", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
 
@@ -335,9 +335,9 @@ async def test_a_raising_top_tier_propagates_out_of_run_turn(
     """
     import pytest
 
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     class _RaisingBrain:
         async def chat(self, messages, tools=None):
@@ -375,8 +375,8 @@ async def test_racing_many_times_does_not_leak_tasks():
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     winner_reply = TierReply(answer="ok", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
 
@@ -406,8 +406,8 @@ async def test_race_tiers_cancels_pending_siblings_when_the_top_tier_itself_rais
     """
     import asyncio
 
-    from spire_voice.providers.base import BrainError
-    from spire_voice.turn import brain_race
+    from atlas.providers.base import BrainError
+    from atlas.turn import brain_race
 
     triage_finally_ran = False
 
@@ -441,8 +441,8 @@ async def test_a_committed_top_tier_cannot_lose_the_race_to_a_confident_triage_r
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     commitment = brain_race.ToolCommitment(committed=True)
 
@@ -485,11 +485,11 @@ async def test_a_committed_top_tier_survives_a_confident_triage_reply_end_to_end
     import asyncio
     from types import SimpleNamespace
 
-    from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     class _RecordingToolHost:
         def __init__(self) -> None:
@@ -580,8 +580,8 @@ async def test_a_needs_clarification_triage_reply_ends_the_race_early():
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     clarifying_reply = TierReply(
         answer="",
@@ -616,8 +616,8 @@ async def test_a_needs_clarification_reply_is_dropped_once_a_tool_call_has_been_
     """
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     commitment = brain_race.ToolCommitment(committed=True)
 
@@ -652,8 +652,8 @@ async def test_needs_clarification_ties_still_break_by_ascending_tier_index():
     index wins, never set iteration order."""
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     low_reply = TierReply(
         answer="",
@@ -690,8 +690,8 @@ async def test_a_top_tiers_needs_clarification_reply_still_ends_the_race():
     `needs_clarification=True` top-tier reply is a new, reachable shape."""
     import asyncio
 
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     top_reply = TierReply(
         answer="",
@@ -727,11 +727,11 @@ async def test_run_turn_rejects_two_tiers_both_flagged_calls_tools(
     raise rather than silently letting two racing models both reach
     Home Assistant (D-05).
     """
-    from spire_voice.providers.base import BrainError, FinalTranscript
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainError, FinalTranscript
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     reply = TierReply(answer="fine", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
     tier_a = brain_race.TierBrain(
@@ -766,8 +766,8 @@ async def test_an_echoed_confident_triage_reply_does_not_win(fake_envelope_clien
     user's own transcript echoed back must not end the race -- the top
     tier's own answer must be used instead.
     """
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     transcript = "we're off the example cooler"
     echoed_reply = TierReply(
@@ -795,8 +795,8 @@ async def test_an_echoed_confident_triage_reply_does_not_win(fake_envelope_clien
 async def test_a_genuine_confident_triage_reply_still_wins(fake_envelope_client):
     """The companion case: a confident answer that is not an echo of the
     transcript is left completely untouched."""
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.turn import brain_race
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
 
     genuine_reply = TierReply(
         answer="it is 3 pm", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
@@ -824,11 +824,11 @@ async def test_an_echoed_confident_triage_reply_loses_the_race_end_to_end(
     triage reply must not reach the operator -- the top tier's own answer
     must be spoken instead.
     """
-    from spire_voice.providers.base import BrainReply, FinalTranscript
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     transcript = "we're off the example cooler"
     echoed_reply = TierReply(
@@ -887,11 +887,11 @@ async def test_run_turn_rejects_calls_tools_on_a_tier_that_is_not_the_highest_in
     disagree about which tier is "the top tier" -- `run_turn` must reject
     that construction rather than let the two derivations silently diverge.
     """
-    from spire_voice.providers.base import BrainError, FinalTranscript
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainError, FinalTranscript
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     reply = TierReply(answer="fine", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
     tier_a = brain_race.TierBrain(

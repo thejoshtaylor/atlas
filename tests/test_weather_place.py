@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
-from spire_mcp.open_meteo import OpenMeteoClient
+from atlas_mcp.open_meteo import OpenMeteoClient
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -176,7 +176,7 @@ def _client_for(transport_handler) -> httpx.AsyncClient:
 
 
 async def test_weather_current_for_a_qualified_place_reports_the_resolved_location():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
     async with _client_for(router) as http_client:
@@ -200,7 +200,7 @@ async def test_weather_current_for_a_qualified_place_reports_the_resolved_locati
 
 
 async def test_weather_current_without_a_place_reports_home():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
     async with _client_for(router) as http_client:
@@ -221,7 +221,7 @@ async def test_weather_current_without_a_place_reports_home():
 
 
 async def test_weather_current_in_fahrenheit_sends_temperature_unit_and_labels_f(monkeypatch):
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
     async with _client_for(router) as http_client:
@@ -243,7 +243,7 @@ async def test_weather_current_in_fahrenheit_sends_temperature_unit_and_labels_f
 
 
 async def test_weather_current_default_units_sends_no_temperature_unit_param():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _CURRENT_BODY)
     async with _client_for(router) as http_client:
@@ -267,7 +267,7 @@ async def test_weather_current_default_units_sends_no_temperature_unit_param():
 
 
 def test_split_place_splits_on_the_first_comma_and_strips_both_parts():
-    from spire_mcp.weather import split_place
+    from atlas_mcp.weather import split_place
 
     assert split_place("Paris, France") == ("Paris", "France")
     assert split_place("  Springfield ,  Illinois ") == ("Springfield", "Illinois")
@@ -276,14 +276,14 @@ def test_split_place_splits_on_the_first_comma_and_strips_both_parts():
 
 
 def test_haversine_km_matches_the_known_paris_to_london_distance():
-    from spire_mcp.weather import haversine_km
+    from atlas_mcp.weather import haversine_km
 
     distance = haversine_km(48.8566, 2.3522, 51.5074, -0.1278)
     assert abs(distance - 343.5) < 5
 
 
 def test_qualifier_filter_narrows_to_the_matching_country_or_admin1_or_none():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _PARIS_GEOCODE_BODY["results"]
 
@@ -310,7 +310,7 @@ def test_qualifier_filter_narrows_to_the_matching_country_or_admin1_or_none():
 
 
 def test_qualifier_alias_usa_keeps_only_the_us_match():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _PORTLAND_GEOCODE_BODY["results"]
     result = select_place(
@@ -321,7 +321,7 @@ def test_qualifier_alias_usa_keeps_only_the_us_match():
 
 
 def test_qualifier_then_nearby_picks_the_nearer_qualifying_match():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _PARIS_GEOCODE_BODY["results"]
     tennessee_latitude, tennessee_longitude = 36.30200, -88.32670
@@ -337,7 +337,7 @@ def test_qualifier_then_nearby_picks_the_nearer_qualifying_match():
 
 
 def test_qualifier_then_population_picks_the_more_populous_qualifying_match():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _PARIS_GEOCODE_BODY["results"]
     result = select_place(
@@ -351,7 +351,7 @@ def test_qualifier_then_population_picks_the_more_populous_qualifying_match():
 
 
 def test_nearby_wins_over_a_more_populous_farther_match():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _SPRINGFIELD_GEOCODE_BODY["results"]
     illinois_latitude, illinois_longitude = 39.80172, -89.64371
@@ -367,7 +367,7 @@ def test_nearby_wins_over_a_more_populous_farther_match():
 
 
 def test_nearest_of_several_nearby_wins_even_over_a_far_more_populous_one():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = [
         {"name": "A", "latitude": 10.0, "longitude": 10.0, "population": 1000000},
@@ -380,7 +380,7 @@ def test_nearest_of_several_nearby_wins_even_over_a_far_more_populous_one():
 
 
 def test_population_fallback_picks_the_most_populous_match_when_none_are_nearby():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = _PARIS_GEOCODE_BODY["results"]
     result = select_place(
@@ -390,7 +390,7 @@ def test_population_fallback_picks_the_most_populous_match_when_none_are_nearby(
 
 
 def test_missing_population_counts_as_zero():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     matches = [
         {"name": "Alpha", "latitude": 80.0, "longitude": 80.0, "population": None},
@@ -404,7 +404,7 @@ def test_missing_population_counts_as_zero():
 
 
 def test_empty_match_list_returns_none():
-    from spire_mcp.weather import select_place
+    from atlas_mcp.weather import select_place
 
     assert (
         select_place([], qualifier=None, home_latitude=0.0, home_longitude=0.0, local_radius_km=300.0)
@@ -413,7 +413,7 @@ def test_empty_match_list_returns_none():
 
 
 def test_format_location_skips_empty_parts():
-    from spire_mcp.weather import format_location
+    from atlas_mcp.weather import format_location
 
     assert format_location({"name": "Paris", "admin1": "", "country": "France"}) == "Paris, France"
     assert format_location({"name": "Paris", "admin1": "", "country": ""}) == "Paris"
@@ -421,7 +421,7 @@ def test_format_location_skips_empty_parts():
 
 async def test_the_decorated_weather_current_names_the_unknown_place_in_a_tool_error():
     from mcp.server.mcpserver.exceptions import ToolError
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     no_match_body = {"generationtime_ms": 0.4}
     router = _RoutingTransport(no_match_body, _CURRENT_BODY)
@@ -439,7 +439,7 @@ async def test_the_decorated_weather_current_names_the_unknown_place_in_a_tool_e
 
 
 def test_read_local_radius_km_default_and_valid_value(monkeypatch):
-    from spire_mcp.weather import _read_local_radius_km
+    from atlas_mcp.weather import _read_local_radius_km
 
     monkeypatch.delenv("WEATHER_LOCAL_RADIUS_KM", raising=False)
     assert _read_local_radius_km() == 300.0
@@ -452,7 +452,7 @@ def test_read_local_radius_km_default_and_valid_value(monkeypatch):
 
 
 def test_read_local_radius_km_rejects_unparseable_negative_and_infinite_values(monkeypatch):
-    from spire_mcp.weather import _read_local_radius_km
+    from atlas_mcp.weather import _read_local_radius_km
 
     for bad_value in ("abc", "-1", "inf"):
         monkeypatch.setenv("WEATHER_LOCAL_RADIUS_KM", bad_value)
@@ -495,7 +495,7 @@ class _RecordingTransport:
 
 
 async def test_weather_forecast_for_a_qualified_place_reports_its_location():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_SPRINGFIELD_GEOCODE_BODY, _FORECAST_BODY)
     async with _client_for(router) as http_client:
@@ -513,7 +513,7 @@ async def test_weather_forecast_for_a_qualified_place_reports_its_location():
 
 async def test_weather_forecast_refuses_a_bad_day_count_before_any_request():
     from mcp.server.mcpserver.exceptions import ToolError
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
     async with _client_for(router) as http_client:
@@ -587,7 +587,7 @@ async def test_geocode_with_no_results_key_or_an_empty_list_gives_no_matches():
 
 
 async def test_geocode_with_an_unreadable_body_raises_malformed():
-    from spire_mcp.open_meteo import UpstreamMalformedError
+    from atlas_mcp.open_meteo import UpstreamMalformedError
 
     for body in ({"results": [{"name": "Paris"}]}, {"results": "nope"}):
         recorder = _RecordingTransport(body)
@@ -598,7 +598,7 @@ async def test_geocode_with_an_unreadable_body_raises_malformed():
 
 
 async def test_geocode_with_a_503_raises_unreachable():
-    from spire_mcp.open_meteo import UpstreamUnreachableError
+    from atlas_mcp.open_meteo import UpstreamUnreachableError
 
     recorder = _RecordingTransport({"error": "internal"}, status_code=503)
     async with _client_for(recorder) as http_client:
@@ -620,7 +620,7 @@ async def test_a_second_geocode_inside_the_ttl_makes_one_request_in_total():
 
 
 async def test_both_tools_advertise_an_optional_place_in_their_schema():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     listed = await weather.mcp_server.list_tools()
     tools_by_name = {tool.name: tool for tool in listed}
@@ -632,7 +632,7 @@ async def test_both_tools_advertise_an_optional_place_in_their_schema():
 
 
 async def test_weather_forecast_in_fahrenheit_sends_temperature_unit_and_labels_f(monkeypatch):
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
     async with _client_for(router) as http_client:
@@ -654,7 +654,7 @@ async def test_weather_forecast_in_fahrenheit_sends_temperature_unit_and_labels_
 
 
 async def test_weather_forecast_default_units_sends_no_temperature_unit_param():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     router = _RoutingTransport(_PARIS_GEOCODE_BODY, _FORECAST_BODY)
     async with _client_for(router) as http_client:
@@ -673,7 +673,7 @@ async def test_weather_forecast_default_units_sends_no_temperature_unit_param():
 
 
 async def test_both_tool_descriptions_mention_unit_and_neither_schema_takes_one():
-    from spire_mcp import weather
+    from atlas_mcp import weather
 
     listed = await weather.mcp_server.list_tools()
     tools_by_name = {tool.name: tool for tool in listed}

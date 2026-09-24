@@ -1,4 +1,4 @@
-"""Tests for `spire_mcp.ha`'s tool handlers, gated by `spire_mcp.safety`'s
+"""Tests for `atlas_mcp.ha`'s tool handlers, gated by `atlas_mcp.safety`'s
 `allow_call`/`allow_read` boundary.
 
 Turned green by plan 01-03. Every entity id below is invented, following the
@@ -16,9 +16,9 @@ import httpx
 import pytest
 from mcp.client.stdio import get_default_environment
 
-import spire_mcp.ha as ha_module
-from spire_mcp.ha import handle_call_service, handle_get_state
-from spire_mcp.safety import Denied, Policy
+import atlas_mcp.ha as ha_module
+from atlas_mcp.ha import handle_call_service, handle_get_state
+from atlas_mcp.safety import Denied, Policy
 
 # The exact text Home Assistant answers with when a response-only service is
 # called without `?return_response` (verified live against a real hub, see
@@ -449,14 +449,14 @@ async def test_negative_transition_is_refused_before_any_request(fake_ha):
 
 
 # SAFE-09: plan 03-04 gives the child a second protocol to Home Assistant
-# (mcp/spire_mcp/registry.py's WebSocket connection). The child must hold
+# (mcp/atlas_mcp/registry.py's WebSocket connection). The child must hold
 # the same one credential it held before -- HA_TOKEN -- and nothing this
 # plan's own parent process might carry for an unrelated purpose. Named so
 # a failing assertion says exactly which secret leaked.
 _HOSTILE_PARENT_SECRETS = {
     "XAI_API_KEY": "sk-hostile-parent-secret-should-never-reach-the-ha-child",
     "DATABASE_URL": "postgresql+asyncpg://hostile:secret@db.invalid/hostile",
-    "SPIRE_SECRET_KEY": "hostile-fernet-key-should-never-leak-into-the-ha-child",
+    "ATLAS_SECRET_KEY": "hostile-fernet-key-should-never-leak-into-the-ha-child",
 }
 
 
@@ -493,7 +493,7 @@ def test_the_child_never_sees_secrets_the_parent_holds_for_other_plugins(monkeyp
         f"""
         import json
         import os
-        import spire_mcp.ha  # import the real child module under this env
+        import atlas_mcp.ha  # import the real child module under this env
         print(json.dumps({{name: (name in os.environ) for name in {list(_HOSTILE_PARENT_SECRETS)!r}}}))
         """
     )

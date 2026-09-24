@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Run one echo-path calibration (Tier 1, VOICE-07) from the command line --
-a thin caller of `run_echo_calibration` (`spire_voice.calibration.runner`),
+a thin caller of `run_echo_calibration` (`atlas.calibration.runner`),
 and nothing else. All of the measuring lives in the runner; this script
 parses arguments, validates what is checkable before anything opens, opens
 the camera source and the speaker FIFO writer, calls `run_echo_calibration`,
 prints the result, and closes both. A test parses this file's own imports
-to prove it: `run_echo_calibration` is imported, `spire_voice.audio.
+to prove it: `run_echo_calibration` is imported, `atlas.audio.
 echo_path` never is (`tests/test_calibration_runner.py`).
 
 Follows `scripts/capture_wake_corpus.py`'s own conventions: validate up
@@ -15,7 +15,7 @@ operator has already quieted the room and stood still for the probe is the
 same lost evening that script's own validation exists to prevent. Default
 paths resolve relative to the repository root. This module reads no
 environment variable directly; it reaches the camera and the speaker FIFO
-only through `spire_voice.config.load_config`, the one place `${TAPO_USER}`/
+only through `atlas.config.load_config`, the one place `${TAPO_USER}`/
 `${TAPO_PASSWORD}` are ever expanded from the environment -- run this
 script through `scripts/dev-calibrate-echo.sh`, which sources `.env` the
 way `dev-run.sh`/`dev-capture-corpus.sh` do.
@@ -36,11 +36,11 @@ import asyncio
 import sys
 from pathlib import Path
 
-from spire_voice.calibration.record import EchoCalibration
-from spire_voice.calibration.runner import CalibrationRunResult, run_echo_calibration
-from spire_voice.config import CameraConfig, Config, ConfigError, load_config
-from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
-from spire_voice.transports.camera import CameraAudioSource
+from atlas.calibration.record import EchoCalibration
+from atlas.calibration.runner import CalibrationRunResult, run_echo_calibration
+from atlas.config import CameraConfig, Config, ConfigError, load_config
+from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
+from atlas.transports.camera import CameraAudioSource
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"

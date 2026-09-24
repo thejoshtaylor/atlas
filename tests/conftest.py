@@ -19,8 +19,8 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from spire_mcp.safety import Policy
-from spire_voice.db.repository import (
+from atlas_mcp.safety import Policy
+from atlas.db.repository import (
     Credential,
     Invite,
     Macro,
@@ -43,7 +43,7 @@ from spire_voice.db.repository import (
     assign_step_due_ats,
     next_append_due_at,
 )
-from spire_voice.transports.base import SourceFormat
+from atlas.transports.base import SourceFormat
 
 
 @dataclass
@@ -172,7 +172,7 @@ class FakeWakeDetector:
 
 @dataclass
 class FakeWakeHit:
-    """Structurally identical to `spire_voice.wake.base.WakeHit`."""
+    """Structurally identical to `atlas.wake.base.WakeHit`."""
 
     score: float
 
@@ -296,7 +296,7 @@ def fake_envelope_client():
 
 
 # Every entity id below is invented. No real house appears in this file,
-# matching the convention `mcp/spire_mcp/safety.py::_demo` already states.
+# matching the convention `mcp/atlas_mcp/safety.py::_demo` already states.
 _FAKE_STATES: dict[str, dict] = {
     "switch.example_fan": {
         "entity_id": "switch.example_fan",
@@ -392,7 +392,7 @@ async def fake_ha():
 
 
 class FakePolicyRepository:
-    """An in-memory `PolicyRepository` (`spire_voice.db.repository`) --
+    """An in-memory `PolicyRepository` (`atlas.db.repository`) --
     the one Postgres-free implementation D-04 ("the suite runs with no
     Postgres reachable") requires.
 
@@ -483,7 +483,7 @@ def fake_policy_repository():
 
 
 class FakeMacroRepository:
-    """An in-memory `MacroRepository` (`spire_voice.db.repository`) --
+    """An in-memory `MacroRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, the direct sibling of `FakePolicyRepository`
     above.
@@ -598,7 +598,7 @@ def fake_macro_repository():
 
 
 class FakePluginRepository:
-    """An in-memory `PluginRepository` (`spire_voice.db.repository`) --
+    """An in-memory `PluginRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, the direct sibling of
     `FakeMacroRepository` above.
@@ -714,7 +714,7 @@ _FAKE_WORKFLOW_TERMINAL_RUN_STATUSES = ("completed", "cancelled", "failed")
 
 
 class FakeWorkflowRepository:
-    """An in-memory `WorkflowRepository` (`spire_voice.db.repository`) --
+    """An in-memory `WorkflowRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, the direct sibling of
     `FakeMacroRepository` above.
@@ -962,7 +962,7 @@ def fake_workflow_repository():
 
 
 class FakeAccountRepository:
-    """An in-memory `AccountRepository` (`spire_voice.db.repository`) --
+    """An in-memory `AccountRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, matching `FakePolicyRepository`'s own
     precedent above exactly.
@@ -1169,7 +1169,7 @@ def fake_account_repository():
 
 
 class FakeCredentialRepository:
-    """An in-memory `CredentialRepository` (`spire_voice.db.repository`) --
+    """An in-memory `CredentialRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, matching `FakePolicyRepository`'s and
     `FakeAccountRepository`'s own precedent above exactly. Holds
@@ -1214,7 +1214,7 @@ def fake_credential_repository():
 
 
 class FakeSetupRepository:
-    """An in-memory `SetupRepository` (`spire_voice.db.repository`) --
+    """An in-memory `SetupRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04's "the suite runs with no
     Postgres reachable" requires, matching every other `Fake*Repository`
     in this file. Seeds the same five named rows the real migration
@@ -1266,7 +1266,7 @@ def fake_setup_repository():
 
 
 class FakeSettingsRepository:
-    """An in-memory `SettingsRepository` (`spire_voice.db.repository`) --
+    """An in-memory `SettingsRepository` (`atlas.db.repository`) --
     the Postgres-free implementation D-04 requires, matching every other
     `Fake*Repository` in this file."""
 
@@ -1305,7 +1305,7 @@ def fake_settings_repository():
 
 class FakeProviderSelectionRepository:
     """An in-memory `ProviderSelectionRepository`
-    (`spire_voice.db.repository`) -- the Postgres-free implementation
+    (`atlas.db.repository`) -- the Postgres-free implementation
     D-04 requires, matching every other `Fake*Repository` in this file.
     Seeds the same three named slots the real migration
     (`0011_provider_selection.py`) seeds, all pointed at `"xai"`, so a
@@ -1370,7 +1370,7 @@ def fake_provider_selection_repository():
 
 
 class FakeWakeEventRepository:
-    """An in-memory `WakeEventRepository` (`spire_voice.db.repository`) --
+    """An in-memory `WakeEventRepository` (`atlas.db.repository`) --
     the Postgres-free implementation `SourceRunner`'s own tests drive
     (D-13, D-14), matching every other `Fake*Repository` in this file.
     Starts empty: every test records its own events, matching

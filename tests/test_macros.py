@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from spire_mcp.ha import handle_call_service
-from spire_mcp.safety import Denied, Policy
+from atlas_mcp.ha import handle_call_service
+from atlas_mcp.safety import Denied, Policy
 
-from spire_voice.config import MacroActionConfig, MacroConfig
-from spire_voice.turn.macros import fire_macro, match, normalize
+from atlas.config import MacroActionConfig, MacroConfig
+from atlas.turn.macros import fire_macro, match, normalize
 
 
 class _MacroToolHost:
@@ -296,9 +296,9 @@ class _RaisingToolHost:
 async def test_macro_hit_skips_brain(fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha):
     """A phrase matching a configured macro skips the tier race entirely --
     a macro is a latency mechanism, not only a convenience (MACRO-01)."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = _macro(phrase="good night", reply="good night")
     policy = Policy.from_config({})
@@ -336,9 +336,9 @@ async def test_macro_hit_skips_brain(fake_audio_source, fake_stt, fake_brain, fa
 async def test_macro_success_speaks_from_the_cache_with_zero_live_tts_calls(
     fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
 ):
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = _macro(phrase="good night", reply="good night")
     policy = Policy.from_config({})
@@ -373,9 +373,9 @@ async def test_macro_failure_speaks_live_exactly_once_and_loses_the_cache(
 ):
     """A macro whose action is refused pays the live synthesis cost --
     CMD-07 forbids a cached confirmation of something that did not happen."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = _macro(
         phrase="good night",
@@ -425,9 +425,9 @@ async def test_empty_transcript_never_reaches_the_macro_check(fake_audio_source,
     """VOICE-08's guard ends the turn before the macro check ever runs --
     an empty transcript reaches neither the tier race nor a macro's tool
     host."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = _macro(phrase="good night", reply="good night")
     source = fake_audio_source(frames=[b"\x00\x01"])
@@ -458,9 +458,9 @@ async def test_a_transcript_matching_no_macro_still_reaches_the_tier_race(
 ):
     """A macro check that costs nothing observable when it misses -- the
     non-macro path is unchanged from Phase 01."""
-    from spire_voice.providers.base import BrainReply, FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = _macro(phrase="good night", reply="good night")
     source = fake_audio_source(frames=[b"\x00\x01"])

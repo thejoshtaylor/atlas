@@ -34,7 +34,7 @@ down_revision: Union[str, Sequence[str], None] = "0003"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-# The five step names `spire_voice.routes.wizard` enumerates -- named here,
+# The five step names `atlas.routes.wizard` enumerates -- named here,
 # not imported from that module, because a migration must keep reading the
 # same way years after the application code around it has changed; a
 # migration that imports application code can silently start seeding a

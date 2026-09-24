@@ -1,0 +1,18 @@
+{{/*
+D-15: the project's own config/config.example.yaml, shipped verbatim
+(files/config.yaml is a byte-identical copy, checked by CI's own diff).
+.Files.Get reads the file as raw text -- it is never passed back through
+the template engine, so every ${VAR} placeholder inside it survives
+untouched. Templating this file's contents with chart values would make
+the chart a second configuration format to keep in sync with the
+project's own file forever, which is exactly what D-15 exists to avoid.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "atlas.fullname" . }}-config
+  labels:
+    {{- include "atlas.labels" . | nindent 4 }}
+data:
+  config.yaml: |-
+{{ .Files.Get "files/config.yaml" | indent 4 }}

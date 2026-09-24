@@ -9,7 +9,7 @@ same detector-only decode path the live pipeline uses, never a second,
 independently derived resample -- and hands that identical decoded copy to
 every engine under test.
 
-**openWakeWord has no "hey spire" model in this environment** (RESEARCH.md
+**openWakeWord has no "hey atlas" model in this environment** (RESEARCH.md
 Pitfall 3): its adapter raises `WakeError` naming the missing path, which
 this harness reports as a row with its cause named, never an absent row
 and never a reason to drop it from the report. If only one engine can
@@ -59,11 +59,11 @@ from typing import Any, Callable, Sequence
 
 import av
 
-from spire_voice.config import CameraConfig, VoskWakeConfig, OpenWakeWordConfig, load_config
-from spire_voice.transports.camera import CameraAudioSource
-from spire_voice.wake.base import WakeDetector, WakeError, WakeHit
-from spire_voice.wake.openwakeword_engine import OpenWakeWordDetector
-from spire_voice.wake.vosk_engine import VoskWakeDetector
+from atlas.config import CameraConfig, VoskWakeConfig, OpenWakeWordConfig, load_config
+from atlas.transports.camera import CameraAudioSource
+from atlas.wake.base import WakeDetector, WakeError, WakeHit
+from atlas.wake.openwakeword_engine import OpenWakeWordDetector
+from atlas.wake.vosk_engine import VoskWakeDetector
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"

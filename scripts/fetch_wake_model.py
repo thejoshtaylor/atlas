@@ -45,7 +45,7 @@ from typing import Callable
 
 import httpx
 
-from spire_voice.config import ConfigError, load_config
+from atlas.config import ConfigError, load_config
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"
@@ -142,7 +142,7 @@ def fetch_vosk_model(
         raise FetchError(f"{model_dir} exists and is not a directory")
 
     expected_top = model_dir.name
-    with tempfile.TemporaryDirectory(prefix="spire-vosk-fetch-") as tmp_str:
+    with tempfile.TemporaryDirectory(prefix="atlas-vosk-fetch-") as tmp_str:
         tmp = Path(tmp_str)
         zip_path = tmp / "vosk-model.zip"
         download(url, zip_path)

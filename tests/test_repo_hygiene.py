@@ -1,12 +1,12 @@
 """Mechanical no-real-house-data checks, green from the first commit.
 
-This is the mechanical form of the rule `mcp/spire_mcp/safety.py`'s own
+This is the mechanical form of the rule `mcp/atlas_mcp/safety.py`'s own
 self-check already states in prose: every entity id in this repository is
 invented, and no credential literal belongs anywhere in the tree. Both
 checks walk the whole repository (minus build/dependency/VCS directories
 that never ship in the public repo either way) -- WR-01 (phase 01 code
 review): scoping this to `tests/`/`static/` alone left every other file
-(`mcp/`, the rest of `src/spire_voice/`, `config/*.yaml`) unguarded, which
+(`mcp/`, the rest of `src/atlas/`, `config/*.yaml`) unguarded, which
 is exactly where a real entity id or a hardcoded credential is most likely
 to land by accident in a later phase.
 """
@@ -152,10 +152,10 @@ _ALLOWED_OBJECT_IDS = {
     # caught, in the working tree and in history alike.
     "office_lamp",
     "office_fan",
-    # 260922-cmo, historical. config/argo/spire-voice-ci-workflowtemplate.yaml
+    # 260922-cmo, historical. config/argo/atlas-ci-workflowtemplate.yaml
     # (blob `909910246ec63ec2736063bb9e2c75e05536fa54`, reachable from commit
     # `05685f463a21fe7e24857ef86267a1adb783cd58`) referenced its own sibling
-    # manifest's filename, `spire-voice-ci-sensor.yaml`, in a header comment
+    # manifest's filename, `atlas-ci-sensor.yaml`, in a header comment
     # -- coincidentally matching `sensor.` (the Home Assistant domain) plus
     # `yaml` (an ordinary filename extension, not a house fixture's object
     # id) as its object id. The working tree no longer spells this filename
@@ -413,7 +413,7 @@ def test_repository_holds_no_credential_literal():
 # violation through it.
 #
 # `"calibration"` is deliberately NOT in this set: plan 02-10 adds a
-# legitimately tracked `src/spire_voice/calibration/` source package, and a
+# legitimately tracked `src/atlas/calibration/` source package, and a
 # generic directory-name check here would flag that code as though it were
 # the runtime data directory. `test_calibration_directory_default_location_
 # is_gitignored` below checks the actual runtime path
@@ -471,7 +471,7 @@ def test_calibration_directory_default_location_is_gitignored():
     -- this is the ordering plan 02-01 used for the session store, applied
     before this plan's calibration record is ever written for real.
     """
-    from spire_voice.calibration.record import DEFAULT_CALIBRATION_DIR
+    from atlas.calibration.record import DEFAULT_CALIBRATION_DIR
 
     candidate = Path(DEFAULT_CALIBRATION_DIR.lstrip("/")) / "echo_path.json"
     proc = subprocess.run(
@@ -598,7 +598,7 @@ def test_the_entity_id_scan_covers_the_surfaces_this_project_publishes():
 def test_the_wake_events_migration_and_module_are_covered_by_the_repository_scan():
     """Plan 08-03 Task 3: this file scans by directory walk
     (`_iter_repo_files`), pruning only `_EXCLUDED_DIR_NAMES` -- neither
-    `alembic/` nor `src/spire_voice/db/` is in that set, so the new
+    `alembic/` nor `src/atlas/db/` is in that set, so the new
     `wake_events` migration and the modified `db/` modules are already
     inside both the credential-literal scan (every file) and the
     entity-id scan (`.py` is in `_ENTITY_ID_SCAN_SUFFIXES`) with no list
@@ -609,7 +609,7 @@ def test_the_wake_events_migration_and_module_are_covered_by_the_repository_scan
     scanned_entity_id_paths = set(_iter_repo_files(_ENTITY_ID_SCAN_SUFFIXES))
 
     migration = _REPO_ROOT / "alembic" / "versions" / "0012_wake_events.py"
-    module = _REPO_ROOT / "src" / "spire_voice" / "db" / "models.py"
+    module = _REPO_ROOT / "src" / "atlas" / "db" / "models.py"
 
     assert migration in scanned_paths
     assert module in scanned_paths

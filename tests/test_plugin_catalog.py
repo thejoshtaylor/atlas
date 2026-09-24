@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from spire_voice.plugins.catalog import (
+from atlas.plugins.catalog import (
     DEFAULT_CATALOG_PATH,
     CatalogConfigKey,
     CatalogError,
@@ -28,7 +28,7 @@ def test_the_shipped_catalog_parses_and_seeds_the_two_builtin_plugins():
     ha = find_entry(entries, "Home Assistant")
     assert ha is not None
     assert ha.transport == "stdio"
-    assert ha.args == ("-m", "spire_mcp.ha")
+    assert ha.args == ("-m", "atlas_mcp.ha")
     assert ha.url is None
     assert ha.config_keys == (
         CatalogConfigKey(key="HA_URL", label="Home Assistant URL", secret=False),
@@ -38,7 +38,7 @@ def test_the_shipped_catalog_parses_and_seeds_the_two_builtin_plugins():
     weather = find_entry(entries, "Weather")
     assert weather is not None
     assert weather.transport == "stdio"
-    assert weather.args == ("-m", "spire_mcp.weather")
+    assert weather.args == ("-m", "atlas_mcp.weather")
     assert weather.url is None
     assert [ck.key for ck in weather.config_keys] == [
         "WEATHER_LATITUDE",
@@ -187,7 +187,7 @@ def test_the_default_catalog_path_does_not_depend_on_the_working_directory(tmp_p
     """
     import os
 
-    from spire_voice.plugins.catalog import DEFAULT_CATALOG_PATH, load_catalog
+    from atlas.plugins.catalog import DEFAULT_CATALOG_PATH, load_catalog
 
     assert os.path.isabs(DEFAULT_CATALOG_PATH)
 

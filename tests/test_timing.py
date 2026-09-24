@@ -17,9 +17,9 @@ async def test_stage_timestamps_recorded(fake_audio_source, fake_stt, fake_brain
     """
     from types import SimpleNamespace
 
-    from spire_voice.providers.base import BrainReply, FinalTranscript, PartialTranscript, ToolCall
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript, PartialTranscript, ToolCall
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     class _StubToolHost:
         async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
@@ -78,7 +78,7 @@ async def test_stage_timestamps_recorded(fake_audio_source, fake_stt, fake_brain
 def test_end_of_speech_to_first_audio_is_measured():
     """The budget number is derived from the two recorded timestamps it
     names, not measured a second, separate way."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.stt_final_at = 10.0
@@ -90,7 +90,7 @@ def test_end_of_speech_to_first_audio_is_measured():
 def test_mark_first_audio_is_idempotent():
     """A second call to `mark_first_audio()` leaves the first timestamp in
     place -- the regression this phase's guard exists to prevent."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.mark_first_audio()
@@ -104,7 +104,7 @@ def test_mark_first_audio_is_idempotent():
 def test_mark_answer_audio_is_idempotent():
     """A second call to `mark_answer_audio()` leaves the first timestamp in
     place, matching `mark_first_audio()`'s guard."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.mark_answer_audio()
@@ -118,7 +118,7 @@ def test_mark_answer_audio_is_idempotent():
 def test_end_of_speech_to_answer_audio_is_measured():
     """The answer's own budget number is derived from `stt_final_at` and
     `answer_audio_at`, mirroring the first-audio property exactly."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.stt_final_at = 10.0
@@ -130,7 +130,7 @@ def test_end_of_speech_to_answer_audio_is_measured():
 def test_end_of_speech_to_answer_audio_is_none_until_both_marks_exist():
     """`None` until both `stt_final_at` and `answer_audio_at` are set --
     matching `end_of_speech_to_first_audio_ms`'s contract."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     assert timings.end_of_speech_to_answer_audio_ms is None
@@ -145,7 +145,7 @@ def test_end_of_speech_to_answer_audio_is_none_until_both_marks_exist():
 def test_end_of_speech_to_answer_audio_keeps_fractional_milliseconds():
     """No precision is discarded before the budget comparison: a fractional
     millisecond difference must survive, not round away."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.stt_final_at = 10.0
@@ -159,7 +159,7 @@ def test_filler_then_answer_leaves_first_audio_and_answer_audio_distinct():
     filler played and an answer followed must have `first_audio_at !=
     answer_audio_at`, with `first_audio_at` the earlier value. This would
     fail if the two marks ever shared one call site."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
 
@@ -181,7 +181,7 @@ def test_filler_then_answer_leaves_first_audio_and_answer_audio_distinct():
 def test_stage_durations_ms_has_answer_audio_at_after_first_audio_at():
     """`stage_durations_ms()` carries an `answer_audio_at` entry, positioned
     immediately after `first_audio_at` in `_STAGE_ORDER`."""
-    from spire_voice.timing import _STAGE_ORDER, TurnTimings
+    from atlas.timing import _STAGE_ORDER, TurnTimings
 
     index = _STAGE_ORDER.index("first_audio_at")
     assert _STAGE_ORDER[index + 1] == "answer_audio_at"
@@ -195,7 +195,7 @@ def test_stage_durations_ms_answer_audio_at_is_none_when_unreached():
     """A turn that never reached an answer (no filler, no answer utterance
     marked) reports `None` for the `answer_audio_at` stage duration, not a
     fabricated zero."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.turn_started_at = 1.0
@@ -210,7 +210,7 @@ def test_to_event_and_log_carry_end_of_speech_to_answer_audio_ms():
     """`to_event()` and `log()` both carry the new derived number alongside
     the existing first-audio number -- the panel has nothing to render for
     the answer number if either omits it."""
-    from spire_voice.timing import TurnTimings
+    from atlas.timing import TurnTimings
 
     timings = TurnTimings()
     timings.stt_final_at = 10.0

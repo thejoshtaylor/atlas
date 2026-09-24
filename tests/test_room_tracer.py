@@ -22,12 +22,12 @@ from typing import Any
 
 import av
 
-from spire_voice.config import CameraConfig
-from spire_voice.sources.runner import SourceRunner
-from spire_voice.speaker.fifo_writer import FifoWriter
-from spire_voice.timing import TurnTimings
-from spire_voice.transports.camera import CameraAudioSource
-from spire_voice.turn.controller import run_turn
+from atlas.config import CameraConfig
+from atlas.sources.runner import SourceRunner
+from atlas.speaker.fifo_writer import FifoWriter
+from atlas.timing import TurnTimings
+from atlas.transports.camera import CameraAudioSource
+from atlas.turn.controller import run_turn
 
 from tests.conftest import BrainReply, FakeBrain, FakeTts, FakeWakeDetector, FinalTranscript, RecordingFakeStt
 

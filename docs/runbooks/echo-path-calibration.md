@@ -6,7 +6,7 @@ with correlation enabled and no valid calibration on file, so this cannot be hal
 silently. Follow this document to take a real measurement, then move to the next step.
 
 The measurement itself has one implementation: `run_echo_calibration`
-(`src/spire_voice/calibration/runner.py`). Two things call it. This runbook uses the
+(`src/atlas/calibration/runner.py`). Two things call it. This runbook uses the
 browser, at `/calibration`. `scripts/dev-calibrate-echo.sh` runs the same measurement
 from the command line, with no browser at all. Use whichever is easier to reach. Both
 write the same record and neither is a weaker copy of the other.

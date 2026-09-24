@@ -6,7 +6,7 @@ Every entity id below is invented (`example_*`), per
 
 from __future__ import annotations
 
-from spire_voice.turn.local_intent import LocalIntent, match_on_off
+from atlas.turn.local_intent import LocalIntent, match_on_off
 
 # The main fixture: one clear target (a switch with a generic physical-object
 # suffix a spoken command routinely omits) plus two unrelated devices whose

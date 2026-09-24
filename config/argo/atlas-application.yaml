@@ -1,0 +1,35 @@
+# Argo CD Application driving atlas on the jt-spire build cluster.
+# Mirrors the shape of the existing chat-manager Application on this
+# cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: atlas
+  namespace: argocd
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: app=harbor.tail41bc66.ts.net/atlas/app:latest
+    argocd-image-updater.argoproj.io/app.update-strategy: digest
+    argocd-image-updater.argoproj.io/app.helm.image-spec: image.ref
+    argocd-image-updater.argoproj.io/app.pull-secret: pullsecret:argocd/regcred-atlas
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thejoshtaylor/atlas.git
+    targetRevision: HEAD
+    path: charts/atlas
+    helm:
+      valueFiles:
+        - values-build.yaml
+      # No `parameters` block here — argocd-image-updater writes that
+      # itself on its first successful run. A hand-written one is a stale
+      # digest waiting to be re-applied over whatever the updater already
+      # resolved.
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: home
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

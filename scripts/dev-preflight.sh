@@ -52,9 +52,9 @@ fi
 # Read from the configured `speaker.fifo_path` (`config.example.yaml`'s
 # own default shown here as the fallback), never a secret, so printing the
 # path itself is fine.
-speaker_config_path="${SPIRE_CONFIG:-config/config.example.yaml}"
+speaker_config_path="${ATLAS_CONFIG:-config/config.example.yaml}"
 speaker_fifo_path=$(awk -F': *' '/^[[:space:]]*fifo_path:/ {gsub(/["'"'"']/, "", $2); print $2; exit}' "$speaker_config_path" 2>/dev/null)
-speaker_fifo_path="${speaker_fifo_path:-/run/spire/speaker.alaw}"
+speaker_fifo_path="${speaker_fifo_path:-/run/atlas/speaker.alaw}"
 speaker_fifo_dir=$(dirname "$speaker_fifo_path")
 if [ -d "$speaker_fifo_dir" ] && [ -w "$speaker_fifo_dir" ]; then
   echo "speaker-fifo-dir: OK ($speaker_fifo_dir exists and is writable)"

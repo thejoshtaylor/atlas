@@ -1,6 +1,6 @@
 """A defect discovered incidentally while fixing WR-03 (code review), not
 named by the review itself: every `Mapped[datetime]` column
-`spire_voice.db.models` declares maps, with no `timezone=True`, to
+`atlas.db.models` declares maps, with no `timezone=True`, to
 Postgres' `TIMESTAMP WITHOUT TIME ZONE` -- and every datetime this
 project's runtime code has ever written is `datetime.now(timezone.utc)`,
 timezone-*aware*. Nothing in this suite exercised a real write through the
@@ -13,7 +13,7 @@ subtract offset-naive and offset-aware datetimes` on the very first
 insert, which is exactly what surfaced while writing WR-03's own real-
 Postgres test.
 
-`spire_voice/db/postgres.py` now converts every datetime at its own
+`atlas/db/postgres.py` now converts every datetime at its own
 database boundary (`_to_naive_utc` on write, `_to_aware_utc` on read) --
 this file proves that conversion holds for every repository class in that
 module, not only `PostgresAccountRepository` (WR-03's own concurrency test
@@ -35,21 +35,21 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.db.postgres import (
+from atlas.db.postgres import (
     PostgresCredentialRepository,
     PostgresPolicyRepository,
     PostgresSettingsRepository,
     PostgresSetupRepository,
 )
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -88,7 +88,7 @@ def _run_upgrade_head(async_url: str) -> None:
 
 @pytest.fixture
 async def sessionmaker(monkeypatch):
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")

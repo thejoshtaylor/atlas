@@ -44,7 +44,7 @@ class _FakeWebSocket:
 
 
 async def test_websocket_yields_pcm16():
-    from spire_voice.transports.websocket import WebSocketAudioSource
+    from atlas.transports.websocket import WebSocketAudioSource
 
     ws = _FakeWebSocket(EXPECTED_PCM16_FRAMES)
     source = WebSocketAudioSource(ws)
@@ -55,8 +55,8 @@ async def test_websocket_yields_pcm16():
 
 
 def test_websocket_declares_its_own_format():
-    from spire_voice.transports.base import SourceFormat
-    from spire_voice.transports.websocket import WebSocketAudioSource
+    from atlas.transports.base import SourceFormat
+    from atlas.transports.websocket import WebSocketAudioSource
 
     source = WebSocketAudioSource(_FakeWebSocket([]))
 
@@ -94,7 +94,7 @@ class _FakeAudioTrack:
 
 
 async def test_webrtc_yields_pcm16():
-    from spire_voice.transports.webrtc import WebrtcTransport
+    from atlas.transports.webrtc import WebrtcTransport
 
     transport = WebrtcTransport()
     assert hasattr(transport, "frames")
@@ -110,8 +110,8 @@ async def test_webrtc_yields_pcm16():
 
 
 def test_webrtc_declares_its_own_format():
-    from spire_voice.transports.base import SourceFormat
-    from spire_voice.transports.webrtc import WebrtcTransport
+    from atlas.transports.base import SourceFormat
+    from atlas.transports.webrtc import WebrtcTransport
 
     transport = WebrtcTransport()
 
@@ -129,7 +129,7 @@ async def test_webrtc_resamples_non_16khz_mono_frames():
     2x-upsample count rather than pinning an exact figure that would make
     this test change every time the resampler's internal filter does.
     """
-    from spire_voice.transports.webrtc import WebrtcTransport
+    from atlas.transports.webrtc import WebrtcTransport
 
     transport = WebrtcTransport()
     frame_samples = 80

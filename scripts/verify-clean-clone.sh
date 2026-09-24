@@ -33,7 +33,7 @@ _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 _SOURCE="${1:-$_REPO_ROOT}"
 
 _RUN_ID="$$-${RANDOM}"
-_PROJECT="spire-voice-verify-${_RUN_ID}"
+_PROJECT="atlas-verify-${_RUN_ID}"
 _PORT="18080"
 _HEALTH_TIMEOUT_S="180"
 
@@ -49,7 +49,7 @@ cleanup() {
     echo "# cleaning up: tearing down the ${_PROJECT} stack and its volumes" >&2
     (
       cd "$_TMP_DIR" 2>/dev/null \
-        && COMPOSE_PROJECT_NAME="$_PROJECT" SPIRE_PORT="$_PORT" \
+        && COMPOSE_PROJECT_NAME="$_PROJECT" ATLAS_PORT="$_PORT" \
           docker compose down -v >/dev/null 2>&1
     ) || true
     echo "# cleaning up: removing $_TMP_DIR" >&2
@@ -67,7 +67,7 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-_TMP_DIR="$(mktemp -d -t spire-voice-verify-clean-clone.XXXXXX)"
+_TMP_DIR="$(mktemp -d -t atlas-verify-clean-clone.XXXXXX)"
 echo "# cloning $_SOURCE into $_TMP_DIR" >&2
 if ! git clone --quiet "$_SOURCE" "$_TMP_DIR"; then
   echo "FATAL: git clone failed" >&2
@@ -88,16 +88,16 @@ cd "$_TMP_DIR"
 # clone that cannot pass its own tests on the Python it ships has not
 # reached a running assistant in any sense DEP-03 means.
 echo "# building the image's own test stage (Python 3.12, the version D-13 locks)" >&2
-if ! docker build --target test -t "spire-voice-test:${_RUN_ID}" . >&2; then
+if ! docker build --target test -t "atlas-test:${_RUN_ID}" . >&2; then
   echo "FATAL: the image's own test stage failed -- this project's dependency set does not install and pass on the Python the image ships" >&2
   exit 1
 fi
-docker image rm "spire-voice-test:${_RUN_ID}" >/dev/null 2>&1 || true
+docker image rm "atlas-test:${_RUN_ID}" >/dev/null 2>&1 || true
 
 # docs/runbooks/deploy-compose.md's own wake-word step -- run before the
 # stack comes up, exactly as documented, with no .env file present.
 echo "# provisioning the Vosk wake-word model (docs/runbooks/deploy-compose.md)" >&2
-if ! COMPOSE_PROJECT_NAME="$_PROJECT" SPIRE_PORT="$_PORT" \
+if ! COMPOSE_PROJECT_NAME="$_PROJECT" ATLAS_PORT="$_PORT" \
   docker compose run --rm app python scripts/fetch_wake_model.py --config config/config.example.yaml >&2
 then
   echo "FATAL: scripts/fetch_wake_model.py failed inside the container -- the README's own documented step did not work from a clean clone" >&2
@@ -108,12 +108,12 @@ fi
 # apart from the project-name/port override the same document names as
 # the sanctioned way to run a second instance.
 echo "# bringing the stack up: docker compose up -d --build --wait" >&2
-if ! COMPOSE_PROJECT_NAME="$_PROJECT" SPIRE_PORT="$_PORT" \
+if ! COMPOSE_PROJECT_NAME="$_PROJECT" ATLAS_PORT="$_PORT" \
   docker compose up -d --build --wait >&2
 then
   echo "FATAL: docker compose up did not reach a healthy stack from a clean clone" >&2
   echo "# app container logs:" >&2
-  COMPOSE_PROJECT_NAME="$_PROJECT" SPIRE_PORT="$_PORT" docker compose logs app >&2 || true
+  COMPOSE_PROJECT_NAME="$_PROJECT" ATLAS_PORT="$_PORT" docker compose logs app >&2 || true
   exit 1
 fi
 

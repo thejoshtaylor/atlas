@@ -90,7 +90,7 @@ uses. If you install it, and you redistribute a build that includes it, GPL-3.0
 applies to that build. Install it only if you accept this:
 
 ```bash
-pip install spire-voice[piper]
+pip install atlas[piper]
 ```
 
 See the repository's `README.md` for this project's own licence.

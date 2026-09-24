@@ -17,9 +17,9 @@ import threading
 
 import pytest
 
-from spire_voice.config import SpeakerConfig
-from spire_voice.speaker import mpegts
-from spire_voice.speaker.tapo_talk import TAPO_CLOUD_PASSWORD_ENV, TapoTalkSupervisor, camera_host_from_rtsp_url
+from atlas.config import SpeakerConfig
+from atlas.speaker import mpegts
+from atlas.speaker.tapo_talk import TAPO_CLOUD_PASSWORD_ENV, TapoTalkSupervisor, camera_host_from_rtsp_url
 
 
 class _FakeWriter:
@@ -183,7 +183,7 @@ async def test_tapo_talk_supervisor_stop_closes_the_session_while_blocked_on_a_f
         # directly, against a threshold far below the safety net, is what
         # actually distinguishes "closed promptly on its own" from
         # "only closed because this test's own timeout forced it."
-        with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.tapo_talk"):
+        with caplog.at_level(logging.WARNING, logger="atlas.speaker.tapo_talk"):
             started = time.monotonic()
             await asyncio.wait_for(supervisor.stop(), timeout=5)
             elapsed = time.monotonic() - started
@@ -217,7 +217,7 @@ async def test_tapo_talk_supervisor_stays_in_backoff_without_the_cloud_password(
 
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.tapo_talk"):
+    with caplog.at_level(logging.WARNING, logger="atlas.speaker.tapo_talk"):
         supervisor.start()
         await asyncio.sleep(0.1)
         await supervisor.stop()
@@ -248,7 +248,7 @@ async def test_tapo_talk_supervisor_times_out_a_stalled_connect_into_backoff(tmp
 
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.speaker.tapo_talk"):
+    with caplog.at_level(logging.WARNING, logger="atlas.speaker.tapo_talk"):
         supervisor.start()
         await _wait_for(lambda: build_calls >= 2)
         await supervisor.stop()
@@ -272,7 +272,7 @@ async def test_tapo_talk_supervisor_doubles_its_backoff_on_consecutive_failures(
             delays.append(seconds)
         await real_sleep(0)
 
-    import spire_voice.speaker.tapo_talk as tapo_talk_module
+    import atlas.speaker.tapo_talk as tapo_talk_module
 
     monkeypatch.setattr(tapo_talk_module.asyncio, "sleep", recording_sleep)
     config = SpeakerConfig(fifo_path=str(tmp_path / "speaker.alaw"), respawn_backoff_s=30.0)

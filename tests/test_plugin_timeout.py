@@ -26,7 +26,7 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from mcp_types.jsonrpc import INVALID_PARAMS, REQUEST_TIMEOUT
 
-from spire_voice.mcp_client import McpToolHost
+from atlas.mcp_client import McpToolHost
 
 _MCP_ROOT = "/nonexistent/mcp-root"  # never read: _spawn is bypassed in every test here
 
@@ -42,7 +42,7 @@ def _host_with_fake_session(session: Any, *, timeout_s: float | None) -> McpTool
     host._ha_url = "http://ha.invalid:8123"
     host._ha_token = "test-key"
     host._mcp_root = _MCP_ROOT
-    host._child_module = "spire_mcp.ha"
+    host._child_module = "atlas_mcp.ha"
     host._timeout_s = timeout_s
     return host
 

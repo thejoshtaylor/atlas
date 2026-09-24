@@ -25,20 +25,20 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.db.postgres import PostgresWorkflowRepository
-from spire_voice.db.repository import (
+from atlas.db.postgres import PostgresWorkflowRepository
+from atlas.db.repository import (
     WorkflowRunNotAppendableError,
     WorkflowRunNotFoundError,
     WorkflowStepSpec,
 )
-from spire_voice.workflow.steps import StepOutcome
+from atlas.workflow.steps import StepOutcome
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -354,7 +354,7 @@ def _run_upgrade_head(async_url: str) -> None:
 
 
 def _set_migration_env(monkeypatch) -> None:
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")

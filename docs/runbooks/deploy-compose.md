@@ -15,8 +15,8 @@ credential.
 ## Bring it up
 
 ```bash
-git clone https://github.com/<your-fork-or-this-repository>/spire-voice.git
-cd spire-voice
+git clone https://github.com/<your-fork-or-this-repository>/atlas.git
+cd atlas
 docker compose up -d --build --wait
 ```
 
@@ -31,7 +31,7 @@ below).
 
 ## The wake-word model -- one command, before the first start
 
-The application's default configuration listens for the phrase "hey spire" using
+The application's default configuration listens for the phrase "hey atlas" using
 Vosk, a wake-word engine that needs a model file on disk. Nothing in this project
 downloads that model automatically -- an offline deployment must not need the
 internet at a moment you did not choose. Provision it once, before the first
@@ -41,7 +41,7 @@ internet at a moment you did not choose. Provision it once, before the first
 docker compose run --rm app python scripts/fetch_wake_model.py --config config/config.example.yaml
 ```
 
-This downloads the model into the same `spire-models` volume the running
+This downloads the model into the same `atlas-models` volume the running
 application reads from, and prints `already present` on every run after the
 first -- safe to run again, and safe to run before `docker compose up` has ever
 started the `app` service. Skipping this step is the one way a fresh clone fails
@@ -86,12 +86,12 @@ it names is enough -- it was not, until the code review that found this.
 **The secret key is generated once, on first boot, and persisted -- back it up.**
 This one value derives both the session-signing key and the key every stored
 provider credential is encrypted with. `deploy/docker-entrypoint.sh` generates it
-the first time no key is found, writes it to the `spire-data` volume, and reuses
+the first time no key is found, writes it to the `atlas-data` volume, and reuses
 that same file on every later start -- confirmed by restarting the container and
 comparing the file byte-for-byte. If that volume is lost with no backup, every
 stored credential becomes permanently unreadable and every signed-in session is
-invalidated at once. Back up `spire-data` the way you would any other secret. You
-can also set `SPIRE_SECRET_KEY` yourself in `.env` before the first start if you
+invalidated at once. Back up `atlas-data` the way you would any other secret. You
+can also set `ATLAS_SECRET_KEY` yourself in `.env` before the first start if you
 would rather manage it outside this project's own generation step; see
 `.env.example`'s own comment for the exact command that generates a valid one.
 
@@ -123,7 +123,7 @@ to run alongside a stack you may already have up, so it overrides the Compose
 project name and the published port:
 
 ```bash
-COMPOSE_PROJECT_NAME=spire-voice-second SPIRE_PORT=8081 docker compose up -d --build --wait
+COMPOSE_PROJECT_NAME=atlas-second ATLAS_PORT=8081 docker compose up -d --build --wait
 ```
 
 Use the same override if you want a second, independent instance of your own.
@@ -134,8 +134,8 @@ Use the same override if you want a second, independent instance of your own.
 docker compose down
 ```
 
-This stops the containers and keeps every named volume (`spire-data`,
-`spire-models`, `spire-db-data`) -- your data, your models, and your secret key
+This stops the containers and keeps every named volume (`atlas-data`,
+`atlas-models`, `atlas-db-data`) -- your data, your models, and your secret key
 all survive. Add `-v` only if you intend to discard all of it, including the
 database.
 

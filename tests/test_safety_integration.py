@@ -1,7 +1,7 @@
 """Proves the safety boundary's refusal reaches the spoken reply verbatim.
 
 Turned green by plan 01-03. The first test here exercises the end-to-end
-shape `mcp/spire_mcp/ha.py`'s own docstring documents: an uncaught `Denied`
+shape `mcp/atlas_mcp/ha.py`'s own docstring documents: an uncaught `Denied`
 becomes an error-shaped MCP result whose text is `Denied.reason`, and the
 turn controller speaks that text directly with no second brain call in
 between.
@@ -15,11 +15,11 @@ through.
 
 from types import SimpleNamespace
 
-from spire_mcp.ha import handle_call_service
-from spire_mcp.safety import Denied, Policy
+from atlas_mcp.ha import handle_call_service
+from atlas_mcp.safety import Denied, Policy
 
-from spire_voice.config import MacroActionConfig, MacroConfig
-from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.config import MacroActionConfig, MacroConfig
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 
 
 class _RefusingToolHost:
@@ -54,8 +54,8 @@ class _RefusingToolHost:
 async def test_denied_reason_reaches_the_reply_verbatim(
     fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
 ):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn off the server socket")])
@@ -109,8 +109,8 @@ async def test_denied_reason_reaches_the_reply_verbatim_through_the_macro_path(
     specific bypass and no second brain call -- `_RefusingToolHost` is
     reused unmodified, because a macro action reaches `allow_call` through
     the identical `tool_host.call_tool` entry a model-issued call uses."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -192,9 +192,9 @@ async def test_long_denied_reason_reaches_speech_whole_via_the_tier_path(
     """A refusal never passes through a model, so no `max_tokens`
     truncation applies -- `Denied.reason` reaches text-to-speech whole, at
     any length."""
-    from spire_voice.config import BrainConfig
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.config import BrainConfig
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     assert len(_LONG_REASON) >= BrainConfig().max_tokens * 4
 
@@ -230,8 +230,8 @@ async def test_long_denied_reason_reaches_speech_whole_via_the_macro_path(
 ):
     """The tier path and the macro path behave identically for the same
     over-length reason -- neither entrance truncates."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -269,8 +269,8 @@ async def test_empty_denied_reason_speaks_the_fallback_via_the_tier_path(
     """A `Denied` whose reason is empty speaks a fixed fallback sentence
     rather than silence, so a refused command is never indistinguishable
     from a dropped turn."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _DENIED_FALLBACK_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _DENIED_FALLBACK_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn off the server socket")])
@@ -305,8 +305,8 @@ async def test_empty_denied_reason_speaks_the_fallback_via_the_macro_path(
     """The macro path's empty-reason case uses the identical fallback the
     tier path uses -- `_DENIED_FALLBACK_REPLY` is the one constant both call
     sites reach for, not two independently-worded sentences."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _DENIED_FALLBACK_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _DENIED_FALLBACK_REPLY, run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -345,8 +345,8 @@ async def test_non_ascii_denied_reason_reaches_speech_unchanged(
     truncates by byte length. Exact equality, not a normalized or slugged
     comparison: a non-ASCII character surviving a lossy round trip as a
     replacement character would still pass a normalized comparison."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     reason = "そのスイッチは操作できません -- ceci est refusé -- ☃"
     macro = MacroConfig(

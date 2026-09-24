@@ -1,5 +1,5 @@
 // The wake-tuning surface's fetch layer (DBG-05, D-13, D-14a, D-15, D-16).
-// Every shape here matches `src/spire_voice/routes/wake.py`'s own response
+// Every shape here matches `src/atlas/routes/wake.py`'s own response
 // models field for field, the same discipline `lib/plugins.ts` states at
 // its own top of file -- a renamed or reshaped field here is a silent
 // drift from what the server actually sends.

@@ -18,9 +18,9 @@ from zoneinfo import ZoneInfo
 
 import conftest
 
-import spire_voice.app as app_module
-from spire_voice.app import _catalog_prompt, _state_message
-from spire_voice.db.repository import WorkflowRun, WorkflowStep
+import atlas.app as app_module
+from atlas.app import _catalog_prompt, _state_message
+from atlas.db.repository import WorkflowRun, WorkflowStep
 
 
 def _entities_from_fake_states() -> list[dict[str, str]]:
@@ -306,7 +306,7 @@ def test_tool_result_json_unwraps_the_sdks_result_envelope_for_a_list():
     that Home Assistant listed)."""
     from types import SimpleNamespace
 
-    from spire_voice.app import _tool_result_json
+    from atlas.app import _tool_result_json
 
     entities = [{"entity_id": "switch.example_fan_socket", "friendly_name": "Fan Socket", "state": "off"}]
     wrapped = SimpleNamespace(structured_content={"result": entities}, content=[])

@@ -11,7 +11,7 @@ import {
   type TurnTimingMessage,
 } from "./transports"
 
-// The eight stages `spire_voice.timing.TurnTimings` actually records
+// The eight stages `atlas.timing.TurnTimings` actually records
 // (`timing.py`'s own module docstring: "eight timestamps and their
 // derived durations, nothing else") -- 03-UI-SPEC.md's own overflow row
 // and this plan's own task text both say "seven"; the real dataclass has
@@ -43,7 +43,7 @@ const STAGE_ORDER = Object.keys(STAGE_LABELS)
  *  - A denied microphone permission states what happened (`micDenied`
  *    below) rather than leaving the toggle idle with no explanation.
  *  - A turn that returned no transcript (`turn_outcome ===
- *    "empty_transcript"`, `spire_voice/turn/controller.py`) states that,
+ *    "empty_transcript"`, `atlas/turn/controller.py`) states that,
  *    too, rather than a blank reply the operator has to interpret.
  *
  * Everything else about the page is carried forward as it stood --

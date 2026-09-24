@@ -23,7 +23,7 @@ export function SetupGate({
   if (status === "incomplete") {
     return (
       <main className="flex min-h-svh flex-col items-center justify-center gap-2 p-6 text-center">
-        <h1 className="text-display font-semibold text-foreground">spire-voice isn&apos;t set up yet.</h1>
+        <h1 className="text-display font-semibold text-foreground">atlas isn&apos;t set up yet.</h1>
         <p className="max-w-sm text-body text-muted-foreground">
           An admin needs to finish the first-run wizard before this works.
         </p>

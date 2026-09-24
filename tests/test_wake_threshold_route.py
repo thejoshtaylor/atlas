@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from spire_voice.config import GateConfig, WakeConfig
-from spire_voice.sources.runner import SourceRunner
-from spire_voice.wake.gate import WakeGate
+from atlas.config import GateConfig, WakeConfig
+from atlas.sources.runner import SourceRunner
+from atlas.wake.gate import WakeGate
 
 from tests.conftest import FakeAudioSource, FakeWakeHit
 
@@ -142,7 +142,7 @@ async def test_a_runner_nobody_calls_set_wake_threshold_on_behaves_as_before(cap
     )
 
     assert runner.wake_threshold == 0.55
-    with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.INFO, logger="atlas.sources.runner"):
         await runner.run()
     assert len(turns_started) == 1
 
@@ -168,7 +168,7 @@ class _ScriptedWakeDetector:
         self.score = score
 
     def process(self, chunk: bytes):
-        from spire_voice.wake.base import WakeHit
+        from atlas.wake.base import WakeHit
 
         return WakeHit(score=self.score)
 
@@ -184,15 +184,15 @@ def _boot_authenticated_client(tmp_path, monkeypatch, *, role, wake_engine="open
     hit through the boot's own `camera` `SourceRunner`)."""
     from fastapi.testclient import TestClient
 
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
-    from spire_voice.plugins import manager as plugin_manager_module
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
+    from atlas.plugins import manager as plugin_manager_module
 
-    import spire_voice.app as app_module
+    import atlas.app as app_module
     import tests.conftest as conftest
     from tests import test_startup_smoke as smoke
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     session_dir = tmp_path / "sessions"
     session_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(
@@ -231,7 +231,7 @@ def _boot_authenticated_client(tmp_path, monkeypatch, *, role, wake_engine="open
         else:
             from datetime import datetime, timezone
 
-            from spire_voice.db.repository import User
+            from atlas.db.repository import User
 
             account_repo = app_module.app.state.account_repo
             user_id = account_repo._next_user_id
@@ -443,7 +443,7 @@ def _repositories_with_stored_threshold(stored_threshold):
     def _builder(config: object, engine: object) -> dict:
         from datetime import datetime, timezone
 
-        from spire_voice.db.repository import Setting
+        from atlas.db.repository import Setting
 
         from tests import test_startup_smoke as smoke
 
@@ -464,12 +464,12 @@ def _repositories_with_stored_threshold(stored_threshold):
 
 def _boot_with_stored_threshold(tmp_path, monkeypatch, *, stored_threshold, wake_engine="openwakeword"):
     from fastapi.testclient import TestClient
-    from spire_voice.plugins import manager as plugin_manager_module
+    from atlas.plugins import manager as plugin_manager_module
 
-    import spire_voice.app as app_module
+    import atlas.app as app_module
     from tests import test_startup_smoke as smoke
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     session_dir = tmp_path / "sessions"
     session_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(
@@ -528,7 +528,7 @@ def test_the_boot_logs_which_source_the_threshold_came_from(tmp_path, monkeypatc
     client, app_module = _boot_with_stored_threshold(
         tmp_path, monkeypatch, stored_threshold=0.81, wake_engine="openwakeword"
     )
-    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+    with caplog.at_level(logging.INFO, logger="atlas.app"):
         with client:
             pass
     assert any(
@@ -569,7 +569,7 @@ def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path
     it on every load of the tuning screen. The sweep bounds the table now;
     this is the backstop for the window between two sweeps -- and it is
     never silent (WR-06)."""
-    from spire_voice.routes.wake import MAX_WAKE_EVENTS_IN_RESPONSE
+    from atlas.routes.wake import MAX_WAKE_EVENTS_IN_RESPONSE
 
     client, app_module = _boot_authenticated_client(
         tmp_path, monkeypatch, role="operator", wake_engine="openwakeword"

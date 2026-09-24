@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from spire_voice.calibration.record import (
+from atlas.calibration.record import (
     SCHEMA_VERSION,
     CalibrationError,
     EchoCalibration,

@@ -7,7 +7,7 @@
 // or 503 on some other route.
 import { apiFetch } from "./api"
 
-/** `SetupStep`'s exact shape (`src/spire_voice/routes/auth.py`) -- a name
+/** `SetupStep`'s exact shape (`src/atlas/routes/auth.py`) -- a name
  * and a boolean, never the fuller `detail` object `GET /api/wizard`
  * returns to an authenticated admin. */
 export interface SetupStep {

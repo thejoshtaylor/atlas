@@ -5,8 +5,8 @@ Revises: 0002
 Create Date: 2026-09-18
 
 Creates `provider_credentials` (PROV-04, D-07): one row per credential
-slot in the closed set `spire_voice.crypto.credentials.CredentialSlot`
-names, holding ciphertext only -- `spire_voice.crypto.credentials` is the
+slot in the closed set `atlas.crypto.credentials.CredentialSlot`
+names, holding ciphertext only -- `atlas.crypto.credentials` is the
 one module that ever turns a row here back into a usable value, and only
 at startup (`app.py`'s `lifespan`), never from a route.
 """

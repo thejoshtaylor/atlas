@@ -10,12 +10,12 @@ each from the operator's own, already-deployed configuration (D-11).
 
 This file holds no entity id, no pattern, and no house name of its own. It
 reads them, if any exist, at run time from a file that is not part of this
-repository: the one `SPIRE_CONFIG` names, the same environment variable and
+repository: the one `ATLAS_CONFIG` names, the same environment variable and
 the same default (`config/config.example.yaml`) `app.py` already reads. A
 reader checking SAFE-05 should start here and find nothing to check.
 
 The seed step is the load-bearing half of this migration. Rejecting the
-`safety:` config key (`spire_voice.config.Config.from_config`, this same
+`safety:` config key (`atlas.config.Config.from_config`, this same
 plan) without first carrying an operator's real denylist into the database
 would leave the house with an empty denylist between those two events --
 the exact window this project's prior power-cut incident is about (D-11,
@@ -54,8 +54,8 @@ import sqlalchemy as sa
 import yaml
 from alembic import op
 
-from spire_mcp.safety import Policy
-from spire_voice.config import expand_env
+from atlas_mcp.safety import Policy
+from atlas.config import expand_env
 
 logger = logging.getLogger("alembic.policy_seed")
 
@@ -102,7 +102,7 @@ def _create_tables() -> None:
 
 
 def _read_safety_block(config_path: str) -> dict | None:
-    """Read `config_path` (the file `SPIRE_CONFIG` names) and return its
+    """Read `config_path` (the file `ATLAS_CONFIG` names) and return its
     `safety:` block, or `None` when the file has no such key.
 
     Raises when the file cannot be opened or read at all -- never seeds an
@@ -114,9 +114,9 @@ def _read_safety_block(config_path: str) -> dict | None:
     except OSError as exc:
         raise RuntimeError(
             f"the policy seed migration could not read {config_path!r} (named by "
-            "SPIRE_CONFIG, or its default) to seed the safety policy -- refusing to seed "
+            "ATLAS_CONFIG, or its default) to seed the safety policy -- refusing to seed "
             "an empty denylist silently. Either make the file readable at that path, or "
-            "point SPIRE_CONFIG at the file that holds the safety: block to carry forward."
+            "point ATLAS_CONFIG at the file that holds the safety: block to carry forward."
         ) from exc
 
     raw = yaml.safe_load(expand_env(raw_text)) or {}
@@ -124,7 +124,7 @@ def _read_safety_block(config_path: str) -> dict | None:
 
 
 def _seed_policy() -> None:
-    config_path = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
+    config_path = os.environ.get("ATLAS_CONFIG", "config/config.example.yaml")
     safety_block = _read_safety_block(config_path)
 
     if safety_block is None:

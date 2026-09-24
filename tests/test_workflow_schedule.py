@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from spire_voice.workflow.schedule import ScheduleError, resolve_schedule
+from atlas.workflow.schedule import ScheduleError, resolve_schedule
 
 _UTC_NOON = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)
 

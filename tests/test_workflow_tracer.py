@@ -3,7 +3,7 @@ writes a durable run and step, nothing fires at that moment, and one poll
 after the step's `due_at` fires it through the tool host and writes its
 terminal state in the transaction that claimed it.
 
-Marked `integration` and skipped without `SPIRE_TEST_DATABASE_URL`,
+Marked `integration` and skipped without `ATLAS_TEST_DATABASE_URL`,
 following `tests/test_account_repository_concurrency.py`'s own
 skip/reset/upgrade harness shape exactly.
 
@@ -29,20 +29,20 @@ from mcp.types import CallToolResult, TextContent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import WorkflowConfig
-from spire_voice.db.postgres import PostgresWorkflowRepository
-from spire_voice.workflow.scheduler import WorkflowScheduler
-from spire_voice.workflow.steps import execute_step
-from spire_voice.workflow.tool import WorkflowToolHost
+from atlas.config import WorkflowConfig
+from atlas.db.postgres import PostgresWorkflowRepository
+from atlas.workflow.scheduler import WorkflowScheduler
+from atlas.workflow.steps import execute_step
+from atlas.workflow.tool import WorkflowToolHost
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -80,7 +80,7 @@ def _run_upgrade_head(async_url: str) -> None:
 
 
 def _set_migration_env(monkeypatch) -> None:
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")

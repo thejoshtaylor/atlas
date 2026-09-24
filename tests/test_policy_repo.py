@@ -2,7 +2,7 @@
 would have been, and the snapshot handed to the MCP child must survive that
 round trip unchanged (SAFE-05).
 
-`mcp/spire_mcp/safety.py`'s `Policy.from_config` is the existing, tested
+`mcp/atlas_mcp/safety.py`'s `Policy.from_config` is the existing, tested
 constructor; this phase adds a sibling, `Policy.from_db_rows`, built from
 whatever a policy repository fetches. Nothing today proves the two agree --
 a repository that fetches rows in the wrong order, coerces a type
@@ -10,7 +10,7 @@ differently, or drops a field `from_config` would have kept, would build a
 `Policy` that is silently a different denylist than the one an equivalent
 config block describes, with no test catching the divergence before an
 operator's real house does. The second test guards the boundary one step
-further out: what actually crosses into the MCP child over `SPIRE_SAFETY`
+further out: what actually crosses into the MCP child over `ATLAS_SAFETY`
 is a JSON-serialized snapshot, parsed a second time on the other side
 (`tests/test_policy_reaches_the_child.py` already proves the existing
 config-to-child leg of this; this test proves the database-to-child leg).
@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from spire_mcp.safety import Policy
-from spire_voice.mcp_client import McpToolHost
-from spire_voice.policy_snapshot import safety_block_from_policy
+from atlas_mcp.safety import Policy
+from atlas.mcp_client import McpToolHost
+from atlas.policy_snapshot import safety_block_from_policy
 
 REPO = Path(__file__).resolve().parents[1]
 MCP_ROOT = REPO / "mcp"
@@ -86,7 +86,7 @@ async def test_a_database_only_denied_entity_is_refused_by_the_real_child(fake_p
     that exists only as a `FakePolicyRepository` row -- not in any source
     file -- travels through `safety_block_from_policy`, into a real
     `McpToolHost.start(..., safety_block=block)`-spawned child process over
-    `SPIRE_SAFETY`, and a real `ha_call_service` MCP tool call against that
+    `ATLAS_SAFETY`, and a real `ha_call_service` MCP tool call against that
     entity id comes back refused. No Home Assistant server is needed and
     none is started: `allow_call` raises inside the child before
     `handle_call_service` ever constructs an httpx request at all.

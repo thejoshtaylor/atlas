@@ -2,9 +2,9 @@
 
 ## Project
 
-**spire-voice**
+**ATLAS** (Assistant for Tasks, Logistics, Automation, and Scheduling)
 
-spire-voice is a self-hosted voice assistant for the home. A local wake word starts
+ATLAS is a self-hosted voice assistant for the home. A local wake word starts
 it. Speech, reasoning, and speech synthesis then run through providers the operator
 chooses, which can be cloud services or local models. Every capability it can reach
 is an MCP server, so an operator adds new abilities without a change to the core.
@@ -45,7 +45,7 @@ off limits.
 | Technology | Version | Purpose | Why Recommended |
 |---|---|---|---|
 | **openWakeWord** | 0.6.0 (Feb 2024 — no release since; see caveat below) | Neural wake word detector, ONNX/TFLite models | Zero-shot custom phrase training pipeline, tiny models (~1-2MB), runs on `onnxruntime` CPU with no GPU. `pip install openwakeword`. **Confidence: HIGH** (version/format verified on [GitHub releases](https://github.com/dscripka/openWakeWord/releases) and [README](https://github.com/dscripka/openWakeWord)). |
-| **Vosk** (`vosk` PyPI package) | 0.3.45 (Dec 2022 on PyPI; upstream `alphacep/vosk-api` repo shows commits into Dec 2025 and open PRs/issues through Aug 2026) | Kaldi-descended offline ASR, used here as a grammar-constrained wake detector | Kaldi's telephony heritage (Switchboard/Fisher-style 8kHz training data lineage) makes it far more tolerant of narrowband audio than a model trained on synthetic 16kHz speech. Constraining the decoder grammar to `["hey spire", "[unk]"]` turns a full ASR engine into a cheap, low-false-positive wake detector. **Confidence: MEDIUM** (PyPI version is stale-looking, but upstream repo activity is current — the PyPI package lag is a packaging-hygiene issue, not a project-health one). |
+| **Vosk** (`vosk` PyPI package) | 0.3.45 (Dec 2022 on PyPI; upstream `alphacep/vosk-api` repo shows commits into Dec 2025 and open PRs/issues through Aug 2026) | Kaldi-descended offline ASR, used here as a grammar-constrained wake detector | Kaldi's telephony heritage (Switchboard/Fisher-style 8kHz training data lineage) makes it far more tolerant of narrowband audio than a model trained on synthetic 16kHz speech. Constraining the decoder grammar to `["hey atlas", "[unk]"]` turns a full ASR engine into a cheap, low-false-positive wake detector. **Confidence: MEDIUM** (PyPI version is stale-looking, but upstream repo activity is current — the PyPI package lag is a packaging-hygiene issue, not a project-health one). |
 
 ### The 8kHz narrowband question, explicitly
 

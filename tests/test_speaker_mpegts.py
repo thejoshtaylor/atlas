@@ -7,7 +7,7 @@ session. Pure and deterministic -- no camera, no pytapo, no network.
 
 from __future__ import annotations
 
-from spire_voice.speaker.mpegts import PesState, build_header, get_payload
+from atlas.speaker.mpegts import PesState, build_header, get_payload
 
 PAT_PREFIX_HEX = "474000100000b00d0001c100000001f0002ab104b2"
 PMT_PREFIX_HEX = "475000100002b0120001c10000fffff00090e100f0005631e8cd"

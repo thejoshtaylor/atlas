@@ -20,7 +20,7 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from spire_voice.session.retention import RemovedSession, RetentionScheduler, sweep_expired_sessions
+from atlas.session.retention import RemovedSession, RetentionScheduler, sweep_expired_sessions
 
 _NOW = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -109,7 +109,7 @@ def test_an_undeletable_directory_is_logged_and_the_run_continues_past_it(tmp_pa
             raise OSError("simulated: directory held open")
         shutil.rmtree(path)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.session.retention"):
+    with caplog.at_level(logging.WARNING, logger="atlas.session.retention"):
         removed = sweep_expired_sessions(tmp_path, retain_days=7, clock=lambda: _NOW, remove=failing_for_stuck)
 
     assert stuck.exists()
@@ -121,7 +121,7 @@ def test_an_undeletable_directory_is_logged_and_the_run_continues_past_it(tmp_pa
 def test_a_run_with_nothing_to_remove_still_logs_that_it_ran(tmp_path, caplog):
     _make_session(tmp_path, _NOW - timedelta(days=1))  # well within the window
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.session.retention"):
+    with caplog.at_level(logging.INFO, logger="atlas.session.retention"):
         removed = sweep_expired_sessions(tmp_path, retain_days=7, clock=lambda: _NOW)
 
     assert removed == []
@@ -226,7 +226,7 @@ async def test_cancelling_the_schedule_stops_further_sweeps(tmp_path):
 
 
 async def test_a_sweep_that_raises_is_logged_and_the_schedule_continues(tmp_path, caplog, monkeypatch):
-    import spire_voice.session.retention as retention_module
+    import atlas.session.retention as retention_module
 
     call_count = {"n": 0}
     real_sweep = sweep_expired_sessions
@@ -247,7 +247,7 @@ async def test_a_sweep_that_raises_is_logged_and_the_schedule_continues(tmp_path
         sleep=_instant_sleep,
     )
 
-    with caplog.at_level(logging.ERROR, logger="spire_voice.session.retention"):
+    with caplog.at_level(logging.ERROR, logger="atlas.session.retention"):
         scheduler.start()
         try:
             await _wait_for(lambda: call_count["n"] >= 2)
@@ -296,7 +296,7 @@ async def test_the_schedule_sweeps_wake_events_on_the_same_window(tmp_path, capl
         wake_event_repo=repo,
     )
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.session.retention"):
+    with caplog.at_level(logging.INFO, logger="atlas.session.retention"):
         scheduler.start()
         try:
             await _wait_for(lambda: len(repo.cutoffs) >= 2)
@@ -327,7 +327,7 @@ async def test_a_wake_event_sweep_that_raises_does_not_stop_the_directory_sweep(
         wake_event_repo=_RaisingWakeEventRepo(),
     )
 
-    with caplog.at_level(logging.ERROR, logger="spire_voice.session.retention"):
+    with caplog.at_level(logging.ERROR, logger="atlas.session.retention"):
         scheduler.start()
         try:
             await _wait_for(lambda: not expired.exists())

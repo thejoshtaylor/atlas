@@ -36,9 +36,9 @@ score_wake_engines = importlib.util.module_from_spec(_spec)
 sys.modules["score_wake_engines"] = score_wake_engines
 _spec.loader.exec_module(score_wake_engines)
 
-from spire_voice.config import OpenWakeWordConfig
-from spire_voice.wake.base import WakeError, WakeHit
-from spire_voice.wake.openwakeword_engine import OpenWakeWordDetector
+from atlas.config import OpenWakeWordConfig
+from atlas.wake.base import WakeError, WakeHit
+from atlas.wake.openwakeword_engine import OpenWakeWordDetector
 
 
 # --- fixtures --------------------------------------------------------------
@@ -269,12 +269,12 @@ def test_score_engine_over_corpus_resets_the_detector_between_recordings():
 
 def test_build_engine_returns_engine_unavailable_with_named_cause_when_factory_raises_wake_error():
     def _boom():
-        raise WakeError("model not present at /models/hey_spire.onnx")
+        raise WakeError("model not present at /models/hey_atlas.onnx")
 
     result = score_wake_engines.build_engine(_boom)
 
     assert isinstance(result, score_wake_engines.EngineUnavailable)
-    assert "hey_spire.onnx" in result.reason
+    assert "hey_atlas.onnx" in result.reason
 
 
 def test_build_engine_returns_the_constructed_detector_when_the_factory_succeeds():
@@ -286,13 +286,13 @@ def test_build_engine_returns_the_constructed_detector_when_the_factory_succeeds
 
 
 def test_score_engine_over_corpus_reports_an_unavailable_engine_without_dropping_it():
-    unavailable = score_wake_engines.EngineUnavailable(reason="model not present at /models/hey_spire.onnx")
+    unavailable = score_wake_engines.EngineUnavailable(reason="model not present at /models/hey_atlas.onnx")
 
     report = score_wake_engines.score_engine_over_corpus(unavailable, "openwakeword", [])
 
     assert report.name == "openwakeword"
     assert report.available is False
-    assert "hey_spire.onnx" in report.unavailable_reason
+    assert "hey_atlas.onnx" in report.unavailable_reason
 
 
 def test_score_all_engines_keeps_an_unavailable_engine_in_the_report():
@@ -334,7 +334,7 @@ def test_openwakeword_detector_satisfies_the_wake_detector_protocol(tmp_path, mo
             return {self.model_name: 0.9}
 
     monkeypatch.setattr(openwakeword, "Model", _FakeModel)
-    model_path = tmp_path / "hey_spire.onnx"
+    model_path = tmp_path / "hey_atlas.onnx"
     model_path.write_bytes(b"not a real model -- only the path needs to exist for this test")
     config = OpenWakeWordConfig(model_path=str(model_path), threshold=0.5, trigger_frames=1)
 
@@ -405,7 +405,7 @@ def _set_config_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # plain passthrough values above, so it cannot share the "test-value"
     # placeholder the other six use.
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+        "DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
     )
     # Phase 7 (D-15): security.cookie_secure is unquoted in
     # config.example.yaml, so expansion must produce a real YAML boolean

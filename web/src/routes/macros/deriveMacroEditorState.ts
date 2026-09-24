@@ -38,7 +38,7 @@ export function deriveMacroEditorState(query: QueryLike<Macro> | null): MacroEdi
   return { kind: "ready", macro: query.data }
 }
 
-// A deliberately advisory mirror of `spire_voice.turn.macros.normalize`
+// A deliberately advisory mirror of `atlas.turn.macros.normalize`
 // (NFKC fold, case fold, the same punctuation class, whitespace
 // collapse) -- not byte-identical (JS has no `casefold()`, so
 // `toLowerCase()` stands in for it), and it does not need to be: this

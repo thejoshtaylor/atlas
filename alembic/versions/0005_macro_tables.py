@@ -14,14 +14,14 @@ collection, not a second copy of the first.
 
 This file holds no phrase, no entity id, and no house name of its own. It
 reads them, if any exist, at run time from a file that is not part of this
-repository: the one `SPIRE_CONFIG` names, the same environment variable and
+repository: the one `ATLAS_CONFIG` names, the same environment variable and
 the same default (`config/config.example.yaml`) `app.py` already reads. A
 reader checking D-09 should start here and find nothing to check.
 
 The seed step is the load-bearing half of this migration, for the exact
 reason `0001`'s own docstring gives and Phase 3's code review (CR-01) once
 paid for getting backwards: rejecting the `macros:` config key
-(`spire_voice.config.Config.from_config`) without first carrying an
+(`atlas.config.Config.from_config`) without first carrying an
 operator's real macros into the database would leave the house with none
 of them between those two events. So: read the file through
 `MacroConfig.from_config` -- one parser, the same one `config.py` already
@@ -36,7 +36,7 @@ the file parser would have rejected is a macro that can shadow another one
 at runtime with nothing having ever validated the pair -- the exact defect
 this check exists to prevent, reached through a new door once macros can
 also arrive from a browser (plan 04-06). `Macro.normalized_keys`
-(`spire_voice.db.repository`) is what lets this same function keep
+(`atlas.db.repository`) is what lets this same function keep
 guarding the database path once a route calls it there, with no change to
 the function itself.
 
@@ -75,7 +75,7 @@ import sqlalchemy as sa
 import yaml
 from alembic import op
 
-from spire_voice.config import MacroConfig, _check_macros_do_not_collide, expand_env
+from atlas.config import MacroConfig, _check_macros_do_not_collide, expand_env
 
 logger = logging.getLogger("alembic.macro_seed")
 
@@ -136,7 +136,7 @@ def _create_tables() -> None:
 
 
 def _read_macros_block(config_path: str) -> list | None:
-    """Read `config_path` (the file `SPIRE_CONFIG` names) and return its
+    """Read `config_path` (the file `ATLAS_CONFIG` names) and return its
     `macros:` list, or `None` when the file has no such key.
 
     Raises when the file cannot be opened or read at all -- never seeds
@@ -149,8 +149,8 @@ def _read_macros_block(config_path: str) -> list | None:
     except OSError as exc:
         raise RuntimeError(
             f"the macro seed migration could not read {config_path!r} (named by "
-            "SPIRE_CONFIG, or its default) to seed macros -- refusing to seed nothing "
-            "silently. Either make the file readable at that path, or point SPIRE_CONFIG "
+            "ATLAS_CONFIG, or its default) to seed macros -- refusing to seed nothing "
+            "silently. Either make the file readable at that path, or point ATLAS_CONFIG "
             "at the file that holds the macros: block to carry forward."
         ) from exc
 
@@ -159,7 +159,7 @@ def _read_macros_block(config_path: str) -> list | None:
 
 
 def _seed_macros() -> None:
-    config_path = os.environ.get("SPIRE_CONFIG", "config/config.example.yaml")
+    config_path = os.environ.get("ATLAS_CONFIG", "config/config.example.yaml")
     macros_raw = _read_macros_block(config_path)
 
     if macros_raw is None:

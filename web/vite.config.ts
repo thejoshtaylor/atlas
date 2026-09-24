@@ -12,7 +12,7 @@ export default defineConfig({
     },
   },
   build: {
-    // src/spire_voice/app.py's `app.frontend("/", directory="web/dist")`
+    // src/atlas/app.py's `app.frontend("/", directory="web/dist")`
     // (plan 03-05) reads from this exact path -- a rename here breaks
     // serving there.
     outDir: 'dist',

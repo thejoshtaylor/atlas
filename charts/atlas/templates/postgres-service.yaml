@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "atlas.postgres.fullname" . }}
+  labels:
+    {{- include "atlas.postgres.labels" . | nindent 4 }}
+spec:
+  # Headless -- StatefulSet's own DNS identity, reachable only inside the
+  # cluster. No node port, ever: this is not meant to be reached from
+  # outside the release (T-07-39, T-07-41).
+  clusterIP: None
+  selector:
+    {{- include "atlas.postgres.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

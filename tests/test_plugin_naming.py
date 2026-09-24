@@ -12,8 +12,8 @@ from __future__ import annotations
 import pytest
 from mcp.types import Tool
 
-from spire_voice.mcp_client import AmbiguousToolError, McpToolHostLookup
-from spire_voice.plugins.naming import (
+from atlas.mcp_client import AmbiguousToolError, McpToolHostLookup
+from atlas.plugins.naming import (
     NAME_SEPARATOR,
     PluginTool,
     PluginTools,

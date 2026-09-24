@@ -23,13 +23,13 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig, SessionConfig
-from spire_voice.routes.sessions import _resolve_readable_session_directory
-from spire_voice.routes.sessions import router as sessions_router
-from spire_voice.session.recorder import EVENTS_FILENAME, SessionRecorder
-from spire_voice.session.retention import parse_session_timestamp
-from spire_voice.timing import TurnTimings
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig, SessionConfig
+from atlas.routes.sessions import _resolve_readable_session_directory
+from atlas.routes.sessions import router as sessions_router
+from atlas.session.recorder import EVENTS_FILENAME, SessionRecorder
+from atlas.session.retention import parse_session_timestamp
+from atlas.timing import TurnTimings
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 

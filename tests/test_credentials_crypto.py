@@ -9,7 +9,7 @@ at all: the whole point of write-only is that a compromised admin session,
 or a bug in a response serializer that includes one field too many, cannot
 leak the plaintext back out over the same channel that would leak the leak.
 The second test guards the storage layer directly: a row read straight out
-of the database, with no `SPIRE_SECRET_KEY`, must not be interpretable as
+of the database, with no `ATLAS_SECRET_KEY`, must not be interpretable as
 the original credential -- proving the encryption is real, not a
 base64-shaped no-op.
 """
@@ -24,20 +24,20 @@ from fastapi.testclient import TestClient
 
 from cryptography.fernet import InvalidToken
 
-from spire_voice.auth.tokens import _CREDENTIAL_ENCRYPTION_INFO, _JWT_SIGNING_INFO, _derive_key
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig, read_secret_key
-from spire_voice.crypto.credentials import (
+from atlas.auth.tokens import _CREDENTIAL_ENCRYPTION_INFO, _JWT_SIGNING_INFO, _derive_key
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig, read_secret_key
+from atlas.crypto.credentials import (
     CredentialSlot,
     decrypt_credential,
     encrypt_credential,
     resolve_credential_source,
     resolve_credential_value,
 )
-from spire_voice.routes.accounts import router as accounts_router
-from spire_voice.routes.auth import router as auth_router, setup_router
-from spire_voice.routes.credentials import router as credentials_router
-from spire_voice.routes.policy import router as policy_router
+from atlas.routes.accounts import router as accounts_router
+from atlas.routes.auth import router as auth_router, setup_router
+from atlas.routes.credentials import router as credentials_router
+from atlas.routes.policy import router as policy_router
 
 import conftest
 from test_auth_roles import _flatten_routes
@@ -52,7 +52,7 @@ _REAL_SECRET_VALUE = "correct horse battery staple, definitely not a real key"
 
 def _fake_config() -> SimpleNamespace:
     """A `Config`-shaped stand-in carrying only what
-    `spire_voice.crypto.credentials.env_value_for_slot` reads -- every
+    `atlas.crypto.credentials.env_value_for_slot` reads -- every
     provider slot's environment fallback is empty, and the Home Assistant
     slot has no declared server block, matching a fresh install with
     nothing in the environment either."""
@@ -66,7 +66,7 @@ def _fake_config() -> SimpleNamespace:
         # (`find_latest_calibration(config.calibration.dir)`) -- a
         # directory that does not exist reads as "no calibration yet"
         # (`find_latest_calibration`'s own docstring), never an error.
-        calibration=SimpleNamespace(dir="/tmp/spire-test-no-such-calibration-dir"),
+        calibration=SimpleNamespace(dir="/tmp/atlas-test-no-such-calibration-dir"),
     )
 
 
@@ -112,7 +112,7 @@ def test_a_saved_credential_never_comes_back_from_any_route(
     route-coverage test is one: the failure mode is the one route
     somebody forgot.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -181,7 +181,7 @@ def test_a_stored_credential_is_unreadable_without_the_key(monkeypatch):
     """A stored ciphertext cannot be decrypted with a different secret,
     and a corrupted ciphertext raises rather than returning something
     that looks like it worked."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     ciphertext, key_version = encrypt_credential(_REAL_SECRET_VALUE, security)
 
@@ -194,25 +194,25 @@ def test_a_stored_credential_is_unreadable_without_the_key(monkeypatch):
     assert decrypt_credential(ciphertext, key_version, security) == _REAL_SECRET_VALUE
 
     # A different secret cannot decrypt it.
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _OTHER_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _OTHER_SECRET_KEY)
     different_security = SecurityConfig()
     with pytest.raises(InvalidToken):
         decrypt_credential(ciphertext, key_version, different_security)
 
     # A corrupted ciphertext raises rather than returning something.
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     corrupted = ciphertext[:-1] + (b"\x00" if ciphertext[-1:] != b"\x00" else b"\x01")
     with pytest.raises(InvalidToken):
         decrypt_credential(corrupted, key_version, security)
 
 
 def test_the_credential_key_and_the_jwt_signing_key_derive_independently(monkeypatch):
-    """One operator-supplied `SPIRE_SECRET_KEY` yields two different
+    """One operator-supplied `ATLAS_SECRET_KEY` yields two different
     derived values -- the credential-encryption key
-    (`spire_voice.crypto.credentials`) and the JWT signing key
-    (`spire_voice.auth.tokens`) -- under two distinct HKDF labels, so
+    (`atlas.crypto.credentials`) and the JWT signing key
+    (`atlas.auth.tokens`) -- under two distinct HKDF labels, so
     neither can be used to attack the other."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     secret = read_secret_key(security)
 
@@ -228,7 +228,7 @@ def test_a_write_to_an_unknown_slot_is_refused(
     """The slot set is closed and defined in code -- a write to a name
     outside `CredentialSlot` is refused before it ever reaches
     `provider_credentials`."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     policy_repo = fake_policy_repository()
@@ -257,32 +257,32 @@ def test_a_write_to_an_unknown_slot_is_refused(
 
 
 def test_a_missing_secret_key_raises_configerror_naming_the_variable(monkeypatch):
-    """A missing `SPIRE_SECRET_KEY` raises `ConfigError` naming the
+    """A missing `ATLAS_SECRET_KEY` raises `ConfigError` naming the
     variable at the moment a credential is read or written, never a
     silently generated ephemeral key -- an encryption key that changes on
     every restart would make every previously-encrypted credential
     permanently unreadable.
 
-    `ConfigError` is read off `spire_voice.config` fresh, here, rather
+    `ConfigError` is read off `atlas.config` fresh, here, rather
     than the name this file imported at collection time --
     `tests/test_config.py::test_config_and_turn_macros_import_in_either_order`
-    reloads `spire_voice.config`, which mints a *new* `ConfigError` class
-    distinct from the one a module-level `from spire_voice.config import
+    reloads `atlas.config`, which mints a *new* `ConfigError` class
+    distinct from the one a module-level `from atlas.config import
     ConfigError` bound before that reload ran. `read_secret_key` itself
     always raises whatever class is currently bound in `config.py`'s own
     namespace, so a stale import here would build a `pytest.raises` that
     can never match it once that reload has run earlier in the same test
     session (the exact gotcha `tests/test_startup_smoke.py` documents for
     `app_module.ConfigError`)."""
-    import spire_voice.config as config_module
+    import atlas.config as config_module
 
-    monkeypatch.delenv("SPIRE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ATLAS_SECRET_KEY", raising=False)
     security = SecurityConfig()
 
-    with pytest.raises(config_module.ConfigError, match="SPIRE_SECRET_KEY"):
+    with pytest.raises(config_module.ConfigError, match="ATLAS_SECRET_KEY"):
         encrypt_credential(_REAL_SECRET_VALUE, security)
 
-    with pytest.raises(config_module.ConfigError, match="SPIRE_SECRET_KEY"):
+    with pytest.raises(config_module.ConfigError, match="ATLAS_SECRET_KEY"):
         decrypt_credential(b"not-a-real-ciphertext", 1, security)
 
 
@@ -302,7 +302,7 @@ def _config_with_env_value(value: str) -> SimpleNamespace:
 
 
 async def test_a_value_in_both_places_the_database_wins(monkeypatch, fake_credential_repository):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     repo = fake_credential_repository()
     ciphertext, key_version = encrypt_credential("the-database-value", security)
@@ -329,7 +329,7 @@ async def test_a_value_in_both_places_the_database_wins(monkeypatch, fake_creden
 async def test_a_value_in_only_the_environment_is_used_and_reported(
     monkeypatch, fake_credential_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     repo = fake_credential_repository()  # empty -- no database row
     config = SimpleNamespace(
@@ -347,7 +347,7 @@ async def test_a_value_in_only_the_environment_is_used_and_reported(
 
 
 async def test_neither_source_is_unset(monkeypatch, fake_credential_repository):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     repo = fake_credential_repository()
     config = SimpleNamespace(security=security, **_config_with_env_value("").__dict__)
@@ -384,16 +384,16 @@ def test_the_home_assistant_token_is_written_where_the_assistant_reads_it(
     import asyncio
     from datetime import datetime, timezone
 
-    from spire_voice.db.repository import Plugin, PluginConfigValue
-    from spire_voice.routes.wizard import _ha_plugin_connection_info
+    from atlas.db.repository import Plugin, PluginConfigValue
+    from atlas.routes.wizard import _ha_plugin_connection_info
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     now = datetime.now(timezone.utc)
     ha = Plugin(
         id=1, slug="ha", display_name="Home Assistant", transport="stdio",
-        args=("-m", "spire_mcp.ha"), url=None, enabled=True, builtin=True,
+        args=("-m", "atlas_mcp.ha"), url=None, enabled=True, builtin=True,
         enforces_policy=True, timeout_ms=5000, created_at=now, updated_at=now,
         created_by_user_id=None,
     )

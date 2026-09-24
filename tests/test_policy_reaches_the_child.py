@@ -1,6 +1,6 @@
 """The policy the operator writes must reach the process that enforces it.
 
-`mcp/spire_mcp/ha.py` is the only process that calls Home Assistant, so its
+`mcp/atlas_mcp/ha.py` is the only process that calls Home Assistant, so its
 `Policy` is the one that decides. It once hardcoded `Policy.from_config(None)`
 and never saw the `safety:` block at all: `config.py` parsed the block into
 `Config.policy`, and nothing read that field. A denylist written by an
@@ -32,7 +32,7 @@ def _child_policy_probe(env_extra: dict[str, str]) -> subprocess.CompletedProces
     code = textwrap.dedent(
         """
         import json
-        import spire_mcp.ha as ha
+        import atlas_mcp.ha as ha
         p = ha._policy
         print(json.dumps({
             "mode": p.mode,
@@ -60,7 +60,7 @@ def test_child_applies_the_safety_block_it_is_given():
         "deny_entities": ["switch.example_server_socket"],
         "deny_patterns": ["switch.example_camera_*"],
     }
-    proc = _child_policy_probe({"SPIRE_SAFETY": json.dumps(block)})
+    proc = _child_policy_probe({"ATLAS_SAFETY": json.dumps(block)})
     assert proc.returncode == 0, proc.stderr
     got = json.loads(proc.stdout.strip().splitlines()[-1])
     assert "switch.example_server_socket" in got["deny_entities"], (
@@ -85,13 +85,13 @@ def test_child_refuses_to_start_on_a_malformed_block():
     That degradation is the silent failure this whole module exists to close:
     a denylist that looks configured and enforces nothing.
     """
-    proc = _child_policy_probe({"SPIRE_SAFETY": "{not json"})
+    proc = _child_policy_probe({"ATLAS_SAFETY": "{not json"})
     assert proc.returncode != 0, "a malformed policy must not start"
-    assert "SPIRE_SAFETY" in proc.stderr
+    assert "ATLAS_SAFETY" in proc.stderr
 
-    proc = _child_policy_probe({"SPIRE_SAFETY": json.dumps(["not", "a", "mapping"])})
+    proc = _child_policy_probe({"ATLAS_SAFETY": json.dumps(["not", "a", "mapping"])})
     assert proc.returncode != 0, "a non-mapping policy must not start"
-    assert "SPIRE_SAFETY" in proc.stderr
+    assert "ATLAS_SAFETY" in proc.stderr
 
 
 def test_app_forwards_the_raw_block_rather_than_reserializing_policy():
@@ -109,7 +109,7 @@ def test_app_forwards_the_raw_block_rather_than_reserializing_policy():
     """
     import inspect
 
-    import spire_voice.app as app_mod
+    import atlas.app as app_mod
 
     source = inspect.getsource(app_mod.lifespan)
     assert "safety_block_from_policy(await policy_repo.load_policy())" in source, (

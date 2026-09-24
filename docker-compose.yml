@@ -23,20 +23,20 @@ services:
     # starts. One shared image serves both deployment targets; only
     # Compose needs this particular script.
     entrypoint: ["/deploy/docker-entrypoint.sh"]
-    command: ["python", "-m", "spire_voice.app"]
+    command: ["python", "-m", "atlas.app"]
     volumes:
       - ./deploy/docker-entrypoint.sh:/deploy/docker-entrypoint.sh:ro
-      - spire-data:/data
-      - spire-models:/models
+      - atlas-data:/data
+      - atlas-models:/models
     ports:
       # Bound to the host's own loopback address, not every interface.
       # Nothing off this host can reach the port, so the session cookie
       # never crosses a real network out of the box -- this is what bounds
       # COOKIE_SECURE=false below. An operator who widens this (for
-      # example to "0.0.0.0:${SPIRE_PORT:-8080}:8080") must also set
+      # example to "0.0.0.0:${ATLAS_PORT:-8080}:8080") must also set
       # COOKIE_SECURE=true and terminate TLS in front of this port; see
       # README.md.
-      - "127.0.0.1:${SPIRE_PORT:-8080}:8080"
+      - "127.0.0.1:${ATLAS_PORT:-8080}:8080"
     environment:
       # Every ${VAR} config/config.example.yaml names, each with a
       # fallback -- expansion raises by name on a variable that is
@@ -44,7 +44,7 @@ services:
       # first missing one without this block. An empty provider
       # credential is the unset-credential state the application already
       # handles (D-04); an absent variable is a startup error.
-      DATABASE_URL: "postgresql+asyncpg://spire:${POSTGRES_PASSWORD:-changeme}@db:5432/spire"
+      DATABASE_URL: "postgresql+asyncpg://atlas:${POSTGRES_PASSWORD:-changeme}@db:5432/atlas"
       # 0.0.0.0, not the config file's own dev default of 127.0.0.1: a
       # process bound to the container's own loopback interface is not
       # reachable through Docker's port publishing at all. Reachability
@@ -70,7 +70,7 @@ services:
       # switch. Safe default false, same as the shipped config.
       CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"
       # Comma-separated words speech-to-text is biased toward (stt.keyterms).
-      STT_KEYTERMS: "${STT_KEYTERMS:-Spire}"
+      STT_KEYTERMS: "${STT_KEYTERMS:-Atlas}"
       # Only read by speaker/tapo_talk.py, and only when speaker.backend is
       # set to tapo_talk in config.yaml -- unused (and safe to leave unset)
       # on the default go2rtc path.
@@ -78,8 +78,8 @@ services:
       # D-16: read by deploy/docker-entrypoint.sh, not by config.py's own
       # ${VAR} expansion -- an operator-supplied override takes effect
       # unchanged; left unset, the entrypoint generates and persists one.
-      SPIRE_SECRET_KEY: "${SPIRE_SECRET_KEY:-}"
-      SPIRE_DATA_DIR: /data
+      ATLAS_SECRET_KEY: "${ATLAS_SECRET_KEY:-}"
+      ATLAS_DATA_DIR: /data
     depends_on:
       db:
         condition: service_healthy
@@ -93,26 +93,26 @@ services:
     # 07-RESEARCH.md's own Bitnami-image finding for why.
     image: postgres:18
     environment:
-      POSTGRES_USER: spire
+      POSTGRES_USER: atlas
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
-      POSTGRES_DB: spire
+      POSTGRES_DB: atlas
     # postgres:18's own image places data in a major-version-specific
     # subdirectory it manages itself (`pg_ctlcluster`-compatible layout,
     # docker-library/postgres#1259) -- the mount point is the parent
     # directory, not .../data directly, confirmed against a real
     # `docker run` of this exact image this session.
     volumes:
-      - spire-db-data:/var/lib/postgresql
+      - atlas-db-data:/var/lib/postgresql
     # No `ports:` entry at all -- reachable only on the Compose network,
     # which is what bounds the default password above. An operator who
     # needs to reach it directly uses `docker compose exec db psql ...`.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spire -d spire"]
+      test: ["CMD-SHELL", "pg_isready -U atlas -d atlas"]
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  spire-data:
-  spire-models:
-  spire-db-data:
+  atlas-data:
+  atlas-models:
+  atlas-db-data:

@@ -11,7 +11,7 @@ stay -- they still carry url, model, voice and codec -- only the *choice
 of implementation* moves here.
 
 All three slots are seeded unconditionally with `"xai"`, the one entry
-every registry holds this plan (`spire_voice.providers.registry`) and the
+every registry holds this plan (`atlas.providers.registry`) and the
 only implementation `config.example.yaml` has ever configured for any of
 them. Unlike `0008_plugin_tables.py`'s seed-then-reject shape, there is no
 legacy config key naming a provider *choice* to migrate away from -- this

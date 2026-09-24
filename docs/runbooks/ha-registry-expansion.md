@@ -4,7 +4,7 @@ This runbook exists because of one finding this project could not check against 
 real house: Home Assistant's REST API has no endpoint for the area, device, or
 label registry. Only the WebSocket API answers those. Official documentation and
 independent community reports both say so, but neither is the same as watching a
-real Home Assistant answer the four registry commands `mcp/spire_mcp/registry.py`
+real Home Assistant answer the four registry commands `mcp/atlas_mcp/registry.py`
 depends on. Run the probe below once, against your own instance, before trusting
 that "turn off everything in the office" reaches the right switches.
 
@@ -101,7 +101,7 @@ If this happens:
 
 ## What the child holds, and does not
 
-`mcp/spire_mcp/registry.py` reaches Home Assistant over this same WebSocket
+`mcp/atlas_mcp/registry.py` reaches Home Assistant over this same WebSocket
 connection using the one `HA_TOKEN` the child already holds for its existing
 REST calls -- no second credential, no environment variable beyond `HA_URL` and
 `HA_TOKEN`, and no database connection of any kind (SAFE-09). This probe script

@@ -10,7 +10,7 @@ block. Task 3 adds turn-level cases below, driving the real `run_turn`.
 import pytest
 from pydantic import ValidationError
 
-from spire_voice.providers.tier_reply import FillerPhrase, TierReply
+from atlas.providers.tier_reply import FillerPhrase, TierReply
 
 
 def test_a_reply_asking_which_entity_with_two_candidates_validates():
@@ -95,7 +95,7 @@ def test_an_ordinary_needs_tool_reply_is_unchanged_by_the_new_fields():
 def test_the_same_candidate_list_produces_the_same_clarifying_sentence_twice():
     """Composed in code, never through a second model round (D-14): the
     same candidates, in the same order, always produce the same sentence."""
-    from spire_voice.turn.controller import _compose_clarifying_question
+    from atlas.turn.controller import _compose_clarifying_question
 
     candidates = ("light.example_lamp", "light.example_desk_lamp")
     first = _compose_clarifying_question(candidates, {})
@@ -117,10 +117,10 @@ async def test_a_needs_clarification_winner_speaks_a_question_and_makes_no_tool_
     import asyncio
     from types import SimpleNamespace
 
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     class _RecordingToolHost:
         def __init__(self) -> None:
@@ -201,10 +201,10 @@ async def test_a_needs_clarification_question_prefers_friendly_names_from_inject
     says out loud."""
     import asyncio
 
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     async def _state_fetch():
         return [
@@ -324,7 +324,7 @@ def test_compose_clarifying_question_over_two_run_summaries_names_both_in_order(
     `friendly_names` (that mapping is built from entity state, never from
     workflow runs), so this is the existing fallback path, not new
     behavior."""
-    from spire_voice.turn.controller import _compose_clarifying_question
+    from atlas.turn.controller import _compose_clarifying_question
 
     candidates = ("turn off the porch light", "start the coffee maker")
     question = _compose_clarifying_question(candidates, {})
@@ -390,7 +390,7 @@ def test_compose_clarifying_question_over_two_plugin_names_names_both_in_order()
     no entry in `friendly_names` (that mapping is built from entity
     state, never from installed plugins), so this is the existing
     fallback path, not new behavior."""
-    from spire_voice.turn.controller import _compose_clarifying_question
+    from atlas.turn.controller import _compose_clarifying_question
 
     candidates = ("Weather", "Garden Sensors")
     question = _compose_clarifying_question(candidates, {})

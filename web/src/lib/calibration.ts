@@ -1,6 +1,6 @@
 // Typed access to the two routes Phase 2 already built --
 // `GET /calibration/echo-path` and `POST /calibration/echo-path/run`
-// (`src/spire_voice/app.py`, `_calibration_response`) -- through plan
+// (`src/atlas/app.py`, `_calibration_response`) -- through plan
 // 03-03's fetch seam (`./api.ts`). There is one implementation of the
 // echo-path measurement, and it is on the server; this module is a
 // second caller of it, never a second measurement.

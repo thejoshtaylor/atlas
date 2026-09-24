@@ -1,7 +1,7 @@
 // The accounts and invites surface: who has access, the role each of
 // them has, and the invites waiting to be accepted (WEB-04, WEB-05,
 // 03-08 Task 1). Every route here matches
-// `src/spire_voice/routes/accounts.py` exactly -- field names copied
+// `src/atlas/routes/accounts.py` exactly -- field names copied
 // verbatim from its response models, not renamed to a convention of this
 // module's own invention.
 import type { UseMutationOptions } from "@tanstack/react-query"

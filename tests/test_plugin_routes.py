@@ -1,7 +1,7 @@
 """Plugin authoring over HTTP (D-01 .. D-16, PLUG-03, PLUG-04, PLUG-08).
 
 Every test here builds a small, throwaway `FastAPI()` app carrying only
-`spire_voice.routes.plugins`'s own router -- the same "primitives in
+`atlas.routes.plugins`'s own router -- the same "primitives in
 isolation" shape `tests/test_policy_routes.py` already uses, since this
 file's whole point is the plugin routes themselves, not the rest of the
 application.
@@ -25,11 +25,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mcp.types import Tool
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig
-from spire_voice.plugins import manager as manager_module
-from spire_voice.plugins.manager import PluginManager, PluginState
-from spire_voice.routes.plugins import router as plugins_router
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig
+from atlas.plugins import manager as manager_module
+from atlas.plugins.manager import PluginManager, PluginState
+from atlas.routes.plugins import router as plugins_router
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
@@ -126,18 +126,18 @@ def _admin_client(app, security, account_repo):
 def test_listing_plugins_never_returns_a_secret_value(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.crypto.credentials import encrypt_credential
-    from spire_voice.db.repository import Plugin
+    from atlas.crypto.credentials import encrypt_credential
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     ciphertext, key_version = encrypt_credential("a-real-secret-token", security)
     now = datetime.now(timezone.utc)
     ha = Plugin(
-        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "atlas_mcp.ha"),
         url=None, enabled=True, builtin=True, enforces_policy=True, timeout_ms=5000,
         created_at=now, updated_at=now, created_by_user_id=None,
     )
@@ -145,7 +145,7 @@ def test_listing_plugins_never_returns_a_secret_value(
         plugins=[ha],
         config_values={
             1: [
-                __import__("spire_voice.db.repository", fromlist=["PluginConfigValue"]).PluginConfigValue(
+                __import__("atlas.db.repository", fromlist=["PluginConfigValue"]).PluginConfigValue(
                     key="HA_TOKEN", secret=True, value=None, ciphertext=ciphertext, key_version=key_version
                 ),
             ]
@@ -171,7 +171,7 @@ def test_listing_plugins_never_returns_a_secret_value(
 def test_get_unknown_plugin_is_a_named_404(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -188,7 +188,7 @@ def test_get_unknown_plugin_is_a_named_404(
 def test_installing_from_the_catalog_creates_a_row_and_reconciles_live(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -207,7 +207,7 @@ def test_installing_from_the_catalog_creates_a_row_and_reconciles_live(
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["transport"] == "stdio"
-    assert body["args"] == ["-m", "spire_mcp.weather"]
+    assert body["args"] == ["-m", "atlas_mcp.weather"]
     assert body["display_name"] == "Weather"
     assert body["slug"] == "weather"
     assert body["builtin"] is False
@@ -221,7 +221,7 @@ def test_installing_from_the_catalog_creates_a_row_and_reconciles_live(
 def test_installing_from_the_catalog_with_a_secret_left_blank_is_not_set(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -242,7 +242,7 @@ def test_installing_from_the_catalog_with_a_secret_left_blank_is_not_set(
 def test_installing_from_the_catalog_refuses_an_undeclared_config_key(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -262,7 +262,7 @@ def test_installing_from_the_catalog_refuses_an_undeclared_config_key(
 def test_installing_an_unknown_catalog_entry_is_refused_by_name(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -279,7 +279,7 @@ def test_installing_an_unknown_catalog_entry_is_refused_by_name(
 def test_installing_by_a_hand_entered_command_creates_a_stdio_row(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -305,7 +305,7 @@ def test_installing_by_a_hand_entered_command_creates_a_stdio_row(
 def test_a_command_naming_an_interpreter_is_refused(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -329,7 +329,7 @@ def test_a_command_naming_an_interpreter_is_refused(
 def test_installing_by_a_hand_entered_url_creates_a_remote_row(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -356,7 +356,7 @@ def test_installing_by_a_hand_entered_url_creates_a_remote_row(
 def test_a_plain_http_url_on_a_non_loopback_host_is_refused(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -380,7 +380,7 @@ def test_a_plain_http_url_on_a_non_loopback_host_is_refused(
 def test_installing_with_neither_a_catalog_entry_nor_a_custom_source_is_refused(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -396,7 +396,7 @@ def test_installing_with_neither_a_catalog_entry_nor_a_custom_source_is_refused(
 def test_installing_with_both_a_catalog_entry_and_a_command_is_refused(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -418,7 +418,7 @@ def test_a_request_naming_enforces_policy_is_rejected_with_422(
 ):
     """T-06-28: no route may set the policy-enforcing flag -- enforced
     structurally, since no request model carries the field at all."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -443,11 +443,11 @@ def test_a_request_naming_enforces_policy_is_rejected_with_422(
 def test_enabling_and_disabling_flip_the_row_and_reconcile_live(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -479,11 +479,11 @@ def test_enabling_and_disabling_flip_the_row_and_reconcile_live(
 def test_saving_configuration_writes_plain_and_encrypts_secret(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -516,12 +516,12 @@ def test_saving_configuration_writes_plain_and_encrypts_secret(
 def test_saving_a_blank_secret_leaves_an_already_set_value_alone(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.crypto.credentials import encrypt_credential
-    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from atlas.crypto.credentials import encrypt_credential
+    from atlas.db.repository import Plugin, PluginConfigValue
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -549,11 +549,11 @@ def test_saving_a_blank_secret_leaves_an_already_set_value_alone(
 def test_saving_configuration_on_a_disabled_plugin_does_not_reconcile(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -577,11 +577,11 @@ def test_saving_configuration_on_a_disabled_plugin_does_not_reconcile(
 def test_deleting_a_non_builtin_plugin_removes_it_and_reconciles_live(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -609,16 +609,16 @@ def test_deleting_a_non_builtin_plugin_removes_it_and_reconciles_live(
 def test_deleting_a_builtin_plugin_is_refused_by_name_and_it_still_exists(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
     ha = Plugin(
-        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "atlas_mcp.ha"),
         url=None, enabled=True, builtin=True, enforces_policy=True, timeout_ms=5000,
         created_at=now, updated_at=now, created_by_user_id=None,
     )
@@ -639,7 +639,7 @@ def test_deleting_a_builtin_plugin_is_refused_by_name_and_it_still_exists(
 def test_a_reconcile_failure_is_reported_as_a_failed_write(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -656,7 +656,7 @@ def test_a_reconcile_failure_is_reported_as_a_failed_write(
 def test_every_plugin_route_refuses_an_operator(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -678,7 +678,7 @@ def test_every_plugin_route_refuses_an_operator(
 def test_every_plugin_route_refuses_a_viewer(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -695,7 +695,7 @@ def test_every_plugin_route_refuses_a_viewer(
 
 # --- Task 3: live effect against the real PluginManager --------------------
 #
-# Every test below spawns the real `spire_mcp.ha`/`spire_mcp.weather` child
+# Every test below spawns the real `atlas_mcp.ha`/`atlas_mcp.weather` child
 # already shipped in this repository's own `mcp/` directory, the same
 # real-subprocess discipline `tests/test_plugin_manager.py` already uses --
 # proving install/enable/disable/config-save actually reach a real running
@@ -742,7 +742,7 @@ def _real_plugins_client(security, account_repo, plugin_repo):
 def test_installing_a_plugin_starts_it_and_its_tools_reach_the_schema_before_returning(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -767,7 +767,7 @@ def test_installing_a_plugin_starts_it_and_its_tools_reach_the_schema_before_ret
 def test_disabling_a_plugin_stops_it_and_withdraws_its_tools_before_returning(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -794,7 +794,7 @@ def test_disabling_a_plugin_stops_it_and_withdraws_its_tools_before_returning(
 def test_enabling_a_disabled_plugin_restarts_it_and_restores_its_tools(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -827,7 +827,7 @@ def test_saving_configuration_restarts_the_plugin_with_the_new_configuration(
     saved -- captured directly from the real child's own spawned
     environment, the same interception point `tests/test_plugin_manager.py`
     already uses."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -861,7 +861,7 @@ def test_saving_configuration_restarts_the_plugin_with_the_new_configuration(
 def test_a_newly_installed_plugin_that_will_not_start_is_still_created_and_reported_degraded(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -874,7 +874,7 @@ def test_a_newly_installed_plugin_that_will_not_start_is_still_created_and_repor
     with _real_plugins_client(security, account_repo, plugin_repo) as (client, manager):
         response = client.post(
             "/api/plugins",
-            json={"display_name": "Never Starts", "transport": "command", "command": "-m spire_mcp.weather"},
+            json={"display_name": "Never Starts", "transport": "command", "command": "-m atlas_mcp.weather"},
         )
         assert response.status_code == 201, response.text
         body = response.json()
@@ -889,7 +889,7 @@ def test_editing_one_plugins_configuration_leaves_a_second_plugins_session_untou
     """Task 3's own instruction: prove it -- edit one plugin's
     configuration and assert a second plugin's session is the same
     object afterwards."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -939,7 +939,7 @@ def test_reinstalling_a_deleted_plugin_under_the_same_name_is_reported_as_runnin
     for a plugin that was genuinely running, and offered an Enable button
     for it. Deleting now forgets the row instead.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -988,17 +988,17 @@ def test_a_save_cannot_rewrite_a_stored_secret_as_a_plaintext_row(
     The stored row is the authority now, and a request that contradicts it
     is refused by name rather than coerced.
     """
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.crypto.credentials import encrypt_credential
-    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from atlas.crypto.credentials import encrypt_credential
+    from atlas.db.repository import Plugin, PluginConfigValue
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
     ha = Plugin(
-        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "atlas_mcp.ha"),
         url=None, enabled=False, builtin=True, enforces_policy=True, timeout_ms=5000,
         created_at=now, updated_at=now, created_by_user_id=None,
     )
@@ -1044,11 +1044,11 @@ def test_a_save_cannot_reclassify_a_plain_key_as_secret_either(
     """The same rule in the other direction -- a save changes a value,
     never whether it is secret. Reclassifying silently would leave the
     editor showing a key it can no longer read back, with no record of why."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from atlas.db.repository import Plugin, PluginConfigValue
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -1086,11 +1086,11 @@ def test_a_key_the_plugin_does_not_have_yet_is_added_with_the_kind_the_request_n
     stored classification to defer to, so the request is the only source
     there is. WR-05's rule is about reclassifying an existing key, not
     about refusing new ones."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin, PluginConfigValue
+    from atlas.db.repository import Plugin, PluginConfigValue
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
@@ -1133,7 +1133,7 @@ def test_installing_a_url_plugin_with_two_unnamed_secrets_is_refused_by_name(
     credential, and the install path accepted any number of secret keys --
     leaving which one this house sends to a third-party server decided by
     the order a `SELECT` with no `ORDER BY` returned rows."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
@@ -1177,21 +1177,21 @@ def test_a_reserved_configuration_key_is_refused_at_install_and_at_save(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
     """WR-08 (code review): `PYTHONPATH` decides where a plugin child
-    imports `spire_mcp` -- `spire_mcp.safety` included -- and
-    `SPIRE_SAFETY` carries the house policy the enforcing child applies to
+    imports `atlas_mcp` -- `atlas_mcp.safety` included -- and
+    `ATLAS_SAFETY` carries the house policy the enforcing child applies to
     itself. Neither is a plugin's to set, so neither write boundary
     accepts one; `_env_from_config_values` writes both after the
     configuration loop as the backstop."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)
     ha = Plugin(
-        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "spire_mcp.ha"),
+        id=1, slug="ha", display_name="Home Assistant", transport="stdio", args=("-m", "atlas_mcp.ha"),
         url=None, enabled=False, builtin=True, enforces_policy=True, timeout_ms=5000,
         created_at=now, updated_at=now, created_by_user_id=None,
     )
@@ -1215,11 +1215,11 @@ def test_a_reserved_configuration_key_is_refused_at_install_and_at_save(
             "display_name": "Sneaky",
             "transport": "command",
             "command": "-m example_module",
-            "config_values": {"SPIRE_SAFETY": {"value": '{"mode": "allow_all"}'}},
+            "config_values": {"ATLAS_SAFETY": {"value": '{"mode": "allow_all"}'}},
         },
     )
     assert installed.status_code == 400, installed.text
-    assert "SPIRE_SAFETY" in installed.json()["detail"]
+    assert "ATLAS_SAFETY" in installed.json()["detail"]
     assert list(plugin_repo.plugins) == [1], "nothing is installed when the write is refused"
 
 
@@ -1230,13 +1230,13 @@ def test_an_unreadable_catalog_is_a_named_refusal_not_a_bare_500(
     an image whose `config/` mount does not carry the catalog showed the
     plugins screen a raw 500 instead of one of this module's own named
     refusals."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     plugin_repo = fake_plugin_repository()
     manager = _FakePluginManagerForRoutes()
 
-    from spire_voice.routes import plugins as plugins_module
+    from atlas.routes import plugins as plugins_module
 
     monkeypatch.setattr(
         plugins_module, "DEFAULT_CATALOG_PATH", "/nonexistent/plugin-catalog.json"
@@ -1263,11 +1263,11 @@ def test_the_per_plugin_timeout_can_be_changed_after_install(
     carries it now, and the same save restarts the plugin, which is what
     makes the new deadline take effect (`plugins/host.py` reads it off the
     row when it builds the host)."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
-    from spire_voice.db.repository import Plugin
+    from atlas.db.repository import Plugin
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc)

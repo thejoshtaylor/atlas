@@ -57,7 +57,7 @@ export function SignInRoute() {
         onSubmit={(event) => event.preventDefault()}
       >
         <div className="flex flex-col gap-1">
-          <p className="text-body text-muted-foreground">spire-voice</p>
+          <p className="text-body text-muted-foreground">ATLAS</p>
           <h1 className="text-display font-semibold">Sign in</h1>
         </div>
 

@@ -11,12 +11,12 @@ import json
 from types import SimpleNamespace
 from typing import Sequence
 
-from spire_mcp.ha import handle_call_service, handle_list_entities
-from spire_mcp.safety import Denied, Policy
+from atlas_mcp.ha import handle_call_service, handle_list_entities
+from atlas_mcp.safety import Denied, Policy
 
-from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
-from spire_voice.providers.tts_xai import SinkFormat
-from spire_voice.transports.base import SourceFormat
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.providers.tts_xai import SinkFormat
+from atlas.transports.base import SourceFormat
 
 
 class _CameraSinkSource:
@@ -46,7 +46,7 @@ class _CameraSinkSource:
 
 
 class _FakeToolHost:
-    """Calls straight into `spire_mcp.ha`'s handler functions against `fake_ha`.
+    """Calls straight into `atlas_mcp.ha`'s handler functions against `fake_ha`.
 
     No subprocess and no MCP wire protocol -- this is a functional double
     for `McpToolHost`, exercising the same safety-gated handlers the real
@@ -79,8 +79,8 @@ class _FakeToolHost:
 
 
 async def test_full_turn_happy_path(fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"] * 3)
     stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
@@ -134,8 +134,8 @@ async def test_answer_is_synthesized_against_the_sources_own_sink(fake_stt, fake
     sink passed to `tts.synthesize` -- the camera speaker's A-law/8kHz
     pair, never the browser default a live camera turn used to hardcode
     (the bug this plan fixes)."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = _CameraSinkSource(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
@@ -166,8 +166,8 @@ async def test_empty_transcript_closes_turn(fake_audio_source, fake_stt, fake_br
     as a `reply.text` event with no audio, so silence never looks like a
     dropped turn.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="")])
@@ -199,10 +199,10 @@ async def test_wake_only_or_filler_transcript_never_reaches_the_brain(
     """A final transcript that is only the wake phrase (or a near-miss of
     it) or only filler words ends the turn the same way VOICE-08 does --
     no macro, no local intent, no brain call (260923-kao)."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _NO_SPEECH_REPLY, run_turn
 
-    for text in ("Space Spire", "It's"):
+    for text in ("Space Atlas", "It's"):
         source = fake_audio_source(frames=[b"\x00\x01"])
         stt = fake_stt(events=[FinalTranscript(text=text)])
         brain = fake_brain(replies=[])
@@ -239,8 +239,8 @@ async def test_silence_timeout_closes_turn(fake_audio_source, fake_stt, fake_bra
     anywhere near that long. 260922-woc: this route also now speaks
     `_NO_SPEECH_REPLY`, the same as the empty-transcript route above.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(hang=True)
@@ -279,8 +279,8 @@ async def test_next_turn_runs_after_a_closed_turn(fake_audio_source, fake_stt, f
     """The half of VOICE-08 a hang would hide: whichever route closed the
     first turn, an ordinary turn right after it still reaches speech.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     async def _assert_ordinary_turn_reaches_tts() -> None:
         source = fake_audio_source(frames=[b"\x00\x01"])
@@ -348,8 +348,8 @@ async def test_tool_round_cap_is_enforced(fake_audio_source, fake_stt, fake_brai
     says so -- never a success confirmation, per CMD-01's transparency
     prohibition.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _TOO_MANY_ROUNDS_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _TOO_MANY_ROUNDS_REPLY, run_turn
 
     class _AlwaysToolHost:
         """A tool host that always answers successfully -- the brain is what
@@ -397,8 +397,8 @@ async def test_empty_tool_call_free_reply_falls_back_to_a_spoken_reply(
     the fallback fires instead, the same way VOICE-08's empty-transcript
     case does.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _EMPTY_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _EMPTY_REPLY, run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="what do you think")])
@@ -453,8 +453,8 @@ async def test_no_filler_played_when_the_race_finishes_before_the_deadline(
     single utterance per turn, that equality is the correct reading; the
     inequality assertion belongs only to the filler case.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
@@ -488,10 +488,10 @@ async def test_filler_plays_once_from_the_cache_when_the_deadline_passes(
     text-to-speech provider -- and the answer's audio does not reach the
     source until the holding phrase's last chunk has been sent.
     """
-    from spire_voice.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     top_answer = "it is done"
     top_reply = TierReply(answer=top_answer, confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
@@ -555,11 +555,11 @@ async def test_filler_cache_miss_raises_and_never_calls_the_live_provider(
     """
     import pytest
 
-    from spire_voice.providers.base import TtsError
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import TtsError
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     top_reply = TierReply(answer="done", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
     top_tier = brain_race.TierBrain(
@@ -608,10 +608,10 @@ async def test_empty_filler_cache_waits_in_silence_and_still_speaks(
     """An empty or absent filler cache makes the turn wait in silence: no
     holding phrase, no synthesis, and the answer still speaks.
     """
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     top_answer = "done"
     top_reply = TierReply(answer=top_answer, confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
@@ -660,8 +660,8 @@ async def test_precache_all_reuses_an_existing_cache_file(tmp_path):
     re-synthesizing it: a second build over the same directory does not
     grow the synthesis call count.
     """
-    from spire_voice.providers.tts_cache import precache_all
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.providers.tts_cache import precache_all
+    from atlas.providers.tts_xai import SinkFormat
 
     class _CountingSynthesizer:
         def __init__(self) -> None:
@@ -689,8 +689,8 @@ async def test_precache_all_names_files_with_codec_and_sample_rate(tmp_path):
     """Every cache file's name carries the codec and sample rate, for human
     debugging -- the hash alone is already collision-safe.
     """
-    from spire_voice.providers.tts_cache import precache_all
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.providers.tts_cache import precache_all
+    from atlas.providers.tts_xai import SinkFormat
 
     class _Synthesizer:
         async def synthesize(self, text_deltas, sink=None):
@@ -710,7 +710,7 @@ def test_cache_key_changes_with_any_field_and_is_stable_otherwise():
     """The cache key changes when the voice, the codec, the sample rate, or
     the text changes, and is stable when none of them do.
     """
-    from spire_voice.providers.tts_cache import cache_key
+    from atlas.providers.tts_cache import cache_key
 
     base = cache_key("eve", "pcm", 24000, "one moment")
 
@@ -748,8 +748,8 @@ async def test_state_fetch_starts_before_the_transcript_is_drained(fake_audio_so
     duration threshold is flaky on a loaded machine and proves less than an
     ordering one.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     order: list[str] = []
 
@@ -794,8 +794,8 @@ async def test_slow_state_fetch_is_awaited_not_abandoned(fake_audio_source, fake
     """A state fetch slower than the transcript still completes the turn,
     awaited rather than abandoned once the drain finishes first.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     async def _slow_state_fetch():
         await asyncio.sleep(0.05)
@@ -829,8 +829,8 @@ async def test_a_raising_state_fetch_still_reaches_speech(fake_audio_source, fak
     rather than ending the turn (T-01.1-17): the assistant that cannot read
     current state can still take a command.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     async def _raising_state_fetch():
         raise RuntimeError("home assistant unreachable")
@@ -859,8 +859,8 @@ async def test_a_raising_state_fetch_still_reaches_speech(fake_audio_source, fak
 
 
 async def test_three_messages_reach_the_tier_in_catalog_state_user_order(fake_audio_source, fake_stt, fake_tts):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     async def _state_fetch():
         return [{"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"}]
@@ -898,8 +898,8 @@ async def test_no_state_fetch_produces_the_old_two_message_list(fake_audio_sourc
     every earlier test in this file drives `run_turn` this way and must
     keep passing unmodified.
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
@@ -935,10 +935,10 @@ async def test_criterion_4_a_confident_triage_tier_answers_with_zero_tool_calls(
     The tool-host double raises on any call, so a regression fails loudly
     rather than by an unchecked counter.
     """
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     class _RaisingToolHost:
         async def call_tool(self, name, arguments):
@@ -987,9 +987,9 @@ async def test_macro_hit_cancels_a_started_state_fetch_without_leaving_it_dangli
     and its cancellation awaited, never left dangling for asyncio to
     complain about at garbage-collection time.
     """
-    from spire_voice.config import MacroActionConfig, MacroConfig
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.config import MacroActionConfig, MacroConfig
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -1047,9 +1047,9 @@ async def test_cached_macro_reply_speaks_the_cache_entry_matching_the_sources_si
     text. Before this fix, `CachedTts` ignored `sink` entirely and always
     played whichever single flat cache it was given, which was the
     camera-static bug for any camera turn (module docstring's Bug)."""
-    from spire_voice.config import MacroActionConfig, MacroConfig
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.config import MacroActionConfig, MacroConfig
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -1135,8 +1135,8 @@ async def test_barge_in_interrupt_stops_emission_partway_through(fake_audio_sour
     """The chunks the fake source received is the mechanical proof emission
     actually stopped, per the acceptance criteria -- not just that the loop
     returned."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     source = fake_audio_source()
     tts = fake_tts(chunks=[b"1", b"2", b"3", b"4", b"5"])
@@ -1149,8 +1149,8 @@ async def test_barge_in_interrupt_stops_emission_partway_through(fake_audio_sour
 
 
 async def test_barge_in_turn_outcome_is_barged_in_and_not_completed(fake_audio_source, fake_tts):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     source = fake_audio_source()
     tts = fake_tts(chunks=[b"1", b"2", b"3"])
@@ -1167,8 +1167,8 @@ async def test_barge_in_turn_outcome_is_barged_in_and_not_completed(fake_audio_s
 async def test_barge_in_records_a_progress_figure_that_is_neither_zero_nor_the_full_length(
     fake_audio_source, fake_tts
 ):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     source = fake_audio_source()
     events: list[dict] = []
@@ -1194,8 +1194,8 @@ async def test_barge_in_interrupt_is_a_loop_break_not_an_exception(fake_audio_so
     """`_speak` must return normally -- its caller (`run_turn`) still needs
     to record the outcome, close the session, and emit the reply event on
     every exit path, which an exception would route around."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     source = fake_audio_source()
     tts = fake_tts(chunks=[b"1", b"2", b"3"])
@@ -1214,8 +1214,8 @@ async def test_barge_in_disabled_or_absent_behaves_byte_for_byte_as_before_this_
     `barge_in` whose policy is disabled (D-12's per-source override) both
     produce the exact same outcome and chunk count as a plain `_speak` call
     always has."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     chunks = [b"1", b"2", b"3", b"4", b"5"]
 
@@ -1244,8 +1244,8 @@ async def test_barge_in_never_starts_a_turn_or_reopens_the_transcript_stream(
     called exactly once (T-02-24 -- only the wake path may ever start a
     turn or open a transcription stream), and nothing about the interrupt
     reaches for it again."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     source = fake_audio_source(frames=[b"\x00\x01"])
     stream_calls: list[object] = []
@@ -1342,15 +1342,15 @@ class _SequentialDrainingStt:
 
 
 async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
-    """Evidence Turn B: STT final "Fire." (the wake word's tail) must not
+    """Evidence Turn B: STT final "At last." (a mangled echo of the wake word) must not
     end the turn -- a second drain runs, once, and the brain sees the
     command the operator actually spoke, never the wake echo. The pre-roll
     chunk is replayed exactly once across both drains combined.
     """
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.sources.runner import PrerollReplayingSource
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.sources.runner import PrerollReplayingSource
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     preroll_chunk = b"\xd5" * 8
     live_source = _FrameCountingLiveSource(frames=[b"\x2a" * 8])
@@ -1358,7 +1358,7 @@ async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
 
     stt = _SequentialDrainingStt(
         calls=[
-            [FinalTranscript(text="Ace Fire.")],
+            [FinalTranscript(text="At last.")],
             [FinalTranscript(text="turn on the lights")],
         ]
     )
@@ -1376,7 +1376,7 @@ async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
         system_prompt="you control a home",
         max_tool_rounds=3,
         timings=timings,
-        wake_phrase="hey spire",
+        wake_phrase="hey atlas",
     )
 
     assert len(stt.received_by_call) == 2
@@ -1392,10 +1392,10 @@ async def test_wake_only_transcript_drains_again_for_the_command(fake_tts):
 async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
     """The second drain can itself end empty -- treated exactly like
     VOICE-08's own empty-transcript case, not a third attempt."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.sources.runner import PrerollReplayingSource
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.sources.runner import PrerollReplayingSource
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _NO_SPEECH_REPLY, run_turn
 
     preroll_chunk = b"\xd5" * 8
     live_source = _FrameCountingLiveSource(frames=[b"\x2a" * 8])
@@ -1403,7 +1403,7 @@ async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
 
     stt = _SequentialDrainingStt(
         calls=[
-            [FinalTranscript(text="hey spire")],
+            [FinalTranscript(text="hey atlas")],
             [FinalTranscript(text="")],
         ]
     )
@@ -1421,7 +1421,7 @@ async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
         system_prompt="you control a home",
         max_tool_rounds=3,
         timings=timings,
-        wake_phrase="hey spire",
+        wake_phrase="hey atlas",
     )
 
     assert len(stt.received_by_call) == 2
@@ -1432,14 +1432,14 @@ async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
 
 
 async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_tts):
-    """"hey spire turn on the lights" in a single final transcript is left
+    """"hey atlas turn on the lights" in a single final transcript is left
     alone -- the LLM copes, and stripping the wake phrase out is out of
     scope. Only one drain ever runs."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
-    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey spire turn on the lights")]])
+    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey atlas turn on the lights")]])
     brain = _RecordingBrain(replies=[BrainReply(text="turned on the lights")])
     source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
     tts = fake_tts(chunks=[b"\x01\x02"])
@@ -1455,13 +1455,13 @@ async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_
         system_prompt="you control a home",
         max_tool_rounds=3,
         timings=timings,
-        wake_phrase="hey spire",
+        wake_phrase="hey atlas",
     )
 
     assert len(stt.received_by_call) == 1
     assert brain.received_messages[-1][-1] == {
         "role": "user",
-        "content": "hey spire turn on the lights",
+        "content": "hey atlas turn on the lights",
     }
     assert tts.received_text == ["turned on the lights"]
 
@@ -1471,13 +1471,13 @@ async def test_no_wake_phrase_configured_drains_once(fake_tts):
     plan) skips `is_wake_only` entirely, so there is still only one drain.
     But the transcript guard (260923-kao) checks every final transcript
     regardless of `wake_phrase` -- with no configured phrase it falls back
-    to the default keyword, "spire", and "hey spire" is wake-only against
+    to the default keyword, "atlas", and "hey atlas" is wake-only against
     that default. The turn ends without the brain."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _NO_SPEECH_REPLY, run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _NO_SPEECH_REPLY, run_turn
 
-    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey spire")]])
+    stt = _SequentialDrainingStt(calls=[[FinalTranscript(text="hey atlas")]])
     brain = _RecordingBrain(replies=[])
     source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
     tts = fake_tts(chunks=[b"\x01\x02"])
@@ -1515,10 +1515,10 @@ async def test_empty_winner_answer_speaks_the_cached_fallback(
     `confident` flag. Before this fix, that reply reached `_speak` verbatim
     and the turn ended in silence.
     """
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import _CANNOT_DO_REPLY, run_turn
 
     blank_reply = TierReply(answer="", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
     tier = brain_race.TierBrain(
@@ -1557,10 +1557,10 @@ async def test_whitespace_only_winner_answer_speaks_the_cached_fallback(
 ):
     """The same gap, for a reply whose `answer` is whitespace rather than a
     bare empty string -- `.strip()` catches both."""
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import _CANNOT_DO_REPLY, run_turn
 
     blank_reply = TierReply(answer="   ", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
     tier = brain_race.TierBrain(
@@ -1599,10 +1599,10 @@ async def test_empty_and_blank_fallback_prefers_the_cache_when_it_has_the_phrase
     """When the sink's own filler cache actually carries the fallback
     phrase, it is served from there -- zero calls to the live provider,
     the same discipline the filler/macro paths already carry."""
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import _CANNOT_DO_REPLY, run_turn
 
     blank_reply = TierReply(answer="", confident=False, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
     tier = brain_race.TierBrain(
@@ -1647,9 +1647,9 @@ async def test_brain_slower_than_turn_timeout_speaks_the_cached_fallback_and_can
     recording 260922-woc's own evidence names (about 55s in tool rounds,
     then an empty answer).
     """
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import _CANNOT_DO_REPLY, run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import _CANNOT_DO_REPLY, run_turn
 
     # A real delay far longer than the configured timeout below -- this
     # tier is cancelled well before it would ever resolve on its own.
@@ -1695,10 +1695,10 @@ async def test_a_dead_speaker_does_not_abort_the_turn(fake_tts):
     write raised `SpeakerError`, and the whole turn died before the brain's
     tool calls ran. The command must still run and the reply text must
     still reach the event stream."""
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.speaker.fifo_writer import SpeakerError
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.speaker.fifo_writer import SpeakerError
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     class _DeadSpeakerSource(_FrameCountingLiveSource):
         async def send_audio(self, chunk: bytes) -> None:
@@ -1727,15 +1727,15 @@ async def test_a_dead_speaker_does_not_abort_the_turn(fake_tts):
 
 class _CameraLikeSource(_FrameCountingLiveSource):
     def sink_format(self):
-        from spire_voice.providers.tts_xai import SinkFormat
+        from atlas.providers.tts_xai import SinkFormat
 
         return SinkFormat(codec="alaw", sample_rate=8000)
 
 
 async def _run_cue_turn(fake_tts, source, *, wake_cue: bool):
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     await run_turn(
         source,
@@ -1752,8 +1752,8 @@ async def _run_cue_turn(fake_tts, source, *, wake_cue: bool):
 
 
 async def test_wake_cue_plays_before_the_reply_on_a_source_with_a_speaker(fake_tts):
-    from spire_voice.audio.cue import wake_cue
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.audio.cue import wake_cue
+    from atlas.providers.tts_xai import SinkFormat
 
     source = _CameraLikeSource(frames=[b"\x00\x01"])
     await _run_cue_turn(fake_tts, source, wake_cue=True)
@@ -1786,8 +1786,8 @@ async def test_a_matched_local_intent_calls_the_tool_and_speaks_done(
 ):
     """A matched on/off command calls `ha_call_service` with the right
     args, never calls the brain, and speaks the cached "done" phrase."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     policy = Policy.from_config(None)
     source = fake_audio_source(frames=[b"\x00\x01"])
@@ -1826,8 +1826,8 @@ async def test_a_denied_local_intent_speaks_cannot_do_that_one_and_never_reaches
     """A tool error (here, a policy denial) speaks the cached "i can't do
     that one" phrase and never falls back to the brain -- the denial may
     have been on purpose."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     policy = Policy.from_config({"deny_entities": ["switch.example_fan"]})
     source = fake_audio_source(frames=[b"\x00\x01"])
@@ -1863,8 +1863,8 @@ async def test_no_local_intent_match_falls_through_to_the_brain(
 ):
     """A transcript the matcher does not recognize reaches the brain
     exactly as it would with `local_intents` disabled."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     policy = Policy.from_config(None)
     source = fake_audio_source(frames=[b"\x00\x01"])
@@ -1899,8 +1899,8 @@ async def test_local_intents_disabled_by_default_falls_through_to_the_brain(
     """`local_intents` defaults to `False` -- a caller that never passes it
     (every caller that predates this plan) reaches the brain exactly as
     before, even for a transcript the matcher would otherwise recognize."""
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     policy = Policy.from_config(None)
     source = fake_audio_source(frames=[b"\x00\x01"])

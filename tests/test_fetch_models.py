@@ -23,7 +23,7 @@ fetch_models = importlib.util.module_from_spec(_spec)
 sys.modules["fetch_models"] = fetch_models
 _spec.loader.exec_module(fetch_models)
 
-from spire_voice.config import SttConfig, TtsConfig
+from atlas.config import SttConfig, TtsConfig
 
 
 def _model_file(dest: Path, url: str = "https://example.invalid/f") -> "fetch_models.ModelFile":

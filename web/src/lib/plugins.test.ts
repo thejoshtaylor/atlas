@@ -32,7 +32,7 @@ function samplePlugin(overrides: Partial<Plugin> = {}): Plugin {
     slug: "home-assistant",
     display_name: "Home Assistant",
     transport: "stdio",
-    args: ["-m", "spire_mcp.ha"],
+    args: ["-m", "atlas_mcp.ha"],
     url: null,
     enabled: true,
     builtin: true,

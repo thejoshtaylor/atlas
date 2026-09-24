@@ -17,8 +17,8 @@ import struct
 import tempfile
 from pathlib import Path
 
-from spire_voice.audio.alaw import pcm16_to_alaw
-from spire_voice.session.audio_wrap import wrap_alaw_as_wav, wrap_pcm16_as_wav
+from atlas.audio.alaw import pcm16_to_alaw
+from atlas.session.audio_wrap import wrap_alaw_as_wav, wrap_pcm16_as_wav
 
 _SAMPLE_RATE = 8000
 _DURATION_SECONDS = 1
@@ -58,7 +58,7 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path(tempfile.gettempdir()) / "spire-wav-check",
+        default=Path(tempfile.gettempdir()) / "atlas-wav-check",
         help="Directory to write the two sample WAV files into "
         "(default: a directory under the system temp directory).",
     )

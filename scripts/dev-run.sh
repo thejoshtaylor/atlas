@@ -27,5 +27,5 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 export PYTHONPATH=src:mcp
-export SPIRE_CONFIG="${SPIRE_CONFIG:-config/config.example.yaml}"
-exec .venv/bin/python -m spire_voice.app
+export ATLAS_CONFIG="${ATLAS_CONFIG:-config/config.example.yaml}"
+exec .venv/bin/python -m atlas.app

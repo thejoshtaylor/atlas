@@ -9,14 +9,14 @@ substitute your own release name, namespace, host name, and image reference.
 - A Kubernetes cluster you can reach with `kubectl`, and `helm` (this chart uses
   Chart API v2, no chart dependencies).
 - Your own image, pushed somewhere your cluster can pull from. This chart names
-  no default registry on purpose (`charts/spire-voice/values.yaml`'s own
+  no default registry on purpose (`charts/atlas/values.yaml`'s own
   comment): you build the image from this repository's `Dockerfile` and push it,
   rather than pulling a build this project would have to maintain and version
   independently of the chart.
 
   ```bash
-  docker build -t <your-registry>/spire-voice:<tag> .
-  docker push <your-registry>/spire-voice:<tag>
+  docker build -t <your-registry>/atlas:<tag> .
+  docker push <your-registry>/atlas:<tag>
   ```
 
 - An Ingress controller, if you want a URL rather than a `kubectl port-forward`.
@@ -25,8 +25,8 @@ substitute your own release name, namespace, host name, and image reference.
 ## Install it
 
 ```bash
-helm install spire-voice charts/spire-voice \
-  --set image.repository=<your-registry>/spire-voice \
+helm install atlas charts/atlas \
+  --set image.repository=<your-registry>/atlas \
   --set image.tag=<tag>
 ```
 
@@ -39,7 +39,7 @@ value is a `--set` flag or a values file, never a template you hand-modify.
 
 ## The wake-word model -- one job, before the application pod can become healthy
 
-The application's default configuration listens for the phrase "hey spire"
+The application's default configuration listens for the phrase "hey atlas"
 using Vosk, a wake-word engine that needs a model file on disk. Nothing in
 this project downloads that model automatically. The chart gives the
 application pod a `models` volume, but nothing provisions the model file
@@ -47,27 +47,27 @@ into it by itself -- run this once, after `helm install`, before the
 application pod's first successful start:
 
 ```bash
-kubectl run spire-voice-fetch-wake-model --rm -i --restart=Never \
-  --image=<your-registry>/spire-voice:<tag> \
+kubectl run atlas-fetch-wake-model --rm -i --restart=Never \
+  --image=<your-registry>/atlas:<tag> \
   --overrides='
 {
   "spec": {
     "containers": [{
       "name": "fetch-wake-model",
-      "image": "<your-registry>/spire-voice:<tag>",
+      "image": "<your-registry>/atlas:<tag>",
       "command": ["python", "scripts/fetch_wake_model.py", "--config", "config/config.example.yaml"],
       "volumeMounts": [{"name": "models", "mountPath": "/models"}]
     }],
     "volumes": [{
       "name": "models",
-      "persistentVolumeClaim": {"claimName": "spire-voice-models"}
+      "persistentVolumeClaim": {"claimName": "atlas-models"}
     }],
     "restartPolicy": "Never"
   }
 }'
 ```
 
-`spire-voice-models` above is `{release name}-models` -- substitute your own
+`atlas-models` above is `{release name}-models` -- substitute your own
 release name if you installed under a different one. Until this job runs, the
 application pod refuses to start with a message naming the missing model
 directory, by design, rather than pretending to listen for a wake word it
@@ -113,7 +113,7 @@ Providers and Settings screens once you have signed in -- never from a values
 file or a template you edit. **Changing which provider a slot uses needs a
 restart of the application pod**, and the screen says so: your choice is saved
 immediately, but the slot keeps running whichever provider it started with
-until the pod restarts (`kubectl rollout restart deployment/spire-voice`,
+until the pod restarts (`kubectl rollout restart deployment/atlas`,
 substituting your own release name).
 
 ## The local provider set
@@ -131,8 +131,8 @@ licence than the rest of this project.
 ## Upgrading
 
 ```bash
-helm upgrade spire-voice charts/spire-voice \
-  --set image.repository=<your-registry>/spire-voice \
+helm upgrade atlas charts/atlas \
+  --set image.repository=<your-registry>/atlas \
   --set image.tag=<new-tag>
 ```
 
@@ -145,16 +145,16 @@ PersistentVolumeClaim, never `emptyDir`.
 Two things this release creates outlive `helm uninstall`, on purpose, and they
 must be deleted together or not at all:
 
-- the Secret (`<release>-spire-voice-secret`), which carries the generated
-  `SPIRE_SECRET_KEY` and the bundled database's password;
-- the database's PersistentVolumeClaim (`postgres-data-<release>-spire-voice-postgres-0`).
+- the Secret (`<release>-atlas-secret`), which carries the generated
+  `ATLAS_SECRET_KEY` and the bundled database's password;
+- the database's PersistentVolumeClaim (`postgres-data-<release>-atlas-postgres-0`).
 
 Kubernetes never deletes a StatefulSet's PVC, and this chart marks the Secret
 `helm.sh/resource-policy: keep` so that Helm does not delete it either. Those
 two facts exist together for one reason. The database image reads
 `POSTGRES_PASSWORD` only when its data directory is empty, so a database that
 survives on its PVC keeps the password it was initialized with; and
-`SPIRE_SECRET_KEY` is what every provider credential in that database is
+`ATLAS_SECRET_KEY` is what every provider credential in that database is
 encrypted with. Delete the Secret while keeping the volume and you get a
 database that rejects the new password and a set of credentials nobody can ever
 decrypt again -- silently, from two ordinary commands run in order.
@@ -162,8 +162,8 @@ decrypt again -- silently, from two ordinary commands run in order.
 To uninstall and reinstall the same deployment, keeping your data:
 
 ```bash
-helm uninstall spire-voice
-helm install spire-voice charts/spire-voice --set image.repository=... --set image.tag=...
+helm uninstall atlas
+helm install atlas charts/atlas --set image.repository=... --set image.tag=...
 ```
 
 Use the same release name and the same namespace. The reinstall adopts the kept
@@ -175,9 +175,9 @@ To start genuinely fresh, delete both, and accept that every stored credential
 and every signed-in session goes with them:
 
 ```bash
-helm uninstall spire-voice
-kubectl delete secret spire-voice-secret
-kubectl delete pvc postgres-data-spire-voice-postgres-0
+helm uninstall atlas
+kubectl delete secret atlas-secret
+kubectl delete pvc postgres-data-atlas-postgres-0
 ```
 
 (Substitute your own release name in all three.) `scripts/verify-helm-deploy.sh`
@@ -198,7 +198,7 @@ yourself against a cluster you can reach:
 ./scripts/verify-helm-deploy.sh
 ```
 
-Add `--image <your-registry>/spire-voice:<tag> --wait-for-app` to also prove
+Add `--image <your-registry>/atlas:<tag> --wait-for-app` to also prove
 the application pod itself becomes healthy; without a pullable image the
 script honestly reports that claim as "not attempted" rather than assuming it.
 That flag also puts `--wait` on the `helm install` and `helm upgrade` calls,

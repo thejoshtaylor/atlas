@@ -1,5 +1,5 @@
 // The pending-runs list and workflow editor's fetch surface (FLOW-09,
-// FLOW-10). Every shape here matches `src/spire_voice/routes/workflows.py`'s
+// FLOW-10). Every shape here matches `src/atlas/routes/workflows.py`'s
 // own response models field for field, the same discipline `lib/macros.ts`
 // states at its own top of file -- a renamed or reshaped field here is a
 // silent drift from what the server actually sends.

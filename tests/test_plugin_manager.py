@@ -6,7 +6,7 @@ decrypted only at the child's environment, and a respawn of the
 policy-enforcing plugin carries a genuinely new safety block rather than
 repeating the one the first child was started with.
 
-Every single-plugin test spawns the real `spire_mcp.ha` child module
+Every single-plugin test spawns the real `atlas_mcp.ha` child module
 already shipped in this repository's own `mcp/` directory (the same
 real-subprocess discipline `tests/test_mcp_client.py` and
 `tests/test_ha_tool.py` already use) -- never a fake tool host for the
@@ -39,13 +39,13 @@ from types import SimpleNamespace
 import pytest
 from mcp.types import Tool
 
-from spire_voice.config import SecurityConfig
-from spire_voice.crypto.credentials import encrypt_credential
-from spire_voice.db.repository import Plugin, PluginConfigValue
-from spire_voice.mcp_client import McpToolHost, UnknownToolError
-from spire_voice.plugins import manager as manager_module
-from spire_voice.plugins.manager import PluginManager, PluginState, RunningPlugin
-from spire_voice.plugins.naming import NAME_SEPARATOR
+from atlas.config import SecurityConfig
+from atlas.crypto.credentials import encrypt_credential
+from atlas.db.repository import Plugin, PluginConfigValue
+from atlas.mcp_client import McpToolHost, UnknownToolError
+from atlas.plugins import manager as manager_module
+from atlas.plugins.manager import PluginManager, PluginState, RunningPlugin
+from atlas.plugins.naming import NAME_SEPARATOR
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
@@ -59,7 +59,7 @@ _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
 @pytest.fixture(autouse=True)
 def _secret_key(monkeypatch):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
 
 
 def _plugin(
@@ -109,7 +109,7 @@ async def test_a_seeded_ha_row_spawns_the_child_and_its_tools_reach_the_lookup(
     """Truth 1: a row in the plugins table, not a hardcoded block, is what
     makes Home Assistant's tools reach the assistant."""
     security = SecurityConfig()
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True)
     repo = fake_plugin_repository(
         plugins=[ha_plugin],
         config_values={
@@ -185,8 +185,8 @@ async def test_a_second_seeded_row_reaches_the_assistant_through_the_same_loop(
     started. See this module's own docstring for why the weather side is
     a fake here rather than the second real subprocess."""
     security = SecurityConfig()
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"], builtin=True)
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True)
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"], builtin=True)
     repo = fake_plugin_repository(
         plugins=[ha_plugin, weather_plugin],
         config_values={
@@ -255,7 +255,7 @@ async def test_a_disabled_plugin_row_contributes_no_tools_and_spawns_no_child(
     """Truth 3: a disabled plugin row contributes no tools and spawns no
     child."""
     security = SecurityConfig()
-    disabled_ha = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enabled=False, enforces_policy=True)
+    disabled_ha = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enabled=False, enforces_policy=True)
     repo = fake_plugin_repository(plugins=[disabled_ha], config_values={})
     manager = PluginManager(
         repo, mcp_root=_MCP_ROOT, security=security, safety_block_provider=_no_policy
@@ -288,7 +288,7 @@ async def test_a_secret_config_value_is_decrypted_only_in_the_spawned_childs_env
     """
     security = SecurityConfig()
     secret_plaintext = "a-plainly-fictional-decrypted-token"
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True)
     stored_value = _secret_value("HA_TOKEN", secret_plaintext, security)
     assert stored_value.value is None, "a secret PluginConfigValue must never carry a plaintext value"
     assert stored_value.ciphertext is not None
@@ -340,7 +340,7 @@ async def test_respawning_the_enforcing_plugin_carries_the_new_safety_block(
     """
     security = SecurityConfig()
     ha_plugin = _plugin(
-        1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True, timeout_ms=300
+        1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True, timeout_ms=300
     )
     repo = fake_plugin_repository(
         plugins=[ha_plugin],
@@ -372,7 +372,7 @@ async def test_respawning_the_enforcing_plugin_carries_the_new_safety_block(
     try:
         await manager.start_all()
         assert len(captured_envs) == 1
-        assert json.loads(captured_envs[0]["SPIRE_SAFETY"]) == first_block
+        assert json.loads(captured_envs[0]["ATLAS_SAFETY"]) == first_block
 
         second_block = {
             "mode": "allow_all_except_denylist",
@@ -381,8 +381,8 @@ async def test_respawning_the_enforcing_plugin_carries_the_new_safety_block(
         await manager.request_respawn(ha_plugin.id, second_block)
 
         assert len(captured_envs) == 2, "respawn must spawn exactly one replacement child"
-        assert json.loads(captured_envs[1]["SPIRE_SAFETY"]) == second_block
-        assert captured_envs[1]["SPIRE_SAFETY"] != captured_envs[0]["SPIRE_SAFETY"], (
+        assert json.loads(captured_envs[1]["ATLAS_SAFETY"]) == second_block
+        assert captured_envs[1]["ATLAS_SAFETY"] != captured_envs[0]["ATLAS_SAFETY"], (
             "the replacement child must not repeat the first child's own safety block"
         )
         # The rest of the environment (HA_TOKEN decrypted, HA_URL, PYTHONPATH)
@@ -399,7 +399,7 @@ async def test_rebuild_never_mutates_the_previous_lookup_or_schema_in_place(fake
     objects rather than mutating the previous ones -- a caller holding a
     reference to the pre-rebuild lookup must keep seeing the old state."""
     security = SecurityConfig()
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True)
     repo = fake_plugin_repository(
         plugins=[ha_plugin],
         config_values={
@@ -501,7 +501,7 @@ async def test_a_rebuild_the_watchdog_triggers_mid_turn_leaves_that_turns_own_ob
     monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
 
     gate = _StepGate()
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"], enforces_policy=True)
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"], enforces_policy=True)
     repo = fake_plugin_repository(plugins=[ha_plugin], config_values={})
     manager = PluginManager(
         repo,
@@ -590,8 +590,8 @@ def test_a_second_plugin_publishing_a_name_the_first_already_published_does_not_
     """T-06-18: a name collision must be a rename, never a refusal to
     start -- `rebuild()` itself must not raise, and both tools must reach
     the schema under distinct, owner-prefixed names."""
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"])
     ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
     weather_host = _FakeToolHost([("notify", "Weather's own notify")])
 
@@ -608,8 +608,8 @@ def test_a_second_plugin_publishing_a_name_the_first_already_published_does_not_
 async def test_a_call_naming_a_prefixed_tool_reaches_the_plugin_that_owns_it_and_no_other(
     fake_plugin_repository,
 ):
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"])
     ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
     weather_host = _FakeToolHost([("notify", "Weather's own notify")])
 
@@ -630,8 +630,8 @@ async def test_a_call_naming_a_prefixed_tool_reaches_the_plugin_that_owns_it_and
 async def test_a_call_naming_a_still_bare_uncontested_tool_reaches_its_one_owner(
     fake_plugin_repository,
 ):
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"])
     ha_host = _FakeToolHost([("list_entities", "list Home Assistant entities")])
     weather_host = _FakeToolHost([("notify", "Weather's own notify")])
 
@@ -648,8 +648,8 @@ async def test_a_call_naming_a_still_bare_uncontested_tool_reaches_its_one_owner
 def test_disabling_one_of_two_colliding_plugins_returns_the_survivor_to_its_bare_name(
     fake_plugin_repository,
 ):
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"])
     ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
     weather_host = _FakeToolHost([("notify", "Weather's own notify")])
 
@@ -673,7 +673,7 @@ def test_disabling_one_of_two_colliding_plugins_returns_the_survivor_to_its_bare
 
 
 def test_tool_ownership_prompt_is_empty_before_any_collision(fake_plugin_repository):
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
     ha_host = _FakeToolHost([("list_entities", "list entities")])
 
     manager = _bare_manager(fake_plugin_repository)
@@ -686,8 +686,8 @@ def test_tool_ownership_prompt_is_empty_before_any_collision(fake_plugin_reposit
 def test_a_rebuild_that_adds_a_collision_updates_the_ownership_prompt_on_the_same_swap(
     fake_plugin_repository,
 ):
-    ha_plugin = _plugin(1, "ha", args=["-m", "spire_mcp.ha"])
-    weather_plugin = _plugin(2, "weather", args=["-m", "spire_mcp.weather"])
+    ha_plugin = _plugin(1, "ha", args=["-m", "atlas_mcp.ha"])
+    weather_plugin = _plugin(2, "weather", args=["-m", "atlas_mcp.weather"])
     ha_host = _FakeToolHost([("notify", "Home Assistant's own notify")])
     weather_host = _FakeToolHost([("notify", "Weather's own notify")])
 

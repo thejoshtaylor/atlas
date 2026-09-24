@@ -34,7 +34,7 @@ function plugin(overrides: Partial<Plugin> = {}): Plugin {
     slug: "home-assistant",
     display_name: "Home Assistant",
     transport: "stdio",
-    args: ["-m", "spire_mcp.ha"],
+    args: ["-m", "atlas_mcp.ha"],
     url: null,
     enabled: true,
     builtin: true,
@@ -137,7 +137,7 @@ describe("saveBlockedByMissingCustomSource -- a hand-entered install needs which
     expect(saveBlockedByMissingCustomSource("command", "  ", "")).toBe(MISSING_COMMAND_REASON)
   })
   test("command mode is unblocked once a command is typed", () => {
-    expect(saveBlockedByMissingCustomSource("command", "-m spire_mcp.custom", "")).toBeNull()
+    expect(saveBlockedByMissingCustomSource("command", "-m atlas_mcp.custom", "")).toBeNull()
   })
   test("url mode blocks on a blank URL, ignoring a stray command value", () => {
     expect(saveBlockedByMissingCustomSource("url", "-m ignored", "")).toBe(MISSING_URL_REASON)

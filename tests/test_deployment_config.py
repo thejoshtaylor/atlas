@@ -3,7 +3,7 @@ secret key that persists across a restart (this file's Task 2 section),
 and the Docker Compose deployment those persistence guarantees back (Task
 3 adds to this file).
 
-D-16 is the highest-stakes claim in this phase: `SPIRE_SECRET_KEY` derives
+D-16 is the highest-stakes claim in this phase: `ATLAS_SECRET_KEY` derives
 both the JWT signing key and the credential-encryption key
 (`auth/tokens.py`). A key that changes across a restart makes every stored
 credential permanently unreadable and every issued session invalid, all at
@@ -24,8 +24,8 @@ from pathlib import Path
 
 import yaml
 
-from spire_voice.auth.tokens import validate_secret_key_strength
-from spire_voice.config import SecurityConfig
+from atlas.auth.tokens import validate_secret_key_strength
+from atlas.config import SecurityConfig
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENTRYPOINT = _REPO_ROOT / "deploy" / "docker-entrypoint.sh"
@@ -43,13 +43,13 @@ def _run_entrypoint(
     data_dir: Path, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Runs the real entrypoint, wrapping a command that prints
-    `SPIRE_SECRET_KEY` back out -- the entrypoint's whole job is making
+    `ATLAS_SECRET_KEY` back out -- the entrypoint's whole job is making
     sure that variable is correct and exported by the time the wrapped
     command runs, and this is the simplest real proof of that."""
-    env = {"PATH": os.environ.get("PATH", ""), "SPIRE_DATA_DIR": str(data_dir)}
+    env = {"PATH": os.environ.get("PATH", ""), "ATLAS_DATA_DIR": str(data_dir)}
     env.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(_ENTRYPOINT), "sh", "-c", 'printf %s "$SPIRE_SECRET_KEY"'],
+        ["bash", str(_ENTRYPOINT), "sh", "-c", 'printf %s "$ATLAS_SECRET_KEY"'],
         capture_output=True,
         text=True,
         env=env,
@@ -58,7 +58,7 @@ def _run_entrypoint(
 
 
 def test_an_already_set_key_is_used_unchanged_and_writes_no_file(tmp_path):
-    result = _run_entrypoint(tmp_path, {"SPIRE_SECRET_KEY": "already-set-value"})
+    result = _run_entrypoint(tmp_path, {"ATLAS_SECRET_KEY": "already-set-value"})
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == "already-set-value"
@@ -98,7 +98,7 @@ def test_the_generated_key_passes_the_applications_own_strength_validation(tmp_p
     result = _run_entrypoint(tmp_path)
     assert result.returncode == 0, result.stderr
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", result.stdout)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", result.stdout)
     # Raises on anything short, malformed, or low-variety -- must not raise.
     validate_secret_key_strength(SecurityConfig())
 
@@ -181,7 +181,7 @@ def test_compose_app_port_is_bound_to_loopback_only():
 
 
 def test_the_image_pins_the_numeric_uid_and_gid_the_chart_names() -> None:
-    """WR-07. The pod runs as the image's non-root `spire` user and
+    """WR-07. The pod runs as the image's non-root `atlas` user and
     mounts two ReadWriteOnce PVCs at /data and /models. Kubernetes knows
     nothing about an image's passwd file, so the chart has to name a
     numeric `fsGroup` to make those volumes writable -- and a number the
@@ -190,11 +190,11 @@ def test_the_image_pins_the_numeric_uid_and_gid_the_chart_names() -> None:
     sides, rather than asserting either one alone.
     """
     dockerfile = (_REPO_ROOT / "Dockerfile").read_text()
-    assert "--gid 1001 spire" in dockerfile
+    assert "--gid 1001 atlas" in dockerfile
     assert "--uid 1001 --gid 1001" in dockerfile
 
     deployment = (
-        _REPO_ROOT / "charts" / "spire-voice" / "templates" / "deployment.yaml"
+        _REPO_ROOT / "charts" / "atlas" / "templates" / "deployment.yaml"
     ).read_text()
     assert "fsGroup: 1001" in deployment
     assert "fsGroupChangePolicy: OnRootMismatch" in deployment
@@ -263,12 +263,12 @@ def test_the_example_database_url_names_the_port_the_dev_script_actually_uses() 
     env_example = _ENV_EXAMPLE.read_text(encoding="utf-8")
     dev_script = (_REPO_ROOT / "scripts" / "dev-postgres.sh").read_text(encoding="utf-8")
 
-    default_port = re.search(r'_PORT="\$\{SPIRE_DEV_POSTGRES_PORT:-(\d+)\}"', dev_script)
+    default_port = re.search(r'_PORT="\$\{ATLAS_DEV_POSTGRES_PORT:-(\d+)\}"', dev_script)
     assert default_port, "could not read the dev Postgres script's default port"
     port = default_port.group(1)
 
     assert port != "5432", "the dev database must not claim Postgres's own default port"
-    assert f"127.0.0.1:{port}/spire" in env_example
+    assert f"127.0.0.1:{port}/atlas" in env_example
 
 
 # --- WR-10 (code review): the test stage is actually built -------------

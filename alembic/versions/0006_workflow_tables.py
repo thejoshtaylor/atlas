@@ -16,7 +16,7 @@ database-only concept from the moment this phase adds it (D-07, D-08) --
 there was never an operator-editable `workflow_runs`/`workflow_steps`
 equivalent in the configuration file for a migration to carry forward, the
 way `0001`'s `safety:` block and `0005`'s `macros:` block each once were.
-`spire_voice.config.WorkflowConfig` (added the same plan as this
+`atlas.config.WorkflowConfig` (added the same plan as this
 migration) is a sibling, unrelated concern -- it declares the poller's own
 *schedule* (how often it wakes, how many steps it drains per tick), never
 a run or a step, so there is nothing of that shape for this migration to

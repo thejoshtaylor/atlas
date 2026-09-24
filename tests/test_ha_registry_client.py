@@ -1,6 +1,6 @@
-"""Tests for `spire_mcp.registry.HaRegistryClient`: the WebSocket handshake,
+"""Tests for `atlas_mcp.registry.HaRegistryClient`: the WebSocket handshake,
 out-of-order reply matching, and the failure-closed behaviors the target
-expansion in `mcp/spire_mcp/ha.py` depends on (SAFE-03, SAFE-09).
+expansion in `mcp/atlas_mcp/ha.py` depends on (SAFE-03, SAFE-09).
 
 Every id and every entity id below is invented, following the rule
 `safety.py`'s own self-check already states.
@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from spire_mcp.registry import (
+from atlas_mcp.registry import (
     RegistryAuthError,
     RegistryUnavailableError,
     REGISTRY_REFRESH_INTERVAL_S,

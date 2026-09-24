@@ -1,5 +1,5 @@
 [project]
-name = "spire-voice"
+name = "atlas"
 version = "0.1.0"
 description = "A self-hosted voice assistant for the home."
 requires-python = ">=3.11"

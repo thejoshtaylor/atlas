@@ -1,0 +1,104 @@
+# CI build for atlas, submitted by the atlas-ci Sensor
+# (config/argo/atlas-ci-sensor) on every push to main. Builds the
+# one runtime image this project ships
+# from the repo-root Dockerfile's default (`runtime`) stage and pushes
+# harbor.tail41bc66.ts.net/atlas/app at both :latest and :sha. The
+# `test` stage (the project's own full backend suite) is never a build
+# target here -- that proof runs in scripts/verify-clean-clone.sh, not in
+# this pipeline.
+#
+# atlas's repository is PUBLIC (unlike chat-manager's, which this
+# template is modeled on), so the clone step below needs no git
+# credential at all: it clones the plain HTTPS URL directly, with no
+# credential-bearing parameter and no secret token in its environment.
+#
+# The build itself is heavy -- av, onnxruntime, ctranslate2, and vosk
+# (all native-extension Python packages) plus a bun frontend stage --
+# so activeDeadlineSeconds below is generous, and buildkit needs real
+# CPU/memory headroom on the node it schedules to.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: atlas-ci
+  namespace: argo
+spec:
+  serviceAccountName: argo-workflow
+  entrypoint: buildctl
+  arguments:
+    parameters:
+      - name: repo
+        value: github.com/thejoshtaylor/atlas
+      - name: ref
+        value: refs/heads/main
+      - name: sha
+        value: HEAD
+      - name: tag
+        value: latest
+      - name: image
+        value: atlas/app
+      - name: regcredSecret
+        value: regcred-atlas
+  templates:
+    - name: buildctl
+      activeDeadlineSeconds: 3600
+      # Builds fail intermittently (2 of about 9 on 2026-09-22), and a
+      # manual resubmit of the same commit then succeeds. Without a retry,
+      # a failed build leaves the old image running with no signal.
+      retryStrategy:
+        limit: "2"
+        retryPolicy: Always
+        backoff:
+          duration: "30s"
+          factor: "2"
+      initContainers:
+        - name: clone
+          image: alpine/git:latest
+          mirrorVolumeMounts: true
+          command: [sh, -c]
+          args:
+            - |
+              set -e
+              git init -q /work && cd /work
+              # Public repository -- no credential, no token, no secret-backed
+              # env var. A plain HTTPS clone of the literal repo URL is all
+              # this needs (the {{workflow.parameters.repo}} default above
+              # names the same repository; hardcoded here rather than
+              # interpolated, since a public clone has no credential this
+              # needs to keep out of the build log either way).
+              git remote add origin "https://github.com/thejoshtaylor/atlas.git"
+              git fetch -q --depth 1 origin "{{workflow.parameters.sha}}"
+              git checkout -q FETCH_HEAD
+              echo "checked out $(git rev-parse HEAD)"
+      # buildkit builds from /work, the clone target above. Only the
+      # Dockerfile's own default (runtime) stage is built -- the test
+      # stage is never a build target of this template.
+      container:
+        image: moby/buildkit:v0.23.2
+        command: [buildctl]
+        env:
+          - name: DOCKER_CONFIG
+            value: /cfg
+        args:
+          - --addr
+          - tcp://buildkitd:1234
+          - build
+          - --frontend=dockerfile.v0
+          - --local=context=/work
+          - --local=dockerfile=/work
+          - --opt=filename=Dockerfile
+          - --output
+          - 'type=image,"name=harbor.tail41bc66.ts.net/{{workflow.parameters.image}}:{{workflow.parameters.tag}},harbor.tail41bc66.ts.net/{{workflow.parameters.image}}:{{workflow.parameters.sha}}",push=true'
+        volumeMounts:
+          - name: work
+            mountPath: /work
+          - name: regcred
+            mountPath: /cfg
+      volumes:
+        - name: work
+          emptyDir: {}
+        - name: regcred
+          secret:
+            secretName: "{{workflow.parameters.regcredSecret}}"
+            items:
+              - key: .dockerconfigjson
+                path: config.json

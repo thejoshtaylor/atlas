@@ -62,7 +62,7 @@ export function AcceptInviteRoute() {
         onSubmit={(event) => event.preventDefault()}
       >
         <div className="flex flex-col gap-1">
-          <p className="text-body text-muted-foreground">spire-voice</p>
+          <p className="text-body text-muted-foreground">atlas</p>
           <h1 className="text-display font-semibold">Accept invite</h1>
         </div>
 

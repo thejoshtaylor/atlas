@@ -10,9 +10,9 @@ would prove nothing about real continuous speech.
 
 from __future__ import annotations
 
-from spire_voice.audio.ring import PrerollBuffer
-from spire_voice.sources.runner import PrerollReplayingSource
-from spire_voice.transports.base import SourceFormat
+from atlas.audio.ring import PrerollBuffer
+from atlas.sources.runner import PrerollReplayingSource
+from atlas.transports.base import SourceFormat
 
 
 def test_preroll_buffer_never_holds_more_than_its_configured_window():

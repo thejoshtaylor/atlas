@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from spire_voice.workflow.tool import WorkflowToolHost
+from atlas.workflow.tool import WorkflowToolHost
 
 
 def _host(repo, *, zone=None, now=None):
@@ -82,9 +82,9 @@ async def test_flow_01_a_spoken_sentence_drives_run_turn_to_an_ordered_multi_ste
     in the order the model called them. Plan 05-01's tracer proved the
     tool host's own boundary for one step; this test is what makes
     FLOW-01 -- "ordered steps", plural -- actually true end to end."""
-    from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     repo = fake_workflow_repository()
     clock_time = [datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)]
@@ -568,9 +568,9 @@ async def test_a_raising_pending_runs_fetch_still_reaches_speech(
     scheduled known rather than ending the turn -- the identical
     T-01.1-17 posture `state_fetch` already carries, applied to D-09's
     own second fetch."""
-    from spire_voice.providers.base import BrainReply, FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import BrainReply, FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     async def _raising_pending_runs_fetch():
         raise RuntimeError("workflow repository unreachable")
@@ -607,11 +607,11 @@ async def test_a_macro_turn_cancels_a_started_pending_runs_fetch_without_leaving
     dangling, the identical shape `state_task` already follows."""
     import asyncio
 
-    from spire_mcp.safety import Policy
-    from spire_voice.config import MacroActionConfig, MacroConfig
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import run_turn
+    from atlas_mcp.safety import Policy
+    from atlas.config import MacroActionConfig, MacroConfig
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
 
     from test_turn_controller import _FakeToolHost
 
@@ -679,11 +679,11 @@ async def test_two_pending_runs_matching_the_words_are_disambiguated_with_zero_t
     import asyncio
     from types import SimpleNamespace
 
-    from spire_voice.providers.base import FinalTranscript
-    from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn import brain_race
-    from spire_voice.turn.controller import run_turn
+    from atlas.providers.base import FinalTranscript
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
 
     class _RecordingToolHost:
         def __init__(self) -> None:
@@ -772,7 +772,7 @@ async def test_two_pending_runs_matching_the_words_are_disambiguated_with_zero_t
 def _pending_run_for_disambiguation(run_id: int, summary: str):
     from datetime import datetime, timezone
 
-    from spire_voice.db.repository import WorkflowRun, WorkflowStep
+    from atlas.db.repository import WorkflowRun, WorkflowStep
 
     now = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)
     return WorkflowRun(

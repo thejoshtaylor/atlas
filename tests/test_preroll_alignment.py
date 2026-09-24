@@ -29,18 +29,18 @@ from typing import AsyncIterator, Sequence
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from spire_voice.audio.ring import bytes_per_ms
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig, SessionConfig
-from spire_voice.providers.base import BrainReply, FinalTranscript
-from spire_voice.routes.sessions import router as sessions_router
-from spire_voice.session.observers import ObserverPublishingSource, ObserverRegistry
-from spire_voice.session.recorder import SessionRecorder
-from spire_voice.session.timeline import preroll_offset_s
-from spire_voice.sources.runner import PrerollReplayingSource
-from spire_voice.timing import TurnTimings
-from spire_voice.transports.base import SourceFormat
-from spire_voice.turn.controller import run_turn
+from atlas.audio.ring import bytes_per_ms
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig, SessionConfig
+from atlas.providers.base import BrainReply, FinalTranscript
+from atlas.routes.sessions import router as sessions_router
+from atlas.session.observers import ObserverPublishingSource, ObserverRegistry
+from atlas.session.recorder import SessionRecorder
+from atlas.session.timeline import preroll_offset_s
+from atlas.sources.runner import PrerollReplayingSource
+from atlas.timing import TurnTimings
+from atlas.transports.base import SourceFormat
+from atlas.turn.controller import run_turn
 
 # Distinguishable by content, never by re-reading the count the recorder
 # wrote: the pre-roll and the live audio use different byte values so the
@@ -468,7 +468,7 @@ def test_two_entries_tied_at_the_same_instant_keep_written_order_and_the_same_of
     recorder.record_event({"type": "transcript.partial", "text": "second"})
     recorder.close(timings)
 
-    from spire_voice.session import timeline as timeline_module
+    from atlas.session import timeline as timeline_module
 
     events_path = recorder.directory / "events.jsonl"
     raw_events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]

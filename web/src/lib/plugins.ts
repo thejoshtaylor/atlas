@@ -1,5 +1,5 @@
 // The plugins admin surface's fetch layer (PLUG-03, PLUG-08, D-14). Every
-// shape here matches `src/spire_voice/routes/plugins.py`'s own response
+// shape here matches `src/atlas/routes/plugins.py`'s own response
 // models field for field, the same discipline `lib/macros.ts` states at
 // its own top of file -- a renamed or reshaped field here is a silent
 // drift from what the server actually sends.

@@ -20,12 +20,12 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import SecurityConfig
-from spire_voice.crypto.credentials import encrypt_credential
-from spire_voice.db.postgres import PostgresPluginRepository
-from spire_voice.db.repository import PluginAlreadyExistsError, PluginConfigValue
+from atlas.config import SecurityConfig
+from atlas.crypto.credentials import encrypt_credential
+from atlas.db.postgres import PostgresPluginRepository
+from atlas.db.repository import PluginAlreadyExistsError, PluginConfigValue
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
 pytestmark = pytest.mark.integration
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.integration
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -63,8 +63,8 @@ def _run_upgrade_head(async_url: str) -> None:
 
 @pytest.fixture
 async def sessionmaker(monkeypatch):
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")

@@ -40,12 +40,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncIterator
 
-from spire_voice.config import ConfigError, load_config
-from spire_voice.providers.boot import ProviderUnavailable
-from spire_voice.providers.stt_faster_whisper import FasterWhisperStt
-from spire_voice.providers.tts_piper import PiperTts
-from spire_voice.providers.tts_xai import SinkFormat
-from spire_voice.transports.base import SourceFormat
+from atlas.config import ConfigError, load_config
+from atlas.providers.boot import ProviderUnavailable
+from atlas.providers.stt_faster_whisper import FasterWhisperStt
+from atlas.providers.tts_piper import PiperTts
+from atlas.providers.tts_xai import SinkFormat
+from atlas.transports.base import SourceFormat
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"

@@ -1,6 +1,6 @@
 // The safety policy surface: the two modes, the denylist/allowlist rules
 // in each, and the mode switch's audit trail (SAFE-06, SAFE-07). Every
-// shape here matches `src/spire_voice/routes/policy.py`'s own response
+// shape here matches `src/atlas/routes/policy.py`'s own response
 // models field-for-field.
 import type { UseMutationOptions } from "@tanstack/react-query"
 import { apiFetch } from "./api"

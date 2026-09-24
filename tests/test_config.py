@@ -1,14 +1,14 @@
 """Config loader: env expansion, per-section validation, the retired safety key.
 
 Requirement coverage: SRC-01 (env expansion, transport selector). The safety
-block's own parsing lives in `mcp/spire_mcp/safety.py` and is exercised by
+block's own parsing lives in `mcp/atlas_mcp/safety.py` and is exercised by
 `tests/test_safety_integration.py`; this file only proves `Config` rejects a
 `safety:` key rather than reading one (D-11, Phase 3).
 """
 
 import pytest
 
-from spire_voice.config import Config, ConfigError, ServerConfig, SttConfig, expand_env
+from atlas.config import Config, ConfigError, ServerConfig, SttConfig, expand_env
 
 
 def _minimal_raw_config() -> dict:
@@ -51,30 +51,30 @@ def _minimal_raw_config() -> dict:
             "browser_sample_rate": 24000,
             "optimize_streaming_latency": 2,
         },
-        "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
+        "database": {"url": "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"},
     }
 
 
 def test_env_expansion_replaces_placeholders(monkeypatch):
     # A value that itself contains "${" is not expanded a second time --
     # expansion runs once, over the raw text, before the YAML parse.
-    monkeypatch.setenv("SPIRE_TEST_VAR", "value-with-${NOT_EXPANDED}")
-    raw = "key: ${SPIRE_TEST_VAR}\n"
+    monkeypatch.setenv("ATLAS_TEST_VAR", "value-with-${NOT_EXPANDED}")
+    raw = "key: ${ATLAS_TEST_VAR}\n"
     assert expand_env(raw) == "key: value-with-${NOT_EXPANDED}\n"
 
 
 def test_missing_env_var_is_a_startup_error(monkeypatch):
-    monkeypatch.delenv("SPIRE_TEST_MISSING_VAR", raising=False)
+    monkeypatch.delenv("ATLAS_TEST_MISSING_VAR", raising=False)
     with pytest.raises(ConfigError) as exc_info:
-        expand_env("key: ${SPIRE_TEST_MISSING_VAR}\n")
-    assert "SPIRE_TEST_MISSING_VAR" in str(exc_info.value)
+        expand_env("key: ${ATLAS_TEST_MISSING_VAR}\n")
+    assert "ATLAS_TEST_MISSING_VAR" in str(exc_info.value)
 
 
 def test_a_missing_env_var_with_a_default_expands_to_the_default(monkeypatch):
-    monkeypatch.delenv("SPIRE_TEST_MISSING_VAR", raising=False)
-    assert expand_env("key: ${SPIRE_TEST_MISSING_VAR:-a, b}\n") == "key: a, b\n"
-    monkeypatch.setenv("SPIRE_TEST_MISSING_VAR", "set")
-    assert expand_env("key: ${SPIRE_TEST_MISSING_VAR:-a}\n") == "key: set\n"
+    monkeypatch.delenv("ATLAS_TEST_MISSING_VAR", raising=False)
+    assert expand_env("key: ${ATLAS_TEST_MISSING_VAR:-a, b}\n") == "key: a, b\n"
+    monkeypatch.setenv("ATLAS_TEST_MISSING_VAR", "set")
+    assert expand_env("key: ${ATLAS_TEST_MISSING_VAR:-a}\n") == "key: set\n"
 
 
 def test_unknown_transport_value_is_a_startup_error():
@@ -158,7 +158,7 @@ def test_mcp_server_block_rejects_a_configurable_interpreter():
     """`command:` is refused outright, naming why, rather than silently ignored.
 
     The old spelling took a full argv whose first element was the interpreter,
-    and `config.example.yaml` shipped `["python3", "-m", "spire_mcp.ha"]`. That
+    and `config.example.yaml` shipped `["python3", "-m", "atlas_mcp.ha"]`. That
     value crashes startup everywhere `python3` is not the venv interpreter,
     because the child needs the same `mcp` SDK this process has. The key was
     also parsed and then consumed by nothing, so an operator could edit it,
@@ -171,14 +171,14 @@ def test_mcp_server_block_rejects_a_configurable_interpreter():
     """
     import pytest
 
-    from spire_voice.config import ConfigError, McpServerConfig
+    from atlas.config import ConfigError, McpServerConfig
 
     with pytest.raises(ConfigError) as exc:
-        McpServerConfig.from_config({"command": ["python3", "-m", "spire_mcp.ha"]})
+        McpServerConfig.from_config({"command": ["python3", "-m", "atlas_mcp.ha"]})
     assert "args" in str(exc.value)
 
-    ok = McpServerConfig.from_config({"args": ["-m", "spire_mcp.ha"], "env": {"HA_URL": "u"}})
-    assert ok.args == ("-m", "spire_mcp.ha")
+    ok = McpServerConfig.from_config({"args": ["-m", "atlas_mcp.ha"], "env": {"HA_URL": "u"}})
+    assert ok.args == ("-m", "atlas_mcp.ha")
     assert ok.env == {"HA_URL": "u"}
 
 
@@ -186,7 +186,7 @@ def test_mcp_server_block_rejects_a_configurable_interpreter():
 
 
 def test_brain_models_list_produces_tiers_in_written_order():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config(
         {"models": [{"model": "grok-4.20-0309-non-reasoning"}, {"model": "grok-4.6"}]}
@@ -195,7 +195,7 @@ def test_brain_models_list_produces_tiers_in_written_order():
 
 
 def test_brain_model_key_is_a_startup_error_naming_models():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BrainConfig.from_config({"model": "grok-4.6"})
@@ -203,7 +203,7 @@ def test_brain_model_key_is_a_startup_error_naming_models():
 
 
 def test_brain_empty_or_absent_models_list_is_a_startup_error():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BrainConfig.from_config({"models": []})
@@ -214,14 +214,14 @@ def test_brain_empty_or_absent_models_list_is_a_startup_error():
 
 
 def test_brain_models_must_be_a_list_not_a_string():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError):
         BrainConfig.from_config({"models": "grok-4.6"})
 
 
 def test_brain_single_tier_is_both_the_only_candidate_and_the_top_tier():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
     assert brain.top_tier.model == "grok-4.6"
@@ -229,7 +229,7 @@ def test_brain_single_tier_is_both_the_only_candidate_and_the_top_tier():
 
 
 def test_brain_tier_rejects_a_configurable_calls_tools_key():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BrainConfig.from_config({"models": [{"model": "grok-4.6", "calls_tools": True}]})
@@ -237,7 +237,7 @@ def test_brain_tier_rejects_a_configurable_calls_tools_key():
 
 
 def test_brain_top_tier_is_the_last_entry_and_triage_tiers_is_the_rest():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config(
         {"models": [{"model": "a"}, {"model": "b"}, {"model": "c"}]}
@@ -247,8 +247,8 @@ def test_brain_top_tier_is_the_last_entry_and_triage_tiers_is_the_rest():
 
 
 def test_xai_brain_resolves_against_top_tier_by_default_and_explicit_model_override():
-    from spire_voice.config import BrainConfig
-    from spire_voice.providers.brain_xai import XaiBrain
+    from atlas.config import BrainConfig
+    from atlas.providers.brain_xai import XaiBrain
 
     brain_config = BrainConfig.from_config(
         {"api_key": "test-key", "models": [{"model": "a"}, {"model": "b"}]}
@@ -265,21 +265,21 @@ def test_xai_brain_resolves_against_top_tier_by_default_and_explicit_model_overr
 
 
 def test_brain_turn_timeout_s_defaults_to_25_seconds():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
     assert brain.turn_timeout_s == 25.0
 
 
 def test_brain_turn_timeout_s_is_configurable():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": 10})
     assert brain.turn_timeout_s == 10.0
 
 
 def test_brain_turn_timeout_s_must_be_positive():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "turn_timeout_s": 0})
@@ -293,14 +293,14 @@ def test_brain_turn_timeout_s_must_be_positive():
 
 
 def test_brain_local_intents_defaults_to_true():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
     assert brain.local_intents is True
 
 
 def test_brain_local_intents_is_configurable():
-    from spire_voice.config import BrainConfig
+    from atlas.config import BrainConfig
 
     brain = BrainConfig.from_config(
         {"models": [{"model": "grok-4.6"}], "local_intents": False}
@@ -309,7 +309,7 @@ def test_brain_local_intents_is_configurable():
 
 
 def test_brain_local_intents_must_be_a_bool():
-    from spire_voice.config import BrainConfig, ConfigError
+    from atlas.config import BrainConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "local_intents": "yes"})
@@ -320,14 +320,14 @@ def test_brain_local_intents_must_be_a_bool():
 
 
 def test_normalize_folds_case_punctuation_and_whitespace():
-    from spire_voice.turn.macros import normalize
+    from atlas.turn.macros import normalize
 
     assert normalize("  Good, Night!!  ") == "good night"
     assert normalize("GOOD NIGHT") == "good night"
 
 
 def test_normalize_compares_by_code_point_through_nfkc():
-    from spire_voice.turn.macros import normalize
+    from atlas.turn.macros import normalize
 
     # A precomposed accented character and its NFKC-equivalent decomposed
     # form (base letter + combining accent) differ in code point count and
@@ -343,7 +343,7 @@ def test_macro_collision_on_phrase_raises_naming_both():
     same function `alembic/versions/0005_macro_tables.py`'s seed step and
     plan 04-06's write routes both call, now that `Config.from_config` no
     longer parses `macros:` at all."""
-    from spire_voice.config import ConfigError, MacroConfig, _check_macros_do_not_collide
+    from atlas.config import ConfigError, MacroConfig, _check_macros_do_not_collide
 
     macros = (
         MacroConfig.from_config(
@@ -360,7 +360,7 @@ def test_macro_collision_on_phrase_raises_naming_both():
 
 
 def test_macro_alias_colliding_with_another_macros_phrase_raises_naming_both():
-    from spire_voice.config import ConfigError, MacroConfig, _check_macros_do_not_collide
+    from atlas.config import ConfigError, MacroConfig, _check_macros_do_not_collide
 
     macros = (
         MacroConfig.from_config(
@@ -385,7 +385,7 @@ def test_macros_key_still_present_is_a_startup_error_naming_it():
     """D-09: macros used to carry now live in the database, seeded by the
     migration -- a config file still carrying the key raises `ConfigError`
     naming it, the same way `safety:` already does (D-11)."""
-    from spire_voice.config import Config, ConfigError
+    from atlas.config import Config, ConfigError
 
     raw = _minimal_raw_config()
     raw["macros"] = [
@@ -401,13 +401,13 @@ def test_mcp_key_still_present_is_a_startup_error_naming_it():
     `plugins` table, seeded by `alembic/versions/0008_plugin_tables.py` --
     a config file still carrying the `mcp:` key raises `ConfigError`
     naming it, the same way `safety:`/`macros:` already do (D-11, D-09)."""
-    from spire_voice.config import Config, ConfigError
+    from atlas.config import Config, ConfigError
 
     raw = _minimal_raw_config()
     raw["mcp"] = {
         "servers": {
             "ha": {
-                "args": ["-m", "spire_mcp.ha"],
+                "args": ["-m", "atlas_mcp.ha"],
                 "env": {"HA_URL": "http://ha.invalid", "HA_TOKEN": "test-token"},
             },
         },
@@ -431,7 +431,7 @@ def test_mcp_key_still_present_is_a_startup_error_naming_it():
 
 
 def test_macro_alias_matching_its_own_phrase_loads_cleanly_as_one_key():
-    from spire_voice.config import MacroConfig
+    from atlas.config import MacroConfig
 
     macro = MacroConfig.from_config(
         {
@@ -445,14 +445,14 @@ def test_macro_alias_matching_its_own_phrase_loads_cleanly_as_one_key():
 
 
 def test_macro_blank_phrase_is_a_startup_error():
-    from spire_voice.config import ConfigError, MacroConfig
+    from atlas.config import ConfigError, MacroConfig
 
     with pytest.raises(ConfigError):
         MacroConfig.from_config({"reply": "ok", "actions": [{"tool": "ha_call_service"}]})
 
 
 def test_macro_blank_reply_is_a_startup_error_naming_the_macro():
-    from spire_voice.config import ConfigError, MacroConfig
+    from atlas.config import ConfigError, MacroConfig
 
     with pytest.raises(ConfigError) as exc:
         MacroConfig.from_config({"phrase": "good night", "actions": [{"tool": "ha_call_service"}]})
@@ -460,7 +460,7 @@ def test_macro_blank_reply_is_a_startup_error_naming_the_macro():
 
 
 def test_macro_zero_actions_is_a_startup_error_naming_the_macro():
-    from spire_voice.config import ConfigError, MacroConfig
+    from atlas.config import ConfigError, MacroConfig
 
     with pytest.raises(ConfigError) as exc:
         MacroConfig.from_config({"phrase": "good night", "reply": "ok", "actions": []})
@@ -468,7 +468,7 @@ def test_macro_zero_actions_is_a_startup_error_naming_the_macro():
 
 
 def test_macro_with_no_aliases_key_loads_cleanly_matching_on_phrase_alone():
-    from spire_voice.config import MacroConfig
+    from atlas.config import MacroConfig
 
     macro = MacroConfig.from_config(
         {"phrase": "good night", "reply": "ok", "actions": [{"tool": "ha_call_service"}]}
@@ -478,7 +478,7 @@ def test_macro_with_no_aliases_key_loads_cleanly_matching_on_phrase_alone():
 
 
 def test_macro_action_blank_tool_name_is_a_startup_error():
-    from spire_voice.config import ConfigError, MacroActionConfig
+    from atlas.config import ConfigError, MacroActionConfig
 
     with pytest.raises(ConfigError):
         MacroActionConfig.from_config({"arguments": {}})
@@ -490,21 +490,21 @@ def test_macro_action_blank_tool_name_is_a_startup_error():
 def test_config_and_turn_macros_import_in_either_order():
     """Proves no runtime import cycle between the two modules -- config.py
     imports normalize() from turn/macros.py, and turn/macros.py must never
-    import spire_voice.config back."""
+    import atlas.config back."""
     import importlib
 
-    import spire_voice.config  # noqa: F401
-    import spire_voice.turn.macros  # noqa: F401
+    import atlas.config  # noqa: F401
+    import atlas.turn.macros  # noqa: F401
 
-    importlib.reload(spire_voice.turn.macros)
-    importlib.reload(spire_voice.config)
+    importlib.reload(atlas.turn.macros)
+    importlib.reload(atlas.config)
 
 
 # --- Task 3: the two tts: precache keys, wired end to end ---
 
 
 def test_tts_config_parses_cache_dir_and_precache():
-    from spire_voice.config import TtsConfig
+    from atlas.config import TtsConfig
 
     tts = TtsConfig.from_config({"cache_dir": "/tmp/cache", "precache": ["ok", "done"]})
     assert tts.cache_dir == "/tmp/cache"
@@ -512,7 +512,7 @@ def test_tts_config_parses_cache_dir_and_precache():
 
 
 def test_tts_config_defaults_cache_dir_and_precache_when_absent():
-    from spire_voice.config import TtsConfig
+    from atlas.config import TtsConfig
 
     tts = TtsConfig.from_config({})
     assert tts.cache_dir == "/data/tts-cache"
@@ -520,7 +520,7 @@ def test_tts_config_defaults_cache_dir_and_precache_when_absent():
 
 
 def test_example_config_loads_end_to_end(monkeypatch):
-    from spire_voice.config import load_config
+    from atlas.config import load_config
 
     for name in (
         "XAI_API_KEY",
@@ -550,7 +550,7 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # placeholder the loop above uses without failing that validation.
     monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
     # Plan 04-03: mcp.servers.weather's two placeholders -- a coordinate,
-    # not an arbitrary string, since spire_mcp.weather parses these as
+    # not an arbitrary string, since atlas_mcp.weather parses these as
     # floats (never exercised by this test, which only loads Config, but
     # a numeric-shaped value is the honest placeholder for what these
     # actually carry).
@@ -560,7 +560,7 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # DatabaseConfig.from_config validates the scheme eagerly, unlike the
     # plain passthrough values above.
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+        "DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
     )
 
     config = load_config("config/config.example.yaml")
@@ -616,8 +616,8 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # Plan 03-01's gap closure: the bootstrap seam (D-01) loads, and its
     # derived migration URL swaps the driver without touching host,
     # credentials, or database name.
-    assert config.database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
-    assert config.database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+    assert config.database.url == "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
+    assert config.database.migration_url == "postgresql+psycopg://atlas:test-value@db.invalid:5432/atlas"
 
     # Plan 06-01: `mcp:` (and `Config.mcp_servers`) is retired -- every MCP
     # server, weather included, is a plugin row now, seeded by
@@ -627,7 +627,7 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # rejection; there is no `Config` field left to assert on here.
 
     assert config.database.run_migrations_at_startup is True
-    assert config.security.secret_key_env == "SPIRE_SECRET_KEY"
+    assert config.security.secret_key_env == "ATLAS_SECRET_KEY"
     assert config.security.access_token_ttl_s == 900
     assert config.security.refresh_token_ttl_s == 1209600
     assert config.security.cookie_secure is False
@@ -641,7 +641,7 @@ def test_example_config_camera_url_and_speaker_backend_expand_from_env(monkeypat
     and that camera.rtsp_url comes through as exactly what the
     environment supplied, with no embedded host or credential left in
     the committed file for it to compete with."""
-    from spire_voice.config import load_config
+    from atlas.config import load_config
 
     for name in (
         "XAI_API_KEY",
@@ -658,7 +658,7 @@ def test_example_config_camera_url_and_speaker_backend_expand_from_env(monkeypat
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+        "DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
     )
     camera_url = "rtsp://real-user:real-pass@a-real-camera.invalid:554/stream1"
     monkeypatch.setenv("CAMERA_RTSP_URL", camera_url)
@@ -690,7 +690,7 @@ def _set_example_config_env(monkeypatch) -> None:
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+        "DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
     )
     monkeypatch.setenv(
         "CAMERA_RTSP_URL", "rtsp://real-user:real-pass@a-real-camera.invalid:554/stream1"
@@ -711,7 +711,7 @@ def test_example_config_speaker_tcp_url_expands_from_env(
     """260923-pds (T-pds-06): SPEAKER_TCP_URL uses the `:-` empty-default
     placeholder, so a deployment that never sets it (the go2rtc case here)
     still loads -- no existing Helm or Compose deployment breaks."""
-    from spire_voice.config import ConfigError, load_config
+    from atlas.config import ConfigError, load_config
 
     _set_example_config_env(monkeypatch)
     monkeypatch.setenv("SPEAKER_BACKEND", speaker_backend)
@@ -735,7 +735,7 @@ def test_example_config_speaker_tcp_url_expands_from_env(
 
 
 def test_camera_config_rejects_an_unsupported_encoding():
-    from spire_voice.config import CameraConfig, ConfigError
+    from atlas.config import CameraConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         CameraConfig.from_config({"encoding": "opus"})
@@ -743,7 +743,7 @@ def test_camera_config_rejects_an_unsupported_encoding():
 
 
 def test_speaker_config_rejects_a_non_positive_respawn_backoff():
-    from spire_voice.config import ConfigError, SpeakerConfig
+    from atlas.config import ConfigError, SpeakerConfig
 
     with pytest.raises(ConfigError):
         SpeakerConfig.from_config({"respawn_backoff_s": 0})
@@ -756,7 +756,7 @@ def test_speaker_config_rejects_a_non_positive_reopen_timeout():
     reopen immediately, including one a respawning ffmpeg child was about
     to win -- reject it at config load, same posture as respawn_backoff_s
     above."""
-    from spire_voice.config import ConfigError, SpeakerConfig
+    from atlas.config import ConfigError, SpeakerConfig
 
     with pytest.raises(ConfigError):
         SpeakerConfig.from_config({"reopen_timeout_s": 0})
@@ -765,20 +765,20 @@ def test_speaker_config_rejects_a_non_positive_reopen_timeout():
 
 
 def test_speaker_config_backend_defaults_to_go2rtc():
-    from spire_voice.config import SpeakerConfig
+    from atlas.config import SpeakerConfig
 
     assert SpeakerConfig.from_config({}).backend == "go2rtc"
     assert SpeakerConfig().backend == "go2rtc"
 
 
 def test_speaker_config_accepts_tapo_talk_backend():
-    from spire_voice.config import SpeakerConfig
+    from atlas.config import SpeakerConfig
 
     assert SpeakerConfig.from_config({"backend": "tapo_talk"}).backend == "tapo_talk"
 
 
 def test_speaker_config_rejects_an_unknown_backend():
-    from spire_voice.config import ConfigError, SpeakerConfig
+    from atlas.config import ConfigError, SpeakerConfig
 
     with pytest.raises(ConfigError) as exc:
         SpeakerConfig.from_config({"backend": "sonos"})
@@ -799,7 +799,7 @@ def test_speaker_config_rejects_an_unknown_backend():
 def test_speaker_config_tcp_backend_accepts_a_valid_url(raw, expected_backend, expected_tcp_url):
     """tcp_url is only validated on the tcp backend -- tapo_talk and go2rtc
     both accept it unchecked (or absent) since neither reads it."""
-    from spire_voice.config import SpeakerConfig
+    from atlas.config import SpeakerConfig
 
     config = SpeakerConfig.from_config(raw)
     assert config.backend == expected_backend
@@ -821,7 +821,7 @@ def test_speaker_config_tcp_backend_rejects_a_bad_url(raw, error_substring):
     """A missing, empty, None, bare, or non-tcp:// tcp_url on the tcp
     backend must stop startup naming speaker.tcp_url -- the existing
     unknown-backend rejection (naming speaker.backend) must still hold too."""
-    from spire_voice.config import ConfigError, SpeakerConfig
+    from atlas.config import ConfigError, SpeakerConfig
 
     with pytest.raises(ConfigError) as exc:
         SpeakerConfig.from_config(raw)
@@ -829,13 +829,13 @@ def test_speaker_config_tcp_backend_rejects_a_bad_url(raw, error_substring):
 
 
 def test_speaker_config_tcp_url_defaults_to_empty_string():
-    from spire_voice.config import SpeakerConfig
+    from atlas.config import SpeakerConfig
 
     assert SpeakerConfig().tcp_url == ""
 
 
 def test_session_config_rejects_a_non_positive_retention():
-    from spire_voice.config import ConfigError, SessionConfig
+    from atlas.config import ConfigError, SessionConfig
 
     with pytest.raises(ConfigError):
         SessionConfig.from_config({"retain_days": 0})
@@ -844,7 +844,7 @@ def test_session_config_rejects_a_non_positive_retention():
 
 
 def test_workflow_config_defaults():
-    from spire_voice.config import WorkflowConfig
+    from atlas.config import WorkflowConfig
 
     workflow = WorkflowConfig.from_config(None)
     assert workflow.poll_interval_s == 5.0
@@ -855,7 +855,7 @@ def test_workflow_config_defaults():
 
 
 def test_workflow_config_rejects_a_non_positive_poll_interval():
-    from spire_voice.config import ConfigError, WorkflowConfig
+    from atlas.config import ConfigError, WorkflowConfig
 
     with pytest.raises(ConfigError):
         WorkflowConfig.from_config({"poll_interval_s": 0})
@@ -864,7 +864,7 @@ def test_workflow_config_rejects_a_non_positive_poll_interval():
 
 
 def test_workflow_config_rejects_a_non_positive_max_steps_per_poll():
-    from spire_voice.config import ConfigError, WorkflowConfig
+    from atlas.config import ConfigError, WorkflowConfig
 
     with pytest.raises(ConfigError):
         WorkflowConfig.from_config({"max_steps_per_poll": 0})
@@ -876,7 +876,7 @@ def test_workflow_config_rejects_a_non_positive_max_steps_per_poll():
 
 
 def test_workflow_config_rejects_a_negative_late_threshold():
-    from spire_voice.config import ConfigError, WorkflowConfig
+    from atlas.config import ConfigError, WorkflowConfig
 
     with pytest.raises(ConfigError):
         WorkflowConfig.from_config({"late_threshold_s": -1})
@@ -886,7 +886,7 @@ def test_workflow_config_rejects_a_negative_late_threshold():
 
 
 def test_workflow_config_rejects_a_max_attempts_below_one():
-    from spire_voice.config import ConfigError, WorkflowConfig
+    from atlas.config import ConfigError, WorkflowConfig
 
     with pytest.raises(ConfigError):
         WorkflowConfig.from_config({"max_attempts": 0})
@@ -895,7 +895,7 @@ def test_workflow_config_rejects_a_max_attempts_below_one():
 
 
 def test_workflow_config_rejects_a_non_positive_retry_backoff():
-    from spire_voice.config import ConfigError, WorkflowConfig
+    from atlas.config import ConfigError, WorkflowConfig
 
     with pytest.raises(ConfigError):
         WorkflowConfig.from_config({"retry_backoff_s": 0})
@@ -904,7 +904,7 @@ def test_workflow_config_rejects_a_non_positive_retry_backoff():
 
 
 def test_wake_config_rejects_an_unknown_engine():
-    from spire_voice.config import ConfigError, WakeConfig
+    from atlas.config import ConfigError, WakeConfig
 
     with pytest.raises(ConfigError) as exc:
         WakeConfig.from_config({"engine": "shazam"})
@@ -913,7 +913,7 @@ def test_wake_config_rejects_an_unknown_engine():
 
 
 def test_gate_config_still_carrying_an_identity_key_is_a_startup_error():
-    from spire_voice.config import ConfigError, GateConfig
+    from atlas.config import ConfigError, GateConfig
 
     with pytest.raises(ConfigError) as exc:
         GateConfig.from_config({"require_face": True})
@@ -929,7 +929,7 @@ def test_gate_config_still_carrying_an_identity_key_is_a_startup_error():
 
 
 def test_source_override_naming_an_unknown_field_is_a_startup_error():
-    from spire_voice.config import ConfigError, GateConfig
+    from atlas.config import ConfigError, GateConfig
 
     with pytest.raises(ConfigError) as exc:
         GateConfig.from_config({"sources": {"browser": {"require_video": True}}})
@@ -937,14 +937,14 @@ def test_source_override_naming_an_unknown_field_is_a_startup_error():
 
 
 def test_gate_resolve_returns_global_policy_unchanged_with_no_override():
-    from spire_voice.config import GateConfig
+    from atlas.config import GateConfig
 
     gate = GateConfig.from_config({"mute_when_playing": ["media_player.example_tv"]})
     assert gate.resolve("camera") == gate
 
 
 def test_gate_resolve_returns_merged_policy_for_a_source_with_an_override():
-    from spire_voice.config import GateConfig
+    from atlas.config import GateConfig
 
     gate = GateConfig.from_config(
         {
@@ -958,7 +958,7 @@ def test_gate_resolve_returns_merged_policy_for_a_source_with_an_override():
 
 
 def test_wake_threshold_survives_the_load_as_a_float_with_no_rounding():
-    from spire_voice.config import WakeConfig
+    from atlas.config import WakeConfig
 
     wake = WakeConfig.from_config({"openwakeword": {"threshold": 0.123456}})
     assert wake.openwakeword.threshold == 0.123456
@@ -977,7 +977,7 @@ def test_wake_source_override_of_a_nested_engine_block_builds_a_real_subconfig()
     `AttributeError: 'dict' object has no attribute 'threshold'` at
     startup -- a crash whose message does not point at the actual mistake,
     contradicting this module's own "raised, not returned" doctrine."""
-    from spire_voice.config import OpenWakeWordConfig, WakeConfig
+    from atlas.config import OpenWakeWordConfig, WakeConfig
 
     wake = WakeConfig.from_config(
         {
@@ -999,7 +999,7 @@ def test_wake_source_override_of_a_nested_engine_block_builds_a_real_subconfig()
 
 
 def test_wake_source_override_of_a_nested_engine_block_rejects_a_non_mapping():
-    from spire_voice.config import ConfigError, WakeConfig
+    from atlas.config import ConfigError, WakeConfig
 
     with pytest.raises(ConfigError) as exc:
         WakeConfig.from_config({"sources": {"camera": {"openwakeword": 0.9}}})
@@ -1010,7 +1010,7 @@ def test_wake_source_override_of_a_nested_engine_block_rejects_a_non_mapping():
 
 
 def test_calibration_config_rejects_a_non_positive_probe_duration():
-    from spire_voice.config import CalibrationConfig, ConfigError
+    from atlas.config import CalibrationConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         CalibrationConfig.from_config({"probe_duration_s": 0})
@@ -1021,7 +1021,7 @@ def test_calibration_config_rejects_a_non_positive_probe_duration():
 
 
 def test_calibration_config_rejects_a_negative_settle_period():
-    from spire_voice.config import CalibrationConfig, ConfigError
+    from atlas.config import CalibrationConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         CalibrationConfig.from_config({"settle_s": -0.1})
@@ -1035,7 +1035,7 @@ def test_calibration_config_rejects_a_negative_settle_period():
 
 
 def test_calibration_config_rejects_a_non_positive_max_age_days():
-    from spire_voice.config import CalibrationConfig, ConfigError
+    from atlas.config import CalibrationConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         CalibrationConfig.from_config({"max_age_days": 0})
@@ -1046,7 +1046,7 @@ def test_calibration_config_rejects_a_non_positive_max_age_days():
 
 
 def test_calibration_config_rejects_a_negative_tail():
-    from spire_voice.config import CalibrationConfig, ConfigError
+    from atlas.config import CalibrationConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         CalibrationConfig.from_config({"tail_s": -0.01})
@@ -1054,7 +1054,7 @@ def test_calibration_config_rejects_a_negative_tail():
 
 
 def test_calibration_config_route_enabled_defaults_off():
-    from spire_voice.config import CalibrationConfig
+    from atlas.config import CalibrationConfig
 
     assert CalibrationConfig.from_config(None).route_enabled is False
     assert CalibrationConfig.from_config({}).route_enabled is False
@@ -1071,7 +1071,7 @@ def test_calibration_config_refuses_a_route_enabled_that_is_not_a_boolean():
     value parses as `None`, not `false`, and this route makes a real home
     play a sound and record the room (T-FMI-01) -- a configuration nobody
     means is refused by name here instead."""
-    from spire_voice.config import CalibrationConfig, ConfigError
+    from atlas.config import CalibrationConfig, ConfigError
 
     for value in (None, 1, 0, "true", "false", "yes", "on", ""):
         with pytest.raises(ConfigError) as exc:
@@ -1081,7 +1081,7 @@ def test_calibration_config_refuses_a_route_enabled_that_is_not_a_boolean():
 
 
 def test_calibration_config_accepts_both_real_booleans_for_route_enabled():
-    from spire_voice.config import CalibrationConfig
+    from atlas.config import CalibrationConfig
 
     assert CalibrationConfig.from_config({"route_enabled": True}).route_enabled is True
     assert CalibrationConfig.from_config({"route_enabled": False}).route_enabled is False
@@ -1093,12 +1093,12 @@ def test_an_empty_calibration_route_enabled_variable_is_refused_by_the_real_load
     """The end-to-end form of the case above, through `load_config` and the
     real `${VAR}` expansion -- the path the chart and Compose both take --
     rather than through `CalibrationConfig.from_config` alone."""
-    from spire_voice.config import ConfigError, load_config
+    from atlas.config import ConfigError, load_config
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "database:\n"
-        "  url: postgresql+asyncpg://spire:test-value@db.invalid:5432/spire\n"
+        "  url: postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas\n"
         "brain:\n"
         "  base_url: https://brain.invalid/v1\n"
         "  api_key: test-value\n"
@@ -1119,7 +1119,7 @@ def test_shipped_config_resolves_calibration_route_enabled_from_the_real_env_var
     file must resolve to a real YAML boolean, exactly as `${COOKIE_SECURE}`
     already does -- proven end-to-end through `load_config` on the shipped
     file rather than through a hand-built fixture."""
-    from spire_voice.config import load_config
+    from atlas.config import load_config
 
     for name in (
         "XAI_API_KEY",
@@ -1137,7 +1137,7 @@ def test_shipped_config_resolves_calibration_route_enabled_from_the_real_env_var
     monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
     monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
     monkeypatch.setenv(
-        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+        "DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
     )
 
     monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "true")
@@ -1153,7 +1153,7 @@ def test_shipped_config_resolves_calibration_route_enabled_from_the_real_env_var
 
 
 def test_barge_in_config_rejects_a_negative_correlation_tolerance():
-    from spire_voice.config import BargeInConfig, ConfigError
+    from atlas.config import BargeInConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BargeInConfig.from_config({"correlation_tolerance": -0.01})
@@ -1164,7 +1164,7 @@ def test_barge_in_config_rejects_a_negative_correlation_tolerance():
 
 
 def test_barge_in_config_rejects_an_adaptation_rate_outside_its_bounds():
-    from spire_voice.config import BargeInConfig, ConfigError
+    from atlas.config import BargeInConfig, ConfigError
 
     with pytest.raises(ConfigError) as exc:
         BargeInConfig.from_config({"tracking_adaptation_rate": 0})
@@ -1182,7 +1182,7 @@ def test_barge_in_config_rejects_an_adaptation_rate_outside_its_bounds():
 
 
 def test_barge_in_config_correlation_defaults_off():
-    from spire_voice.config import BargeInConfig
+    from atlas.config import BargeInConfig
 
     resolved = BargeInConfig.from_config(None)
     assert resolved.correlation_enabled is False
@@ -1193,7 +1193,7 @@ def test_barge_in_config_correlation_enabled_survives_a_per_source_override_roun
     default) alongside whatever `correlation_enabled` the global block
     carries -- proving the two keys coexist under `resolve()` the same way
     every other barge-in field already does."""
-    from spire_voice.config import BargeInConfig
+    from atlas.config import BargeInConfig
 
     config = BargeInConfig.from_config(
         {"correlation_enabled": True, "sources": {"camera": {"enabled": False}}}
@@ -1207,28 +1207,28 @@ def test_barge_in_config_correlation_enabled_survives_a_per_source_override_roun
 
 
 def test_database_config_derives_migration_url_from_the_runtime_url():
-    from spire_voice.config import DatabaseConfig
+    from atlas.config import DatabaseConfig
 
     database = DatabaseConfig.from_config(
-        {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"}
+        {"url": "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"}
     )
-    assert database.url == "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
-    assert database.migration_url == "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"
+    assert database.url == "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"
+    assert database.migration_url == "postgresql+psycopg://atlas:test-value@db.invalid:5432/atlas"
     assert database.run_migrations_at_startup is True
 
 
 def test_database_config_rejects_a_synchronous_scheme():
-    from spire_voice.config import ConfigError, DatabaseConfig
+    from atlas.config import ConfigError, DatabaseConfig
 
     with pytest.raises(ConfigError) as exc:
         DatabaseConfig.from_config(
-            {"url": "postgresql+psycopg://spire:test-value@db.invalid:5432/spire"}
+            {"url": "postgresql+psycopg://atlas:test-value@db.invalid:5432/atlas"}
         )
     assert "database.url" in str(exc.value)
 
 
 def test_database_config_rejects_a_missing_url():
-    from spire_voice.config import ConfigError, DatabaseConfig
+    from atlas.config import ConfigError, DatabaseConfig
 
     with pytest.raises(ConfigError) as exc:
         DatabaseConfig.from_config({})
@@ -1236,39 +1236,39 @@ def test_database_config_rejects_a_missing_url():
 
 
 def test_database_config_explicit_migration_url_overrides_the_derived_one():
-    from spire_voice.config import DatabaseConfig
+    from atlas.config import DatabaseConfig
 
     database = DatabaseConfig.from_config(
         {
-            "url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire",
-            "migration_url": "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/spire",
+            "url": "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas",
+            "migration_url": "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/atlas",
         }
     )
     assert database.migration_url == (
-        "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/spire"
+        "postgresql+psycopg://migrator:test-value@migrations.invalid:5432/atlas"
     )
 
 
 def test_read_secret_key_raises_a_named_config_error_when_absent(monkeypatch):
-    from spire_voice.config import ConfigError, SecurityConfig, read_secret_key
+    from atlas.config import ConfigError, SecurityConfig, read_secret_key
 
-    monkeypatch.delenv("SPIRE_SECRET_KEY", raising=False)
+    monkeypatch.delenv("ATLAS_SECRET_KEY", raising=False)
     security = SecurityConfig.from_config(None)
     with pytest.raises(ConfigError) as exc:
         read_secret_key(security)
-    assert "SPIRE_SECRET_KEY" in str(exc.value)
+    assert "ATLAS_SECRET_KEY" in str(exc.value)
 
 
 def test_read_secret_key_returns_the_environment_value_when_present(monkeypatch):
-    from spire_voice.config import SecurityConfig, read_secret_key
+    from atlas.config import SecurityConfig, read_secret_key
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-value")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-value")
     security = SecurityConfig.from_config(None)
     assert read_secret_key(security) == "test-value"
 
 
 def test_security_config_rejects_an_access_lifetime_that_does_not_outlive_a_shorter_refresh():
-    from spire_voice.config import ConfigError, SecurityConfig
+    from atlas.config import ConfigError, SecurityConfig
 
     with pytest.raises(ConfigError) as exc:
         SecurityConfig.from_config({"access_token_ttl_s": 1000, "refresh_token_ttl_s": 900})
@@ -1282,13 +1282,13 @@ def test_security_config_rejects_an_access_lifetime_that_does_not_outlive_a_shor
 
 
 def test_security_config_defaults():
-    from spire_voice.config import SecurityConfig
+    from atlas.config import SecurityConfig
 
     security = SecurityConfig.from_config(None)
-    assert security.secret_key_env == "SPIRE_SECRET_KEY"
+    assert security.secret_key_env == "ATLAS_SECRET_KEY"
     assert security.access_token_ttl_s == 900
     assert security.refresh_token_ttl_s == 1209600
-    assert security.cookie_name == "spire_session"
+    assert security.cookie_name == "atlas_session"
     assert security.cookie_secure is False
 
 
@@ -1309,7 +1309,7 @@ def test_security_config_refuses_a_cookie_secure_that_is_not_a_boolean():
     operator could plausibly type; `true`/`false` are the only two this
     field has ever meant.
     """
-    from spire_voice.config import ConfigError, SecurityConfig
+    from atlas.config import ConfigError, SecurityConfig
 
     for value in (None, 1, 0, "true", "false", "yes", "on", ""):
         with pytest.raises(ConfigError) as exc:
@@ -1319,7 +1319,7 @@ def test_security_config_refuses_a_cookie_secure_that_is_not_a_boolean():
 
 
 def test_security_config_accepts_both_real_booleans():
-    from spire_voice.config import SecurityConfig
+    from atlas.config import SecurityConfig
 
     assert SecurityConfig.from_config({"cookie_secure": True}).cookie_secure is True
     assert SecurityConfig.from_config({"cookie_secure": False}).cookie_secure is False
@@ -1329,12 +1329,12 @@ def test_an_empty_cookie_secure_variable_is_refused_by_the_real_loader(tmp_path,
     """The end-to-end form of the case above, through `load_config` and
     the real `${VAR}` expansion -- the path the chart and Compose both
     take -- rather than through `SecurityConfig.from_config` alone."""
-    from spire_voice.config import ConfigError, load_config
+    from atlas.config import ConfigError, load_config
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "database:\n"
-        "  url: postgresql+asyncpg://spire:test-value@db.invalid:5432/spire\n"
+        "  url: postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas\n"
         "brain:\n"
         "  base_url: https://brain.invalid/v1\n"
         "  api_key: test-value\n"

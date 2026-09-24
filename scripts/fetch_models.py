@@ -7,7 +7,7 @@ D-11 is this script's whole reason to exist as a separate, operator-run
 step: nothing in the application ever downloads a model at boot. An
 offline deployment must not need the internet at the least convenient
 moment, so `lifespan`, no route, and no provider constructor calls
-anything in this module -- confirmed by a grep gate over `src/spire_voice/`
+anything in this module -- confirmed by a grep gate over `src/atlas/`
 in this script's own `<verify>`.
 
 Destinations are read from the project's own configuration
@@ -65,7 +65,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
-from spire_voice.config import ConfigError, load_config
+from atlas.config import ConfigError, load_config
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"

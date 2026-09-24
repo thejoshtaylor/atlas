@@ -13,9 +13,9 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from spire_voice.config import SttConfig, TtsConfig
-from spire_voice.providers.base import FinalTranscript, ToolCall
-from spire_voice.transports.base import SourceFormat
+from atlas.config import SttConfig, TtsConfig
+from atlas.providers.base import FinalTranscript, ToolCall
+from atlas.transports.base import SourceFormat
 
 
 def _stt_cfg() -> SttConfig:
@@ -32,7 +32,7 @@ def _stt_cfg() -> SttConfig:
 
 
 def test_stt_url_uses_wire_parameter_names():
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     stt = XaiStt(_stt_cfg())
     url = stt.build_url(SourceFormat("pcm", 16000))
@@ -49,26 +49,26 @@ def test_stt_url_uses_wire_parameter_names():
 def test_stt_url_repeats_keyterm_once_per_configured_term():
     from dataclasses import replace
 
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
-    stt = XaiStt(replace(_stt_cfg(), keyterms=("Spire", "example cooler")))
+    stt = XaiStt(replace(_stt_cfg(), keyterms=("Atlas", "example cooler")))
     query = parse_qs(urlparse(stt.build_url(SourceFormat("alaw", 8000))).query)
-    assert query["keyterm"] == ["Spire", "example cooler"]
+    assert query["keyterm"] == ["Atlas", "example cooler"]
 
 
 def test_stt_keyterms_parse_from_a_comma_separated_string_or_a_list():
-    assert SttConfig.from_config({"keyterms": "Spire, example cooler,"}).keyterms == (
-        "Spire",
+    assert SttConfig.from_config({"keyterms": "Atlas, example cooler,"}).keyterms == (
+        "Atlas",
         "example cooler",
     )
-    assert SttConfig.from_config({"keyterms": ["Spire"]}).keyterms == ("Spire",)
+    assert SttConfig.from_config({"keyterms": ["Atlas"]}).keyterms == ("Atlas",)
     assert SttConfig.from_config({}).keyterms == ()
 
 
 def test_stt_url_renders_the_16khz_pcm_source_it_is_given():
     """`build_url` reads `source_format` rather than assuming Phase 1's one
     source -- a 16 kHz PCM `AudioSource` renders exactly that pair."""
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     stt = XaiStt(_stt_cfg())
     query = parse_qs(urlparse(stt.build_url(SourceFormat("pcm", 16000))).query)
@@ -81,7 +81,7 @@ def test_stt_url_renders_the_8khz_alaw_source_it_is_given():
     """PROV-07: an 8 kHz A-law `AudioSource` (the camera) must never be
     streamed into a socket opened for 16 kHz PCM -- `build_url` renders the
     A-law source's own sample rate, not a hardcoded 16000."""
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     stt = XaiStt(_stt_cfg())
     query = parse_qs(urlparse(stt.build_url(SourceFormat("alaw", 8000))).query)
@@ -91,7 +91,7 @@ def test_stt_url_renders_the_8khz_alaw_source_it_is_given():
 
 
 def test_tts_session_update_requests_browser_playable_codec():
-    from spire_voice.providers.tts_xai import XaiTts
+    from atlas.providers.tts_xai import XaiTts
 
     cfg = TtsConfig(
         url="wss://api.x.ai/v1/tts",
@@ -169,11 +169,11 @@ async def test_stream_ends_promptly_once_final_transcript_arrives_even_if_mic_ke
     against the pre-fix code, where `finally: await send_task` never
     returns while `frames` keeps yielding.
     """
-    from spire_voice.providers.stt_xai import XaiStt
+    from atlas.providers.stt_xai import XaiStt
 
     fake_ws = _FakeXaiWebsocket([{"type": "transcript.done", "text": "turn on the fan"}])
     monkeypatch.setattr(
-        "spire_voice.providers.stt_xai.websockets.connect",
+        "atlas.providers.stt_xai.websockets.connect",
         lambda *args, **kwargs: fake_ws,
     )
 
@@ -199,7 +199,7 @@ def _tc(index, name=None, arguments=None):
 
 
 async def test_brain_accumulates_tool_calls_by_index():
-    from spire_voice.providers.brain_xai import accumulate_stream
+    from atlas.providers.brain_xai import accumulate_stream
 
     async def whole():
         yield _chunk(
@@ -252,9 +252,9 @@ async def test_final_transcript_comes_from_speech_final_not_transcript_done():
     """
     import json as _json
 
-    from spire_voice.providers.base import FinalTranscript, PartialTranscript
-    from spire_voice.providers.stt_xai import XaiStt
-    from spire_voice.config import SttConfig
+    from atlas.providers.base import FinalTranscript, PartialTranscript
+    from atlas.providers.stt_xai import XaiStt
+    from atlas.config import SttConfig
 
     wire = [
         {"type": "transcript.partial", "is_final": False, "speech_final": False, "text": "Is the living"},
@@ -275,7 +275,7 @@ async def test_final_transcript_comes_from_speech_final_not_transcript_done():
                     yield _json.dumps(e)
             return gen()
 
-    import spire_voice.providers.stt_xai as mod
+    import atlas.providers.stt_xai as mod
 
     def _connect(*a, **k): return _Ws(wire)
 
@@ -322,8 +322,8 @@ async def test_tts_synthesize_once_posts_rest_and_returns_the_whole_buffer():
     """
     import httpx as _httpx
 
-    from spire_voice.config import TtsConfig
-    from spire_voice.providers.tts_xai import XaiTts
+    from atlas.config import TtsConfig
+    from atlas.providers.tts_xai import XaiTts
 
     captured = {}
 
@@ -340,7 +340,7 @@ async def test_tts_synthesize_once_posts_rest_and_returns_the_whole_buffer():
         k.pop("timeout", None)
         return real_client(transport=transport)
 
-    import spire_voice.providers.tts_xai as mod
+    import atlas.providers.tts_xai as mod
     mod.httpx.AsyncClient = _client
     try:
         tts = XaiTts(TtsConfig.from_config(
@@ -367,9 +367,9 @@ async def test_batch_tts_adapter_skips_the_provider_call_entirely_for_empty_text
     request-building code stays proven to never fire for empty text, not
     just the adapter's fake-provider path (`test_batch_tts_adapter.py`
     covers that same behavior against a fake for the general case)."""
-    from spire_voice.config import TtsConfig
-    from spire_voice.providers.batch_tts_adapter import BatchTtsAdapter
-    from spire_voice.providers.tts_xai import XaiTts
+    from atlas.config import TtsConfig
+    from atlas.providers.batch_tts_adapter import BatchTtsAdapter
+    from atlas.providers.tts_xai import XaiTts
 
     calls = []
     tts = XaiTts(TtsConfig.from_config({"url": "https://x.invalid", "api_key": "k"}))

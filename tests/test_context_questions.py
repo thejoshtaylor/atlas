@@ -19,15 +19,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from spire_mcp.ha import handle_call_service
-from spire_mcp.safety import Denied, Policy
+from atlas_mcp.ha import handle_call_service
+from atlas_mcp.safety import Denied, Policy
 
-from spire_voice.mcp_client import McpToolHostLookup
-from spire_voice.providers.base import BrainReply, FinalTranscript, ToolCall
-from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-from spire_voice.timing import TurnTimings
-from spire_voice.turn import brain_race
-from spire_voice.turn.controller import run_turn
+from atlas.mcp_client import McpToolHostLookup
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.providers.tier_reply import FillerPhrase, TierReply
+from atlas.timing import TurnTimings
+from atlas.turn import brain_race
+from atlas.turn.controller import run_turn
 
 
 class _RecordingToolHost:

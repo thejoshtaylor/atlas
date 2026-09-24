@@ -27,11 +27,11 @@ from datetime import datetime, timezone
 import pytest
 from mcp.types import CallToolResult, TextContent
 
-from spire_voice.config import WorkflowConfig
-from spire_voice.db.models import WorkflowStepRow
-from spire_voice.timing import TurnTimings
-from spire_voice.turn.controller import _speak
-from spire_voice.workflow.steps import (
+from atlas.config import WorkflowConfig
+from atlas.db.models import WorkflowStepRow
+from atlas.timing import TurnTimings
+from atlas.turn.controller import _speak
+from atlas.workflow.steps import (
     StepOutcome,
     UnwiredStepKindError,
     compose_lateness_sentence,
@@ -168,7 +168,7 @@ async def test_a_call_service_failure_does_not_retry():
 
 async def test_a_call_service_step_carrying_transition_off_a_light_is_denied_before_any_call():
     """FLOW-03's second layer (Task 1): the same domain restriction
-    `mcp/spire_mcp/ha.py` enforces at the process boundary, applied again
+    `mcp/atlas_mcp/ha.py` enforces at the process boundary, applied again
     here so a step authored with a bad `transition` never reaches that
     boundary at all -- and is spoken, verbatim, the same as any other
     fire-time refusal (D-14)."""

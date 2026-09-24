@@ -1,5 +1,5 @@
 // The provider-choice admin surface's fetch layer (PROV-01, D-01 .. D-04).
-// Every shape here matches `src/spire_voice/routes/providers.py`'s own
+// Every shape here matches `src/atlas/routes/providers.py`'s own
 // response models field for field, the same discipline `lib/plugins.ts`
 // states at its own top of file -- a renamed or reshaped field here is a
 // silent drift from what the server actually sends.

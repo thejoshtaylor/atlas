@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from spire_voice.audio.alaw import alaw_to_pcm16
-from spire_voice.audio.cue import wake_cue
-from spire_voice.providers.tts_xai import SinkFormat
+from atlas.audio.alaw import alaw_to_pcm16
+from atlas.audio.cue import wake_cue
+from atlas.providers.tts_xai import SinkFormat
 
 
 def test_alaw_cue_is_about_180ms_of_audible_8khz_alaw():

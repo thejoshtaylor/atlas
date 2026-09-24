@@ -34,23 +34,23 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import GateConfig, WakeConfig
-from spire_voice.db.engine import get_current_revision
-from spire_voice.db.models import WakeEventRow
-from spire_voice.db.postgres import PostgresWakeEventRepository
-from spire_voice.db.repository import WakeEvent
-from spire_voice.sources.runner import SourceRunner
+from atlas.config import GateConfig, WakeConfig
+from atlas.db.engine import get_current_revision
+from atlas.db.models import WakeEventRow
+from atlas.db.postgres import PostgresWakeEventRepository
+from atlas.db.repository import WakeEvent
+from atlas.sources.runner import SourceRunner
 
 from tests.conftest import FakeAudioSource, FakeWakeEventRepository, FakeWakeHit
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -83,8 +83,8 @@ async def sessionmaker(monkeypatch):
     """`tests/test_plugin_repo.py`'s own `sessionmaker` fixture, unchanged
     -- reset schema, migrate to head, hand back a fresh
     `async_sessionmaker`."""
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -275,12 +275,12 @@ async def test_migration_0012_applies_onto_0011_and_reverses_cleanly(monkeypatch
     from alembic import command
     from alembic.config import Config as AlembicConfig
 
-    # Migration 0001 reads `SPIRE_CONFIG`'s own `${VAR}`-expanded safety
+    # Migration 0001 reads `ATLAS_CONFIG`'s own `${VAR}`-expanded safety
     # block while seeding -- the same env vars `sessionmaker` above sets,
     # needed here too since this test drives Alembic directly rather than
     # through that fixture (it stops partway to `0011` before `0012`).
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -356,7 +356,7 @@ async def test_a_blocked_hit_records_one_event_with_the_gates_reason(caplog):
         wake_event_repo=repo,
     )
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.INFO, logger="atlas.sources.runner"):
         await runner.run()
         await asyncio.sleep(0)  # let the scheduled write's task actually run
 
@@ -469,7 +469,7 @@ async def test_a_raising_repository_does_not_stop_the_source_or_the_turn(caplog)
         wake_event_repo=_RaisingWakeEventRepository(),
     )
 
-    with caplog.at_level(logging.ERROR, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.ERROR, logger="atlas.sources.runner"):
         await runner.run()
         await asyncio.sleep(0)  # let the failing scheduled write actually raise
 
@@ -555,7 +555,7 @@ async def test_booting_the_real_lifespan_assigns_app_state_wake_event_repo(tmp_p
     drops the wiring is caught at boot, not by a screen showing nothing."""
     from fastapi.testclient import TestClient
 
-    from spire_voice.plugins import manager as plugin_manager_module
+    from atlas.plugins import manager as plugin_manager_module
     from tests import test_startup_smoke as smoke
 
     def _fake_build_repositories_with_wake_events(config: object, engine: object) -> dict:
@@ -563,7 +563,7 @@ async def test_booting_the_real_lifespan_assigns_app_state_wake_event_repo(tmp_p
         repositories["wake_event_repo"] = FakeWakeEventRepository()
         return repositories
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(smoke.app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
     monkeypatch.setattr(smoke.app_module, "precache_all", smoke._fake_precache_all)
@@ -663,7 +663,7 @@ async def test_a_store_that_never_answers_bounds_the_pending_set_and_says_so(cap
     write in flight forever, and a talking television never stops waking
     the house. The set has to be bounded, and the skip has to be said out
     loud -- D-14 forbids a silent drop, not a bounded one (WR-05)."""
-    from spire_voice.sources.runner import MAX_PENDING_WAKE_EVENT_WRITES
+    from atlas.sources.runner import MAX_PENDING_WAKE_EVENT_WRITES
 
     repo = _HangingWakeEventRepository()
     source = FakeAudioSource(frames=[b"\x00"])
@@ -683,7 +683,7 @@ async def test_a_store_that_never_answers_bounds_the_pending_set_and_says_so(cap
         wake_event_repo=repo,
     )
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.sources.runner"):
+    with caplog.at_level(logging.WARNING, logger="atlas.sources.runner"):
         for _ in range(MAX_PENDING_WAKE_EVENT_WRITES + 20):
             runner._schedule_wake_event_write(score=1.0, allowed=True, block_reason=None)
             await asyncio.sleep(0)

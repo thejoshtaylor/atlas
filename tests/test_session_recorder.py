@@ -14,11 +14,11 @@ import json
 import time
 from pathlib import Path
 
-from spire_voice.config import SessionConfig
-from spire_voice.session import timeline as timeline_module
-from spire_voice.session.recorder import SessionRecorder
-from spire_voice.timing import TurnTimings
-from spire_voice.turn.controller import run_turn
+from atlas.config import SessionConfig
+from atlas.session import timeline as timeline_module
+from atlas.session.recorder import SessionRecorder
+from atlas.timing import TurnTimings
+from atlas.turn.controller import run_turn
 
 
 def _session_config(tmp_path: Path, *, record_audio: bool = True) -> SessionConfig:
@@ -237,7 +237,7 @@ async def test_a_full_turn_through_run_turn_produces_all_four_artifacts(
     ignores whatever `frames` it is handed -- it never actually drains the
     iterator, so it can never prove this plan's tap did either.
     """
-    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from atlas.providers.base import BrainReply, FinalTranscript
 
     config = _session_config(tmp_path)
     timings = TurnTimings()
@@ -275,7 +275,7 @@ async def test_the_recorded_audio_byte_count_equals_what_the_turn_drained(
     """A second tap on the source would double this count -- this test
     would fail it.
     """
-    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from atlas.providers.base import BrainReply, FinalTranscript
 
     config = _session_config(tmp_path)
     timings = TurnTimings()
@@ -305,7 +305,7 @@ async def test_the_recorded_audio_byte_count_equals_what_the_turn_drained(
 
 
 async def test_a_turn_ending_on_an_empty_transcript_still_writes_its_directory(fake_audio_source, fake_stt, fake_brain, fake_tts, tmp_path):
-    from spire_voice.providers.base import FinalTranscript
+    from atlas.providers.base import FinalTranscript
 
     config = _session_config(tmp_path)
     timings = TurnTimings()
@@ -338,7 +338,7 @@ async def test_a_turn_ending_on_an_empty_transcript_still_writes_its_directory(f
 async def test_record_audio_off_keeps_the_directory_events_and_timing_but_not_audio(
     fake_audio_source, fake_stt, fake_brain, fake_tts, tmp_path
 ):
-    from spire_voice.providers.base import BrainReply, FinalTranscript
+    from atlas.providers.base import BrainReply, FinalTranscript
 
     config = _session_config(tmp_path, record_audio=False)
     timings = TurnTimings()

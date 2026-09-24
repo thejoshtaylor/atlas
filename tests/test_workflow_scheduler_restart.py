@@ -34,18 +34,18 @@ from mcp.types import CallToolResult, TextContent
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice.config import WorkflowConfig
-from spire_voice.db.postgres import PostgresWorkflowRepository
-from spire_voice.db.repository import WorkflowStepSpec
-from spire_voice.workflow.scheduler import WorkflowScheduler
-from spire_voice.workflow.steps import execute_step
+from atlas.config import WorkflowConfig
+from atlas.db.postgres import PostgresWorkflowRepository
+from atlas.db.repository import WorkflowStepSpec
+from atlas.workflow.scheduler import WorkflowScheduler
+from atlas.workflow.steps import execute_step
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -88,7 +88,7 @@ def _run_upgrade_head(async_url: str) -> None:
 
 
 def _set_migration_env(monkeypatch) -> None:
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -481,7 +481,7 @@ async def test_a_poll_that_raises_is_logged_and_the_schedule_continues(caplog):
     config = WorkflowConfig(poll_interval_s=0.01)
     scheduler = WorkflowScheduler(repo, _noop_executor, config, sleep=_instant_sleep)
 
-    with caplog.at_level(logging.ERROR, logger="spire_voice.workflow.scheduler"):
+    with caplog.at_level(logging.ERROR, logger="atlas.workflow.scheduler"):
         scheduler.start()
         try:
             await _wait_for(lambda: scheduler.poll_count >= 2)

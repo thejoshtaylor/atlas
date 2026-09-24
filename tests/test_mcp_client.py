@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from mcp.types import Tool
 
-from spire_voice.mcp_client import mcp_tools_to_openai_tools
+from atlas.mcp_client import mcp_tools_to_openai_tools
 
 
 def test_mcp_tools_to_openai_tools_reads_real_tool_input_schema():
@@ -96,7 +96,7 @@ def test_mcp_child_runs_under_this_interpreter_not_a_bare_python3():
     helper both `start()` and `respawn()` call, so there is exactly one
     place this choice is made rather than two that could drift apart.
     """
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     source = inspect.getsource(McpToolHost._spawn)
     assert "command=sys.executable" in source, (
@@ -119,7 +119,7 @@ async def test_respawn_replaces_the_child_with_one_enforcing_the_new_policy():
     """A respawned host must expose the new policy, and the old child must
     be gone -- proven against a real spawned subprocess, the same way
     `tests/test_policy_repo.py`'s end-to-end test does."""
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     host = McpToolHost()
     try:
@@ -165,14 +165,14 @@ async def test_respawned_child_environment_holds_exactly_four_keys_and_no_databa
     """SAFE-09/T-03-08: the environment dict the host builds for the
     respawned child, asserted against the dict itself -- not against source
     text -- must hold exactly `HA_URL`, `HA_TOKEN`, `PYTHONPATH`, and
-    `SPIRE_SAFETY`, and no value may contain a database connection scheme.
+    `ATLAS_SAFETY`, and no value may contain a database connection scheme.
 
     `_spawn` now takes `(child_module, env)` directly (Task 3, plan 04-01):
     the environment is built by `start()`/`respawn()` before `_spawn` is
     ever called, so intercepting `_spawn` itself is a simpler capture point
     than reimplementing the build logic here.
     """
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     captured_envs: list[dict] = []
     real_spawn = McpToolHost._spawn
@@ -197,7 +197,7 @@ async def test_respawned_child_environment_holds_exactly_four_keys_and_no_databa
 
     assert len(captured_envs) == 2, "expected one env for start() and one for respawn()"
     respawned_env = captured_envs[-1]
-    assert set(respawned_env.keys()) == {"HA_URL", "HA_TOKEN", "PYTHONPATH", "SPIRE_SAFETY"}
+    assert set(respawned_env.keys()) == {"HA_URL", "HA_TOKEN", "PYTHONPATH", "ATLAS_SAFETY"}
     for value in respawned_env.values():
         assert "postgresql" not in value.lower(), (
             f"a value in the respawned child's environment names a database scheme: {value!r}"
@@ -240,14 +240,14 @@ def _host_with_fake_session(session: _BlockingSession):
     and `respawn()`'s own coordination logic, not a real subprocess. The
     spawn attributes are still set, the same way a real `start()` would set
     them, so `respawn()`'s own `None`-guard does not fire."""
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     host = McpToolHost()
     host.session = session
     host._ha_url = "http://ha.invalid:8123"
     host._ha_token = "test-key"
     host._mcp_root = _MCP_ROOT
-    host._child_module = "spire_mcp.ha"
+    host._child_module = "atlas_mcp.ha"
     return host
 
 
@@ -281,7 +281,7 @@ async def test_respawn_started_while_a_call_is_in_flight_waits_for_it_before_tea
     concurrent dispatch: `respawn()` must not spawn the replacement until
     the in-flight call has returned, and that call's own result must still
     arrive intact."""
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     old_session = _BlockingSession()
     host = _host_with_fake_session(old_session)
@@ -325,7 +325,7 @@ async def test_a_call_cancelled_mid_flight_does_not_wedge_a_later_respawn():
     decrement `_in_flight` in its `finally` -- otherwise one cancelled
     reader wedges every future `respawn()` forever, waiting on a count that
     can never reach zero again."""
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     session = _BlockingSession()
     host = _host_with_fake_session(session)
@@ -376,7 +376,7 @@ async def test_two_concurrent_respawn_calls_serialize_instead_of_racing():
     on whichever spawn actually ran last (B's), not a reference clobbered
     by a race.
     """
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     old_session = _BlockingSession()
     host = _host_with_fake_session(old_session)
@@ -423,8 +423,8 @@ async def test_two_concurrent_respawn_calls_serialize_instead_of_racing():
         await respawn_b
 
         assert len(spawn_envs) == 2, "each respawn() must reach _spawn exactly once, never zero, never racing in"
-        assert "switch.example_a" in spawn_envs[0]["SPIRE_SAFETY"], "A must have spawned first"
-        assert "switch.example_b" in spawn_envs[1]["SPIRE_SAFETY"], "B must have spawned second, not raced in early"
+        assert "switch.example_a" in spawn_envs[0]["ATLAS_SAFETY"], "A must have spawned first"
+        assert "switch.example_b" in spawn_envs[1]["ATLAS_SAFETY"], "B must have spawned second, not raced in early"
         # B ran strictly after A finished (the lock, not the event loop's
         # scheduling order, is what guarantees this) -- so the session B's
         # own _spawn call set must be the one still installed, not
@@ -440,12 +440,12 @@ async def test_start_with_an_explicit_module_and_env_produces_exactly_that_envir
     different child by parameter, not by subclass -- an explicit `env=`
     given to `start()` produces exactly that mapping, with no Home
     Assistant keys merged in from anywhere (SAFE-09). Does not actually
-    launch a subprocess for the given `child_module` -- `spire_mcp.weather`
+    launch a subprocess for the given `child_module` -- `atlas_mcp.weather`
     is plan 04-02's own module, built in a parallel worktree, and this test
     only needs to prove what `start()` decided to spawn, not that the
     module exists in this checkout.
     """
-    from spire_voice.mcp_client import McpToolHost
+    from atlas.mcp_client import McpToolHost
 
     captured: list[tuple[str, dict]] = []
     real_spawn = McpToolHost._spawn
@@ -460,7 +460,7 @@ async def test_start_with_an_explicit_module_and_env_produces_exactly_that_envir
             ha_url="unused",
             ha_token="unused",
             mcp_root=_MCP_ROOT,
-            child_module="spire_mcp.weather",
+            child_module="atlas_mcp.weather",
             env={"PYTHONPATH": _MCP_ROOT},
         )
     finally:
@@ -469,11 +469,11 @@ async def test_start_with_an_explicit_module_and_env_produces_exactly_that_envir
 
     assert len(captured) == 1
     child_module, env = captured[0]
-    assert child_module == "spire_mcp.weather"
+    assert child_module == "atlas_mcp.weather"
     assert env == {"PYTHONPATH": _MCP_ROOT}
     assert "HA_URL" not in env
     assert "HA_TOKEN" not in env
-    assert "SPIRE_SAFETY" not in env
+    assert "ATLAS_SAFETY" not in env
 
 
 class _PingRecordingSession:

@@ -38,8 +38,8 @@ def test_the_real_typecheck_fails_on_a_deliberate_type_error():
     names the offending file. The probe is removed in a `finally` block, so a
     failing assertion here never leaves the working tree dirty."""
     _PROBE_PATH.write_text(
-        "const spireVoiceTypecheckProbe: number = \"this is not a number\"\n"
-        "export default spireVoiceTypecheckProbe\n",
+        "const atlasTypecheckProbe: number = \"this is not a number\"\n"
+        "export default atlasTypecheckProbe\n",
         encoding="utf-8",
     )
     try:

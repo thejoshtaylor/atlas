@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The only real test of D-16's claim: that the guarded generation in
-# charts/spire-voice/templates/secret.yaml actually behaves the way the
+# charts/atlas/templates/secret.yaml actually behaves the way the
 # template's own comments say across a REAL install and a REAL upgrade,
 # against a real cluster. Nothing in this script is a rendered-template
 # assertion -- tests/test_helm_chart.py already covers that ground. This
@@ -20,7 +20,7 @@
 #      returns success the moment the API server has accepted the
 #      manifests. A verification script that passes on a chart that
 #      cannot deploy is worse than no script at all.
-#   2. The generated SPIRE_SECRET_KEY survives the upgrade byte-identical
+#   2. The generated ATLAS_SECRET_KEY survives the upgrade byte-identical
 #      (T-07-37 -- the single highest-consequence failure this phase
 #      guards against).
 #   3. A row written to the bundled database before the upgrade is still
@@ -51,9 +51,9 @@
 #   scripts/verify-helm-deploy.sh [--image REPO:TAG] [--wait-for-app] [--timeout SECONDS]
 set -uo pipefail
 
-_CHART_DIR="charts/spire-voice"
+_CHART_DIR="charts/atlas"
 _REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-_RELEASE="spire-voice-verify-$$-${RANDOM}"
+_RELEASE="atlas-verify-$$-${RANDOM}"
 _NAMESPACE="$_RELEASE"
 
 _IMAGE_REPO=""
@@ -138,8 +138,8 @@ if [ -n "$_IMAGE_REPO" ]; then
   _HELM_SET_ARGS+=(--set "image.repository=$_IMAGE_REPO" --set "image.tag=$_IMAGE_TAG")
 fi
 
-_pg_selector="app.kubernetes.io/name=spire-voice-postgres,app.kubernetes.io/instance=$_RELEASE"
-_app_selector="app.kubernetes.io/name=spire-voice,app.kubernetes.io/instance=$_RELEASE"
+_pg_selector="app.kubernetes.io/name=atlas-postgres,app.kubernetes.io/instance=$_RELEASE"
+_app_selector="app.kubernetes.io/name=atlas,app.kubernetes.io/instance=$_RELEASE"
 _secret_selector="app.kubernetes.io/instance=$_RELEASE"
 
 # The kubelet's own words for "I refused this container before running it".
@@ -239,7 +239,7 @@ _postgres_pod_name() {
 
 _secret_key_value() {
   kubectl get secret -n "$_NAMESPACE" -l "$_secret_selector" \
-    -o jsonpath='{.items[0].data.SPIRE_SECRET_KEY}' 2>/dev/null
+    -o jsonpath='{.items[0].data.ATLAS_SECRET_KEY}' 2>/dev/null
 }
 
 _run_psql() {
@@ -249,7 +249,7 @@ _run_psql() {
   pod="$(_postgres_pod_name)"
   kubectl exec -n "$_NAMESPACE" "$pod" -- \
     env PGPASSWORD="$(kubectl get secret -n "$_NAMESPACE" -l "$_secret_selector" -o jsonpath='{.items[0].data.POSTGRES_PASSWORD}' | base64 -d)" \
-    psql -U spire -d spire -tAc "$1"
+    psql -U atlas -d atlas -tAc "$1"
 }
 
 _MARKER_TOKEN="verify-$$-$(date +%s)"
@@ -302,12 +302,12 @@ fi
 echo "# 1. reading the generated secret key before the upgrade" >&2
 _secret_key_before="$(_secret_key_value)"
 if [ -z "$_secret_key_before" ]; then
-  echo "FATAL: could not read SPIRE_SECRET_KEY from the installed release's Secret" >&2
+  echo "FATAL: could not read ATLAS_SECRET_KEY from the installed release's Secret" >&2
   exit 1
 fi
 
 echo "# 2. writing a marker row into the bundled database" >&2
-if ! _run_psql "CREATE TABLE IF NOT EXISTS spire_voice_verify_marker (id serial primary key, note text); INSERT INTO spire_voice_verify_marker (note) VALUES ('${_MARKER_TOKEN}');" >/dev/null 2>&1; then
+if ! _run_psql "CREATE TABLE IF NOT EXISTS atlas_verify_marker (id serial primary key, note text); INSERT INTO atlas_verify_marker (note) VALUES ('${_MARKER_TOKEN}');" >/dev/null 2>&1; then
   echo "FATAL: could not write the marker row before the upgrade" >&2
   exit 1
 fi
@@ -348,7 +348,7 @@ else
 fi
 
 echo "# 5. checking the marker row is still there after the upgrade" >&2
-_marker_count="$(_run_psql "SELECT count(*) FROM spire_voice_verify_marker WHERE note = '${_MARKER_TOKEN}';" 2>/dev/null | tr -d '[:space:]')"
+_marker_count="$(_run_psql "SELECT count(*) FROM atlas_verify_marker WHERE note = '${_MARKER_TOKEN}';" 2>/dev/null | tr -d '[:space:]')"
 if [ "$_marker_count" = "1" ]; then
   _claim_db_status="proved: the marker row survived the upgrade"
 else
@@ -378,7 +378,7 @@ fi
 # The path that destroyed a deployment in silence. `helm uninstall` deletes
 # the Secret; Kubernetes never deletes the StatefulSet's PVC; a reinstall
 # regenerated both POSTGRES_PASSWORD (which the surviving, already-initdb'd
-# database rejects) and SPIRE_SECRET_KEY (which makes every credential row
+# database rejects) and ATLAS_SECRET_KEY (which makes every credential row
 # in that surviving database undecryptable). Two documented commands in
 # order. This claim runs them in that order and checks all three of the
 # things that have to still line up afterwards.
@@ -404,9 +404,9 @@ else
     # survived on its PVC. `_run_psql` reads the password out of the
     # reinstalled Secret, so this is exactly the authentication that
     # failed before.
-    _reinstall_marker_count="$(_run_psql "SELECT count(*) FROM spire_voice_verify_marker WHERE note = '${_MARKER_TOKEN}';" 2>/dev/null | tr -d '[:space:]')"
+    _reinstall_marker_count="$(_run_psql "SELECT count(*) FROM atlas_verify_marker WHERE note = '${_MARKER_TOKEN}';" 2>/dev/null | tr -d '[:space:]')"
     if [ "$_secret_key_reinstalled" != "$_secret_key_before" ]; then
-      _claim_reinstall_status="attempted, FAILED: SPIRE_SECRET_KEY was regenerated by the reinstall -- every credential in the surviving database is now undecryptable"
+      _claim_reinstall_status="attempted, FAILED: ATLAS_SECRET_KEY was regenerated by the reinstall -- every credential in the surviving database is now undecryptable"
       _any_attempted_claim_failed="true"
     elif [ "$_reinstall_marker_count" != "1" ]; then
       _claim_reinstall_status="attempted, FAILED: the surviving database refused the reinstalled password, or lost its data (marker rows found: '${_reinstall_marker_count:-<unreadable>}')"
@@ -418,7 +418,7 @@ else
 fi
 
 echo ""
-echo "==================== spire-voice Helm deploy verification ===================="
+echo "==================== atlas Helm deploy verification ===================="
 echo "cluster:    $_CLUSTER_SERVER (context: $_CONTEXT)"
 echo "namespace:  $_NAMESPACE (deleted after this script exits)"
 echo "release:    $_RELEASE"
@@ -426,7 +426,7 @@ echo ""
 echo "claim 1 (every container in the application pod is accepted, and its"
 echo "         init containers run to completion):"
 echo "  -> $_claim_init_status"
-echo "claim 2 (SPIRE_SECRET_KEY survives an upgrade, byte-identical):"
+echo "claim 2 (ATLAS_SECRET_KEY survives an upgrade, byte-identical):"
 echo "  -> $_claim_key_status"
 echo "claim 3 (a row written before the upgrade is still there after it):"
 echo "  -> $_claim_db_status"

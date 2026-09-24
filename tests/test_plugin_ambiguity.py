@@ -36,19 +36,19 @@ import pytest
 from mcp.types import Tool
 from pydantic import ValidationError
 
-from spire_voice.config import MacroActionConfig, MacroConfig, WorkflowConfig
-from spire_voice.db.models import WorkflowStepRow
-from spire_voice.db.repository import WorkflowStepSpec
-from spire_voice.mcp_client import McpToolHostLookup, RenamedToolHostView
-from spire_voice.plugins.naming import PluginTool, PluginTools, rename_collisions
-from spire_voice.providers.base import FinalTranscript
-from spire_voice.providers.tier_reply import FillerPhrase, TierReply
-from spire_voice.routes.conflict import annotate_conflict
-from spire_voice.timing import TurnTimings
-from spire_voice.turn import brain_race
-from spire_voice.turn.controller import run_turn
-from spire_voice.turn.macros import fire_macro
-from spire_voice.workflow.steps import _HA_CALL_SERVICE_TOOL, execute_step
+from atlas.config import MacroActionConfig, MacroConfig, WorkflowConfig
+from atlas.db.models import WorkflowStepRow
+from atlas.db.repository import WorkflowStepSpec
+from atlas.mcp_client import McpToolHostLookup, RenamedToolHostView
+from atlas.plugins.naming import PluginTool, PluginTools, rename_collisions
+from atlas.providers.base import FinalTranscript
+from atlas.providers.tier_reply import FillerPhrase, TierReply
+from atlas.routes.conflict import annotate_conflict
+from atlas.timing import TurnTimings
+from atlas.turn import brain_race
+from atlas.turn.controller import run_turn
+from atlas.turn.macros import fire_macro
+from atlas.workflow.steps import _HA_CALL_SERVICE_TOOL, execute_step
 
 # --- Task 1: a spoken command ambiguous between two plugins -----------------
 
@@ -375,9 +375,9 @@ async def test_installing_a_colliding_plugin_writes_nothing_to_macro_or_workflow
     read back byte-identical after the collision is introduced."""
     from mcp.types import Tool
 
-    from spire_voice.config import SecurityConfig
-    from spire_voice.db.repository import Plugin
-    from spire_voice.plugins.manager import PluginManager, PluginState, RunningPlugin
+    from atlas.config import SecurityConfig
+    from atlas.db.repository import Plugin
+    from atlas.plugins.manager import PluginManager, PluginState, RunningPlugin
 
     async def _no_policy():
         return None
@@ -398,7 +398,7 @@ async def test_installing_a_colliding_plugin_writes_nothing_to_macro_or_workflow
         slug="ha",
         display_name="ha",
         transport="stdio",
-        args=("-m", "spire_mcp.ha"),
+        args=("-m", "atlas_mcp.ha"),
         url=None,
         enabled=True,
         builtin=True,
@@ -413,7 +413,7 @@ async def test_installing_a_colliding_plugin_writes_nothing_to_macro_or_workflow
         slug="lookalike",
         display_name="lookalike",
         transport="stdio",
-        args=("-m", "spire_mcp.weather"),
+        args=("-m", "atlas_mcp.weather"),
         url=None,
         enabled=True,
         builtin=False,

@@ -5,7 +5,7 @@ read-only safety-conflict annotation `routes/macros.py` already reads from
 `routes/conflict.py` (never a second copy of that check).
 
 Every test here builds a small, throwaway `FastAPI()` app carrying only
-`spire_voice.routes.workflows`'s own router, the same "primitives in
+`atlas.routes.workflows`'s own router, the same "primitives in
 isolation" shape `tests/test_macro_routes.py` already uses.
 """
 
@@ -19,11 +19,11 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from spire_voice.auth.tokens import issue_access_token
-from spire_voice.config import SecurityConfig
-from spire_voice.db.repository import WorkflowStepSpec
-from spire_voice.providers.tts_xai import SinkFormat
-from spire_voice.routes.workflows import router as workflows_router
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig
+from atlas.db.repository import WorkflowStepSpec
+from atlas.providers.tts_xai import SinkFormat
+from atlas.routes.workflows import router as workflows_router
 
 _TEST_SECRET_KEY = "test-secret-key-not-a-real-generated-value"
 
@@ -44,7 +44,7 @@ def _build_workflow_app(
     app.state.config = SimpleNamespace(
         security=security,
         tts=SimpleNamespace(
-            cache_dir=str(cache_dir) if cache_dir is not None else "/tmp/spire-test-workflow-tts-cache",
+            cache_dir=str(cache_dir) if cache_dir is not None else "/tmp/atlas-test-workflow-tts-cache",
             voice_id="eve",
         ),
     )
@@ -165,7 +165,7 @@ def _future_run_at(now: datetime, *, minutes: int = 30) -> str:
 def test_reading_and_listing_reject_an_unauthenticated_request_and_a_viewer(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -185,7 +185,7 @@ def test_every_workflow_route_requires_operator(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
     """Every route -- reads included -- is gated (T-05-19)."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -206,7 +206,7 @@ def test_every_workflow_route_requires_operator(
 async def test_listing_returns_both_origins_marked_and_only_pending_or_firing(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -253,7 +253,7 @@ async def test_listing_returns_both_origins_marked_and_only_pending_or_firing(
 def test_reading_an_unknown_run_id_returns_a_named_404(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -272,7 +272,7 @@ def test_reading_an_unknown_run_id_returns_a_named_404(
 async def test_a_call_service_step_targeting_a_denied_entity_is_annotated_denied(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -309,7 +309,7 @@ async def test_a_call_service_step_targeting_a_denied_entity_is_annotated_denied
 async def test_the_unknown_annotation_is_returned_when_the_catalog_cannot_be_read_and_differs_from_no_conflict(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -348,7 +348,7 @@ async def test_the_unknown_annotation_is_returned_when_the_catalog_cannot_be_rea
 async def test_the_unknown_annotation_is_returned_when_the_policy_cannot_be_read(
     monkeypatch, fake_account_repository, fake_workflow_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -388,7 +388,7 @@ async def test_the_unknown_annotation_is_returned_when_the_policy_cannot_be_read
 def test_creating_a_workflow_with_a_summary_run_at_and_steps_returns_it_stored_in_order(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -419,7 +419,7 @@ def test_creating_a_workflow_with_a_summary_run_at_and_steps_returns_it_stored_i
 def test_creating_a_workflow_with_no_steps_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -442,7 +442,7 @@ def test_creating_a_workflow_with_no_steps_is_refused(
 def test_creating_a_workflow_with_a_negative_wait_duration_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -469,7 +469,7 @@ def test_creating_a_workflow_with_a_zero_wait_duration_is_refused(
     `workflow/tool.py`) refused it -- an operator could author by webapp
     a `wait` step a spoken sentence would be refused for building. Both
     now agree on `> 0`."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -492,7 +492,7 @@ def test_creating_a_workflow_with_a_zero_wait_duration_is_refused(
 def test_creating_a_call_service_step_with_no_domain_or_service_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -518,7 +518,7 @@ def test_creating_a_call_service_step_with_no_domain_or_service_is_refused(
 def test_a_transition_on_a_non_light_domain_is_refused_at_authoring_time(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -545,7 +545,7 @@ def test_a_transition_on_a_non_light_domain_is_refused_at_authoring_time(
 def test_creating_a_speak_step_with_blank_words_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -567,7 +567,7 @@ def test_creating_a_speak_step_with_blank_words_is_refused(
 def test_a_schedule_time_in_the_past_is_refused(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -597,7 +597,7 @@ def test_a_zoneless_run_at_is_resolved_against_the_servers_own_configured_zone(
     """PA-03/D-04: the browser's `datetime-local` string carries no offset
     -- this must resolve against `app.state.server_timezone`, never the
     test process's own local zone."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -630,7 +630,7 @@ def test_a_zoneless_run_at_is_resolved_against_the_servers_own_configured_zone(
 def test_an_ambiguous_run_at_is_refused_with_its_own_named_error(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -655,7 +655,7 @@ def test_an_ambiguous_run_at_is_refused_with_its_own_named_error(
 def test_a_nonexistent_run_at_is_refused_with_its_own_named_error(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -686,7 +686,7 @@ def test_a_nonexistent_run_at_is_refused_with_its_own_named_error(
 async def test_replacing_steps_on_a_pending_run_persists_the_new_list(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -720,7 +720,7 @@ async def test_replacing_steps_on_a_pending_run_persists_the_new_list(
 def test_replacing_steps_on_an_unknown_run_returns_a_named_404(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -738,7 +738,7 @@ def test_replacing_steps_on_an_unknown_run_returns_a_named_404(
 async def test_replacing_steps_on_a_firing_run_is_refused_distinguishably_from_a_404(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -773,7 +773,7 @@ async def test_replacing_steps_on_a_firing_run_is_refused_distinguishably_from_a
 async def test_cancelling_a_pending_run_moves_it_to_a_terminal_status_and_keeps_the_row(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -806,7 +806,7 @@ async def test_cancelling_a_pending_run_moves_it_to_a_terminal_status_and_keeps_
 async def test_cancelling_an_unknown_run_and_cancelling_it_twice_answer_differently(
     monkeypatch, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -847,7 +847,7 @@ async def test_cancelling_a_run_that_moved_on_between_the_pre_read_and_the_cance
     the run to a *different* terminal status than the one `existing`
     (read before this call) saw -- exactly what a concurrent poller
     finishing the run between those two reads would do."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -893,7 +893,7 @@ async def test_cancelling_a_run_that_moved_on_between_the_pre_read_and_the_cance
 def test_a_saved_speak_step_is_synthesized_before_the_response_and_reports_ready(
     monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -934,7 +934,7 @@ def test_a_saved_speak_step_is_synthesized_before_the_response_and_reports_ready
 def test_a_synthesis_failure_returns_a_degraded_success_and_the_run_still_commits(
     monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -984,7 +984,7 @@ def test_a_synthesis_failure_returns_a_degraded_success_and_the_run_still_commit
 def test_a_second_save_of_the_same_words_does_not_resynthesize(
     monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -1029,7 +1029,7 @@ def test_a_second_save_of_the_same_words_does_not_resynthesize(
 def test_a_second_save_after_a_failed_synthesis_synthesizes_again(
     monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()
@@ -1079,7 +1079,7 @@ def test_a_second_save_after_a_failed_synthesis_synthesizes_again(
 def test_a_run_with_no_speak_step_never_calls_the_synthesizer(
     monkeypatch, tmp_path, fake_account_repository, fake_workflow_repository, fake_policy_repository
 ):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     workflow_repo = fake_workflow_repository()

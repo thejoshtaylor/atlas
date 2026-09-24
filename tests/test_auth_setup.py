@@ -4,7 +4,7 @@ While the `users` table is empty, only the create-admin route may answer --
 every other route must return 503 naming "setup incomplete". Once an admin
 exists, the create-admin route must be permanently closed. The failure mode
 this file exists to catch is not "the wizard looks broken"; it is "a
-half-installed spire-voice is a reachable spire-voice" -- an admin panel
+half-installed atlas is a reachable atlas" -- an admin panel
 that quietly serves its ordinary routes before an operator has ever set a
 password would let a television-shaped sentence, or a stranger on the same
 network before setup finishes, reach a route this project's whole safety
@@ -29,8 +29,8 @@ import re
 import test_startup_smoke as smoke
 from fastapi.testclient import TestClient
 
-import spire_voice.app as app_module
-from spire_voice.auth.dependencies import SETUP_GATE_EXEMPT_PATHS
+import atlas.app as app_module
+from atlas.auth.dependencies import SETUP_GATE_EXEMPT_PATHS
 
 _PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
 
@@ -100,7 +100,7 @@ def _boot_with_empty_accounts(tmp_path, monkeypatch) -> TestClient:
     # `test_startup_smoke.py`'s own autouse fixture only applies within
     # that module -- this file needs the same structurally-valid test key
     # set explicitly (`validate_secret_key_strength`, plan 03-05).
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
     monkeypatch.setattr(
         smoke.plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host
@@ -279,7 +279,7 @@ def test_the_frontend_shell_is_reachable_before_any_admin_exists(tmp_path, monke
     if preexisting:
         frontend_dir.rename(backup_dir)
     frontend_dir.mkdir(parents=True)
-    marker = "spire-voice-test-setup-gate-frontend-marker"
+    marker = "atlas-test-setup-gate-frontend-marker"
     (frontend_dir / "index.html").write_text(
         f"<!doctype html><title>{marker}</title>", encoding="utf-8"
     )

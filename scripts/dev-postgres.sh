@@ -14,16 +14,16 @@
 # status, not part of that export.
 set -euo pipefail
 
-_CONTAINER=spire-dev-postgres
-_USER=spire
-_PASSWORD=spire
-_DB=spire
+_CONTAINER=atlas-dev-postgres
+_USER=atlas
+_PASSWORD=atlas
+_DB=atlas
 # WR-09 (code review): not 5432. That is the port every other Postgres on
 # a development machine is already bound to, and this script reusing it
 # means `.env.example`'s own DATABASE_URL reaches an unrelated container
 # and fails with an authentication error that reads like a bug in this
 # project. `.env.example` names this same port.
-_PORT="${SPIRE_DEV_POSTGRES_PORT:-54329}"
+_PORT="${ATLAS_DEV_POSTGRES_PORT:-54329}"
 _IMAGE=postgres:18
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -61,4 +61,4 @@ fi
 # shape -- only the variable name differs, matching how the two consumers
 # read it (config.yaml's ${DATABASE_URL} vs. the test's own env lookup).
 echo "export DATABASE_URL=postgresql+asyncpg://${_USER}:${_PASSWORD}@127.0.0.1:${_PORT}/${_DB}"
-echo "export SPIRE_TEST_DATABASE_URL=postgresql+asyncpg://${_USER}:${_PASSWORD}@127.0.0.1:${_PORT}/${_DB}"
+echo "export ATLAS_TEST_DATABASE_URL=postgresql+asyncpg://${_USER}:${_PASSWORD}@127.0.0.1:${_PORT}/${_DB}"

@@ -21,11 +21,11 @@ import struct
 
 import pytest
 
-from spire_voice.audio.alaw import pcm16_to_alaw
-from spire_voice.audio.energy import rms_amplitude
-from spire_voice.calibration.record import EchoCalibration
-from spire_voice.speaker.output_trace import EmittedAudioTrace
-from spire_voice.sources.runner import BargeInMonitor
+from atlas.audio.alaw import pcm16_to_alaw
+from atlas.audio.energy import rms_amplitude
+from atlas.calibration.record import EchoCalibration
+from atlas.speaker.output_trace import EmittedAudioTrace
+from atlas.sources.runner import BargeInMonitor
 
 # --- Task 1: rms_amplitude alone, no policy, no duration --------------------
 
@@ -207,7 +207,7 @@ def test_a_source_whose_policy_disables_barge_in_never_signals_an_interrupt():
     """Distinct from `_monitor(enabled=False)` above: this constructs a
     `BargeInMonitor` the way `SourceRunner` actually does, from a resolved
     per-source `BargeInConfig` (D-12) whose `enabled` field is `False`."""
-    from spire_voice.config import BargeInConfig
+    from atlas.config import BargeInConfig
 
     resolved = BargeInConfig(enabled=False).resolve("camera")
     monitor = BargeInMonitor(
@@ -310,8 +310,8 @@ class _TraceTappingBargeIn:
 
 
 async def test_speak_with_no_monitor_is_byte_for_byte_unchanged(fake_audio_source, fake_tts):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     chunks = [b"1", b"2", b"3"]
     source = fake_audio_source()
@@ -323,8 +323,8 @@ async def test_speak_with_no_monitor_is_byte_for_byte_unchanged(fake_audio_sourc
 
 
 async def test_speak_with_a_monitor_appends_every_written_chunk_to_its_trace(fake_audio_source, fake_tts):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     chunks = [_tone(500, 80), _tone(500, 80), _tone(500, 80)]
     source = fake_audio_source()
@@ -339,8 +339,8 @@ async def test_speak_with_a_monitor_appends_every_written_chunk_to_its_trace(fak
 
 
 async def test_speak_appends_nothing_to_the_trace_after_an_interrupt_is_requested(fake_audio_source, fake_tts):
-    from spire_voice.timing import TurnTimings
-    from spire_voice.turn.controller import _speak
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
 
     class _InterruptingBargeIn:
         """Latches `interrupt_requested` true on its third read (one read

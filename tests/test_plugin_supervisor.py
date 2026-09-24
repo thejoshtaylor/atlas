@@ -19,7 +19,7 @@ crash-driven respawn (D-05, Task 2): a ping failure withdraws the
 plugin's tools immediately, and a bounded-backoff respawn loop restores
 them once one succeeds.
 
-Every test here uses fakes over `spire_voice.plugins.manager.
+Every test here uses fakes over `atlas.plugins.manager.
 start_plugin_host` -- proving the manager's own deadline/state-recording/
 watchdog logic needs no real subprocess. `tests/test_plugin_manager.py`
 already covers the real-child spawn path this file does not repeat.
@@ -41,10 +41,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from spire_voice.config import PluginsConfig, SecurityConfig
-from spire_voice.db.repository import Plugin
-from spire_voice.plugins import manager as manager_module
-from spire_voice.plugins.manager import PluginManager, PluginState
+from atlas.config import PluginsConfig, SecurityConfig
+from atlas.db.repository import Plugin
+from atlas.plugins import manager as manager_module
+from atlas.plugins.manager import PluginManager, PluginState
 
 _MCP_ROOT = "/nonexistent/mcp-root"  # never read: start_plugin_host is faked in every test here
 
@@ -66,7 +66,7 @@ def _plugin(
         slug=slug,
         display_name=slug,
         transport="stdio",
-        args=("-m", f"spire_mcp.{slug}"),
+        args=("-m", f"atlas_mcp.{slug}"),
         url=None,
         enabled=enabled,
         builtin=True,
@@ -660,7 +660,7 @@ async def test_a_start_that_misses_the_deadline_closes_the_host_it_already_opene
     fake `McpToolHost`, since the claim is about who closes the host, not
     about what a real child does.
     """
-    from spire_voice.plugins import host as host_module
+    from atlas.plugins import host as host_module
 
     fake_host = _FakeMcpToolHost()
     monkeypatch.setattr(host_module, "McpToolHost", lambda: fake_host)
@@ -687,7 +687,7 @@ async def test_a_start_that_raises_after_the_child_spawned_closes_the_host(
 ):
     """The same window, reached the other way: `_spawn` succeeded and the
     session handshake then raised. Whoever built the host closes it."""
-    from spire_voice.plugins import host as host_module
+    from atlas.plugins import host as host_module
 
     class _RaisingHost(_FakeMcpToolHost):
         async def start(self, *args: object, **kwargs: object) -> None:

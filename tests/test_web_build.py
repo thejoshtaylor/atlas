@@ -29,7 +29,7 @@ import pytest
 import test_startup_smoke as smoke
 from fastapi.testclient import TestClient
 
-import spire_voice.app as app_module
+import atlas.app as app_module
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -50,7 +50,7 @@ def _apply_smoke_monkeypatches(tmp_path: Path, monkeypatch) -> None:
     `test_startup_smoke.py`, so this file's own tests boot the real
     `lifespan`, not a unit call, matching this plan's own acceptance
     criteria for both tests below."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", smoke._TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", smoke._TEST_SECRET_KEY)
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(smoke._write_fake_config(tmp_path)))
     monkeypatch.setattr(smoke.plugin_manager_module, "start_plugin_host", smoke._fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", smoke._fake_precache_all)
@@ -63,7 +63,7 @@ def _apply_smoke_monkeypatches(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(app_module, "CameraAudioSource", smoke._FakeCameraSource)
 
 # `web/dist` is `vite.config.ts`'s own `build.outDir` (a comment there names
-# `app.frontend()` in `src/spire_voice/app.py` as the consumer plan 03-05
+# `app.frontend()` in `src/atlas/app.py` as the consumer plan 03-05
 # wires -- the two must name the same path). Walking `git ls-files` rather
 # than trusting `.gitignore` to be correct is the same posture
 # `test_repo_hygiene.py`'s `test_no_session_path_or_audio_extension_is_tracked_by_git`
@@ -120,7 +120,7 @@ def test_a_missing_build_directory_does_not_stop_the_application(tmp_path, monke
     try:
         assert not frontend_dir.exists()
 
-        with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with caplog.at_level(logging.WARNING, logger="atlas.app"):
             with TestClient(app_module.app) as client:
                 response = client.get("/health")
                 assert response.status_code == 200
@@ -163,7 +163,7 @@ def test_a_present_build_directory_serves_the_built_index_and_the_api_still_wins
     if preexisting:
         frontend_dir.rename(backup_dir)
     frontend_dir.mkdir(parents=True)
-    marker = "spire-voice-test-web-build-marker"
+    marker = "atlas-test-web-build-marker"
     (frontend_dir / "index.html").write_text(
         f"<!doctype html><title>{marker}</title>", encoding="utf-8"
     )

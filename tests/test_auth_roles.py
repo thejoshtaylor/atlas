@@ -13,7 +13,7 @@ authenticated request claim whatever role it wants.
 
 The first two tests below build a minimal, throwaway `FastAPI()` app with
 one route gated by `require_role` -- Task 2's own scope is the auth
-primitives in isolation, before `src/spire_voice/routes/` exists at all
+primitives in isolation, before `src/atlas/routes/` exists at all
 (that is Task 3). The third test, added in Task 3, walks the real
 application's own registered routes instead.
 
@@ -40,9 +40,9 @@ from fastapi import Depends, FastAPI, Response
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from spire_voice.auth.dependencies import Role, require_role
-from spire_voice.auth.tokens import InvalidAccessToken, issue_access_token
-from spire_voice.config import SecurityConfig
+from atlas.auth.dependencies import Role, require_role
+from atlas.auth.tokens import InvalidAccessToken, issue_access_token
+from atlas.config import SecurityConfig
 
 # A plainly fictional value shaped like a real generated key -- this file
 # never calls `validate_secret_key_strength`, so the shape does not need to
@@ -76,7 +76,7 @@ def test_a_viewer_cannot_reach_an_operator_route(monkeypatch, fake_account_repos
     """A `viewer`-role account calling a route gated
     `require_role(Role.OPERATOR)` must get a 403, not a hidden-but-reachable
     success."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
@@ -124,7 +124,7 @@ def _flatten_routes(routes):
 
 def _dependant_reaches_current_user(dependant, seen=None) -> bool:
     """True when `dependant`'s own dependency graph includes
-    `spire_voice.auth.dependencies.current_user` anywhere -- true for a
+    `atlas.auth.dependencies.current_user` anywhere -- true for a
     route gated directly with `Depends(current_user)` and for one gated
     with `require_role(...)`, since every `require_role`-built dependency
     itself depends on `current_user` (`auth/dependencies.py`). `seen`
@@ -134,7 +134,7 @@ def _dependant_reaches_current_user(dependant, seen=None) -> bool:
     if id(dependant) in seen:
         return False
     seen.add(id(dependant))
-    from spire_voice.auth.dependencies import current_user as _current_user
+    from atlas.auth.dependencies import current_user as _current_user
 
     if dependant.call is _current_user:
         return True
@@ -191,7 +191,7 @@ def test_every_registered_route_enforces_a_role_or_is_named_exempt():
     dependency-based access control (T-03-25), and a test that samples a
     handful of routes cannot catch the one that was forgotten.
     """
-    import spire_voice.app as app_module
+    import atlas.app as app_module
 
     flat_routes = _flatten_routes(app_module.app.routes)
 
@@ -232,7 +232,7 @@ def test_a_role_is_read_from_the_cookie_not_the_request_body(monkeypatch, fake_a
     """A request body or header claiming a higher role than the caller's
     actual signed cookie carries must not elevate what `require_role`
     grants."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
 
@@ -277,9 +277,9 @@ def test_a_token_signed_with_a_different_algorithm_is_refused(monkeypatch):
     accepted algorithm explicitly, this would verify successfully despite
     using the wrong algorithm.
     """
-    from spire_voice.auth.tokens import _jwt_signing_key, verify_access_token
+    from atlas.auth.tokens import _jwt_signing_key, verify_access_token
 
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     key = _jwt_signing_key(security)
     wrong_algorithm_token = pyjwt.encode({"sub": "1", "role": "admin"}, key, algorithm="HS512")
@@ -291,10 +291,10 @@ def test_a_token_signed_with_a_different_algorithm_is_refused(monkeypatch):
 def test_signing_key_and_credential_key_derive_independently(monkeypatch):
     """The JWT signing key (this module) and the credential-encryption key
     (plan 03-07) are two independent values derived from one
-    `SPIRE_SECRET_KEY` via HKDF under two distinct, fixed labels -- the two
+    `ATLAS_SECRET_KEY` via HKDF under two distinct, fixed labels -- the two
     derived values must differ (CD-3, this plan's own Task 1 checkpoint
     decision)."""
-    from spire_voice.auth.tokens import _CREDENTIAL_ENCRYPTION_INFO, _JWT_SIGNING_INFO, _derive_key
+    from atlas.auth.tokens import _CREDENTIAL_ENCRYPTION_INFO, _JWT_SIGNING_INFO, _derive_key
 
     signing_key = _derive_key(_TEST_SECRET_KEY, _JWT_SIGNING_INFO)
     credential_key = _derive_key(_TEST_SECRET_KEY, _CREDENTIAL_ENCRYPTION_INFO)
@@ -307,7 +307,7 @@ async def test_a_refresh_token_presented_twice_revokes_the_whole_chain(fake_acco
     means either a bug or a theft, and revokes the whole chain -- including
     the live descendant token the first, legitimate rotation minted
     (T-03-27)."""
-    from spire_voice.auth.tokens import hash_refresh_token, issue_refresh_token, rotate_refresh_token
+    from atlas.auth.tokens import hash_refresh_token, issue_refresh_token, rotate_refresh_token
 
     security = SecurityConfig()
     account_repo = fake_account_repository()
@@ -349,7 +349,7 @@ def test_session_cookie_is_httponly_and_samesite_lax():
     asserted against the real `Set-Cookie` header (T-03-28) -- both
     cookies this plan issues, the access-token one and the refresh-token
     one."""
-    from spire_voice.auth.tokens import set_session_cookie
+    from atlas.auth.tokens import set_session_cookie
 
     security = SecurityConfig()
     response = Response()
@@ -371,7 +371,7 @@ def test_a_disabled_users_valid_token_is_refused(monkeypatch, fake_account_repos
     refused exactly like an invalid one -- `current_user` reloads the user
     fresh from the repository on every call specifically so a disable takes
     effect on the very next request, not after the token expires."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
     app = _build_test_app(security, account_repo)
@@ -401,7 +401,7 @@ def test_require_setup_complete_exempts_exactly_the_named_paths():
     complete, named set -- create-admin, setup-status, health, and (plan
     03-09) the wizard's own routes -- not against one sampled route (this
     plan's own acceptance criterion for Task 2)."""
-    from spire_voice.auth.dependencies import SETUP_GATE_EXEMPT_PATHS
+    from atlas.auth.dependencies import SETUP_GATE_EXEMPT_PATHS
 
     assert SETUP_GATE_EXEMPT_PATHS == {
         "/api/auth/create-admin",
@@ -422,7 +422,7 @@ def _dependant_reaches_require_setup_complete(dependant, seen=None) -> bool:
     if id(dependant) in seen:
         return False
     seen.add(id(dependant))
-    from spire_voice.auth.dependencies import require_setup_complete as _require_setup_complete
+    from atlas.auth.dependencies import require_setup_complete as _require_setup_complete
 
     if dependant.call is _require_setup_complete:
         return True
@@ -457,7 +457,7 @@ def test_every_backend_route_carries_the_setup_gate_except_health():
     because it is not a backend route, never because of a path check a
     future route could slip past.
     """
-    import spire_voice.app as app_module
+    import atlas.app as app_module
 
     flat_routes = _flatten_routes(app_module.app.routes)
 

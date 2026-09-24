@@ -13,7 +13,7 @@ class directly. This is the one that starts the app.
 would make this test pass for the wrong reason.
 
 Four external systems sit on this path and are made inert here, at the
-`spire_voice.app` module level, the same structurally-identical-fake
+`atlas.app` module level, the same structurally-identical-fake
 convention `tests/conftest.py` already uses -- never `unittest.mock`:
 
 - the brain tiers, each of which calls `resolve_model()` over the network
@@ -39,7 +39,7 @@ below, and the dedicated migration-failure test); `_build_repositories`
 substituted with `FakePolicyRepository`/`FakeAccountRepository`, the latter
 pre-seeded with one fake admin so this file's own (unrelated) wiring
 assertions are not all turned into 503s by the new setup gate;
-`SPIRE_SECRET_KEY` set to a structurally-valid test value by this file's own
+`ATLAS_SECRET_KEY` set to a structurally-valid test value by this file's own
 autouse fixture, since `validate_secret_key_strength` now runs before
 anything else in `lifespan`; and one dedicated test
 (`test_the_real_boot_answers_create_admin_while_every_other_route_reports_setup_incomplete`)
@@ -72,11 +72,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import conftest
-import spire_voice.app as app_module
-from spire_voice.db.repository import Plugin, Setting, User
-from spire_voice.plugins import manager as plugin_manager_module
-from spire_voice.transports.base import SourceFormat
-from spire_voice.turn.brain_race import TierBrain
+import atlas.app as app_module
+from atlas.db.repository import Plugin, Setting, User
+from atlas.plugins import manager as plugin_manager_module
+from atlas.transports.base import SourceFormat
+from atlas.turn.brain_race import TierBrain
 
 # A plainly fictional, but structurally valid (32 raw bytes, real byte
 # variety), urlsafe-base64 key -- shaped exactly like
@@ -92,7 +92,7 @@ _TEST_SECRET_KEY = _base64.urlsafe_b64encode(bytes(range(32))).decode("ascii")
 
 @pytest.fixture(autouse=True)
 def _set_test_secret_key(monkeypatch):
-    monkeypatch.setenv("SPIRE_SECRET_KEY", _TEST_SECRET_KEY)
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
 
 
 # Every attribute `lifespan` assigns to `app.state`, read off `app.py` by
@@ -199,7 +199,7 @@ def _write_fake_config(tmp_path: Path, *, extra: dict | None = None) -> Path:
         # `run_migrations`/`build_engine` are both monkeypatched with fakes
         # below, so a syntactically valid, unreachable connection string is
         # all `Config.from_config` needs to build without raising.
-        "database": {"url": "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"},
+        "database": {"url": "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas"},
         # Plan 03-02: the safety: key is retired (D-11) -- Config.from_config
         # now raises if it is present, so this fixture stops emitting one.
         # SecurityConfig's own fields all default, so an empty block (or no
@@ -241,7 +241,7 @@ class _FakeToolHost:
     Plan 06-01: no longer monkeypatched over `McpToolHost` itself --
     `lifespan` no longer constructs one directly (`PluginManager` does,
     inside `plugins.host.start_plugin_host`). The seam this file patches
-    now is `spire_voice.plugins.manager.start_plugin_host` itself (see
+    now is `atlas.plugins.manager.start_plugin_host` itself (see
     `_fake_start_plugin_host` below), which returns instances of this
     class and its siblings.
     """
@@ -297,14 +297,14 @@ def _ha_plugin_row(*, plugin_id: int = 1) -> Plugin:
     `start_plugin_host` (below) ignores whatever environment
     `PluginManager` builds and returns a canned fake host regardless, so
     an empty config-value list is enough to exercise the wiring with no
-    `SPIRE_SECRET_KEY` dependency."""
+    `ATLAS_SECRET_KEY` dependency."""
     now = datetime.now(timezone.utc)
     return Plugin(
         id=plugin_id,
         slug="ha",
         display_name="Home Assistant",
         transport="stdio",
-        args=("-m", "spire_mcp.ha"),
+        args=("-m", "atlas_mcp.ha"),
         url=None,
         enabled=True,
         builtin=True,
@@ -326,7 +326,7 @@ def _weather_plugin_row(*, plugin_id: int = 2) -> Plugin:
         slug="weather",
         display_name="Weather",
         transport="stdio",
-        args=("-m", "spire_mcp.weather"),
+        args=("-m", "atlas_mcp.weather"),
         url=None,
         enabled=True,
         builtin=True,
@@ -347,7 +347,7 @@ async def _no_safety_block() -> "dict | None":
 
 
 async def _fake_start_plugin_host(plugin: Plugin, **kwargs: object) -> object:
-    """Replaces `spire_voice.plugins.manager.start_plugin_host`: the real
+    """Replaces `atlas.plugins.manager.start_plugin_host`: the real
     one spawns an actual subprocess through `McpToolHost`. Every plugin
     row this file seeds is either `ha` or `weather`; each gets its own
     canned fake, keyed by slug -- `PluginManager` itself decides nothing
@@ -381,7 +381,7 @@ async def _fake_precache_all(tts: object, cache_dir: Path, texts: list[str], voi
 
 
 def _fake_run_migrations(migration_url: str) -> None:
-    """Replaces `spire_voice.db.engine.run_migrations`: the real one runs
+    """Replaces `atlas.db.engine.run_migrations`: the real one runs
     Alembic against a reachable Postgres, which this smoke test never has.
     A no-op here proves `lifespan`'s wiring (awaited, in sequence, before
     anything else) without needing a real database -- the one test that
@@ -391,7 +391,7 @@ def _fake_run_migrations(migration_url: str) -> None:
 
 
 def _fake_build_engine(database_config: object) -> object:
-    """Replaces `spire_voice.db.engine.build_engine`: the real one builds a
+    """Replaces `atlas.db.engine.build_engine`: the real one builds a
     real `AsyncEngine`. This smoke test only needs *something* non-`None`
     to land on `app.state.db_engine` and to have a no-op `dispose()` for
     the teardown block to call."""
@@ -404,7 +404,7 @@ def _fake_build_engine(database_config: object) -> object:
 
 
 def _fake_build_repositories(config: object, engine: object) -> dict:
-    """Replaces `spire_voice.app._build_repositories`: the real one builds
+    """Replaces `atlas.app._build_repositories`: the real one builds
     `PostgresPolicyRepository`/`PostgresAccountRepository` against a real
     sessionmaker. Substituting `conftest.FakePolicyRepository`/
     `conftest.FakeAccountRepository` here is what lets this smoke test
@@ -601,8 +601,8 @@ async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
     FfmpegSupervisor wired to build_tcp_argv, with no HTTP client --
     proving the go2rtc ensure_url PUT (which holds the camera password)
     can never be sent on this path, even when ensure_url is set."""
-    from spire_voice.config import SpeakerConfig
-    from spire_voice.speaker.ffmpeg_supervisor import build_tcp_argv
+    from atlas.config import SpeakerConfig
+    from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
     config = SimpleNamespace(
         speaker=SpeakerConfig(
@@ -753,7 +753,7 @@ async def test_stopping_a_plugin_withdraws_its_tools_from_what_the_running_assis
     stop happens on the same event loop the plugins were started on --
     which is also the only task allowed to touch their hosts.
     """
-    from spire_voice.mcp_client import UnknownToolError
+    from atlas.mcp_client import UnknownToolError
 
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
@@ -1012,7 +1012,7 @@ def _write_calibration(calib_dir: Path, *, taken_at) -> None:
     `calib_dir` with the same filename shape `calibration/runner.py`'s own
     `_timestamped_filename` produces -- `find_latest_calibration` globs by
     that shape, not by any name."""
-    from spire_voice.calibration.record import EchoCalibration
+    from atlas.calibration.record import EchoCalibration
 
     calibration = EchoCalibration(
         schema_version=1,
@@ -1037,9 +1037,9 @@ def _write_calibration(calib_dir: Path, *, taken_at) -> None:
 
 def test_correlation_enabled_with_no_calibration_refuses_to_start(tmp_path, monkeypatch):
     """`ConfigError` is read off `app_module` itself, not re-imported from
-    `spire_voice.config` fresh -- `tests/test_config.py`'s own
+    `atlas.config` fresh -- `tests/test_config.py`'s own
     `test_config_and_turn_macros_import_in_either_order` reloads
-    `spire_voice.config` (proving no import cycle), which mints a *new*
+    `atlas.config` (proving no import cycle), which mints a *new*
     `ConfigError` class distinct from the one `app.py` captured at its own
     import time. A fresh import here would build a `pytest.raises` that
     can never match what `app.py` actually raises once that reload has run
@@ -1279,8 +1279,8 @@ def test_the_application_starts_with_every_credential_slot_unset(tmp_path, monke
     clean-install state DEP-03 describes -- must be a boot, not an error,
     and `GET /api/credentials` must answer every slot unset rather than
     failing."""
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
 
     monkeypatch.setattr(
         app_module,
@@ -1330,8 +1330,8 @@ def test_a_missing_stt_credential_leaves_the_app_up_and_the_slot_honestly_degrad
     `tts` must all land on `app.state` as their own honest empty/`None`
     states rather than crashing the boot (the precache and the
     `resolve_model()` loop both had to learn to tolerate this)."""
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
 
     monkeypatch.setattr(
         app_module,
@@ -1477,7 +1477,7 @@ def test_startup_logs_which_source_won_per_slot_never_by_value(tmp_path, monkeyp
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+    with caplog.at_level(logging.INFO, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -1548,7 +1548,7 @@ def test_the_application_reads_the_stored_audio_source_setting_when_present(
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+    with caplog.at_level(logging.INFO, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -1577,7 +1577,7 @@ def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
 
-    with caplog.at_level(logging.INFO, logger="spire_voice.app"):
+    with caplog.at_level(logging.INFO, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -1594,12 +1594,12 @@ def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is
 # (tests/test_db_migrations.py already covers that in isolation), but the
 # actual boot path an operator's upgrade takes. ---------------------------
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise this test instead of skipping it"
     ),
@@ -1684,10 +1684,10 @@ def test_first_boot_seeds_a_legacy_safety_block_through_the_real_lifespan_and_th
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     # The migration itself (`alembic/versions/0001_policy_tables.py`) reads
-    # SPIRE_CONFIG independently of app.py's CONFIG_PATH (its own module
+    # ATLAS_CONFIG independently of app.py's CONFIG_PATH (its own module
     # docstring) -- both must point at the same file for the seed to read
     # the block this test just wrote.
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
@@ -1855,11 +1855,11 @@ def test_first_boot_seeds_a_legacy_macros_block_through_the_real_lifespan_and_st
         tmp_path, extra={"database": {"url": _TEST_DB_URL}, "macros": macros_block}
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
-    # The migration itself reads SPIRE_CONFIG independently of app.py's
+    # The migration itself reads ATLAS_CONFIG independently of app.py's
     # CONFIG_PATH (mirroring the safety-block test above) -- both must
     # point at the same file for the seed to read the block this test just
     # wrote.
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
@@ -1900,7 +1900,7 @@ def test_a_second_boot_with_the_legacy_macros_block_still_present_refuses_naming
         extra={"database": {"url": _TEST_DB_URL}, "macros": _example_macros_block()},
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
@@ -1948,7 +1948,7 @@ def test_a_first_boot_with_both_legacy_safety_and_macros_keys_present_seeds_both
         },
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
@@ -2001,7 +2001,7 @@ def test_a_boot_with_migrations_disabled_and_a_macros_block_present_refuses(
         },
     )
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("SPIRE_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
     monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
     monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
     monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
@@ -2060,7 +2060,7 @@ async def test_state_fetch_follows_the_enforcing_host_across_a_restart(
     still exactly one read per turn -- so a turn after a restart reaches
     the host that is actually running.
     """
-    from spire_voice.config import SecurityConfig
+    from atlas.config import SecurityConfig
 
     hosts: list[_FakeToolHost] = []
 
@@ -2134,7 +2134,7 @@ def test_boot_warns_by_name_when_cookie_is_insecure_and_bind_is_any_address(
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     _apply_standard_lifespan_fakes(monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+    with caplog.at_level(logging.WARNING, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -2155,7 +2155,7 @@ def test_boot_warns_by_name_when_cookie_is_insecure_and_bind_is_a_named_host(
         tmp_path,
         extra={
             "server": {
-                "bind_host": "spire-example-named-host.invalid",
+                "bind_host": "atlas-example-named-host.invalid",
                 "port": 8080,
                 "transport": "websocket",
             },
@@ -2165,7 +2165,7 @@ def test_boot_warns_by_name_when_cookie_is_insecure_and_bind_is_a_named_host(
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     _apply_standard_lifespan_fakes(monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+    with caplog.at_level(logging.WARNING, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -2191,7 +2191,7 @@ def test_boot_is_silent_when_cookie_is_insecure_and_bind_is_loopback(
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     _apply_standard_lifespan_fakes(monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+    with caplog.at_level(logging.WARNING, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -2217,7 +2217,7 @@ def test_boot_is_silent_when_cookie_is_secure_even_on_an_any_address_bind(
     monkeypatch.setattr(app_module, "CONFIG_PATH", str(config_path))
     _apply_standard_lifespan_fakes(monkeypatch)
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+    with caplog.at_level(logging.WARNING, logger="atlas.app"):
         with TestClient(app_module.app):
             pass
 
@@ -2265,8 +2265,8 @@ def test_a_degraded_slot_refuses_a_browser_turn_by_name_instead_of_crashing(
     rule, and the same string the /providers screen shows -- so an
     operator reading it in the browser can find the row that repeats it.
     """
-    from spire_voice.auth.tokens import issue_access_token
-    from spire_voice.config import SecurityConfig
+    from atlas.auth.tokens import issue_access_token
+    from atlas.config import SecurityConfig
 
     _boot_with_every_slot_degraded(tmp_path, monkeypatch)
 
@@ -2316,7 +2316,7 @@ def test_a_degraded_slot_logs_the_wake_word_refusal_once_not_once_per_turn(
             app_module.app, app_module.app.state.config, app_module.CAMERA_SOURCE_NAME
         )
         first, second, third = _RecordingSource(), _RecordingSource(), _RecordingSource()
-        with caplog.at_level(logging.WARNING, logger="spire_voice.app"):
+        with caplog.at_level(logging.WARNING, logger="atlas.app"):
             asyncio.run(_run_three_turns(run_turn_for_source, first, second, third))
 
     # Every wake hit is answered, every time -- the refusal is not

@@ -1,4 +1,4 @@
-"""Static proof for `charts/spire-voice` (DEP-01, D-14, D-15, D-16).
+"""Static proof for `charts/atlas` (DEP-01, D-14, D-15, D-16).
 
 Renders the chart with the real `helm` binary and asserts what a human
 reading the templates would otherwise have to check by eye: every
@@ -25,11 +25,11 @@ import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_CHART_DIR = _REPO_ROOT / "charts" / "spire-voice"
+_CHART_DIR = _REPO_ROOT / "charts" / "atlas"
 _EXAMPLE_CONFIG = _REPO_ROOT / "config" / "config.example.yaml"
 _SHIPPED_CONFIG = _CHART_DIR / "files" / "config.yaml"
 
-# Mirrors spire_voice.config._PLACEHOLDER_RE exactly -- this test does not
+# Mirrors atlas.config._PLACEHOLDER_RE exactly -- this test does not
 # import the application package (it does not need PYTHONPATH set up to
 # run), so the pattern is duplicated rather than imported. If the two ever
 # drift, test_config.py's own suite against the real loader is the
@@ -46,7 +46,7 @@ skip_without_helm = pytest.mark.skipif(
 def _placeholder_names(raw_text: str) -> set[str]:
     """Every `${NAME}` config.example.yaml's own text names, on a
     non-comment line -- the same "skip whole-line comments" rule
-    `spire_voice.config.expand_env` applies, so a placeholder mentioned only
+    `atlas.config.expand_env` applies, so a placeholder mentioned only
     in prose (this file's own header) is never counted as a real variable."""
     names: set[str] = set()
     for line in raw_text.splitlines():
@@ -56,7 +56,7 @@ def _placeholder_names(raw_text: str) -> set[str]:
     return names
 
 
-def _helm_template(*extra_args: str, release: str = "spire-test") -> list[dict]:
+def _helm_template(*extra_args: str, release: str = "atlas-test") -> list[dict]:
     """Render the chart for real, and parse every YAML document it
     produces. Raises (via `check=True`) on a `helm template` failure --
     a bad template is a test failure, not a skip."""
@@ -179,7 +179,7 @@ def test_chart_yaml_declares_no_dependencies() -> None:
 
 
 @skip_without_helm
-@pytest.mark.parametrize("release", ["spire-key-check-a", "spire-key-check-b"])
+@pytest.mark.parametrize("release", ["atlas-key-check-a", "atlas-key-check-b"])
 def test_generated_secret_key_passes_the_real_application_validator(release: str) -> None:
     """Rendered twice (two independent renders, two independently
     generated keys -- `lookup` always returns nothing during
@@ -188,27 +188,27 @@ def test_generated_secret_key_passes_the_real_application_validator(release: str
     a real cluster). Both must satisfy auth/tokens.py's own
     validate_secret_key_strength -- not a reimplementation of its rules,
     the real function."""
-    from spire_voice.auth.tokens import validate_secret_key_strength
-    from spire_voice.config import SecurityConfig
+    from atlas.auth.tokens import validate_secret_key_strength
+    from atlas.config import SecurityConfig
 
     docs = _helm_template(release=release)
     secret = _find_one(docs, "Secret")
-    decoded = base64.b64decode(secret["data"]["SPIRE_SECRET_KEY"]).decode("ascii")
+    decoded = base64.b64decode(secret["data"]["ATLAS_SECRET_KEY"]).decode("ascii")
 
-    previous = os.environ.get("SPIRE_SECRET_KEY")
-    os.environ["SPIRE_SECRET_KEY"] = decoded
+    previous = os.environ.get("ATLAS_SECRET_KEY")
+    os.environ["ATLAS_SECRET_KEY"] = decoded
     try:
         validate_secret_key_strength(SecurityConfig())
     finally:
         if previous is None:
-            os.environ.pop("SPIRE_SECRET_KEY", None)
+            os.environ.pop("ATLAS_SECRET_KEY", None)
         else:
-            os.environ["SPIRE_SECRET_KEY"] = previous
+            os.environ["ATLAS_SECRET_KEY"] = previous
 
 
 def test_generated_secret_key_is_backed_by_randbytes_not_randalphanum() -> None:
     """Pitfall 4: an alphanumeric string's decoded length is not its
-    character count -- `randAlphaNum` must never back `SPIRE_SECRET_KEY`,
+    character count -- `randAlphaNum` must never back `ATLAS_SECRET_KEY`,
     only `randBytes` does."""
     template_text = (_CHART_DIR / "templates" / "secret.yaml").read_text()
     secret_key_line = next(
@@ -340,7 +340,7 @@ def test_the_secret_outlives_the_release_because_the_database_volume_does() -> N
     """WR-01. `helm uninstall` deletes the Secret; Kubernetes never
     deletes a StatefulSet's `volumeClaimTemplates` PVC. A reinstall then
     generated a new POSTGRES_PASSWORD, which the surviving already-initdb'd
-    database rejects, and a new SPIRE_SECRET_KEY, which makes every
+    database rejects, and a new ATLAS_SECRET_KEY, which makes every
     credential row in that same surviving database permanently
     undecryptable. Both from two documented commands run in order.
 
@@ -483,19 +483,19 @@ def test_a_hand_applied_secret_name_renders_no_templated_secret() -> None:
     zero Secret documents of its own in that case (T-CMO-03), and the
     envFrom's secretRef name must be exactly the name that was set, not
     the chart's own generated one."""
-    docs = _helm_template("--set", "secretName=spire-voice")
+    docs = _helm_template("--set", "secretName=atlas")
     secrets = [d for d in docs if d.get("kind") == "Secret"]
     assert secrets == [], f"expected no Secret to render, found {len(secrets)}"
 
     deployment = _find_one(docs, "Deployment")
     containers = deployment["spec"]["template"]["spec"]["containers"]
-    app_container = next(c for c in containers if c["name"] == "spire-voice")
+    app_container = next(c for c in containers if c["name"] == "atlas")
     secret_refs = [
         entry["secretRef"]["name"]
         for entry in app_container.get("envFrom", [])
         if "secretRef" in entry
     ]
-    assert secret_refs == ["spire-voice"]
+    assert secret_refs == ["atlas"]
 
 
 @skip_without_helm
@@ -504,7 +504,7 @@ def test_the_application_container_names_the_numeric_uid_and_gid() -> None:
     image declares its `USER` by name, not by number -- this is the
     `CreateContainerConfigError` that stopped the built image from ever
     running. The application container must name the exact uid/gid the
-    Dockerfile pins (`spire`, uid/gid 1001), under the pod-level
+    Dockerfile pins (`atlas`, uid/gid 1001), under the pod-level
     `runAsNonRoot`."""
     docs = _helm_template()
     deployment = _find_one(docs, "Deployment")
@@ -512,7 +512,7 @@ def test_the_application_container_names_the_numeric_uid_and_gid() -> None:
     assert pod_spec["securityContext"]["runAsNonRoot"] is True
 
     containers = pod_spec["containers"]
-    app_container = next(c for c in containers if c["name"] == "spire-voice")
+    app_container = next(c for c in containers if c["name"] == "atlas")
     security_context = app_container.get("securityContext", {})
     assert security_context.get("runAsUser") == 1001
     assert security_context.get("runAsGroup") == 1001

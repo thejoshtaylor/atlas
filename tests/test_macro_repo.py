@@ -22,18 +22,18 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from spire_voice import config as _config_module
-from spire_voice.config import MacroConfig
-from spire_voice.db.postgres import PostgresMacroRepository
+from atlas import config as _config_module
+from atlas.config import MacroConfig
+from atlas.db.postgres import PostgresMacroRepository
 
-_TEST_DB_URL = os.environ.get("SPIRE_TEST_DATABASE_URL")
+_TEST_DB_URL = os.environ.get("ATLAS_TEST_DATABASE_URL")
 
 pytestmark = pytest.mark.integration
 
 skip_without_postgres = pytest.mark.skipif(
     _TEST_DB_URL is None,
     reason=(
-        "SPIRE_TEST_DATABASE_URL is not set -- run "
+        "ATLAS_TEST_DATABASE_URL is not set -- run "
         "`eval \"$(scripts/dev-postgres.sh)\"` for a throwaway local Postgres, "
         "then re-run the suite, to exercise these tests instead of skipping them"
     ),
@@ -72,7 +72,7 @@ def _run_upgrade_head(async_url: str) -> None:
 
 @pytest.fixture
 async def sessionmaker(monkeypatch):
-    monkeypatch.setenv("SPIRE_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("TAPO_USER", "test-value")
     monkeypatch.setenv("TAPO_PASSWORD", "test-value")
@@ -277,9 +277,9 @@ async def test_concurrent_creates_with_colliding_phrases_produce_exactly_one_mac
                 created_by_user_id=None,
             )
         # Caught off the module object, not a name bound at this module's
-        # own import time (`from spire_voice.config import ConfigError`):
+        # own import time (`from atlas.config import ConfigError`):
         # `test_config_and_turn_macros_import_in_either_order`
-        # (`tests/test_config.py`) reloads `spire_voice.config` in place
+        # (`tests/test_config.py`) reloads `atlas.config` in place
         # somewhere else in a full suite run, which replaces `ConfigError`
         # with a fresh class object in that module's namespace -- a name
         # bound here before the reload would then no longer `except` what

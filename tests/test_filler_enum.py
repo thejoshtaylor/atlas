@@ -12,7 +12,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from spire_voice.providers.tier_reply import (
+from atlas.providers.tier_reply import (
     FILLER_TEXT,
     FillerPhrase,
     OUTCOME_ASSERTING_WORDS,

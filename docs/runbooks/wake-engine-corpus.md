@@ -57,7 +57,7 @@ value.
 2. When the script asks for a distance, answer with a short label such as `close`,
    `across the room`, or `far corner`. When it asks for a speaker, give a name or
    initial.
-3. Press Enter to record each utterance. Say "hey spire" clearly, then wait for the
+3. Press Enter to record each utterance. Say "hey atlas" clearly, then wait for the
    next prompt. Watch the printed position label and count after each recording.
 4. Type `n` to declare a new position (a new distance, a new speaker, or both), or
    `q` to finish this session once you have covered at least two distances and two
@@ -96,7 +96,7 @@ Open the file `--report-out` named. Look at three fields:
 
 - `engines`: one entry per engine. An engine that could not run appears here too,
   with `available: false` and `unavailable_reason` naming the missing file — most
-  likely openWakeWord, which has no "hey spire" model in this project yet. Training
+  likely openWakeWord, which has no "hey atlas" model in this project yet. Training
   one is an offline machine-learning pipeline outside this codebase's scope, so a
   report naming openWakeWord as unavailable is an expected, honest outcome, not a
   bug. A run where only one engine could run compares nothing; it names one engine

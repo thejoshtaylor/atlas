@@ -25,10 +25,10 @@ from typing import Any
 import av
 import httpx
 
-from spire_voice.config import CameraConfig, SpeakerConfig
-from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
-from spire_voice.transports.base import SourceFormat
-from spire_voice.transports.camera import CameraAudioSource
+from atlas.config import CameraConfig, SpeakerConfig
+from atlas.speaker.ffmpeg_supervisor import FfmpegSupervisor
+from atlas.transports.base import SourceFormat
+from atlas.transports.camera import CameraAudioSource
 
 # A deterministic, non-repeating byte sequence, long enough to demux into
 # several packets -- a constant buffer would let a byte-identity assertion
@@ -111,7 +111,7 @@ async def test_camera_source_declares_the_sink_it_was_constructed_with():
     the browser sink every other transport requests by default. Before
     this fix, nothing read this pair at all, so a live turn always asked
     for browser PCM even against the camera speaker."""
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.providers.tts_xai import SinkFormat
 
     config = CameraConfig(rtsp_url=_CAMERA_URL, encoding="alaw", sample_rate=8000)
     source = CameraAudioSource(
@@ -125,7 +125,7 @@ async def test_camera_source_defaults_its_sink_when_none_is_given():
     """Every construction site above builds a `CameraAudioSource` with no
     `sink=` at all -- this must keep returning a real, usable `SinkFormat`
     rather than `None` or raising."""
-    from spire_voice.providers.tts_xai import SinkFormat
+    from atlas.providers.tts_xai import SinkFormat
 
     config = CameraConfig(rtsp_url=_CAMERA_URL, encoding="alaw", sample_rate=8000)
     source = CameraAudioSource(config, _RecordingSpeaker())
@@ -368,7 +368,7 @@ async def test_camera_source_reconnects_after_a_dropped_connection_and_logs_the_
         config, _RecordingSpeaker(), open_container=factory, backoff_s=0.0, sleep=_instant_sleep
     )
 
-    with caplog.at_level(logging.WARNING, logger="spire_voice.transports.camera"):
+    with caplog.at_level(logging.WARNING, logger="atlas.transports.camera"):
         source.start()
         frames_iter = source.frames()
         first_chunk = await asyncio.wait_for(frames_iter.__anext__(), timeout=2.0)

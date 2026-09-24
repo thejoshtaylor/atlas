@@ -1,5 +1,5 @@
 // The macro editor's fetch surface (MACRO-03, D-11). Every shape here
-// matches `src/spire_voice/routes/macros.py`'s own response models
+// matches `src/atlas/routes/macros.py`'s own response models
 // field for field, the same discipline `web/src/lib/policy.ts` states at
 // its own top of file -- a renamed or reshaped field here is a silent
 // drift from what the server actually sends.

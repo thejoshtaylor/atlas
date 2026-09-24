@@ -3,7 +3,7 @@
 # handling stays here, the one place this project puts it (dev-run.sh,
 # dev-capture-corpus.sh). calibrate_echo_path.py itself reads no
 # environment variable directly; it reaches the camera and the speaker
-# FIFO only through spire_voice.config.load_config, which expands
+# FIFO only through atlas.config.load_config, which expands
 # ${TAPO_USER}/${TAPO_PASSWORD} from what this script just sourced.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,6 +19,6 @@ set -a
 set +a
 
 export PYTHONPATH=src:mcp
-export SPIRE_CONFIG="${SPIRE_CONFIG:-config/config.example.yaml}"
+export ATLAS_CONFIG="${ATLAS_CONFIG:-config/config.example.yaml}"
 
-exec .venv/bin/python scripts/calibrate_echo_path.py --config "$SPIRE_CONFIG" "$@"
+exec .venv/bin/python scripts/calibrate_echo_path.py --config "$ATLAS_CONFIG" "$@"

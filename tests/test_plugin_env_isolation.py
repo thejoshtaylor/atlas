@@ -8,7 +8,7 @@ started without raising":
 
 1. A child spawned through the manager, from a plugin row whose
    configuration an admin typed, never sees `XAI_API_KEY`, `DATABASE_URL`,
-   or `SPIRE_SECRET_KEY` from a deliberately polluted parent environment --
+   or `ATLAS_SECRET_KEY` from a deliberately polluted parent environment --
    asserted on the child's own view of its environment, printed from
    inside a real spawned process, never on the dictionary this test built
    (`tests/test_ha_tool.py`'s own discipline, generalized).
@@ -33,11 +33,11 @@ from datetime import datetime, timezone
 from mcp.client.stdio import get_default_environment
 
 import conftest
-from spire_voice.config import SecurityConfig
-from spire_voice.crypto.credentials import encrypt_credential
-from spire_voice.db.repository import Plugin, PluginConfigValue
-from spire_voice.mcp_client import McpToolHost
-from spire_voice.plugins.manager import PluginManager
+from atlas.config import SecurityConfig
+from atlas.crypto.credentials import encrypt_credential
+from atlas.db.repository import Plugin, PluginConfigValue
+from atlas.mcp_client import McpToolHost
+from atlas.plugins.manager import PluginManager
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
@@ -49,7 +49,7 @@ _MCP_ROOT = os.path.join(_REPO_ROOT, "mcp")
 _HOSTILE_PARENT_SECRETS = {
     "XAI_API_KEY": "sk-hostile-parent-secret-should-never-reach-a-plugin-child",
     "DATABASE_URL": "postgresql+asyncpg://hostile:secret@db.invalid/hostile",
-    "SPIRE_SECRET_KEY": "hostile-fernet-key-should-never-leak-into-a-plugin-child",
+    "ATLAS_SECRET_KEY": "hostile-fernet-key-should-never-leak-into-a-plugin-child",
 }
 
 
@@ -60,7 +60,7 @@ def _ha_plugin(plugin_id: int = 1) -> Plugin:
         slug="ha",
         display_name="Home Assistant",
         transport="stdio",
-        args=("-m", "spire_mcp.ha"),
+        args=("-m", "atlas_mcp.ha"),
         url=None,
         enabled=True,
         builtin=True,
@@ -79,7 +79,7 @@ def _weather_plugin(plugin_id: int = 2) -> Plugin:
         slug="weather",
         display_name="Weather",
         transport="stdio",
-        args=("-m", "spire_mcp.weather"),
+        args=("-m", "atlas_mcp.weather"),
         url=None,
         enabled=True,
         builtin=True,
@@ -97,7 +97,7 @@ def _child_env_probe(env: dict[str, str], module: str) -> dict[str, bool]:
     `os.environ` actually carried -- the exact real-spawned-child
     discipline `tests/test_ha_tool.py`'s own hostile-parent test uses,
     generalized to any plugin module rather than hardcoded to
-    `spire_mcp.ha`.
+    `atlas_mcp.ha`.
     """
     code = textwrap.dedent(
         f"""
@@ -119,7 +119,7 @@ async def test_a_child_spawned_through_the_manager_never_sees_the_parents_hostil
 ):
     """Truth 1 (Task 3): a child spawned through `PluginManager`, from a
     plugin row whose configuration an admin typed, never sees
-    `XAI_API_KEY`/`DATABASE_URL`/`SPIRE_SECRET_KEY` from a deliberately
+    `XAI_API_KEY`/`DATABASE_URL`/`ATLAS_SECRET_KEY` from a deliberately
     polluted parent environment -- generalized from the one hardcoded
     Home Assistant child to the manager's own spawn path.
     """
@@ -127,7 +127,7 @@ async def test_a_child_spawned_through_the_manager_never_sees_the_parents_hostil
         monkeypatch.setenv(name, value)
 
     # An admin-typed configuration, encrypted under this (now-hostile)
-    # SPIRE_SECRET_KEY -- the same key `PluginManager` itself reads at
+    # ATLAS_SECRET_KEY -- the same key `PluginManager` itself reads at
     # decrypt time, so encryption and decryption agree regardless of the
     # value being hostile.
     security = SecurityConfig()
@@ -194,7 +194,7 @@ async def test_a_child_spawned_through_the_manager_never_sees_the_parents_hostil
     # guess at what it does, matching `tests/test_ha_tool.py`'s own
     # reasoning.
     child_env = get_default_environment() | manager_built_env
-    seen = _child_env_probe(child_env, "spire_mcp.ha")
+    seen = _child_env_probe(child_env, "atlas_mcp.ha")
     for name in _HOSTILE_PARENT_SECRETS:
         assert not seen[name], f"{name} leaked into a plugin child's environment"
 
@@ -257,7 +257,7 @@ async def test_the_decrypted_secret_reaches_the_child_and_nothing_a_repository_r
     """Truth 3 (Task 3): the decrypted value of a secret config key
     appears in the child's environment (the manager's own build path) and
     nowhere in what `PluginRepository.get_config_values` returns."""
-    monkeypatch.setenv("SPIRE_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
     security = SecurityConfig()
     plaintext = "a-plainly-fictional-decrypted-token"
     ciphertext, key_version = encrypt_credential(plaintext, security)
@@ -304,9 +304,9 @@ def test_a_config_key_cannot_replace_the_pythonpath_the_child_imports_safety_fro
     repository's own `mcp/` root. For the Home Assistant row --
     `enforces_policy=True`, and an admin can edit its configuration freely
     -- a `PYTHONPATH` pointing at a writable directory holding a
-    `spire_mcp/safety.py` made the enforcing child import a policy module
+    `atlas_mcp/safety.py` made the enforcing child import a policy module
     of the admin's choosing, defeating the one in-child boundary this
-    system has. `SPIRE_SAFETY` was already safe, but only by accident of
+    system has. `ATLAS_SAFETY` was already safe, but only by accident of
     being written after the loop; both are deliberate now, and the write
     routes refuse either key outright (`tests/test_plugin_routes.py`).
     """
@@ -324,7 +324,7 @@ def test_a_config_key_cannot_replace_the_pythonpath_the_child_imports_safety_fro
                     ciphertext=None, key_version=None,
                 ),
                 PluginConfigValue(
-                    key="SPIRE_SAFETY", secret=False, value='{"mode": "allow_all"}',
+                    key="ATLAS_SAFETY", secret=False, value='{"mode": "allow_all"}',
                     ciphertext=None, key_version=None,
                 ),
             ],
@@ -343,7 +343,7 @@ def test_a_config_key_cannot_replace_the_pythonpath_the_child_imports_safety_fro
     env = asyncio.run(_build())
 
     assert env["PYTHONPATH"] == str(_MCP_ROOT), (
-        "a plugin's own configuration decided where its child imports spire_mcp.safety from"
+        "a plugin's own configuration decided where its child imports atlas_mcp.safety from"
     )
-    assert env["SPIRE_SAFETY"] == json.dumps({"mode": "deny", "rules": []})
+    assert env["ATLAS_SAFETY"] == json.dumps({"mode": "deny", "rules": []})
     assert env["HA_URL"] == "http://ha.invalid:8123", "every other key is unaffected"

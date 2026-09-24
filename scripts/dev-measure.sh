@@ -39,12 +39,12 @@ if [ "$TRANSPORT" != "websocket" ] && [ "$TRANSPORT" != "webrtc" ] && [ "$TRANSP
 fi
 
 export PYTHONPATH=src:mcp
-export SPIRE_CONFIG="${SPIRE_CONFIG:-config/config.example.yaml}"
+export ATLAS_CONFIG="${ATLAS_CONFIG:-config/config.example.yaml}"
 
-LOG_FILE="$(mktemp -t spire-voice-dev-measure.XXXXXX)"
+LOG_FILE="$(mktemp -t atlas-dev-measure.XXXXXX)"
 echo "application output: $LOG_FILE"
 
-.venv/bin/python -m spire_voice.app >"$LOG_FILE" 2>&1 &
+.venv/bin/python -m atlas.app >"$LOG_FILE" 2>&1 &
 APP_PID=$!
 
 # Kill the backgrounded application on every exit path this script takes —

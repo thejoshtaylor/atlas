@@ -52,7 +52,7 @@ export function AppShell() {
   return (
     <div className="flex min-h-svh flex-col bg-background text-foreground">
       <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background px-4 py-3">
-        <span className="text-heading font-semibold">spire-voice</span>
+        <span className="text-heading font-semibold">ATLAS</span>
         <Button
           type="button"
           variant="ghost"

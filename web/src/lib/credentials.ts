@@ -1,5 +1,5 @@
 // Provider credentials: write-only from the browser (PROV-04, D-07).
-// `src/spire_voice/routes/credentials.py`'s own docstring: the list
+// `src/atlas/routes/credentials.py`'s own docstring: the list
 // route never returns a ciphertext, a plaintext, or any prefix/suffix of
 // either -- this module's `CredentialEntry` type has no field that could
 // hold one, matching the server's response model field-for-field.
