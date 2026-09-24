@@ -670,6 +670,67 @@ def test_example_config_camera_url_and_speaker_backend_expand_from_env(monkeypat
     assert config.speaker.backend == "tapo_talk"
 
 
+def _set_example_config_env(monkeypatch) -> None:
+    """The env vars config/config.example.yaml needs to load at all,
+    shared with test_example_config_camera_url_and_speaker_backend_expand_from_env
+    above -- factored out here rather than changing that test, since only
+    the new tcp_url test below needs it as a reusable helper."""
+    for name in (
+        "XAI_API_KEY",
+        "TAPO_USER",
+        "TAPO_PASSWORD",
+        "SPEAKER_ENSURE_URL",
+        "HA_URL",
+        "HA_TOKEN",
+        "BIND_HOST",
+    ):
+        monkeypatch.setenv(name, "test-value")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+    monkeypatch.setenv("WEATHER_LATITUDE", "0.0")
+    monkeypatch.setenv("WEATHER_LONGITUDE", "0.0")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://spire:test-value@db.invalid:5432/spire"
+    )
+    monkeypatch.setenv(
+        "CAMERA_RTSP_URL", "rtsp://real-user:real-pass@a-real-camera.invalid:554/stream1"
+    )
+
+
+@pytest.mark.parametrize(
+    "speaker_backend, tcp_url_env, expected_backend, expected_tcp_url, error_substring",
+    [
+        ("tcp", "tcp://speaker.invalid:5701", "tcp", "tcp://speaker.invalid:5701", None),
+        ("go2rtc", None, "go2rtc", "", None),
+        ("tcp", None, None, None, "speaker.tcp_url"),
+    ],
+)
+def test_example_config_speaker_tcp_url_expands_from_env(
+    monkeypatch, speaker_backend, tcp_url_env, expected_backend, expected_tcp_url, error_substring
+):
+    """260923-pds (T-pds-06): SPEAKER_TCP_URL uses the `:-` empty-default
+    placeholder, so a deployment that never sets it (the go2rtc case here)
+    still loads -- no existing Helm or Compose deployment breaks."""
+    from spire_voice.config import ConfigError, load_config
+
+    _set_example_config_env(monkeypatch)
+    monkeypatch.setenv("SPEAKER_BACKEND", speaker_backend)
+    if tcp_url_env is None:
+        monkeypatch.delenv("SPEAKER_TCP_URL", raising=False)
+    else:
+        monkeypatch.setenv("SPEAKER_TCP_URL", tcp_url_env)
+
+    if error_substring is not None:
+        with pytest.raises(ConfigError) as exc:
+            load_config("config/config.example.yaml")
+        assert error_substring in str(exc.value)
+        assert "missing required environment variable" not in str(exc.value)
+    else:
+        config = load_config("config/config.example.yaml")
+        assert config.speaker.backend == expected_backend
+        assert config.speaker.tcp_url == expected_tcp_url
+
+
 # --- Task 3: one rejection test per Phase 2 configuration path ---
 
 
