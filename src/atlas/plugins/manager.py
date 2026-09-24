@@ -18,8 +18,9 @@ following plan) cannot be spelled two ways.
 Every plugin's environment is built literally -- the declared config
 values (a secret one decrypted here -- one of the three server-side points
 D-03 names, IN-04), `PYTHONPATH` pointing at the repository's `mcp`
-directory, and the serialized safety
-block for the row `enforces_policy` names -- and started through
+directory, the serialized safety
+block for the row `enforces_policy` names, and `TZ` set to the resolved
+house time zone (260924-h2f, issue #1) whenever one is known -- and started through
 `plugins.host.start_plugin_host` (never a second spawn path, D-04, Pitfall
 2). `rebuild()` builds a new tools list and a new `McpToolHostLookup` and
 assigns both -- never mutating either in place (D-08's own instruction:
@@ -151,11 +152,21 @@ class PluginManager:
         plugins_config: PluginsConfig | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_rebuild: "Callable[[], None] | None" = None,
+        zone_name: "str | None" = None,
     ) -> None:
         self._repository = repository
         self._mcp_root = mcp_root
         self._security = security
         self._safety_block_provider = safety_block_provider
+        # 260924-h2f (issue #1): `lifespan` resolves the house's own time
+        # zone exactly once (`routes/wizard.py::resolve_timezone`) and
+        # passes its `child_tz` here -- every stdio child this manager
+        # spawns or respawns gets the same `TZ`, so a plugin never
+        # disagrees with the assistant about what time it is. `None`
+        # (every pre-existing caller, and every deployment with no
+        # resolvable zone at all) writes no `TZ` key at all, matching
+        # this manager's pre-260924-h2f behavior exactly.
+        self._zone_name = zone_name
         # CR-01 (code review): called at the end of every `rebuild()`, and
         # only there -- the one hook `lifespan` uses to republish the live
         # view the running assistant actually reads (`app.state.
@@ -880,12 +891,17 @@ class PluginManager:
         decrypted here, one of the three server-side points D-03 names,
         IN-04), plus `PYTHONPATH`
         pointing at this repository's own `mcp/` directory, plus the
-        serialized safety block for the one row `enforces_policy` names.
-        Never a filtered copy of this process's own `os.environ`.
+        serialized safety block for the one row `enforces_policy` names,
+        plus `TZ` (260924-h2f) when `self._zone_name` is set. Never a
+        filtered copy of this process's own `os.environ`.
         """
         config_values = await self._repository.get_config_values(plugin.id)
         return _env_from_config_values(
-            config_values, security=self._security, mcp_root=self._mcp_root, safety_block=safety_block
+            config_values,
+            security=self._security,
+            mcp_root=self._mcp_root,
+            safety_block=safety_block,
+            zone_name=self._zone_name,
         )
 
     def _make_env_factory(self, plugin: Plugin):
@@ -1045,6 +1061,7 @@ def _env_from_config_values(
     security: SecurityConfig,
     mcp_root: "os.PathLike[str] | str",
     safety_block: "dict | None",
+    zone_name: "str | None" = None,
 ) -> dict[str, str]:
     """The literal environment build itself, factored out of `_build_env`
     so it needs no `self` -- every declared config value, a secret one
@@ -1053,7 +1070,8 @@ def _env_from_config_values(
     usable value, IN-04 -- this one, `_remote_bearer_token`, and the
     wizard's own hub check. None of the three crosses a response body,
     which is the property D-03 is actually about), plus
-    `PYTHONPATH`, plus the serialized safety block when one is given.
+    `PYTHONPATH`, plus the serialized safety block when one is given, plus
+    `TZ` when `zone_name` is truthy (260924-h2f, issue #1).
 
     Plan 06-06: a secret value with `ciphertext=None` is a declared-but-
     never-set placeholder row (`routes/plugins.py`'s own install path),
@@ -1091,9 +1109,13 @@ def _env_from_config_values(
             env[value.key] = decrypt_credential(value.ciphertext, value.key_version, security)
         else:
             env[value.key] = value.value or ""
-    # Written after the loop, both of them, so neither can be shadowed by a
-    # configuration value regardless of what reached this function (WR-08).
+    # Written after the loop, all three, so none can be shadowed by a
+    # configuration value regardless of what reached this function (WR-08,
+    # extended by 260924-h2f/T-h2f-06 to TZ): a plugin config key named
+    # `TZ` is replaced by the resolved zone here, never the reverse.
     env["PYTHONPATH"] = str(mcp_root)
     if safety_block is not None:
         env["ATLAS_SAFETY"] = json.dumps(safety_block)
+    if zone_name:
+        env["TZ"] = zone_name
     return env

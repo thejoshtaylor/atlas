@@ -83,7 +83,7 @@ from atlas.providers.tts_cache import CachedTts, precache_all
 from atlas.providers.tts_xai import SinkFormat
 from atlas.routes import register_routers
 from atlas.routes.wake import WAKE_THRESHOLD_SETTING_KEY
-from atlas.routes.wizard import resolve_audio_source
+from atlas.routes.wizard import resolve_audio_source, resolve_timezone
 from atlas.session.observers import ObserverPublishingSource, ObserverRegistry
 from atlas.session.recorder import SessionRecorder
 from atlas.session.retention import RetentionScheduler
@@ -220,11 +220,19 @@ _LEGACY_CONFIG_KEYS: tuple[_LegacyConfigKey, ...] = (
     ),
 )
 
-# D-01 (phase 4): the zone `_state_message` reads the current time and date
-# against. `lifespan` sets this from `config.server.timezone`; `None` --
-# the default, and every module-load before `lifespan` has run a single
-# time -- means the process's own local zone, resolved fresh on every call
-# by `_current_moment()` below rather than baked in once at import time.
+# D-01 (phase 4), extended by the 260924-h2f quick task (issue #1): the
+# zone `_state_message` reads the current time and date against.
+# `lifespan` sets this from `routes.wizard.resolve_timezone`'s own result
+# -- the saved-through-the-webapp setting, then `config.server.timezone`,
+# then Home Assistant's own `GET /api/config`, then the process's own
+# zone, in that order. `None` -- the default, and every module-load
+# before `lifespan` has run a single time, and the "process" source's own
+# outcome -- means the process's own local zone, resolved fresh on every
+# call by `_current_moment()` below rather than baked in once at import
+# time. `app.state.timezone_resolution` carries the full result
+# (including *why* it resolved the way it did); Phase 9 (calendar and
+# mail) reads that, never this module global, and nothing past `lifespan`
+# resolves the zone a second time.
 _resolved_timezone: "ZoneInfo | None" = None
 
 
@@ -997,31 +1005,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             config.server.bind_host,
         )
 
-    # D-01 (phase 4): resolve the zone `_state_message` reads the current
-    # time and date against, and log which one won, by name -- an
-    # unlogged, implicit container zone is how a house ends up told the
-    # wrong time with nothing to point at. `ServerConfig.from_config`
-    # already validated a configured name against `zoneinfo`, so this
-    # `ZoneInfo(...)` call cannot raise here.
-    global _resolved_timezone
-    if config.server.timezone:
-        _resolved_timezone = ZoneInfo(config.server.timezone)
-        logger.info("resolved timezone: %s (from server.timezone)", config.server.timezone)
-    else:
-        _resolved_timezone = None
-        logger.info(
-            "resolved timezone: %s (server.timezone not set; using the process's own zone)",
-            _resolved_timezone_name(),
-        )
-    # Plan 05-04: the one process-wide reading of the house's own
-    # configured zone, exposed on `app.state` so `routes/workflows.py`
-    # can hand it to `workflow.schedule.resolve_schedule` for a
-    # zone-less "Run at" string, without resolving a zone name itself
-    # (that module's own acceptance criterion forbids it from importing
-    # `ZoneInfo`). The same `_resolved_timezone` `WorkflowToolHost` below
-    # is already constructed with -- one resolved zone, two readers.
-    app.state.server_timezone = _resolved_timezone
-
     db_engine = build_engine(config.database)
     app.state.db_engine = db_engine
     repositories = _build_repositories(config, db_engine)
@@ -1079,6 +1062,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "itself, so refusing to boot on a setting this process cannot honestly interpret"
         )
     logger.info("wake threshold resolved from %s", wake_threshold_resolved_from)
+
+    # D-01 (phase 4), extended by the 260924-h2f quick task (issue #1):
+    # resolve the house's own time zone -- the one process-wide reading
+    # `_state_message`, `WorkflowToolHost`, and every stdio MCP child's
+    # own `TZ` all read from -- in the one order `routes.wizard.
+    # resolve_timezone`'s own docstring names: the zone saved through the
+    # webapp, then `server.timezone`, then Home Assistant's own `GET
+    # /api/config`, then the process's own zone. `app.state.
+    # timezone_resolution` is the one place a later reader (Phase 9's
+    # calendar and mail) goes; nothing resolves the zone a second time.
+    # `ha_http_client` is the same test seam `check_hub_step` already
+    # uses -- production opens and closes its own short-lived client,
+    # bounded to 5s so an unreachable Home Assistant cannot stall the
+    # boot (T-h2f-05).
+    global _resolved_timezone
+    injected_ha_client = getattr(app.state, "ha_http_client", None)
+    owns_ha_client = injected_ha_client is None
+    ha_client = injected_ha_client if injected_ha_client is not None else httpx.AsyncClient(timeout=5.0)
+    try:
+        timezone_resolution = await resolve_timezone(
+            config, settings_repo, plugin_repo, client=ha_client
+        )
+    finally:
+        if owns_ha_client:
+            await ha_client.aclose()
+    _resolved_timezone = timezone_resolution.zone
+    app.state.timezone_resolution = timezone_resolution
+    app.state.server_timezone = _resolved_timezone
+    if timezone_resolution.warning:
+        logger.warning("%s", timezone_resolution.warning)
+    else:
+        logger.info(
+            "resolved timezone: %s (from %s)",
+            timezone_resolution.name,
+            timezone_resolution.resolved_from,
+        )
 
     # Every provider credential is resolved exactly once, here, in the one
     # order D-07 states: the database wins when an operator has saved a
@@ -1268,6 +1287,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         safety_block_provider=_current_safety_block,
         plugins_config=config.plugins,
         on_rebuild=_publish_tool_view,
+        zone_name=timezone_resolution.child_tz,
     )
     app.state.plugin_manager = plugin_manager
     # Publishes an empty view first, so every attribute above exists even

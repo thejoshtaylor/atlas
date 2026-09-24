@@ -26,8 +26,12 @@ wizard, abandoned partway" row).
 
 from __future__ import annotations
 
+import logging
+import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -53,6 +57,8 @@ from atlas.db.repository import (
 )
 
 router = APIRouter(prefix="/api/wizard", tags=["wizard"])
+
+logger = logging.getLogger("atlas.routes.wizard")
 
 # The five steps, in the order `03-09-PLAN.md`'s own "Step set, chosen
 # under CD-4" section names them. Steps 2-4 (hub/provider_set/
@@ -223,6 +229,176 @@ async def resolve_audio_source(config: Config, settings_repo: SettingsRepository
     if setting is not None and isinstance(setting.value, str) and setting.value:
         return setting.value, "database"
     return DEFAULT_AUDIO_SOURCE, "config"
+
+
+# 260924-h2f: the settings key an admin's saved time zone lives under
+# (`PUT /api/wizard/timezone`), and the text this application shows and
+# logs when nothing gives it a zone and the process itself runs in UTC --
+# a house told in UTC with no explanation is issue #1's whole complaint.
+TIMEZONE_SETTING_KEY = "timezone"
+
+TIMEZONE_UTC_WARNING = (
+    "No time zone is set and Home Assistant did not give one. This server runs "
+    "in UTC, so ATLAS gives times, dates, and 'at' schedules in UTC. Set the "
+    "time zone in the admin webapp under Settings, or set server.timezone in "
+    "the configuration file."
+)
+
+
+@dataclass(frozen=True)
+class TimezoneResolution:
+    """The one resolved house time zone. `lifespan` stores this on
+    `app.state.timezone_resolution`, and no other code resolves the zone
+    again (260924-h2f).
+
+    `zone` is `None` only for `resolved_from == "process"` -- every other
+    source loaded successfully with `zoneinfo`. `name` is always a string
+    worth showing an operator: the IANA key for the first three sources, or
+    the process's own abbreviated name (or "the local zone") for the last.
+    `child_tz` is the value `plugins.manager.PluginManager` writes into
+    every stdio MCP child's `TZ` -- the same as `name` for the first three
+    sources, the parent process's own `TZ` (or `None`) for the last, so a
+    child never disagrees with the parent about which zone "no zone
+    resolved" means.
+    """
+
+    zone: "ZoneInfo | None"
+    name: str
+    resolved_from: str
+    child_tz: "str | None"
+    warning: "str | None"
+
+
+def _process_zone_is_utc() -> bool:
+    """True when this process's own local zone is UTC -- checked by its
+    `tzname()`, not by comparing against a literal `"UTC"` string anywhere
+    else, so a container whose `TZ` is unset (which Python reports as UTC)
+    and one explicitly set to `TZ=UTC` are both caught the same way.
+    Called by its module-level name, not inlined into `resolve_timezone`,
+    so a test can monkeypatch this one attribute and drive both branches
+    with no real clock or environment change.
+    """
+    return datetime.now().astimezone().tzname() == "UTC"
+
+
+def _current_process_zone_name() -> str:
+    return datetime.now().astimezone().tzname() or "the local zone"
+
+
+async def _fetch_home_assistant_time_zone(
+    base_url: str, token: str, *, client: httpx.AsyncClient
+) -> str:
+    """`GET {base_url}/api/config`'s own `time_zone` field, built the same
+    way `atlas_mcp.ha`'s own `/api/states` call is (same header, same
+    bearer-token shape) -- raises on anything that is not a non-empty
+    string, which `resolve_timezone` below treats as "Home Assistant did
+    not give a usable zone" and falls through from.
+    """
+    response = await client.get(
+        f"{base_url}/api/config", headers={"Authorization": f"Bearer {token}"}
+    )
+    response.raise_for_status()
+    value = response.json()["time_zone"]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"time_zone was {value!r}, not a non-empty string")
+    return value
+
+
+async def resolve_timezone(
+    config: Config,
+    settings_repo: SettingsRepository,
+    plugin_repo: PluginRepository,
+    *,
+    client: httpx.AsyncClient,
+) -> TimezoneResolution:
+    """`TimezoneResolution` for the house's own zone (260924-h2f, issue
+    #1) -- the one function that decides between four sources, in one
+    fixed order, mirroring `resolve_audio_source`'s own "one function
+    decides" pattern immediately above:
+
+    1. The zone an admin saved through the webapp (`settings` row keyed
+       `TIMEZONE_SETTING_KEY`) -- `resolved_from == "database"`. A stored
+       value that no longer loads with `zoneinfo` logs a `WARNING` naming
+       the key and falls through, rather than raising: a boot must never
+       refuse over a setting a route already validated when it was
+       written.
+    2. `config.server.timezone`, already validated by
+       `ServerConfig.from_config` -- `resolved_from == "config"`.
+    3. Home Assistant's own `GET /api/config` `time_zone` field, read
+       through the `ha` plugin row's connection info
+       (`_ha_plugin_connection_info`) -- `resolved_from ==
+       "home_assistant"`. Skipped with no request at all when no `HA_URL`
+       is configured. Any failure (decrypt, transport, HTTP status, JSON
+       shape, an unknown zone name) is caught broadly and logged as a
+       `WARNING` naming only the exception's type and message -- never
+       the token -- and falls through: Home Assistant being unreachable
+       must never stop the boot (D-07's same "a degraded plugin boots
+       anyway" posture).
+    4. The process's own zone -- `resolved_from == "process"`, `zone`
+       `None`. `warning` carries `TIMEZONE_UTC_WARNING` when the process
+       itself is running in UTC (`_process_zone_is_utc`), so an operator
+       who never configured a zone anywhere is told, rather than silently
+       served UTC.
+
+    For sources 1-3, `name` and `child_tz` are the same IANA zone key.
+    """
+    setting = await settings_repo.get_setting(TIMEZONE_SETTING_KEY)
+    if setting is not None and isinstance(setting.value, str) and setting.value:
+        try:
+            zone = ZoneInfo(setting.value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            logger.warning(
+                "stored setting %r (%r) is not a valid time zone: %s -- falling "
+                "through to the next source",
+                TIMEZONE_SETTING_KEY,
+                setting.value,
+                exc,
+            )
+        else:
+            return TimezoneResolution(
+                zone=zone,
+                name=setting.value,
+                resolved_from="database",
+                child_tz=setting.value,
+                warning=None,
+            )
+
+    if config.server.timezone:
+        zone = ZoneInfo(config.server.timezone)
+        return TimezoneResolution(
+            zone=zone,
+            name=config.server.timezone,
+            resolved_from="config",
+            child_tz=config.server.timezone,
+            warning=None,
+        )
+
+    base_url, token = await _ha_plugin_connection_info(plugin_repo, config.security)
+    if base_url:
+        try:
+            tz_name = await _fetch_home_assistant_time_zone(base_url, token, client=client)
+            zone = ZoneInfo(tz_name)
+        except Exception as exc:  # noqa: BLE001 -- D-07: Home Assistant down is survivable
+            logger.warning(
+                "could not resolve the time zone from Home Assistant: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        else:
+            return TimezoneResolution(
+                zone=zone,
+                name=tz_name,
+                resolved_from="home_assistant",
+                child_tz=tz_name,
+                warning=None,
+            )
+
+    name = _current_process_zone_name()
+    warning = TIMEZONE_UTC_WARNING if _process_zone_is_utc() else None
+    child_tz = os.environ.get("TZ") or None
+    return TimezoneResolution(
+        zone=None, name=name, resolved_from="process", child_tz=child_tz, warning=warning
+    )
 
 
 async def _admin_account_status(account_repo: AccountRepository) -> WizardStepStatus:
