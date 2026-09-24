@@ -5,6 +5,9 @@ Generated in code, not shipped as a file: two rising tones, each with a
 short fade so the speaker does not click. Encoded for the sink the source
 plays (`providers/tts_xai.py::SinkFormat`), so the camera gets 8 kHz A-law
 like every other byte it plays.
+
+This module also makes sink-format silence for the speaker tail flush
+(`speaker/fifo_writer.py`'s idle tail pad, 260923-sfi).
 """
 
 from __future__ import annotations
@@ -37,3 +40,23 @@ def wake_cue(sink: SinkFormat) -> bytes:
     if sink.codec == "pcm":
         return pcm16
     return b""
+
+
+def silence(sink: SinkFormat, seconds: float) -> bytes:
+    """`seconds` of digital silence, in `sink`'s own codec.
+
+    A-law's idle byte is `0xD5`, not `0x00` (`0x00` decodes to a loud
+    value in A-law's companding). "pcm" is 16-bit signed little-endian, so
+    its silence is a real zero, two bytes per sample. Raises `ValueError`
+    for a codec this module cannot encode -- an empty result here would
+    write nothing to the FIFO and bring the tail hold straight back, with
+    no error to say why.
+    """
+    if seconds < 0:
+        raise ValueError(f"silence() duration must not be negative, got {seconds!r}")
+    n = round(sink.sample_rate * seconds)
+    if sink.codec == "alaw":
+        return b"\xd5" * n
+    if sink.codec == "pcm":
+        return b"\x00" * (2 * n)
+    raise ValueError(f"silence() has no encoding for sink codec {sink.codec!r}")
