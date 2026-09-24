@@ -316,6 +316,107 @@ def test_brain_local_intents_must_be_a_bool():
     assert "local_intents" in str(exc.value)
 
 
+# --- 260924-4iv: state_timeout_ms, state_domains, and a validated cache_system_prompt ---
+
+
+def test_brain_state_defaults():
+    from atlas.config import DEFAULT_STATE_DOMAINS, BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}]})
+    assert brain.state_timeout_ms == 500.0
+    assert brain.state_domains == DEFAULT_STATE_DOMAINS
+    assert brain.cache_system_prompt is True
+
+
+def test_default_state_domains_is_a_superset_of_the_local_intent_candidate_domains():
+    """T-4iv-05's own coupling guard: the state-message filter must never
+    be able to hide an entity the local on/off matcher itself controls."""
+    from atlas.config import DEFAULT_STATE_DOMAINS
+    from atlas.turn.local_intent import _CANDIDATE_DOMAINS
+
+    assert _CANDIDATE_DOMAINS <= DEFAULT_STATE_DOMAINS
+
+
+def test_brain_state_domains_normalizes_case_and_whitespace():
+    from atlas.config import BrainConfig
+
+    brain = BrainConfig.from_config(
+        {"models": [{"model": "grok-4.6"}], "state_domains": ["Light", " switch "]}
+    )
+    assert brain.state_domains == frozenset({"light", "switch"})
+
+
+def test_brain_state_domains_star_means_every_domain():
+    from atlas.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "state_domains": ["*"]})
+    assert brain.state_domains is None
+
+
+def test_brain_state_domains_empty_list_raises():
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "state_domains": []})
+    assert "state_domains" in str(exc.value)
+
+
+def test_brain_state_domains_must_be_a_list_not_a_string():
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "state_domains": "light"})
+    assert "state_domains" in str(exc.value)
+
+
+def test_brain_state_domains_star_mixed_with_other_entries_raises():
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config(
+            {"models": [{"model": "grok-4.6"}], "state_domains": ["*", "light"]}
+        )
+    assert "state_domains" in str(exc.value)
+
+
+def test_brain_state_domains_an_invalid_character_raises():
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config(
+            {"models": [{"model": "grok-4.6"}], "state_domains": ["light switch"]}
+        )
+    assert "state_domains" in str(exc.value)
+
+
+def test_brain_state_timeout_ms_zero_is_allowed():
+    from atlas.config import BrainConfig
+
+    brain = BrainConfig.from_config({"models": [{"model": "grok-4.6"}], "state_timeout_ms": 0})
+    assert brain.state_timeout_ms == 0.0
+
+
+@pytest.mark.parametrize("bad_value", [-1, float("inf"), float("nan"), True, "500"])
+def test_brain_state_timeout_ms_rejects_negative_non_finite_bool_or_non_numeric(bad_value):
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config(
+            {"models": [{"model": "grok-4.6"}], "state_timeout_ms": bad_value}
+        )
+    assert "state_timeout_ms" in str(exc.value)
+
+
+def test_brain_cache_system_prompt_must_be_a_bool():
+    from atlas.config import BrainConfig, ConfigError
+
+    with pytest.raises(ConfigError) as exc:
+        BrainConfig.from_config(
+            {"models": [{"model": "grok-4.6"}], "cache_system_prompt": "yes"}
+        )
+    assert "cache_system_prompt" in str(exc.value)
+
+
 # --- Task 2: macros: block and the normalization that decides sameness ---
 
 

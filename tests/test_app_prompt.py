@@ -299,6 +299,62 @@ def test_state_message_an_overdue_pending_run_is_flagged_as_overdue(monkeypatch)
     assert "overdue" in message.lower()
 
 
+# --- 260924-4iv (items a, b): domains filter and the unavailable lines ---
+
+
+def test_state_message_with_no_domains_is_byte_identical_to_the_pre_4iv_output():
+    entities = _entities_from_fake_states()
+    states = {entity["entity_id"]: entity["state"] for entity in entities}
+
+    with_default = _state_message(states)
+    with_explicit_none = _state_message(states, (), domains=None)
+
+    assert with_default == with_explicit_none
+    for entity_id in states:
+        assert entity_id in with_default
+
+
+def test_state_message_domains_filter_keeps_only_the_configured_domains():
+    from atlas.app import _state_message
+
+    states = {
+        "light.example_lamp": "on",
+        "sensor.example_temperature": "72",
+    }
+
+    message = _state_message(states, domains=frozenset({"light"}))
+
+    assert "light.example_lamp" in message
+    assert "sensor.example_temperature" not in message
+    assert "Current state (only these domains are listed: light" in message
+
+
+def test_state_message_states_none_renders_the_unavailable_line_and_no_entity_lines():
+    from atlas.app import _STATE_UNAVAILABLE_LINE, _state_message
+
+    entities = _entities_from_fake_states()
+    populated = _state_message({entity["entity_id"]: entity["state"] for entity in entities})
+    message = _state_message(None)
+
+    assert _STATE_UNAVAILABLE_LINE in message
+    for entity in entities:
+        assert entity["entity_id"] not in message
+    # The date/time lines are unaffected by an unavailable state read.
+    assert "Current date:" in message
+    assert "Current time:" in message
+    assert message != populated
+
+
+def test_state_message_pending_runs_none_renders_the_unavailable_line_not_no_runs():
+    from atlas.app import _PENDING_RUNS_UNAVAILABLE_LINE, _state_message
+    from atlas.workflow.summary import _NO_RUNS_LINE
+
+    message = _state_message({}, None)
+
+    assert _PENDING_RUNS_UNAVAILABLE_LINE in message
+    assert _NO_RUNS_LINE not in message
+
+
 def test_tool_result_json_unwraps_the_sdks_result_envelope_for_a_list():
     """The MCP SDK returns a list-valued tool result as
     `structuredContent={"result": [...]}`. Live, reading that dict as "no

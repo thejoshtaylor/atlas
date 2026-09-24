@@ -914,6 +914,231 @@ async def test_a_raising_state_fetch_still_reaches_speech(fake_audio_source, fak
     assert timings.turn_outcome == "completed"
 
 
+# --- 260924-4iv (item a): one bounded deadline for the prefetched reads ---
+
+
+async def test_a_slow_state_fetch_is_bounded_by_state_timeout_ms_and_marked_unavailable(
+    fake_audio_source, fake_stt, fake_tts
+):
+    """A state fetch far slower than `state_timeout_ms` costs the turn at
+    most that bound, not its own full duration -- the fetch is cancelled
+    and awaited, never left running, and the brain sees the unavailable
+    line rather than an empty state list."""
+    import time as _time
+
+    from atlas.app import _STATE_UNAVAILABLE_LINE
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    observed_cancel = []
+
+    async def _slow_state_fetch():
+        try:
+            await asyncio.sleep(5)
+            return [{"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"}]
+        except asyncio.CancelledError:
+            observed_cancel.append(True)
+            raise
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="is the lamp on")])
+    brain = _RecordingBrain(replies=[BrainReply(text="i don't know")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    start = _time.monotonic()
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_slow_state_fetch,
+        state_timeout_ms=50,
+    )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 2.0
+    assert observed_cancel == [True]
+    messages = brain.received_messages[0]
+    assert _STATE_UNAVAILABLE_LINE in messages[1]["content"]
+
+
+async def test_a_slow_pending_runs_fetch_is_bounded_and_scopes_run_ids_to_nothing(
+    fake_audio_source, fake_stt, fake_tts
+):
+    from atlas.app import _PENDING_RUNS_UNAVAILABLE_LINE
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    observed_cancel = []
+
+    class _RecordingWorkflowToolHost:
+        def __init__(self):
+            self.received_run_ids = None
+
+        def set_current_turn_run_ids(self, run_ids):
+            self.received_run_ids = run_ids
+
+    async def _slow_pending_runs_fetch():
+        try:
+            await asyncio.sleep(5)
+            return ()
+        except asyncio.CancelledError:
+            observed_cancel.append(True)
+            raise
+
+    workflow_tool_host = _RecordingWorkflowToolHost()
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        pending_runs_fetch=_slow_pending_runs_fetch,
+        workflow_tool_host=workflow_tool_host,
+        state_timeout_ms=50,
+    )
+
+    assert observed_cancel == [True]
+    assert workflow_tool_host.received_run_ids == frozenset()
+    messages = brain.received_messages[0]
+    assert _PENDING_RUNS_UNAVAILABLE_LINE in messages[1]["content"]
+
+
+async def test_local_intents_reads_state_within_the_same_bound_with_no_second_wait(
+    fake_audio_source, fake_stt, fake_tts
+):
+    """`local_intents=True` with a slow state fetch: the local matcher
+    never calls the tool host (there is no state to match against), and
+    the turn reaches the brain within `state_timeout_ms` -- no separate,
+    longer wait."""
+    import time as _time
+
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    class _RaisingToolHost:
+        async def call_tool(self, name, arguments):
+            raise AssertionError("tool_host.call_tool must not be called: no state to match against")
+
+    async def _slow_state_fetch():
+        await asyncio.sleep(5)
+        return [{"entity_id": "switch.example_fan", "friendly_name": "Example Fan", "state": "off"}]
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the example fan")])
+    brain = _RecordingBrain(replies=[BrainReply(text="i can't tell")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    start = _time.monotonic()
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        _RaisingToolHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_slow_state_fetch,
+        state_timeout_ms=50,
+        local_intents=True,
+    )
+    elapsed = _time.monotonic() - start
+
+    assert elapsed < 2.0
+    assert len(brain.received_messages) == 1
+
+
+async def test_state_domains_filter_reaches_the_brain_but_friendly_names_stay_full(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """The state message the brain sees carries only the configured
+    domains, but a needs_clarification reply naming a candidate outside
+    those domains still speaks its friendly name -- `friendly_names` is
+    built from the full, unfiltered fetch payload."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    async def _state_fetch():
+        return [
+            {"entity_id": "light.example_lamp", "friendly_name": "the lamp", "state": "on"},
+            {"entity_id": "sensor.example_temperature", "friendly_name": "the temperature sensor", "state": "72"},
+        ]
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("sensor.example_temperature", "light.example_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying_reply),
+        calls_tools=False,
+    )
+
+    class _RaisingToolHost:
+        async def call_tool(self, name, arguments):
+            raise AssertionError(f"tool_host.call_tool must not be called here, got: {name}")
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what does the sensor say")])
+    # The top tier's own task is still created and started alongside the
+    # triage tier's -- give it a reply to return in case it gets to run
+    # before the triage tier's clarifying reply ends the race, rather than
+    # `_RecordingBrain`'s own "called more times than scripted" raise.
+    brain = _RecordingBrain(replies=[BrainReply(text="never spoken")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        _RaisingToolHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        state_fetch=_state_fetch,
+        state_domains=frozenset({"light"}),
+        tiers=[
+            triage_tier,
+            brain_race.TierBrain(index=1, model="top", brain=brain, envelope_client=None, calls_tools=True),
+        ],
+    )
+
+    assert tts.received_text  # a question was spoken
+    question = tts.received_text[-1]
+    assert "the temperature sensor" in question
+    assert "the lamp" in question
+
+
 async def test_three_messages_reach_the_tier_in_catalog_state_user_order(fake_audio_source, fake_stt, fake_tts):
     from atlas.timing import TurnTimings
     from atlas.turn.controller import run_turn
