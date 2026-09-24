@@ -34,6 +34,14 @@ class FakeGoogle:
         self.refresh_tokens: dict[str, str] = {}
         self.events: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self.requests: list[httpx.Request] = []
+        # Task 2: per-`events.list` failure injection, keyed by
+        # `(access_token, calendar_id)` -- `calendar_id=None` fails every
+        # calendar that access token calls. Value is `(status, raise_connect_error)`;
+        # `status` alone answers a non-2xx response (401/403 -> auth
+        # failure, anything else -> a generic API failure);
+        # `raise_connect_error=True` raises `httpx.ConnectError` instead,
+        # simulating a transport-level failure with no response at all.
+        self._event_failures: dict[tuple[str, "str | None"], tuple["int | None", bool]] = {}
         self._transport = httpx.MockTransport(self._handle)
 
     @property
@@ -55,6 +63,29 @@ class FakeGoogle:
         answers an empty list, matching a real, genuinely-empty
         calendar."""
         self.events[(access_token, calendar_id)] = list(events)
+
+    def fail_events(
+        self,
+        access_token: str,
+        calendar_id: "str | None" = None,
+        *,
+        status: "int | None" = None,
+        raise_connect_error: bool = False,
+    ) -> None:
+        """Task 2: make `events.list` fail for `access_token` (every
+        calendar, when `calendar_id` is `None`, or one calendar only) --
+        either a non-2xx `status` (401/403 for an auth failure, any other
+        code for a generic API failure) or, with `raise_connect_error=True`,
+        a raised `httpx.ConnectError` with no response at all (a transport
+        failure)."""
+        self._event_failures[(access_token, calendar_id)] = (status, raise_connect_error)
+
+    def requests_by_bearer(self, access_token: str) -> list[httpx.Request]:
+        """Every request this fake answered carrying `access_token` as its
+        bearer token -- so a test can assert exactly which account's own
+        token reached which URL."""
+        prefix = f"Bearer {access_token}"
+        return [r for r in self.requests if r.headers.get("authorization") == prefix]
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -85,5 +116,16 @@ class FakeGoogle:
         # encodes it with `urllib.parse.quote(calendar_id, safe="")`).
         segments = request.url.path.split("/")
         calendar_id = urllib.parse.unquote(segments[-2])
+
+        failure = self._event_failures.get((access_token, calendar_id)) or self._event_failures.get(
+            (access_token, None)
+        )
+        if failure is not None:
+            status, raise_connect_error = failure
+            if raise_connect_error:
+                raise httpx.ConnectError("connection refused", request=request)
+            if status is not None:
+                return httpx.Response(status, json={"error": {"message": "forced failure"}})
+
         events = self.events.get((access_token, calendar_id), [])
         return httpx.Response(200, json={"items": events})
