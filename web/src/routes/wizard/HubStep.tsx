@@ -7,6 +7,7 @@ import { ErrorState } from "@/components/state/ErrorState"
 import { SubmitButton } from "@/components/state/SubmitButton"
 import { CREDENTIALS_QUERY_KEY, fetchCredentials } from "@/lib/credentials"
 import { checkHubStepMutationOptions, classifyHubCheckError } from "@/lib/wizard"
+import { TimezoneField } from "./TimezoneField"
 import { WizardCredentialField } from "./WizardCredentialField"
 import { WizardStepShell } from "./WizardStepShell"
 
@@ -22,7 +23,10 @@ const HOME_ASSISTANT_SLOT = "ha_token"
  * treatment). "Continue" then asks the server to verify -- a real call to
  * Home Assistant using the exact read the assistant itself performs
  * (`routes/wizard.py`'s own `_probe_home_assistant`), so a hub that
- * passes here is a hub the assistant can use.
+ * passes here is a hub the assistant can use. A new operator also sets
+ * the house's own time zone on this step (`TimezoneField`, 260924-h2f) --
+ * Home Assistant is the fallback source for it, so this is the natural
+ * place to offer it before the operator ever leaves this screen.
  */
 export function HubStep() {
   const navigate = useNavigate()
@@ -67,6 +71,8 @@ export function HubStep() {
         </div>
 
         <WizardCredentialField entry={haEntry} label="Home Assistant token" slot={HOME_ASSISTANT_SLOT} />
+
+        <TimezoneField />
 
         {errorHeading ? <ErrorState message={errorHeading} detail={errorDetail} onRetry={handleContinue} /> : null}
 

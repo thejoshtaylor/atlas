@@ -17,6 +17,7 @@ import {
 } from "@/lib/credentials"
 import { PROVIDERS_QUERY_KEY, fetchProviders } from "@/lib/providers"
 import { needsRestart } from "@/routes/providers/deriveProvidersScreenState"
+import { TimezoneField } from "@/routes/wizard/TimezoneField"
 
 // 03-UI-SPEC.md's Focal Point row: "the section headings and their Live
 // / Needs-restart badges -- the badge is the information the screen
@@ -131,6 +132,8 @@ export function SettingsRoute() {
           </Link>
         </div>
       </div>
+
+      <TimezoneField />
 
       {query.status === "pending" ? <SkeletonList rows={2} /> : null}
 

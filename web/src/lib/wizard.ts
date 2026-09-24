@@ -179,3 +179,64 @@ export const finishWizardMutationOptions: UseMutationOptions<WizardFinishResult,
     void queryClient.invalidateQueries({ queryKey: SETUP_STATUS_QUERY_KEY })
   },
 }
+
+// --- The time zone (260924-h2f, issue #1) -----------------------------
+
+/** `TimezoneStatusResponse`'s exact shape (`routes/wizard.py`). `zone`/
+ * `resolved_from`/`warning` are the boot's own resolution, never
+ * re-resolved per request; `stored` is the current `settings` row,
+ * `null` when nothing has been saved through the webapp yet. */
+export interface TimezoneStatus {
+  zone: string
+  resolved_from: "database" | "config" | "home_assistant" | "process"
+  stored: string | null
+  warning: string | null
+  applies_live: boolean
+}
+
+export const TIMEZONE_QUERY_KEY = ["wizard", "timezone"] as const
+
+function fetchTimezone(): Promise<TimezoneStatus> {
+  return apiFetch<TimezoneStatus>("/api/wizard/timezone")
+}
+
+export const timezoneQueryOptions = {
+  queryKey: TIMEZONE_QUERY_KEY,
+  queryFn: fetchTimezone,
+}
+
+export interface SetTimezoneInput {
+  zone: string
+}
+
+function setTimezone(input: SetTimezoneInput): Promise<TimezoneStatus> {
+  return apiFetch<TimezoneStatus>("/api/wizard/timezone", { method: "PUT", body: input })
+}
+
+/**
+ * `PUT /api/wizard/timezone` -- `onSuccess` writes the returned status
+ * straight into `TIMEZONE_QUERY_KEY` (the response already carries
+ * everything a fresh `GET` would, per that route's own contract), rather
+ * than invalidating and waiting on a second round trip.
+ */
+export const setTimezoneMutationOptions: UseMutationOptions<TimezoneStatus, unknown, SetTimezoneInput> = {
+  mutationFn: setTimezone,
+  onSuccess: (status) => {
+    queryClient.setQueryData(TIMEZONE_QUERY_KEY, status)
+  },
+}
+
+/**
+ * The value a freshly-loaded time zone field starts with, before the
+ * operator touches it: the saved setting when one exists (an admin
+ * already chose), else the running zone when it did not come from the
+ * process fallback (config or Home Assistant already named a real zone,
+ * worth keeping), else the browser's own zone -- offered as a starting
+ * point, never silently applied (issue items 3 and 5). A pure function,
+ * so this needs no rendered DOM to test.
+ */
+export function initialTimezoneValue(status: TimezoneStatus, browserZone: string): string {
+  if (status.stored) return status.stored
+  if (status.resolved_from !== "process") return status.zone
+  return browserZone
+}
