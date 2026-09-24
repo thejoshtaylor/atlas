@@ -9,6 +9,7 @@ the resolved brain model id, and the entity catalog are all opened once in
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import logging
@@ -462,8 +463,17 @@ def _build_tcp_supervisor(config: Config) -> FfmpegSupervisor:
     PUT is never sent on this path. A separate, monkeypatchable function so
     tests can substitute a fake, the same reason its siblings
     (`_build_ffmpeg_supervisor`, `_build_tapo_talk_supervisor`) are also
-    separate functions."""
-    return FfmpegSupervisor(config.speaker, build_argv=build_tcp_argv)
+    separate functions.
+
+    260923-pyj: the FIFO carries the `tts.codec`/`tts.sample_rate` pair --
+    the same pair `lifespan` builds `camera_tts_sink` from, below -- so the
+    egress argv must read the FIFO in that format, not a fixed one.
+    `functools.partial` binds the sink into `build_tcp_argv` here, so
+    `FfmpegSupervisor._supervise`'s own one-argument `build_argv(config)`
+    call stays unchanged.
+    """
+    sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
+    return FfmpegSupervisor(config.speaker, build_argv=functools.partial(build_tcp_argv, sink=sink))
 
 
 def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:

@@ -555,8 +555,13 @@ def test_tts_config_accepts_codec_and_sample_rate(raw, expected_codec, expected_
 def test_tts_config_rejects_bad_codec_or_sample_rate(raw, error_substring):
     """"fast" must raise ConfigError, never a bare ValueError -- an
     operator reading a startup log should never see a traceback from a
-    stdlib int() call with no config key attached to it."""
-    from atlas.config import TtsConfig
+    stdlib int() call with no config key attached to it.
+
+    ConfigError is imported here, not from this file's top-level import,
+    because `test_config_and_turn_macros_import_in_either_order` above
+    reloads `atlas.config` -- the module-level `ConfigError` name this file
+    imported before that reload is a different class object afterward."""
+    from atlas.config import ConfigError, TtsConfig
 
     with pytest.raises(ConfigError) as exc:
         TtsConfig.from_config(raw)

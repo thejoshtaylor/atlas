@@ -337,12 +337,22 @@ class BrainConfig:
 class TtsConfig:
     """The `tts:` block: two codec pairs for two different sinks.
 
-    `codec`/`sample_rate` matches the camera speaker path (Phase 2) and
-    is left untouched here. `browser_codec`/`browser_sample_rate` is the
-    Phase 1 addition: a browser's Web Audio API cannot decode the
-    camera-facing A-law stream, so the browser sink requests raw PCM
-    instead. Both live on the same `TtsConfig` because both describe the
-    one TTS provider's two possible output requests, not two providers.
+    `codec`/`sample_rate` is the format the speaker plays, set from
+    TTS_CODEC and TTS_SAMPLE_RATE. The camera backends (`go2rtc`,
+    `tapo_talk`) play only 8 kHz A-law -- `_check_speaker_backend_plays_
+    tts_format` below stops startup if this pair is anything else on one
+    of those backends. The `tcp` backend can take `pcm` at a higher rate
+    instead, for a better-sounding reply on a listener that is not the
+    camera. `browser_codec`/`browser_sample_rate` is the Phase 1 addition:
+    a browser's Web Audio API cannot decode the camera-facing A-law
+    stream, so the browser sink requests raw PCM instead. Both pairs live
+    on the same `TtsConfig` because both describe the one TTS provider's
+    two possible output requests, not two providers.
+
+    `sample_rate` is coerced to `int` here because environment expansion
+    always hands this a quoted string (`"24000"`, never a bare `24000`),
+    and both the xAI request body and the sink-keyed precache need a real
+    int to work with, not a string that only looks like one.
     """
 
     url: str = "https://api.x.ai/v1/tts"
@@ -376,13 +386,27 @@ class TtsConfig:
     @classmethod
     def from_config(cls, raw: dict | None) -> "TtsConfig":
         raw = raw or {}
+        codec = raw.get("codec", cls.codec)
+        supported_codecs = ("alaw", "pcm")
+        if codec not in supported_codecs:
+            raise ConfigError(
+                f"tts.codec {codec!r} is not one this codebase implements -- "
+                f"supported values are {supported_codecs!r}"
+            )
+        raw_sample_rate = raw.get("sample_rate", cls.sample_rate)
+        try:
+            sample_rate = int(raw_sample_rate)
+        except (TypeError, ValueError):
+            raise ConfigError(f"tts.sample_rate {raw_sample_rate!r} is not a whole number") from None
+        if sample_rate <= 0:
+            raise ConfigError(f"tts.sample_rate must be positive, got {sample_rate!r}")
         return cls(
             url=raw.get("url", cls.url),
             api_key=raw.get("api_key", cls.api_key),
             voice_id=raw.get("voice_id", cls.voice_id),
             language=raw.get("language", cls.language),
-            codec=raw.get("codec", cls.codec),
-            sample_rate=raw.get("sample_rate", cls.sample_rate),
+            codec=codec,
+            sample_rate=sample_rate,
             browser_codec=raw.get("browser_codec", cls.browser_codec),
             browser_sample_rate=raw.get("browser_sample_rate", cls.browser_sample_rate),
             optimize_streaming_latency=raw.get(
@@ -467,9 +491,10 @@ class SpeakerConfig:
     `backend` selects which FIFO reader owns egress: `go2rtc` (default,
     `FfmpegSupervisor`), `tapo_talk` (`TapoTalkSupervisor`, for firmware
     where go2rtc's built-in `tapo://` client can no longer authenticate),
-    or `tcp` (260923-pds: the same `FfmpegSupervisor`, pushing raw 8 kHz
-    A-law to `tcp_url` for a listener on another machine, such as a
-    Raspberry Pi speaker -- `go2rtc_url`, `stream`, and `ensure_url` are
+    or `tcp` (260923-pds, reply format 260923-pyj: the same
+    `FfmpegSupervisor`, pushing the reply audio in the TTS sink format to
+    `tcp_url` as a NUT stream, for a listener on another machine, such as
+    a Raspberry Pi speaker -- `go2rtc_url`, `stream`, and `ensure_url` are
     not used on this path). The default stays `go2rtc` so an existing
     deployment's behaviour is never silently changed by this field's
     addition.
@@ -1552,13 +1577,16 @@ class Config:
             raise ConfigError(MACROS_KEY_REJECTED_ERROR)
         if "mcp" in raw and reject_legacy_mcp_key:
             raise ConfigError(MCP_KEY_REJECTED_ERROR)
+        tts = TtsConfig.from_config(raw.get("tts"))
+        speaker = SpeakerConfig.from_config(raw.get("speaker"))
+        _check_speaker_backend_plays_tts_format(speaker, tts)
         return cls(
             server=ServerConfig.from_config(raw.get("server")),
             stt=SttConfig.from_config(raw.get("stt")),
             brain=BrainConfig.from_config(raw.get("brain")),
-            tts=TtsConfig.from_config(raw.get("tts")),
+            tts=tts,
             camera=CameraConfig.from_config(raw.get("camera")),
-            speaker=SpeakerConfig.from_config(raw.get("speaker")),
+            speaker=speaker,
             wake=WakeConfig.from_config(raw.get("wake")),
             gate=GateConfig.from_config(raw.get("gate")),
             barge_in=BargeInConfig.from_config(raw.get("barge_in")),
@@ -1603,6 +1631,33 @@ def _check_macros_do_not_collide(macros: "Sequence[MacroConfig]") -> None:
                     "other at runtime"
                 )
             seen[key] = macro
+
+
+def _check_speaker_backend_plays_tts_format(speaker: SpeakerConfig, tts: TtsConfig) -> None:
+    """Raise `ConfigError` when `speaker.backend` is `go2rtc` or
+    `tapo_talk` and `tts` is not the camera's own (alaw, 8000) pair.
+
+    Both camera backends assume that pair unconditionally elsewhere in
+    this codebase: `ffmpeg_supervisor.py`'s `build_ffmpeg_argv` hardcodes
+    `-f alaw -ar 8000`, and `speaker/tapo_talk.py`'s `_PTS_STEP` is derived
+    from 8000 samples/second. A mismatch reaching either one plays noise
+    or plays at the wrong speed, with no error anywhere -- this check
+    exists so that failure happens once, loudly, at startup, instead.
+    `speaker.backend` `tcp` is exempt: its argv reads the FIFO in whatever
+    format `tts` declares (`ffmpeg_supervisor.py`'s `build_tcp_argv`), so
+    any valid pair is safe there.
+    """
+    if speaker.backend not in ("go2rtc", "tapo_talk"):
+        return
+    if (tts.codec, tts.sample_rate) == ("alaw", 8000):
+        return
+    raise ConfigError(
+        f"speaker.backend {speaker.backend!r} plays reply audio on the camera "
+        "speaker, which takes only 8 kHz A-law, but tts.codec is "
+        f"{tts.codec!r} and tts.sample_rate is {tts.sample_rate!r} -- set "
+        "TTS_CODEC=alaw and TTS_SAMPLE_RATE=8000, or set speaker.backend to "
+        "tcp"
+    )
 
 
 # The exact wording `Config.from_config` has always raised for a lingering

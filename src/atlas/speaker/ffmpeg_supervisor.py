@@ -26,10 +26,17 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from atlas.config import SpeakerConfig
+from atlas.providers.tts_xai import SinkFormat
 
 logger = logging.getLogger("atlas.speaker.ffmpeg_supervisor")
 
 SpawnFn = Callable[[list[str]], Awaitable[Any]]
+
+# The FIFO demuxer for each sink codec this codebase ever writes into the
+# speaker FIFO. "pcm" means 16-bit signed little-endian mono everywhere in
+# this codebase (`audio/alaw.py`, `providers/tts_xai.py`'s own SinkFormat
+# docstring), so its demuxer is "s16le".
+_SINK_CODEC_TO_DEMUXER = {"alaw": "alaw", "pcm": "s16le"}
 
 
 def build_ffmpeg_argv(config: SpeakerConfig) -> list[str]:
@@ -66,23 +73,33 @@ def build_ffmpeg_argv(config: SpeakerConfig) -> list[str]:
     ]
 
 
-def build_tcp_argv(config: SpeakerConfig) -> list[str]:
-    """The `ffmpeg` invocation for the `tcp` backend (260923-pds): the FIFO
-    already holds raw 8 kHz A-law, so `-c copy` again -- there is nothing to
-    transcode. `-flush_packets 1` sends each packet as soon as `ffmpeg` has
-    it, so a short reply is not held in an output buffer waiting for more
-    data. The far end is a listener on another machine (for example a
-    Raspberry Pi) that plays what it receives.
+def build_tcp_argv(config: SpeakerConfig, sink: SinkFormat) -> list[str]:
+    """The `ffmpeg` invocation for the `tcp` backend (260923-pds, sink
+    format 260923-pyj): the FIFO holds the TTS reply bytes in `sink`'s own
+    format, so this reads the FIFO in that format and `-c copy` does no
+    transcode. The output is NUT, not a fixed codec flag: NUT carries the
+    codec and the sample rate in its own stream header, so the listener on
+    the far end (for example a Raspberry Pi) needs no format flags of its
+    own to play what it receives. `-flush_packets 1` sends each packet as
+    soon as `ffmpeg` has it, so a short reply is not held in an output
+    buffer waiting for more data.
     """
+    try:
+        demuxer = _SINK_CODEC_TO_DEMUXER[sink.codec]
+    except KeyError:
+        raise ValueError(
+            f"sink codec {sink.codec!r} has no FIFO demuxer -- supported values are "
+            f"{tuple(_SINK_CODEC_TO_DEMUXER)!r}"
+        ) from None
     return [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "warning",
         "-f",
-        "alaw",
+        demuxer,
         "-ar",
-        "8000",
+        str(sink.sample_rate),
         "-ac",
         "1",
         "-i",
@@ -92,7 +109,7 @@ def build_tcp_argv(config: SpeakerConfig) -> list[str]:
         "-flush_packets",
         "1",
         "-f",
-        "alaw",
+        "nut",
         config.tcp_url,
     ]
 
