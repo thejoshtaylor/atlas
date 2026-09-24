@@ -14,6 +14,13 @@ timing any more. `synthesize_once()` returns the whole response body;
 buffer and satisfies the streaming `TtsProvider` protocol on top of it.
 Two chunking loops -- one here, one in the adapter -- would be the exact
 duplicate D-07 forbids.
+
+Quick task 260924-4iu (a): `synthesize_once` used to open a fresh
+`httpx.AsyncClient` for every call, so every reply paid a new TCP and TLS
+handshake before the request itself even started. One `XaiTts` instance
+now carries one lazily built client, reused across every call it makes,
+and `aclose()` closes it. `app.py`'s lifespan shutdown calls `aclose()`
+through `BatchTtsAdapter`'s forwarding.
 """
 
 from __future__ import annotations
@@ -32,6 +39,15 @@ from atlas.providers.base import TtsError
 # restating it -- one definition of the chunk size, not two.
 CHUNK_BYTES = 640
 
+# httpx's own default keepalive expiry is 5 s. A normal back-and-forth
+# conversation leaves the connection idle for longer than that between
+# turns, so the default would drop the socket between almost every pair of
+# replies and the shared client would then save nothing over the old
+# per-call client. 120 s keeps one TLS connection alive across a normal
+# conversation's pauses. httpx checks an idle pooled socket before it
+# reuses one and reconnects on its own when the server already closed it.
+_KEEPALIVE_EXPIRY_S = 120.0
+
 
 @dataclass(frozen=True)
 class SinkFormat:
@@ -45,8 +61,45 @@ class XaiTts:
     """xAI's text-to-speech endpoint: one REST call, the whole utterance
     in the response body -- batch, not streaming (D-05)."""
 
-    def __init__(self, config: TtsConfig) -> None:
+    def __init__(self, config: TtsConfig, *, http_client: httpx.AsyncClient | None = None) -> None:
         self._config = config
+        # An injected client is a caller's own -- this instance never
+        # builds one and `aclose()` never closes it. `self._client` starts
+        # `None` either way; the owned case builds its client lazily, on
+        # first use, in `_get_client` below.
+        self._client = http_client
+        self._owns_client = http_client is None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return the one client this instance sends every request
+        through, building it on first use.
+
+        Built lazily rather than in `__init__`: the provider object can be
+        constructed before the event loop that will use it exists, and
+        `httpx.AsyncClient` binds to whichever loop is running when it is
+        built. `httpx.AsyncClient` is read off the module here, at call
+        time, rather than captured at import time, so a test that
+        monkeypatches `atlas.providers.tts_xai.httpx.AsyncClient` still
+        reaches its replacement.
+        """
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                timeout=self._config.request_timeout_s,
+                limits=httpx.Limits(keepalive_expiry=_KEEPALIVE_EXPIRY_S),
+            )
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the client this instance built, if it built one.
+
+        Safe before any call was ever made (there is no client yet, and
+        this does nothing) and safe to call twice (the second call finds
+        `self._client` already `None`). Never closes an injected client --
+        that client belongs to whoever passed it in.
+        """
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def browser_sink(self) -> SinkFormat:
         """The Phase 1 dev-harness sink: Web Audio-playable PCM, never A-law."""
@@ -97,6 +150,18 @@ class XaiTts:
         Plan 07-02: no empty-text short circuit and no chunking here any
         more -- `BatchTtsAdapter` owns both. This method is a plain,
         unconditional REST call from text to bytes.
+
+        Quick task 260924-4iu (a): the request goes through this instance's
+        one shared client (`_get_client`), not a fresh client per call, so
+        repeated replies reuse one TCP and TLS connection instead of paying
+        a new handshake each time. The API key stays in this one request's
+        own `Authorization` header, never in the shared client's default
+        headers, so it is never held anywhere longer than one call needs it.
+        A pooled keep-alive connection the server closed at the moment of
+        reuse raises `httpx.RemoteProtocolError`; a render has no side
+        effect, so this retries the POST exactly once on that error and
+        lets any other exception, and a second `RemoteProtocolError`,
+        propagate unchanged.
         """
         sink = sink or self.browser_sink()
         payload = {
@@ -107,12 +172,15 @@ class XaiTts:
         }
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
 
-        async with httpx.AsyncClient(timeout=self._config.request_timeout_s) as client:
+        client = self._get_client()
+        try:
             response = await client.post(self._config.url, headers=headers, json=payload)
-            if response.status_code != 200:
-                # 422 is a schema rejection and names the offending field --
-                # surface it verbatim rather than flattening it to "TTS failed".
-                raise TtsError(
-                    f"xAI TTS returned {response.status_code}: {response.text[:300]}"
-                )
-            return response.content
+        except httpx.RemoteProtocolError:
+            response = await client.post(self._config.url, headers=headers, json=payload)
+        if response.status_code != 200:
+            # 422 is a schema rejection and names the offending field --
+            # surface it verbatim rather than flattening it to "TTS failed".
+            raise TtsError(
+                f"xAI TTS returned {response.status_code}: {response.text[:300]}"
+            )
+        return response.content

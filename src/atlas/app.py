@@ -1564,6 +1564,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
     await speaker_http_client.aclose()
+    # Quick task 260924-4iu (a): `app.state.tts` is a `BatchTtsAdapter`
+    # around `XaiTts` for the xAI slot, and `BatchTtsAdapter.__getattr__`
+    # forwards `aclose` to it (`aclose` is not in `_NEVER_FORWARDED`). A
+    # degraded slot is `None`, and Piper has no `aclose` -- either way
+    # `getattr` returns `None` and this closes nothing.
+    tts_closer = getattr(app.state.tts, "aclose", None)
+    if tts_closer is not None:
+        await tts_closer()
     await speaker_writer.close()
     # Plan 06-01: the manager owns every plugin child's teardown now --
     # one call, not a per-host `aclose()` for however many plugins happen
