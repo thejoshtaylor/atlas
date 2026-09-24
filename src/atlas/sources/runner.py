@@ -68,6 +68,18 @@ self._run_turn_fn(turn_source)` with `await asyncio.gather` of that same
 call *and* the barge-in listener, so the listener's lifetime is scoped to
 the turn's -- cancelled the instant the turn task finishes, so it never
 starves the next wake evaluation once `run()`'s loop resumes.
+
+**Detector work runs off the loop (D2, quick task 260924-4is):** every
+call this module makes into `wake_detector.process()` or
+`decode_for_detector()` -- for the wake hit and for the barge-in
+listener alike -- runs on `self._detector_executor`, one worker thread
+per runner. Before this fix, both ran directly on the loop thread, and
+`asyncio.Queue.get()` never yields when the queue already holds a chunk,
+so a backlog drained in one uninterrupted loop step with no checkpoint
+anything else in the process could run at. One worker, not the shared
+default pool `asyncio.to_thread` would use, because Vosk recognizers and
+PyAV codec contexts are stateful and not thread-safe, and a cancelled
+await does not stop a call already running in a thread.
 """
 
 from __future__ import annotations
@@ -76,6 +88,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
@@ -87,7 +100,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.output_trace import EmittedAudioTrace
-from atlas.wake.base import WakeDetector
+from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
 
 logger = logging.getLogger("atlas.sources.runner")
@@ -470,6 +483,19 @@ class SourceRunner:
         # current enough to trust.
         self._calibration = calibration
 
+        # Quick task 260924-4is (D2): every native call this runner makes
+        # against `wake_detector`/`decode_for_detector` -- the wake hit
+        # itself and the barge-in listener's own decode -- runs on this
+        # one worker, never the loop thread and never the default pool.
+        # One worker, not `asyncio.to_thread`'s shared default pool: Vosk
+        # recognizers and PyAV codec contexts are stateful and not
+        # thread-safe, and a cancelled await does not stop a call already
+        # running in a thread, so a second call for this same source must
+        # queue behind the first rather than run beside it. `run()`'s own
+        # `finally` shuts this down with `wait=True`, so a model is never
+        # freed while a call against it is still in flight.
+        self._detector_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"atlas-wake-{name}")
+
         # Resolved once, here, against this runner's own name -- never
         # re-resolved per hit, and never branched on by name anywhere in
         # this class (D-04). Absent configuration (the pre-02-04 tracer
@@ -538,18 +564,55 @@ class SourceRunner:
         iterator itself is the underlying source's own reconnect
         supervisor's problem (`transports/camera.py`'s module docstring),
         not this loop's to retry.
+
+        Quick task 260924-4is (D2): the wake detector's own `process()`
+        call and its PyAV decode run on `self._detector_executor`, this
+        runner's own single worker thread -- never on this loop thread.
+        Before this fix, a backlog on `self._source.frames()`'s queue
+        (nothing reads it, from the moment a turn's own transcript
+        finalizes until this loop resumes) drained in one uninterrupted
+        loop step, because `asyncio.Queue.get()` on a non-empty queue
+        never yields: every chunk's decode and detector call ran back to
+        back with no checkpoint the rest of the process could run at,
+        and the longer that backlog grew, the longer the loop went
+        unresponsive. This `finally` shuts the executor down with
+        `wait=True` -- so `run()` returns only once its own in-flight
+        detector call has actually finished, which is what keeps a
+        caller's `wake_detector.close()` right after from freeing a
+        model a worker thread is still using.
         """
-        async for chunk in self._source.frames():
-            try:
-                await self._process_chunk(chunk)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "source %r: error processing one audio chunk -- continuing to listen "
-                    "for the wake word rather than ending the whole source's task",
-                    self._name,
-                )
+        try:
+            async for chunk in self._source.frames():
+                try:
+                    await self._process_chunk(chunk)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "source %r: error processing one audio chunk -- continuing to listen "
+                        "for the wake word rather than ending the whole source's task",
+                        self._name,
+                    )
+        finally:
+            self._detector_executor.shutdown(wait=True, cancel_futures=True)
+
+    def _detect(self, chunk: bytes) -> WakeHit | None:
+        """Runs on `self._detector_executor`'s single worker thread, never
+        the loop thread (D2): decode, then the wake detector's own native
+        call, both off-loop for the same reason."""
+        detector_chunk = self._decode_for_detector(chunk)
+        if not detector_chunk:
+            return None
+        return self._wake_detector.process(detector_chunk)
+
+    def _barge_in_energy(self, chunk: bytes) -> float | None:
+        """The barge-in listener's own off-loop pair (D2): the same decode
+        `_detect` makes, then an energy reading instead of a wake-detector
+        call."""
+        detector_chunk = self._decode_for_detector(chunk)
+        if not detector_chunk:
+            return None
+        return rms_amplitude(detector_chunk)
 
     async def _process_chunk(self, chunk: bytes) -> None:
         """One chunk of `run()`'s own loop body, split out so `run()` can
@@ -558,10 +621,7 @@ class SourceRunner:
         if self._preroll is not None:
             self._preroll.push(chunk)
 
-        detector_chunk = self._decode_for_detector(chunk)
-        if not detector_chunk:
-            return
-        hit = self._wake_detector.process(detector_chunk)
+        hit = await asyncio.get_running_loop().run_in_executor(self._detector_executor, self._detect, chunk)
         if hit is None:
             return
 
@@ -657,15 +717,22 @@ class SourceRunner:
         A no-op for a disabled policy (D-12's per-source override): this
         never even waits on `transcript_done`, so a source with barge-in
         turned off never opens a second reader of its own queue at all.
+
+        Quick task 260924-4is (D2): each chunk's decode and energy
+        reading run on `self._detector_executor`, the same single worker
+        thread `_process_chunk` uses -- never the loop thread, and never
+        beside a wake-detector call for this source (one worker, so the
+        two native calls for one source can never overlap).
         """
         if not monitor.enabled:
             return
         await monitor.transcript_done.wait()
+        loop = asyncio.get_running_loop()
         async for chunk in self._source.frames():
-            detector_chunk = self._decode_for_detector(chunk)
-            if not detector_chunk:
+            energy = await loop.run_in_executor(self._detector_executor, self._barge_in_energy, chunk)
+            if energy is None:
                 continue
-            monitor.process_energy(rms_amplitude(detector_chunk), self._clock())
+            monitor.process_energy(energy, self._clock())
 
     def _record_blocked_hit(self, score: float, reason: str | None, at: float) -> None:
         """A wake hit the gate blocks is recorded, never dropped silently

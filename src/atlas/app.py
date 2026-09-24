@@ -68,6 +68,7 @@ from atlas.db.repository import (
     WakeEventRepository,
     WorkflowRepository,
 )
+from atlas.loop_stall import LoopStallReporter
 from atlas.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
 from atlas.plugins.manager import PluginManager
 from atlas.policy_snapshot import safety_block_from_policy
@@ -1510,6 +1511,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     workflow_scheduler.start()
     app.state.workflow_scheduler = workflow_scheduler
 
+    # Quick task 260924-4is (D1): started last, right before `yield`, so a
+    # boot that fails before this point never starts the watcher thread --
+    # a failed test boot leaks no threads. Stopped as the very last
+    # teardown statement below, so it watches through the whole shutdown
+    # sequence too.
+    loop_stall_reporter = LoopStallReporter()
+    loop_stall_reporter.start()
+
     yield
 
     # 260923-spd: the speaker supervisor stops FIRST, before anything else
@@ -1561,6 +1570,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # to be running.
     await plugin_manager.stop_all()
     await db_engine.dispose()
+    # Quick task 260924-4is (D1): last statement of teardown -- see the
+    # `start()` call above for why.
+    loop_stall_reporter.stop()
 
 
 # `require_setup_complete` (WEB-01, D-08) used to be registered here as an
