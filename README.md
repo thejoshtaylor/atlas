@@ -109,6 +109,29 @@ assumes about TLS. `scripts/verify-clean-clone.sh` proves the Compose runbook's
 own commands work from a real, fresh clone — run it yourself if you want to see
 that proof rather than take the document's word for it.
 
+### Sharing a node with other workloads
+
+The Helm chart gives the ATLAS container a CPU request of one core and a
+memory request of 1 GiB. Change these through `resources` in your own values
+file. Lower them on a small node.
+
+The chart sets no CPU limit on purpose. A CPU limit throttles the process, and
+that delays audio and replies.
+
+A request keeps a share of CPU for ATLAS when the node is busy. It does not
+stop other pods from using the rest. If other heavy workloads run on the same
+node, for example CI runners or video recording, give each of them a CPU
+limit.
+
+`priorityClassName` is optional. Set it to the name of a PriorityClass that
+you create yourself. The scheduler then places ATLAS ahead of lower-priority
+pods, and can evict them to make room. The chart does not create the
+PriorityClass.
+
+Docker Compose reserves the same amount of memory. Compose has no CPU
+reservation outside Swarm mode. Docker already gives every container an equal
+CPU weight by default.
+
 ## Licence
 
 This project is licensed under the MIT License.
