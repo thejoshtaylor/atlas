@@ -827,6 +827,55 @@ def test_example_config_speaker_tcp_url_expands_from_env(
         assert config.speaker.tcp_url == expected_tcp_url
 
 
+@pytest.mark.parametrize(
+    "speaker_backend, tts_set, tcp_url_env, expected_codec, expected_sample_rate, error_substring",
+    [
+        ("go2rtc", False, None, "alaw", 8000, None),
+        ("tapo_talk", False, None, "alaw", 8000, None),
+        ("tcp", True, "tcp://speaker.invalid:5701", "pcm", 24000, None),
+        ("go2rtc", True, None, None, None, "speaker.backend"),
+    ],
+)
+def test_example_config_tts_codec_and_sample_rate_expand_from_env(
+    monkeypatch,
+    speaker_backend,
+    tts_set,
+    tcp_url_env,
+    expected_codec,
+    expected_sample_rate,
+    error_substring,
+):
+    """260923-pyj (D2, D3, D6): TTS_CODEC/TTS_SAMPLE_RATE use the `:-`
+    camera-pair defaults, so a deployment that never sets them (the first
+    two rows here) loads exactly as it did before this key existed."""
+    from atlas.config import ConfigError, load_config
+
+    _set_example_config_env(monkeypatch)
+    monkeypatch.setenv("SPEAKER_BACKEND", speaker_backend)
+    if tcp_url_env is None:
+        monkeypatch.delenv("SPEAKER_TCP_URL", raising=False)
+    else:
+        monkeypatch.setenv("SPEAKER_TCP_URL", tcp_url_env)
+    if tts_set:
+        monkeypatch.setenv("TTS_CODEC", "pcm")
+        monkeypatch.setenv("TTS_SAMPLE_RATE", "24000")
+    else:
+        monkeypatch.delenv("TTS_CODEC", raising=False)
+        monkeypatch.delenv("TTS_SAMPLE_RATE", raising=False)
+
+    if error_substring is not None:
+        with pytest.raises(ConfigError) as exc:
+            load_config("config/config.example.yaml")
+        message = str(exc.value)
+        assert error_substring in message
+        assert "missing required environment variable" not in message
+    else:
+        config = load_config("config/config.example.yaml")
+        assert config.tts.codec == expected_codec
+        assert config.tts.sample_rate == expected_sample_rate
+        assert type(config.tts.sample_rate) is int
+
+
 # --- Task 3: one rejection test per Phase 2 configuration path ---
 
 

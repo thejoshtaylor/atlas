@@ -418,6 +418,24 @@ def test_an_all_digit_credential_renders_rather_than_failing_the_type_check() ->
 
 
 @skip_without_helm
+def test_secret_carries_tts_codec_and_sample_rate_with_the_camera_defaults() -> None:
+    """260923-pyj (D2): the defaults must be non-empty -- `expand_env`
+    (config.py) only substitutes a `:-` default for an absent variable,
+    so an empty rendered Secret value would reach TtsConfig as "" and
+    stop startup, unlike a missing key rendering as an empty string by
+    accident."""
+    docs = _helm_template()
+    secret = _find_one(docs, "Secret")
+    assert base64.b64decode(secret["data"]["TTS_CODEC"]).decode() == "alaw"
+    assert base64.b64decode(secret["data"]["TTS_SAMPLE_RATE"]).decode() == "8000"
+
+    docs = _helm_template("--set", "env.ttsCodec=pcm", "--set", "env.ttsSampleRate=24000")
+    secret = _find_one(docs, "Secret")
+    assert base64.b64decode(secret["data"]["TTS_CODEC"]).decode() == "pcm"
+    assert base64.b64decode(secret["data"]["TTS_SAMPLE_RATE"]).decode() == "24000"
+
+
+@skip_without_helm
 def test_every_secret_value_is_coerced_before_it_is_base64_encoded() -> None:
     """The rule, rather than the three cases above: no `b64enc` in the
     Secret template reads a value that has not been through `toString`
