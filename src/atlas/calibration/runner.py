@@ -7,7 +7,10 @@ own; that is the whole point of D-20, the seam Phase 3's wizard needs.
 The sequence: build a probe at the source's own declared format; drain and
 discard whatever the source has queued for `settle_s`, so the recording
 that follows starts on room tone rather than whatever was mid-flight when
-the source opened; write the probe to the speaker sink; drain and keep
+the source opened; write the probe to the speaker, converted to the
+speaker's own sink format when one is given (260923-pyj, D4) -- the
+reference used to correlate the recording always stays at the source's
+own rate, regardless of what format the probe travelled in; drain and keep
 `probe_duration_s + tail_s` worth of audio; decode it back to PCM16 at the
 source's own native sample rate; hand both to `measure_echo_path`
 (`audio/echo_path.py`). A measurement that fails to correlate returns that
@@ -57,12 +60,14 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 import numpy as np
 
-from atlas.audio.alaw import alaw_to_pcm16
+from atlas.audio.alaw import alaw_to_pcm16, pcm16_to_alaw
 from atlas.audio.echo_path import AGC_ABSENT, measure_echo_path
 from atlas.audio.energy import rms_amplitude
 from atlas.audio.probe import DEFAULT_PROBE_SEED, PROBE_FORMAT_VERSION, build_probe
 from atlas.calibration.record import SCHEMA_VERSION, CalibrationError, EchoCalibration
 from atlas.config import CalibrationConfig, CameraConfig
+from atlas.providers.tts_piper import _resample_pcm16
+from atlas.providers.tts_xai import SinkFormat
 from atlas.transports.base import SourceFormat
 
 logger = logging.getLogger("atlas.calibration.runner")
@@ -209,6 +214,33 @@ async def _collect_window(
     return bytes(buf)
 
 
+def _probe_for_sink(
+    alaw_bytes: bytes, reference_pcm16: bytes, source_rate: int, sink: SinkFormat | None
+) -> bytes:
+    """The bytes actually written to the speaker: `alaw_bytes` unchanged
+    when `sink` is `None` (the camera case of today), otherwise
+    `reference_pcm16` resampled from `source_rate` to `sink.sample_rate`
+    and encoded in `sink.codec`.
+
+    Resampling from `reference_pcm16` rather than re-decoding `alaw_bytes`
+    matters only in that both already carry identical audio
+    (`audio/probe.py`'s own module docstring: `pcm16_to_alaw(reference_
+    pcm16) == alaw_bytes` exactly) -- starting from the PCM16 reference
+    avoids an extra decode step for the common `sink.codec == "pcm"` case.
+    """
+    if sink is None:
+        return alaw_bytes
+    resampled = _resample_pcm16(reference_pcm16, source_rate, sink.sample_rate)
+    if sink.codec == "alaw":
+        return pcm16_to_alaw(resampled)
+    if sink.codec == "pcm":
+        return resampled
+    raise CalibrationRunnerError(
+        f"unsupported sink codec {sink.codec!r} for the echo-path calibration probe -- "
+        "only 'alaw' and 'pcm' are ever written to a speaker FIFO"
+    )
+
+
 async def run_echo_calibration(
     source: _CalibrationSource,
     speaker: _SpeakerSink,
@@ -219,6 +251,7 @@ async def run_echo_calibration(
     now: Callable[[], datetime] = _default_now,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     probe_seed: int = DEFAULT_PROBE_SEED,
+    sink: SinkFormat | None = None,
 ) -> CalibrationRunResult:
     """Measure the echo path once, end to end, and persist the result --
     or return the reason it could not be measured, writing nothing.
@@ -231,18 +264,28 @@ async def run_echo_calibration(
     this plan's Task 2) validates it a second time up front for that
     reason, but this coroutine adds no validation of its own beyond what
     the record already enforces.
+
+    `sink` (260923-pyj, D4) is the format the speaker FIFO reader actually
+    expects -- the TTS sink `app.py`'s `lifespan` builds as `camera_tts_
+    sink`. `None` means A-law at the source's own rate, the camera case of
+    today: the probe is written unconverted, byte for byte, the same as
+    before this parameter existed.
     """
     fmt = source.source_format()
     alaw_bytes, reference_pcm16 = build_probe(
         fmt.sample_rate, calibration_config.probe_duration_s, seed=probe_seed
     )
+    # Computed before the settle window, not after: an unsupported sink
+    # codec must raise before anything plays, never after the probe has
+    # already gone out over a real speaker.
+    probe_bytes = _probe_for_sink(alaw_bytes, reference_pcm16, fmt.sample_rate, sink)
 
     # Drained and discarded: whatever the source queued before this run
     # ever wrote a probe is not room tone worth analyzing, it is leftover
     # from however long ago the source actually opened.
     await _collect_window(source, calibration_config.settle_s, sleep)
 
-    await speaker.write(alaw_bytes)
+    await speaker.write(probe_bytes)
 
     recorded_raw = await _collect_window(
         source, calibration_config.probe_duration_s + calibration_config.tail_s, sleep

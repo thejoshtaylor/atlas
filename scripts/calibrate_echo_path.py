@@ -39,6 +39,7 @@ from pathlib import Path
 from atlas.calibration.record import EchoCalibration
 from atlas.calibration.runner import CalibrationRunResult, run_echo_calibration
 from atlas.config import CameraConfig, Config, ConfigError, load_config
+from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.transports.camera import CameraAudioSource
 
@@ -145,8 +146,11 @@ async def _run(config: Config, placement_note: str) -> CalibrationRunResult:
     speaker = FifoWriter(config.speaker.fifo_path, reopen_timeout_s=config.speaker.reopen_timeout_s)
     await speaker.open()
     try:
+        # The script writes into the same FIFO the running pod's own
+        # egress reads, so the probe must be in that same TTS sink format.
+        sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
         return await run_echo_calibration(
-            source, speaker, config.camera, config.calibration, placement_note
+            source, speaker, config.camera, config.calibration, placement_note, sink=sink
         )
     finally:
         await speaker.close()

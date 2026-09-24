@@ -586,14 +586,23 @@ class SourceRunner:
         # hand -- `app.py`'s startup refusal is what guarantees the second
         # half of that whenever the first half is true (Task 3), so this
         # constructor-time check is a second, cheap confirmation, never the
-        # only one. A fresh `EmittedAudioTrace` every turn, sized from this
-        # source's own declared format, mirrors `PrerollBuffer`'s own
-        # per-source-format construction just above.
+        # only one. A fresh `EmittedAudioTrace` every turn, sized from the
+        # speaker's own sink format (260923-pyj, D5): the trace records the
+        # chunks `_speak` writes to the speaker, so it must be sized from
+        # the format those bytes are actually in. `source_format()` is only
+        # a fallback, for a source (a test double) that declares no sink at
+        # all -- it mirrors `PrerollBuffer`'s own per-source-format
+        # construction just above for that reason alone.
         correlation_active = self._barge_in_config.correlation_enabled and self._calibration is not None
         trace: EmittedAudioTrace | None = None
         if correlation_active:
-            source_format = self._source.source_format()
-            trace = EmittedAudioTrace(encoding=source_format.encoding, sample_rate=source_format.sample_rate)
+            sink_format = getattr(self._source, "sink_format", None)
+            sink = sink_format() if sink_format is not None else None
+            if sink is not None:
+                trace = EmittedAudioTrace(encoding=sink.codec, sample_rate=sink.sample_rate)
+            else:
+                source_format = self._source.source_format()
+                trace = EmittedAudioTrace(encoding=source_format.encoding, sample_rate=source_format.sample_rate)
         monitor = BargeInMonitor(
             floor=self._barge_in_config.energy_floor,
             min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,

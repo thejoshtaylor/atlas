@@ -1732,6 +1732,15 @@ async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str,
     if app.state.calibration_in_progress:
         raise HTTPException(status_code=409, detail="a calibration run is already in progress")
 
+    # 260923-pyj (D4): the probe goes into the same FIFO as the reply
+    # audio, so it must be written in the format the egress reader
+    # expects. The camera source already declares that format
+    # (lifespan's `camera_tts_sink`) -- read duck-typed here, never from
+    # `config.tts`, since this route's own tests give a config with no
+    # `tts` attribute at all.
+    sink_format = getattr(app.state.camera_source, "sink_format", None)
+    sink = sink_format() if sink_format is not None else None
+
     app.state.calibration_in_progress = True
     try:
         result = await run_echo_calibration(
@@ -1740,6 +1749,7 @@ async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str,
             config.camera,
             config.calibration,
             payload.placement_note,
+            sink=sink,
         )
     finally:
         app.state.calibration_in_progress = False

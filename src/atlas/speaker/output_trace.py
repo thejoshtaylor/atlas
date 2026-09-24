@@ -57,11 +57,11 @@ class EmittedAudioTrace:
     `audio/energy.py`'s own normalized unit.
 
     `encoding`/`sample_rate` are supplied once, at construction, from the
-    same `SourceFormat` `PrerollBuffer` is already sized from
-    (`camera_source.source_format()`) -- `append()` itself takes only the
-    raw chunk. `_speak` holds no codec (module docstring, `turn/
-    controller.py`); this class is what makes that possible without
-    guessing at a chunk's shape.
+    speaker's own sink format (260923-pyj: `camera_source.sink_format()`),
+    which is the format of the bytes `_speak` actually writes -- `append()`
+    itself takes only the raw chunk. `_speak` holds no codec (module
+    docstring, `turn/controller.py`); this class is what makes that
+    possible without guessing at a chunk's shape.
     """
 
     def __init__(self, *, encoding: str, sample_rate: int, span_s: float = _DEFAULT_SPAN_S) -> None:

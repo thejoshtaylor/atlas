@@ -673,7 +673,7 @@ class _SinkDeclaringSource(_NoSinkSource):
         return SinkFormat("pcm", 24000)
 
 
-async def _drive_one_hit(source) -> "BargeInMonitor":
+async def _drive_one_hit(source) -> BargeInMonitor:
     captured: dict[str, object] = {}
 
     async def run_turn_fn(turn_source) -> None:
