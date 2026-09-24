@@ -315,6 +315,12 @@ def test_get_wake_events_reports_engine_grading_threshold_and_events_newest_firs
     )
     try:
         repo = app_module.app.state.wake_event_repo
+        # 260924-4is: recorded well inside `debug.retain_days`' 7-day
+        # default, not a fixed calendar date -- the retention sweep now
+        # awaits a real checkpoint (D3) and can run during this test's own
+        # `client.get()` call, so a date already older than the retention
+        # window is swept before this test ever reads it back.
+        now = datetime.now(timezone.utc)
         asyncio.run(
             repo.record_wake_event(
                 source="camera",
@@ -322,7 +328,7 @@ def test_get_wake_events_reports_engine_grading_threshold_and_events_newest_firs
                 score=0.60,
                 allowed=True,
                 block_reason=None,
-                recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                recorded_at=now - timedelta(minutes=2),
             )
         )
         asyncio.run(
@@ -332,7 +338,7 @@ def test_get_wake_events_reports_engine_grading_threshold_and_events_newest_firs
                 score=0.30,
                 allowed=False,
                 block_reason="below_threshold",
-                recorded_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                recorded_at=now - timedelta(minutes=1),
             )
         )
 
@@ -368,9 +374,21 @@ def test_get_wake_events_counts_sessions_older_than_the_earliest_recorded_wake_e
 ):
     client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
     try:
+        # 260924-4is: relative to "now", not fixed calendar dates -- the
+        # retention sweep now awaits a real checkpoint (D3) and can run
+        # during this test's own `client.get()` call, so a wake event
+        # already older than `debug.retain_days` (7) is swept before this
+        # test ever reads it back. The two session directories only need
+        # to stay on either side of the wake event, which "3 days ago"
+        # and "30 seconds ago" around a wake event "1 day ago" still do.
+        now = datetime.now(timezone.utc)
+        old_session_at = now - timedelta(days=3)
+        new_session_at = now - timedelta(seconds=30)
+        wake_event_at = now - timedelta(days=1)
+
         session_dir = Path(app_module.app.state.config.session.dir)
-        (session_dir / "20250101T000000000000Z-old-turn").mkdir()
-        (session_dir / "20260601T000000000000Z-new-turn").mkdir()
+        (session_dir / f"{old_session_at.strftime('%Y%m%dT%H%M%S%f')}Z-old-turn").mkdir()
+        (session_dir / f"{new_session_at.strftime('%Y%m%dT%H%M%S%f')}Z-new-turn").mkdir()
 
         repo = app_module.app.state.wake_event_repo
         asyncio.run(
@@ -380,7 +398,7 @@ def test_get_wake_events_counts_sessions_older_than_the_earliest_recorded_wake_e
                 score=0.60,
                 allowed=True,
                 block_reason=None,
-                recorded_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+                recorded_at=wake_event_at,
             )
         )
 
@@ -397,9 +415,18 @@ def test_get_wake_events_with_no_wake_events_counts_every_session_as_not_scored(
 ):
     client, app_module = _boot_authenticated_client(tmp_path, monkeypatch, role="operator")
     try:
+        # 260924-4is: relative to "now", not fixed calendar dates -- a
+        # directory named with a date already older than
+        # `debug.retain_days` (7) can be removed by the session retention
+        # sweep (D3, which now awaits a real checkpoint) before this test
+        # ever counts it.
+        now = datetime.now(timezone.utc)
+        old_session_at = now - timedelta(days=3)
+        new_session_at = now - timedelta(seconds=30)
+
         session_dir = Path(app_module.app.state.config.session.dir)
-        (session_dir / "20250101T000000000000Z-old-turn").mkdir()
-        (session_dir / "20260601T000000000000Z-new-turn").mkdir()
+        (session_dir / f"{old_session_at.strftime('%Y%m%dT%H%M%S%f')}Z-old-turn").mkdir()
+        (session_dir / f"{new_session_at.strftime('%Y%m%dT%H%M%S%f')}Z-new-turn").mkdir()
 
         response = client.get("/api/wake-events")
         assert response.status_code == 200
@@ -545,6 +572,8 @@ def test_a_response_inside_the_bound_says_it_is_not_capped(tmp_path, monkeypatch
     )
     try:
         repo = app_module.app.state.wake_event_repo
+        # 260924-4is: see the same note above -- recorded inside the
+        # retention window, not at a fixed calendar date.
         asyncio.run(
             repo.record_wake_event(
                 source="camera",
@@ -552,7 +581,7 @@ def test_a_response_inside_the_bound_says_it_is_not_capped(tmp_path, monkeypatch
                 score=0.60,
                 allowed=True,
                 block_reason=None,
-                recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                recorded_at=datetime.now(timezone.utc),
             )
         )
 
@@ -576,6 +605,9 @@ def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path
     )
     try:
         repo = app_module.app.state.wake_event_repo
+        # 260924-4is: see the same note above -- recorded inside the
+        # retention window, not at a fixed calendar date.
+        base = datetime.now(timezone.utc)
 
         async def _seed() -> None:
             for index in range(MAX_WAKE_EVENTS_IN_RESPONSE + 5):
@@ -585,7 +617,7 @@ def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path
                     score=0.60,
                     allowed=True,
                     block_reason=None,
-                    recorded_at=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=index),
+                    recorded_at=base + timedelta(seconds=index),
                 )
 
         asyncio.run(_seed())
@@ -595,7 +627,8 @@ def test_more_events_than_the_bound_are_capped_and_the_response_says_so(tmp_path
         assert body["capped"] is True
         assert len(body["events"]) == MAX_WAKE_EVENTS_IN_RESPONSE
         # The newest ones, not an arbitrary page.
-        assert body["events"][0]["recorded_at"].startswith("2026-01-01T00:33:2")
+        newest_recorded_at = base + timedelta(seconds=MAX_WAKE_EVENTS_IN_RESPONSE + 4)
+        assert body["events"][0]["recorded_at"].startswith(newest_recorded_at.isoformat(timespec="seconds")[:18])
     finally:
         client.__exit__(None, None, None)
 
