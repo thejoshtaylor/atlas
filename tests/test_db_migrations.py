@@ -812,6 +812,66 @@ async def test_migration_0013_seeds_weather_units_without_overwriting_an_operato
 
 
 @skip_without_postgres
+async def test_migration_0014_points_pre_rename_plugin_args_at_atlas_mcp(tmp_path: Path, monkeypatch):
+    """An install seeded before the spire-voice -> ATLAS rename stores
+    `["-m", "spire_mcp.ha"]`, and the child then fails with
+    `No module named 'spire_mcp'`. 0014 rewrites the prefix, and its
+    downgrade puts it back."""
+    await _reset_schema(_TEST_DB_URL)
+
+    raw = {
+        "server": {"transport": "websocket"},
+        "stt": {"url": "wss://stt.invalid/v1/stt", "api_key": "test-key"},
+        "brain": {
+            "base_url": "https://brain.invalid/v1",
+            "api_key": "test-key",
+            "models": [{"model": "fake-model"}],
+        },
+        "tts": {"url": "https://tts.invalid/v1/tts", "api_key": "test-key", "voice_id": "eve"},
+        "database": {"url": _TEST_DB_URL},
+        "security": {},
+    }
+    config_path = tmp_path / "plugin-rename-migration-test-config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setenv("ATLAS_CONFIG", str(config_path))
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    async def _args() -> dict[str, list]:
+        engine = create_async_engine(_TEST_DB_URL)
+        try:
+            async with engine.connect() as conn:
+                rows = (await conn.execute(text("SELECT slug, args FROM plugins"))).fetchall()
+                return {r.slug: r.args for r in rows}
+        finally:
+            await engine.dispose()
+
+    _run_upgrade_to("0013")
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("UPDATE plugins SET args = CAST(:a AS json) WHERE slug = 'ha'"),
+                {"a": '["-m", "spire_mcp.ha"]'},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_upgrade_head()
+    args = await _args()
+    assert args["ha"] == ["-m", "atlas_mcp.ha"]
+    assert args["weather"] == ["-m", "atlas_mcp.weather"]
+
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    cfg = AlembicConfig("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", _migration_url(_TEST_DB_URL))
+    command.downgrade(cfg, "0013")
+    assert (await _args())["ha"] == ["-m", "spire_mcp.ha"]
+
+
+@skip_without_postgres
 async def test_a_plugins_config_key_cannot_be_stored_twice(tmp_path, monkeypatch):
     """IN-03 (06-REVIEW.md): `set_config_values` is a read-then-upsert with
     no row lock, so without database-level uniqueness two concurrent saves
@@ -1091,7 +1151,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # The real migration runner `lifespan` calls -- not a fake, not a
         # second reimplementation of it (the plan's own key link).
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0013"
+        assert get_current_revision(migration_url) == "0014"
 
         async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
             reread_rules = {r.id: r for r in await policy_repo.list_rules()}
@@ -1122,7 +1182,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # A second run at head: no-op. The stamped revision is unchanged
         # and nothing is added, removed, or rewritten -- old data or new.
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0013"
+        assert get_current_revision(migration_url) == "0014"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
 
         # A downgrade of this phase's own migration, and a re-upgrade,
@@ -1135,7 +1195,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         assert get_current_revision(migration_url) == "0010"
 
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0013"
+        assert get_current_revision(migration_url) == "0014"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
     finally:
         await engine.dispose()
