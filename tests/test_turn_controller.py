@@ -79,6 +79,10 @@ class _FakeToolHost:
 
 
 async def test_full_turn_happy_path(fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha):
+    """260924-4it: the real handler's `{"changed": [...]}` reply on a plain
+    ha_call_service round takes the done shortcut -- only one `brain.chat`
+    call, no second round to phrase "turned on the fan."
+    """
     from atlas.timing import TurnTimings
     from atlas.turn.controller import run_turn
 
@@ -98,7 +102,63 @@ async def test_full_turn_happy_path(fake_audio_source, fake_stt, fake_brain, fak
                     )
                 ]
             ),
-            BrainReply(text="turned on the fan"),
+        ]
+    )
+    tts = fake_tts(chunks=[b"\x01\x02", b"\x03\x04"])
+    policy = Policy.from_config(None)
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert brain.call_count == 1
+    assert len(fake_ha.requests) == 1
+    assert fake_ha.requests[0].method == "POST"
+    assert tts.received_text == ["done"]
+    assert timings.turn_outcome == "completed"
+    assert source.sent_audio == [b"\x01\x02", b"\x03\x04"]
+    assert timings.end_of_speech_to_first_audio_ms is not None
+    # 260922-cts: `fake_audio_source` declares no `sink_format` -- the
+    # pre-fix browser default, unchanged for a source that carries none.
+    assert tts.received_sinks == [None]
+
+
+async def test_a_question_next_to_the_action_still_gets_a_phrasing_round(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_ha
+):
+    """260924-4it: `asks_for_information` finding a question in the
+    transcript forces the second model round even though the tool round
+    itself is a plain ha_call_service success."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"] * 3)
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan and what's the temperature")])
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="ha_call_service",
+                        arguments={
+                            "domain": "switch",
+                            "service": "turn_on",
+                            "entity_id": "switch.example_fan",
+                        },
+                    )
+                ]
+            ),
+            BrainReply(text="turned on the fan, it is 21 degrees"),
         ]
     )
     tts = fake_tts(chunks=[b"\x01\x02", b"\x03\x04"])
@@ -119,14 +179,7 @@ async def test_full_turn_happy_path(fake_audio_source, fake_stt, fake_brain, fak
     )
 
     assert brain.call_count == 2
-    assert len(fake_ha.requests) == 1
-    assert fake_ha.requests[0].method == "POST"
-    assert tts.received_text == ["turned on the fan"]
-    assert source.sent_audio == [b"\x01\x02", b"\x03\x04"]
-    assert timings.end_of_speech_to_first_audio_ms is not None
-    # 260922-cts: `fake_audio_source` declares no `sink_format` -- the
-    # pre-fix browser default, unchanged for a source that carries none.
-    assert tts.received_sinks == [None]
+    assert tts.received_text == ["turned on the fan, it is 21 degrees"]
 
 
 async def test_answer_is_synthesized_against_the_sources_own_sink(fake_stt, fake_brain, fake_tts):

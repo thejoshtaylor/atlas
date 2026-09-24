@@ -95,7 +95,7 @@ from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro
-from atlas.turn.transcript_guard import is_no_command
+from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.wake_echo import is_wake_only
 
 logger = logging.getLogger("atlas.turn.controller")
@@ -128,6 +128,17 @@ _CANNOT_DO_REPLY = "i can't do that one"
 # asked for, and it is precached at startup (`tts.precache` in
 # `config.example.yaml`) for exactly this fast path.
 _DONE_REPLY = "done"
+
+# 260924-4it: the tool names `_round_settles_as_done` may speak "done" for,
+# with no second model round -- an exact match on the name the model
+# called (the offered name), never `readOnlyHint`. atlas-ha declares no
+# tool annotations, the MCP spec defaults `readOnlyHint` to False (so an
+# unannotated read tool would count as an action), and a plugin process
+# must not be able to opt itself into a canned confirmation. A tool not on
+# this list -- a read, a workflow tool, a plugin tool, or a
+# collision-prefixed `{slug}__ha_call_service` -- always takes the second
+# round. The cost of missing this list is only latency.
+_DONE_SHORTCUT_TOOLS: frozenset[str] = frozenset({"ha_call_service"})
 
 # The fixed phrase `_compose_mixed_outcome_reply` speaks for one action that
 # succeeded, in a batch where at least one other action did not (CMD-07,
@@ -1176,6 +1187,50 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
     return "; ".join(clauses)
 
 
+def _round_settles_as_done(reply: Any, results: list[Any], messages: list[dict[str, Any]]) -> bool:
+    """True when a tool round is plain action success and nothing more --
+    the first-round done shortcut in `_run_tool_rounds` may speak the fixed
+    `_DONE_REPLY` instead of paying a second `brain.chat` round only to
+    phrase a confirmation.
+
+    "Done" asserts an outcome, so every condition here errs toward taking
+    the model round -- CMD-07 never lets a canned reply confirm something
+    that did not actually happen.
+
+    - `reply.text` must be blank: the model attached words of its own,
+      which may carry information the operator needs to hear.
+    - Every tool call name must be in `_DONE_SHORTCUT_TOOLS`: a read tool,
+      a workflow tool, a plugin tool, or a collision-prefixed name always
+      takes the model round instead.
+    - Every result must be a real 2xx Home Assistant reply with nothing to
+      read: not a raised exception, not `_is_error`, and its payload must
+      be a dict whose key set is exactly `{"changed"}` -- a response-only
+      service's `{"changed": [...], "response": {...}}` reply, an
+      `{"error": ...}` payload, and an unparseable result all take the
+      model round, since each carries something the operator may need to
+      hear.
+    - The transcript must not ask for information: `asks_for_information`
+      errs toward True, so a miss here only costs latency, never a dropped
+      answer.
+    """
+    if (reply.text or "").strip():
+        return False
+
+    for tool_call in reply.tool_calls:
+        if tool_call.name not in _DONE_SHORTCUT_TOOLS:
+            return False
+
+    for result in results:
+        if isinstance(result, BaseException) or _is_error(result):
+            return False
+        payload = _result_payload(result)
+        if not (isinstance(payload, dict) and set(payload) == {"changed"}):
+            return False
+
+    transcript = brain_race._last_user_message(messages)
+    return transcript is not None and not asks_for_information(transcript)
+
+
 def _compose_clarifying_question(candidates: "tuple[str, ...]", friendly_names: "Mapping[str, str]") -> str:
     """The spoken question for a turn a triage tier's `needs_clarification`
     reply won (CMD-09, D-07).
@@ -1230,8 +1285,16 @@ async def _run_tool_rounds(
     begins, `race_tiers` must not let a triage tier's confident reply end the
     race in this tier's place; only this tier's own settled outcome may
     describe what actually happened.
+
+    260924-4it: when the first round (`round_num == 0`) is plain action
+    success -- every call is on `_DONE_SHORTCUT_TOOLS`, every result is a
+    bare `{"changed": [...]}` Home Assistant reply, the model attached no
+    text of its own, and the transcript does not ask for information
+    (`_round_settles_as_done`) -- this function returns the fixed
+    `_DONE_REPLY` at once, skipping the second `brain.chat` round that
+    would otherwise only phrase a confirmation of what already happened.
     """
-    for _round_num in range(max_tool_rounds):
+    for round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
         timings.mark_brain_first_token()
         if not reply.tool_calls:
@@ -1290,6 +1353,22 @@ async def _run_tool_rounds(
         # plan.
         if any(isinstance(result, BaseException) or _is_error(result) for result in results):
             return _compose_mixed_outcome_reply(list(zip(reply.tool_calls, results)))
+
+        # 260924-4it: the first round only, and only when nothing about it
+        # needs a model's own words -- a later round may follow an earlier
+        # read the operator is waiting to hear, so the shortcut never
+        # applies past round 0 (the same reasoning `_round_settles_as_done`
+        # uses for a question asked next to the action). The second
+        # `brain.chat` call this replaces would only phrase a confirmation
+        # of a plain action success; the local on/off intent path already
+        # speaks "done" after one, with no model call at all.
+        if round_num == 0 and _round_settles_as_done(reply, results, messages):
+            logger.info(
+                "first tool round was plain action success (%d call(s)); speaking %r with no phrasing round",
+                len(reply.tool_calls),
+                _DONE_REPLY,
+            )
+            return _DONE_REPLY
 
         # Every call in this round succeeded: byte-identical to the
         # pre-concurrency behaviour -- one `role: tool` message per call, in
@@ -1487,3 +1566,24 @@ def _result_text(result: Any) -> str:
         if text is not None:
             return text
     return ""
+
+
+def _result_payload(result: Any) -> Any:
+    """A tool result's parsed JSON payload, or `None` when there isn't one.
+
+    Prefers `structured_content`/`structuredContent` when present, the same
+    way `app.py`'s own `_tool_result_json` does (not imported from there --
+    that would be an import cycle) -- unwrapping the MCP SDK's `{"result":
+    value}` wrapper for a non-object return. Falls back to parsing
+    `_result_text(result)` as JSON, and returns `None` rather than raising
+    when there is nothing to parse.
+    """
+    structured = getattr(result, "structured_content", None) or getattr(result, "structuredContent", None)
+    if structured is not None:
+        if isinstance(structured, dict) and set(structured) == {"result"}:
+            return structured["result"]
+        return structured
+    try:
+        return json.loads(_result_text(result))
+    except ValueError:
+        return None

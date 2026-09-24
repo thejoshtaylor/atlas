@@ -23,8 +23,12 @@ summary composed in code, never through a second `brain.chat` round.
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
+from mcp.types import CallToolResult, TextContent
 
 from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 from atlas.timing import TurnTimings
@@ -95,6 +99,37 @@ def _ok(text: str = "{}") -> SimpleNamespace:
 
 def _denied(reason: str) -> SimpleNamespace:
     return SimpleNamespace(isError=True, content=[SimpleNamespace(text=reason)])
+
+
+# 260924-4it: helpers for the first-round done shortcut's own tests.
+
+
+def _changed(entity_id: str, structured: bool = True) -> CallToolResult:
+    """A real `handle_call_service`-shaped 2xx reply: `{"changed": [...]}`,
+    with or without `structured_content` set -- both are what the real MCP
+    framework can hand back, and the shortcut must fire either way."""
+    payload = {"changed": [{"entity_id": entity_id, "state": "off"}]}
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+        structured_content=payload if structured else None,
+    )
+
+
+def _text_result(text: str) -> CallToolResult:
+    return CallToolResult(content=[TextContent(type="text", text=text)])
+
+
+class _ByNameToolHost:
+    """Records every `(name, arguments)` call and returns a scripted result
+    keyed by tool name."""
+
+    def __init__(self, results_by_name: dict[str, Any]) -> None:
+        self._results = dict(results_by_name)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        self.calls.append((name, dict(arguments)))
+        return self._results[name]
 
 
 async def test_a_three_action_command_with_a_denied_first_action_runs_all_three(
@@ -234,6 +269,10 @@ async def test_three_action_all_success_batch_is_byte_identical_to_before(
     `brain.chat` round, and the reply text is that round's own text -- the
     concurrent dispatch this plan adds must not change the all-success shape
     at all.
+
+    260924-4it: its `_ok()` results carry "{}", not Home Assistant's own
+    `{"changed": [...]}` reply, so the done shortcut does not apply here and
+    the second round still runs.
     """
     tool_host = _RecordingToolHost(
         {
@@ -445,3 +484,285 @@ async def test_a_raised_tool_call_is_reported_as_a_failed_clause_not_swallowed_o
     # facts about the house.
     assert "off limits" not in reply_text
     assert brain.call_count == 1
+
+
+# 260924-4it: the first-round done shortcut.
+
+
+@pytest.mark.parametrize("structured", (True, False))
+async def test_an_all_action_first_round_speaks_done_with_no_second_round(
+    structured, fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """Behaviour item 1: three ha_call_service calls in round one, each a
+    real `{"changed": [...]}` Home Assistant reply, speak "done" after
+    exactly one `brain.chat` call -- with `structured_content` set, and
+    with only the JSON text block.
+    """
+    tool_host = _RecordingToolHost(
+        {
+            "switch.example_fan": _changed("switch.example_fan", structured=structured),
+            "light.example_lamp": _changed("light.example_lamp", structured=structured),
+            "switch.example_server_socket": _changed("switch.example_server_socket", structured=structured),
+        }
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    _service_call("switch.example_fan"),
+                    _service_call("light.example_lamp"),
+                    _service_call("switch.example_server_socket"),
+                ]
+            )
+        ]
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the fan, the lamp, and the socket")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_text == ["done"]
+    assert brain.call_count == 1
+    assert len(tool_host.calls) == 3
+    assert timings.turn_outcome == "completed"
+
+
+_NOT_PLAIN_ACTION_SUCCESS_CASES = (
+    pytest.param(
+        [ToolCall(name="ha_list_entities", arguments={}), _service_call("switch.example_fan")],
+        {"ha_list_entities": _text_result("[]"), "ha_call_service": _changed("switch.example_fan")},
+        "turn off the fan",
+        id="read_plus_action",
+    ),
+    pytest.param(
+        [
+            ToolCall(
+                name="example__ha_call_service",
+                arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+            )
+        ],
+        {"example__ha_call_service": _changed("switch.example_fan")},
+        "turn off the fan",
+        id="collision_prefixed_name",
+    ),
+    pytest.param(
+        [_service_call("switch.example_fan")],
+        {"ha_call_service": _text_result(json.dumps({"error": "home assistant returned 500: example failure"}))},
+        "turn off the fan",
+        id="error_payload",
+    ),
+    pytest.param(
+        [_service_call("switch.example_fan")],
+        {
+            "ha_call_service": CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"changed": [], "response": {"todo.example_list": {"items": []}}}),
+                    )
+                ],
+                structured_content={"changed": [], "response": {"todo.example_list": {"items": []}}},
+            )
+        },
+        "turn off the fan",
+        id="response_payload",
+    ),
+    pytest.param(
+        [_service_call("switch.example_fan")],
+        {"ha_call_service": _text_result("ok")},
+        "turn off the fan",
+        id="text_only_result",
+    ),
+    pytest.param(
+        [_service_call("switch.example_fan")],
+        {"ha_call_service": _changed("switch.example_fan")},
+        "turn off the fan and what's the temperature",
+        id="asks_for_information_transcript",
+    ),
+)
+
+
+@pytest.mark.parametrize("tool_calls, results_by_name, transcript", _NOT_PLAIN_ACTION_SUCCESS_CASES)
+async def test_a_round_that_is_not_plain_action_success_still_reaches_the_model(
+    tool_calls, results_by_name, transcript, fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """Behaviour item 3: a read next to the action, a collision-prefixed
+    name, a Home Assistant `{"error": ...}` payload, a service-response
+    payload, an unparseable result, and a question in the transcript all
+    still get the second `brain.chat` round -- none of these is plain
+    action success.
+    """
+    tool_host = _ByNameToolHost(results_by_name)
+    brain = fake_brain(
+        replies=[BrainReply(tool_calls=tool_calls), BrainReply(text="phrased by the model")]
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text=transcript)])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert brain.call_count == 2
+    assert tts.received_text == ["phrased by the model"]
+
+
+async def test_model_text_next_to_the_tool_call_still_gets_a_phrasing_round(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """Behaviour item 3's seventh case: the model attached text of its own
+    next to the tool call, so the shortcut must not fire even though the
+    round is otherwise plain action success."""
+    tool_host = _RecordingToolHost({"switch.example_fan": _changed("switch.example_fan")})
+    brain = fake_brain(
+        replies=[
+            BrainReply(tool_calls=[_service_call("switch.example_fan")], text="working on it"),
+            BrainReply(text="phrased by the model"),
+        ]
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert brain.call_count == 2
+    assert tts.received_text == ["phrased by the model"]
+
+
+async def test_an_action_after_a_read_round_still_gets_a_phrasing_round(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """Behaviour item 4: round one reads state, round two calls a service
+    with a `{"changed"}` payload, round three carries text -- the shortcut
+    only ever looks at round 0, so this three-round turn still costs three
+    `brain.chat` calls and speaks the third round's own text."""
+    tool_host = _ByNameToolHost(
+        {
+            "ha_get_state": _text_result(json.dumps({"entity_id": "sensor.example_server_power", "state": "42.0"})),
+            "ha_call_service": _changed("switch.example_fan"),
+        }
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(tool_calls=[ToolCall(name="ha_get_state", arguments={"entity_id": "sensor.example_server_power"})]),
+            BrainReply(tool_calls=[_service_call("switch.example_fan")]),
+            BrainReply(text="power draw checked and the fan is off"),
+        ]
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="check the server power then turn off the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert brain.call_count == 3
+    assert tts.received_text == ["power draw checked and the fan is off"]
+
+
+async def test_only_the_top_tier_reaches_the_tool_host_when_the_shortcut_fires(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    """D-05, 260924-4it: the done shortcut fires on the top tier's own tool
+    round, and only the top tier ever reaches the tool host -- a triage
+    tier's envelope client still gets exactly one call, carrying no `tools`
+    keyword, and the top tier's own envelope client gets none (it has no
+    envelope client at all, per Task 1)."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.turn import brain_race
+
+    tool_host = _RecordingToolHost({"switch.example_fan": _changed("switch.example_fan")})
+
+    triage_reply = TierReply(answer="", confident=False, needs_tool=True, filler=FillerPhrase.STILL_LOOKING)
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=triage_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+
+    top_answer = "turned it off"
+    top_reply = TierReply(answer=top_answer, confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK)
+    top_brain = fake_brain(replies=[BrainReply(tool_calls=[_service_call("switch.example_fan")])])
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=0,
+        filler_cache=None,
+    )
+
+    assert len(tool_host.calls) == 1
+    assert tts.received_text == ["done"]
+    assert len(triage_tier.envelope_client.calls) == 1
+    assert "tools" not in triage_tier.envelope_client.calls[0]
+    assert top_tier.envelope_client.calls == []
