@@ -238,6 +238,68 @@ class BrainTierConfig:
         return cls(model=model)
 
 
+# 260924-4iv (item b): the controllable domains -- the orchestrator's own
+# set (`_CANDIDATE_DOMAINS` in `turn/local_intent.py` is a strict subset,
+# T-4iv-05's coupling guard) plus common controllable helper and appliance
+# domains. Deliberately excludes sensor, binary_sensor, person,
+# device_tracker, update, button, number, and select -- these make up most
+# of a typical house's entity count, and their state stays readable
+# through the get-state tool, never listed here by default.
+DEFAULT_STATE_DOMAINS: frozenset[str] = frozenset(
+    {
+        "alarm_control_panel",
+        "climate",
+        "cover",
+        "fan",
+        "humidifier",
+        "input_boolean",
+        "input_number",
+        "input_select",
+        "light",
+        "lock",
+        "media_player",
+        "scene",
+        "script",
+        "siren",
+        "switch",
+        "vacuum",
+        "valve",
+        "water_heater",
+    }
+)
+
+_STATE_DOMAIN_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _parse_state_domains(raw_value: object) -> frozenset[str] | None:
+    """`brain.state_domains`: a list of domain names, `["*"]` for every
+    domain, or a `ConfigError` naming the key for anything else
+    (260924-4iv, item b, T-4iv-05)."""
+    if isinstance(raw_value, str):
+        raise ConfigError(
+            f"brain.state_domains must be a list, not a string, got {raw_value!r}"
+        )
+    if not raw_value:
+        raise ConfigError(
+            "brain.state_domains is empty -- there is no 'no domains' meaning; "
+            'use ["*"] to list every domain instead'
+        )
+    normalized = [str(entry).strip().lower() for entry in raw_value]
+    if "*" in normalized:
+        if len(normalized) > 1:
+            raise ConfigError(
+                f'brain.state_domains: "*" must be the only entry when present, got {raw_value!r}'
+            )
+        return None
+    for domain in normalized:
+        if not _STATE_DOMAIN_RE.match(domain):
+            raise ConfigError(
+                f"brain.state_domains entry {domain!r} is not a valid domain name "
+                "(letters, digits, and underscore only)"
+            )
+    return frozenset(normalized)
+
+
 @dataclass(frozen=True)
 class BrainConfig:
     """The `brain:` block: the language model endpoint, the ordered tier
@@ -278,6 +340,19 @@ class BrainConfig:
     # operator who wants every command to go through the brain (for example,
     # to debug a matcher false negative) sets this to `false`.
     local_intents: bool = True
+    # 260924-4iv (item a): the one deadline, past the final transcript, a
+    # turn may spend waiting on the prefetched live-state read and the
+    # prefetched pending-runs read together -- each read once per turn,
+    # cancelled and awaited (never left running) if it misses this bound.
+    # 0 means "use the state only if it is already there."
+    state_timeout_ms: float = 500.0
+    # 260924-4iv (item b): the per-turn state message lists only entities
+    # whose domain is in this set -- `None` (`["*"]` in the config file)
+    # lists every domain, matching the pre-4iv behavior. The cached
+    # catalog prompt, the clarifying-question friendly names, and the
+    # local on/off matcher all still see every entity regardless of this
+    # filter (see `app.py::_state_message`'s own docstring).
+    state_domains: frozenset[str] | None = DEFAULT_STATE_DOMAINS
 
     @property
     def top_tier(self) -> BrainTierConfig:
@@ -320,17 +395,39 @@ class BrainConfig:
         local_intents = raw.get("local_intents", cls.local_intents)
         if not isinstance(local_intents, bool):
             raise ConfigError(f"brain.local_intents must be true or false, got {local_intents!r}")
+        cache_system_prompt = raw.get("cache_system_prompt", cls.cache_system_prompt)
+        if not isinstance(cache_system_prompt, bool):
+            raise ConfigError(
+                f"brain.cache_system_prompt must be true or false, got {cache_system_prompt!r}"
+            )
+        state_timeout_ms_raw = raw.get("state_timeout_ms", cls.state_timeout_ms)
+        if isinstance(state_timeout_ms_raw, bool) or not isinstance(state_timeout_ms_raw, (int, float)):
+            raise ConfigError(
+                f"brain.state_timeout_ms must be a number, got {state_timeout_ms_raw!r}"
+            )
+        state_timeout_ms = float(state_timeout_ms_raw)
+        if not math.isfinite(state_timeout_ms) or state_timeout_ms < 0:
+            raise ConfigError(
+                "brain.state_timeout_ms must be a non-negative, finite number, got "
+                f"{state_timeout_ms_raw!r}"
+            )
+        state_domains_raw = raw.get("state_domains", None)
+        state_domains = (
+            cls.state_domains if state_domains_raw is None else _parse_state_domains(state_domains_raw)
+        )
         return cls(
             base_url=raw.get("base_url", cls.base_url),
             api_key=raw.get("api_key", cls.api_key),
             models=models,
             filler_after_ms=raw.get("filler_after_ms", cls.filler_after_ms),
-            cache_system_prompt=raw.get("cache_system_prompt", cls.cache_system_prompt),
+            cache_system_prompt=cache_system_prompt,
             temperature=raw.get("temperature", cls.temperature),
             max_tokens=raw.get("max_tokens", cls.max_tokens),
             max_tool_rounds=raw.get("max_tool_rounds", cls.max_tool_rounds),
             turn_timeout_s=turn_timeout_s,
             local_intents=local_intents,
+            state_timeout_ms=state_timeout_ms,
+            state_domains=state_domains,
         )
 
 

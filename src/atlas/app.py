@@ -291,7 +291,33 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
     return "\n".join(lines)
 
 
-def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ()) -> str:
+# 260924-4iv (items a, b): the two lines `_state_message` speaks instead of
+# an empty list/sequence when a prefetched read missed its deadline
+# (`brain.state_timeout_ms`) or raised (T-4iv-02). An empty `states`/
+# `pending_runs` is a different, legitimate claim -- "read successfully,
+# and there is nothing there" -- and must never be confused with "could not
+# be read this turn." The catalog prompt (`_catalog_prompt`) still names
+# every real entity id regardless of either line, so the brain is never
+# taught to invent one; the MCP child's own `allow_call` policy still runs
+# on every `call_service` this turn makes, so a turn with no live state
+# still cannot reach an entity the operator marked off limits (T-4iv-02).
+_STATE_UNAVAILABLE_LINE = (
+    "Current state: not available this turn. Do not assume any entity's "
+    "current state. Read an entity with a tool before you answer about its "
+    "state or act on a command that depends on it."
+)
+_PENDING_RUNS_UNAVAILABLE_LINE = (
+    "Scheduled runs: not available this turn. You cannot see which runs "
+    "are scheduled, so do not tell the user that there are none."
+)
+
+
+def _state_message(
+    states: dict[str, str] | None,
+    pending_runs: tuple[Any, ...] | None = (),
+    *,
+    domains: frozenset[str] | None = None,
+) -> str:
     """Rebuilt every turn -- deliberately not part of the cached prefix.
 
     Carries the current local date, day of the week, time to the minute,
@@ -306,6 +332,32 @@ def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ())
     lines: that is a message the model can read as "nothing is known,"
     which is a different claim than no message at all reaching it.
 
+    260924-4iv (item a): `states=None` -- distinct from `{}` -- means the
+    live-state read did not complete this turn (a timeout or a raise in
+    `turn/controller.py::run_turn`, never a choice this function makes
+    itself). It renders `_STATE_UNAVAILABLE_LINE` in place of both the
+    "Current state:" header and every entity line; the date/time lines
+    above it are unaffected, since those never depended on the fetch.
+    Degraded behavior, stated plainly: the model is never handed an empty
+    list that could be misread as "every device is off" -- it is told
+    plainly that it does not know, and to read before it answers about a
+    state or acts on a command that depends on one. `pending_runs=None`
+    is `states=None`'s own sibling, rendering `_PENDING_RUNS_UNAVAILABLE_LINE`
+    in place of `summarise_pending_runs(...)`'s block for the identical
+    reason -- the model must never be told "nothing is scheduled" when the
+    truth is "the read did not finish."
+
+    260924-4iv (item b): `domains`, when given, keeps only entities whose
+    id carries a domain (the prefix before the first `.`) in the set --
+    the header names which domains are listed and tells the model to read
+    any other entity with a tool before answering about its state.
+    `domains=None` (the default) keeps every entity, byte-identical to
+    this function's behavior before this parameter existed. The filter
+    only narrows what this one volatile message shows: `_catalog_prompt`
+    (the cacheable prefix) still names every entity id and friendly name
+    regardless, so nothing here hides an entity from the model's
+    knowledge that it exists, only from this turn's live-state block.
+
     `pending_runs` (plan 05-05 Task 2, D-09) defaults to `()` -- every
     caller that predates this plan keeps producing byte-identical output.
     Given a non-empty sequence of `WorkflowRun`s (`WorkflowRepository.
@@ -319,11 +371,26 @@ def _state_message(states: dict[str, str], pending_runs: "tuple[Any, ...]" = ())
     lines = [
         f"Current date: {now:%A, %B %d, %Y}",
         f"Current time: {now:%H:%M} {_resolved_timezone_name()}",
-        "Current state:",
     ]
-    for entity_id, state in states.items():
-        lines.append(f"- {entity_id}: {state}")
-    lines.append(summarise_pending_runs(pending_runs, now))
+    if states is None:
+        lines.append(_STATE_UNAVAILABLE_LINE)
+    elif domains is None:
+        lines.append("Current state:")
+        for entity_id, state in states.items():
+            lines.append(f"- {entity_id}: {state}")
+    else:
+        sorted_domains = ", ".join(sorted(domains))
+        lines.append(
+            f"Current state (only these domains are listed: {sorted_domains}. "
+            "Read any other entity with a tool before you answer about its state):"
+        )
+        for entity_id, state in states.items():
+            if entity_id.split(".", 1)[0] in domains:
+                lines.append(f"- {entity_id}: {state}")
+    if pending_runs is None:
+        lines.append(_PENDING_RUNS_UNAVAILABLE_LINE)
+    else:
+        lines.append(summarise_pending_runs(pending_runs, now))
     return "\n".join(lines)
 
 
@@ -731,6 +798,11 @@ def _make_run_turn_for_source(
             # routes below pass nothing, which is `run_turn`'s own
             # `local_intents=False` default.
             local_intents=config.brain.local_intents,
+            # 260924-4iv (items a, b): every `run_turn` call site threads
+            # the same two configured values -- the shared prefetched-read
+            # deadline and the state-message domain filter.
+            state_timeout_ms=config.brain.state_timeout_ms,
+            state_domains=config.brain.state_domains,
         )
 
     return _run
@@ -1900,6 +1972,8 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
+            state_timeout_ms=config.brain.state_timeout_ms,
+            state_domains=config.brain.state_domains,
         )
     )
     app.state.background_turns.add(task)
@@ -2030,6 +2104,8 @@ async def turn_ws(websocket: WebSocket) -> None:
         workflow_tool_host=websocket.app.state.workflow_tool_host,
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
         brain_turn_timeout_s=config.brain.turn_timeout_s,
+        state_timeout_ms=config.brain.state_timeout_ms,
+        state_domains=config.brain.state_domains,
     )
 
 

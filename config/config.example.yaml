@@ -500,6 +500,13 @@ brain:
   # The entity list is injected into the system prompt at startup so the model
   # never needs a discovery round trip to learn what exists. It is large and
   # unchanging, which is exactly what prompt caching is for.
+  #
+  # 260924-4iv (item c): xAI caches a repeated prompt prefix by itself, per
+  # server. true sends one x-grok-conv-id header, generated once per
+  # process, on every brain request -- tier calls and the shared envelope
+  # call alike -- so every turn this process runs reaches the same server
+  # and keeps hitting that server's own cache of the (large, unchanging)
+  # entity catalog. false sends no such header.
   cache_system_prompt: true
 
   temperature: 0.0
@@ -517,6 +524,42 @@ brain:
   # having bounded the wait -- past this many seconds, the race is cancelled
   # and a fixed "i can't do that one" is spoken instead of silence.
   turn_timeout_s: 25.0
+
+  # 260924-4iv (item a): the one deadline, past the final transcript, a
+  # turn may spend waiting on the prefetched live-state read and the
+  # prefetched pending-runs read together. A read that misses this bound
+  # is cancelled and the brain is told state is not available this turn,
+  # rather than left waiting indefinitely or shown an empty list that
+  # could be misread as "nothing is on". 0 means "use the state only if
+  # it is already there".
+  state_timeout_ms: 500
+
+  # 260924-4iv (item b): the per-turn state message lists only entities
+  # whose domain is in this list -- narrower than the full house, since
+  # most houses have far more sensors than controllable devices. ["*"]
+  # lists every domain (the pre-4iv behavior). Every entity stays in the
+  # cached catalog and reachable by a get-state tool call regardless of
+  # this filter -- nothing here hides an entity from the model's
+  # knowledge that it exists.
+  state_domains:
+    - alarm_control_panel
+    - climate
+    - cover
+    - fan
+    - humidifier
+    - input_boolean
+    - input_number
+    - input_select
+    - light
+    - lock
+    - media_player
+    - scene
+    - script
+    - siren
+    - switch
+    - vacuum
+    - valve
+    - water_heater
 
   # 260922-lim: a plain on/off command ("turn off the lamp") is matched
   # against live entity state locally, before the tier race ever starts --

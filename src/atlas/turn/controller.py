@@ -170,6 +170,13 @@ _CLARIFYING_QUESTION_CARRIER = "i'm not sure which one you mean --"
 # latency of an ordinary turn.
 _DEFAULT_POLL_INTERVAL_S = 0.05
 
+# 260924-4iv (item a): the one value `_read_prefetched` returns for "this
+# fetch was never given, never finished in time, or raised" -- distinct
+# from every real fetch result (`None` is itself a legitimate scripted
+# return in a few existing tests), so a caller can tell "genuinely
+# unavailable" apart from "read successfully, and it was empty/None."
+_UNAVAILABLE = object()
+
 
 class _AudioSource(Protocol):
     def frames(self) -> AsyncIterator[bytes]: ...
@@ -319,6 +326,8 @@ async def run_turn(
     wake_cue: bool = False,
     brain_turn_timeout_s: float = 25.0,
     local_intents: bool = False,
+    state_timeout_ms: float = 500.0,
+    state_domains: frozenset[str] | None = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -441,6 +450,29 @@ async def run_turn(
     predates this plan, so nothing about an existing caller's behavior
     changes until it opts in (`app.py`'s camera `run_turn` call passes
     `config.brain.local_intents`).
+
+    `state_timeout_ms`/`state_domains` (260924-4iv, items a/b): the one
+    deadline, past `stt_final_at`, this turn may spend waiting on
+    `state_task`/`pending_runs_task` together, and the domain filter
+    `_state_message` applies to the live-state block. `state_timeout_ms`
+    defaults to 500 (`BrainConfig.state_timeout_ms`'s own default);
+    `state_domains=None` (the default) keeps every domain, matching every
+    caller that predates this plan. `state_task` is read at most once,
+    through `_read_prefetched`: the local on/off block above reads it
+    first when that block runs at all, and the message-building section
+    below reuses that same result rather than reading a second time. A
+    read that misses the deadline is cancelled and awaited, never left
+    running, and this turn's brain sees an explicit "not available" line
+    (`app.py::_STATE_UNAVAILABLE_LINE`/`_PENDING_RUNS_UNAVAILABLE_LINE`)
+    rather than an empty list that could be misread as "nothing is on" or
+    "nothing is scheduled." Degraded behavior, stated plainly: the cached
+    catalog prompt still names every entity id regardless of this
+    timeout, so the brain is never blind to what exists, only to what
+    state it is currently in; the local matcher does not run without a
+    real state list; a clarifying question falls back to speaking entity
+    ids; and the MCP child's own safety policy still runs on every
+    `call_service` whatever this turn saw, so a turn with no live state
+    can never reach an entity the operator marked off limits.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -533,6 +565,11 @@ async def run_turn(
             final_text = getattr(final, "text", "") if final is not None else ""
 
         timings.mark_stt_final()
+        # 260924-4iv (item a): one absolute deadline, in `_time.monotonic()`'s
+        # own domain (real time, since `asyncio.wait_for` waits in real
+        # time) -- every bounded read below shares this one instant rather
+        # than each computing its own from a possibly-later "now".
+        state_deadline = _time.monotonic() + state_timeout_ms / 1000
         # The boundary between hearing and thinking, for a page that shows it.
         await _emit_event(source, {"type": "transcript.final", "text": final_text})
 
@@ -656,33 +693,29 @@ async def run_turn(
         # default, and every caller that predates this plan) skips this
         # block entirely, at no observable cost. `tool_host is None` skips
         # it too: there would be nowhere to send the matched call.
+        # 260924-4iv (item a): `state_task` is read at most once per turn,
+        # through `_read_prefetched` and the one shared `state_deadline`
+        # above. `state_read` is this turn's own flag for "already read" --
+        # the local on/off block immediately below reads it first when
+        # that block runs at all; the message-building section further
+        # down reuses `state_result` rather than reading a second time.
+        # This folds the separate, longer 1.5 s bound the local-intent
+        # path used to apply on top of the tier path's own un-timed await
+        # into the one shared deadline: `local_intents` is on by default
+        # on the camera path, so a separate longer bound here would make
+        # item (a) a no-op on the main path.
+        state_read = False
+        state_result: Any = _UNAVAILABLE
+
         if local_intents and tool_host is not None:
-            # `state_task` was started before the drain above (D-15), so by
-            # now it has usually already finished -- this rarely actually
-            # waits. Bounded here, separately from the un-timed await this
-            # function's own tier-race setup makes further down: a slow
-            # state fetch must not hold a local-intent turn open
-            # indefinitely, and `asyncio.shield` keeps a timeout here from
-            # cancelling `state_task` itself, so a command this fast path
-            # cannot serve in time still falls through to the tier race
-            # below, which awaits the same task with no timeout of its own.
             entities: list[dict[str, Any]] = []
             if state_task is not None:
-                try:
-                    states_payload = await asyncio.wait_for(
-                        asyncio.shield(state_task), timeout=1.5
-                    )
-                except asyncio.TimeoutError:
-                    states_payload = None
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.exception(
-                        "state fetch raised; skipping local intent matching"
-                    )
-                    states_payload = None
-                if isinstance(states_payload, list):
-                    entities = states_payload
+                state_result = await _read_prefetched(
+                    state_task, state_deadline, "state fetch", timings.turn_id, state_timeout_ms
+                )
+                state_read = True
+                if isinstance(state_result, list):
+                    entities = state_result
 
             local_intent = match_on_off(final_text, entities) if entities else None
             if local_intent is not None:
@@ -750,68 +783,59 @@ async def run_turn(
         # otherwise, in which case `_compose_clarifying_question` falls back
         # to speaking the id itself.
         friendly_names: dict[str, str] = {}
-        states: dict[str, str] = {}
+        # 260924-4iv (item a): `None` means "unavailable this turn" to
+        # `_state_message` -- distinct from `{}`/`()`, which mean "read
+        # successfully, and it was empty" (or "no fetch was ever given").
+        states_or_none: dict[str, str] | None = {}
         # D-09: the pending-run block's own payload, threaded into
-        # `_state_message` alongside `states` below -- `()` (the default)
-        # when `pending_runs_fetch` was never given, matching `states`' own
-        # `{}` default for the identical reason.
-        pending_runs: "tuple[Any, ...]" = ()
+        # `_state_message` alongside `states_or_none` below -- `()` (the
+        # default) when `pending_runs_fetch` was never given, matching
+        # `states_or_none`'s own `{}` default for the identical reason.
+        pending_runs_or_none: tuple[Any, ...] | None = ()
         if state_task is not None:
-            # `state_task` was started before the drain above, so by now it has
-            # usually already finished -- this await rarely actually waits. A
-            # fetch that raised is logged and treated as "nothing known" rather
-            # than ending the turn: an assistant that cannot read current state
-            # can still take a command, and failing the whole turn over a
-            # stale-state fetch would be a worse outcome than answering without
-            # it (T-01.1-17).
-            try:
-                states_payload = await state_task
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("state fetch raised; continuing turn with no known state")
-                states_payload = []
-            states = (
-                {entity["entity_id"]: entity["state"] for entity in states_payload}
-                if isinstance(states_payload, list)
-                else {}
-            )
-            friendly_names = (
-                {
+            # Read once: the local on/off block above already read this
+            # turn's `state_task` when it ran at all (`state_read=True`);
+            # otherwise it is read here, for the first and only time, bound
+            # by the same `state_deadline` (T-01.1-17's own posture --
+            # unavailable is treated as "nothing known", never as ending
+            # the turn).
+            if not state_read:
+                state_result = await _read_prefetched(
+                    state_task, state_deadline, "state fetch", timings.turn_id, state_timeout_ms
+                )
+                state_read = True
+            if state_result is _UNAVAILABLE:
+                states_or_none = None
+            elif isinstance(state_result, list):
+                states_or_none = {entity["entity_id"]: entity["state"] for entity in state_result}
+                friendly_names = {
                     entity["entity_id"]: entity["friendly_name"]
-                    for entity in states_payload
+                    for entity in state_result
                     if isinstance(entity, dict) and "friendly_name" in entity
                 }
-                if isinstance(states_payload, list)
-                else {}
-            )
+            else:
+                states_or_none = {}
         if pending_runs_task is not None:
-            # Same T-01.1-17 posture `state_task` above already carries,
-            # applied to D-09's own fetch: a workflow-repository read that
-            # raised is logged and treated as "nothing scheduled known"
-            # rather than ending the turn -- the operator can still cancel
-            # or schedule a run this turn even when this particular read
-            # failed, and failing the whole turn over it would be a worse
-            # outcome than answering with an empty pending-run block.
-            try:
-                pending_runs_payload = await pending_runs_task
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception(
-                    "pending-runs fetch raised; continuing turn with nothing scheduled known"
-                )
-                pending_runs_payload = ()
-            pending_runs = tuple(pending_runs_payload) if pending_runs_payload else ()
+            # Same one-shared-deadline discipline as `state_task` above,
+            # applied to D-09's own fetch -- read once, bound by
+            # `state_deadline`, unavailable treated as "nothing scheduled
+            # known" rather than ending the turn (T-01.1-17).
+            pending_runs_result = await _read_prefetched(
+                pending_runs_task, state_deadline, "pending-runs fetch", timings.turn_id, state_timeout_ms
+            )
+            if pending_runs_result is _UNAVAILABLE:
+                pending_runs_or_none = None
+            else:
+                pending_runs_or_none = tuple(pending_runs_result) if pending_runs_result else ()
         if workflow_tool_host is not None:
             # WR-01 fix: scope this turn's `cancel_workflow_run`/
-            # `append_workflow_steps` to exactly the ids `pending_runs`
-            # resolved to, whether or not `pending_runs_fetch` actually
-            # produced any (a fetch that raised, or was never given,
-            # leaves `pending_runs = ()` above, which correctly clears
-            # last turn's set rather than leaving it stale).
+            # `append_workflow_steps` to exactly the ids `pending_runs_or_none`
+            # resolved to. 260924-4iv: an unavailable read (`None`) and a
+            # genuinely empty one (`()`) both scope to no run ids -- cancel
+            # and append refuse every id this turn either way, which is the
+            # safe choice when the list could not be read at all.
             workflow_tool_host.set_current_turn_run_ids(
-                frozenset(run.id for run in pending_runs)
+                frozenset(run.id for run in pending_runs_or_none) if pending_runs_or_none else frozenset()
             )
         if state_task is not None or pending_runs_task is not None:
             # Deferred, not module-level: `app.py` imports `run_turn` from this
@@ -826,7 +850,10 @@ async def run_turn(
             from atlas.app import _state_message
 
             messages.append(
-                {"role": "system", "content": _state_message(states, pending_runs)}
+                {
+                    "role": "system",
+                    "content": _state_message(states_or_none, pending_runs_or_none, domains=state_domains),
+                }
             )
         messages.append({"role": "user", "content": final_text})
 
@@ -1118,6 +1145,64 @@ async def _cancel_state_task(state_task: "asyncio.Task[Any] | None") -> None:
         return
     state_task.cancel()
     await asyncio.gather(state_task, return_exceptions=True)
+
+
+async def _read_prefetched(
+    task: asyncio.Task[Any] | None,
+    deadline: float,
+    what: str,
+    turn_id: str,
+    bound_ms: float,
+) -> Any:
+    """Read `task`'s result without ever costing this turn more than
+    `deadline` (a `_time.monotonic()`-domain instant) to do so (260924-4iv,
+    item a) -- the one bounded read `run_turn` uses for both the
+    prefetched state fetch and the prefetched pending-runs fetch, each
+    read at most once per turn.
+
+    Returns `_UNAVAILABLE` for every case that is not a genuine result:
+    `task is None` (the caller never started a fetch at all); `task`
+    already done but raised (logged, T-01.1-17's existing posture); no
+    time left before `deadline` (the task is cancelled and awaited --
+    `_cancel_state_task` -- never left running past the bound); or a
+    `asyncio.wait_for` timeout on the remaining time (which itself
+    cancels and awaits the task; logged as a warning naming `what`,
+    `bound_ms`, and `turn_id`, so a skipped read is visible against this
+    turn in the log -- T-4iv-06).
+
+    `asyncio.CancelledError` always re-raises, never swallowed -- this
+    function is not the place that decides whether the turn itself should
+    stop.
+    """
+    if task is None:
+        return _UNAVAILABLE
+    if task.done():
+        try:
+            return task.result()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s raised; treating as unavailable", what)
+            return _UNAVAILABLE
+    remaining = deadline - _time.monotonic()
+    if remaining <= 0:
+        await _cancel_state_task(task)
+        return _UNAVAILABLE
+    try:
+        return await asyncio.wait_for(task, timeout=remaining)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "%s did not complete within brain.state_timeout_ms=%sms (turn_id=%s)",
+            what,
+            bound_ms,
+            turn_id,
+        )
+        return _UNAVAILABLE
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("%s raised; treating as unavailable", what)
+        return _UNAVAILABLE
 
 
 async def _drain_to_final_transcript(
