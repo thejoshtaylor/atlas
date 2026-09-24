@@ -684,6 +684,8 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # apart is the failure this block prevents.
     assert config.camera.rtsp_url
     assert config.speaker.fifo_path
+    assert config.speaker.tail_pad_s == 0.2
+    assert config.speaker.tail_pad_idle_s == 0.15
     assert config.wake.engine == "vosk"
     assert config.gate.sources  # the browser override is written explicitly
     assert config.barge_in.enabled is True
@@ -977,6 +979,65 @@ def test_speaker_config_tcp_url_defaults_to_empty_string():
     from atlas.config import SpeakerConfig
 
     assert SpeakerConfig().tcp_url == ""
+
+
+# --- 260923-sfi (D1): the tail-flush pad's two config keys ---
+
+
+def test_speaker_config_tail_pad_defaults():
+    from atlas.config import SpeakerConfig
+
+    config = SpeakerConfig.from_config({})
+    assert config.tail_pad_s == 0.2
+    assert config.tail_pad_idle_s == 0.15
+
+
+def test_speaker_config_tail_pad_s_zero_disables_padding():
+    from atlas.config import SpeakerConfig
+
+    assert SpeakerConfig.from_config({"tail_pad_s": 0}).tail_pad_s == 0
+
+
+def test_speaker_config_tail_pad_values_coerce_from_strings():
+    from atlas.config import SpeakerConfig
+
+    config = SpeakerConfig.from_config({"tail_pad_s": "0.3", "tail_pad_idle_s": "0.2"})
+    assert config.tail_pad_s == 0.3
+    assert config.tail_pad_idle_s == 0.2
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"tail_pad_s": -0.1},
+        {"tail_pad_s": "fast"},
+        {"tail_pad_s": "nan"},
+        {"tail_pad_s": "inf"},
+    ],
+)
+def test_speaker_config_rejects_a_bad_tail_pad_s(raw):
+    from atlas.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerConfig.from_config(raw)
+    assert "speaker.tail_pad_s" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"tail_pad_idle_s": 0},
+        {"tail_pad_idle_s": -1},
+        {"tail_pad_idle_s": "fast"},
+        {"tail_pad_idle_s": "inf"},
+    ],
+)
+def test_speaker_config_rejects_a_bad_tail_pad_idle_s(raw):
+    from atlas.config import ConfigError, SpeakerConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerConfig.from_config(raw)
+    assert "speaker.tail_pad_idle_s" in str(exc.value)
 
 
 def test_session_config_rejects_a_non_positive_retention():

@@ -192,6 +192,8 @@ speaker:
   # reconnects to a listener that went away. Example listener command, on
   # the Pi:
   #   ffmpeg -f nut -listen 1 -i tcp://0.0.0.0:5701 -f pulse default
+  # Do not add -fflags nobuffer to that listener -- it drops the first
+  # packet of every connection (measured at planning time).
   #
   # Default stays go2rtc so an existing deployment's behaviour is never
   # silently changed by this key's addition.
@@ -247,6 +249,19 @@ speaker:
   # long one write waits for a reader before it fails loudly, not how many
   # respawn cycles fit inside it.
   reopen_timeout_s: 10.0
+
+  # ffmpeg reads this FIFO in fixed packets of up to 0.1 s and holds a
+  # partial last packet. Without padding, the end of a reply waits for the
+  # next reply to push it out.
+  #
+  # After tail_pad_idle_s with no new audio, the writer adds tail_pad_s of
+  # silence once. 0 turns padding off.
+  #
+  # A gap in the middle of a reply that is longer than tail_pad_idle_s also
+  # gets the silence. Raise tail_pad_idle_s if you hear short pauses inside
+  # replies.
+  tail_pad_s: 0.2
+  tail_pad_idle_s: 0.15
 
 wake:
   # openwakeword | vosk

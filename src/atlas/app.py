@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from atlas.audio.cue import silence
 from atlas.audio.ring import PrerollBuffer
 from atlas.auth.dependencies import Role, require_role, require_setup_complete
 from atlas.auth.tokens import validate_secret_key_strength
@@ -1255,7 +1256,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Built as a list from the start, even holding one entry here -- plan
     # 02-04 adds the second source, and a list that was always a list needs
     # no restructuring.
-    speaker_writer = FifoWriter(config.speaker.fifo_path, reopen_timeout_s=config.speaker.reopen_timeout_s)
+    # 260923-sfi (D1): the FIFO carries camera_tts_sink's format on every
+    # backend, and every reader consumes it in packets or frames -- so
+    # trailing silence is harmless everywhere, and padding is not tied to
+    # one backend.
+    speaker_writer = FifoWriter(
+        config.speaker.fifo_path,
+        reopen_timeout_s=config.speaker.reopen_timeout_s,
+        pad_bytes=silence(camera_tts_sink, config.speaker.tail_pad_s),
+        pad_idle_s=config.speaker.tail_pad_idle_s,
+    )
     app.state.speaker_writer = speaker_writer
     app.state.background_turns.add(asyncio.create_task(_open_speaker_writer(speaker_writer)))
 

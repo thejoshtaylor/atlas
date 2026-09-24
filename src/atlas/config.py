@@ -23,6 +23,7 @@ Two rules that are easy to get backwards:
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import MISSING, dataclass, field, fields, replace
@@ -498,6 +499,13 @@ class SpeakerConfig:
     not used on this path). The default stays `go2rtc` so an existing
     deployment's behaviour is never silently changed by this field's
     addition.
+
+    `tail_pad_s`/`tail_pad_idle_s` (260923-sfi, D1): the FIFO reader holds
+    a partial last packet -- see `speaker/fifo_writer.py`'s module
+    docstring -- so the writer adds `tail_pad_s` of silence once, after
+    `tail_pad_idle_s` with no audio. `tail_pad_s` of `0` turns padding
+    off. `0.2` is at least two raw-demuxer packets at any rate this
+    codebase writes, because one packet is at most a tenth of a second.
     """
 
     go2rtc_url: str = "http://frigate:1984"
@@ -508,6 +516,8 @@ class SpeakerConfig:
     reopen_timeout_s: float = 10.0
     backend: str = "go2rtc"
     tcp_url: str = ""
+    tail_pad_s: float = 0.2
+    tail_pad_idle_s: float = 0.15
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SpeakerConfig":
@@ -540,6 +550,29 @@ class SpeakerConfig:
                 "set SPEAKER_TCP_URL to the tcp://host:port of the listener that "
                 "plays reply audio (for example a Raspberry Pi) when speaker.backend is tcp"
             )
+        try:
+            tail_pad_s = float(raw.get("tail_pad_s", cls.tail_pad_s))
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"speaker.tail_pad_s must be a number, got {raw.get('tail_pad_s')!r}"
+            ) from None
+        if not (math.isfinite(tail_pad_s) and tail_pad_s >= 0):
+            raise ConfigError(
+                f"speaker.tail_pad_s must be finite and 0 or more, got {tail_pad_s!r} -- "
+                "0 turns padding off; an infinite value would build an unbounded "
+                "silence buffer at startup"
+            )
+        try:
+            tail_pad_idle_s = float(raw.get("tail_pad_idle_s", cls.tail_pad_idle_s))
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"speaker.tail_pad_idle_s must be a number, got {raw.get('tail_pad_idle_s')!r}"
+            ) from None
+        if not (math.isfinite(tail_pad_idle_s) and tail_pad_idle_s > 0):
+            raise ConfigError(
+                f"speaker.tail_pad_idle_s must be finite and positive, got {tail_pad_idle_s!r} -- "
+                "a zero or negative idle window would pad every write, never just the tail"
+            )
         return cls(
             go2rtc_url=raw.get("go2rtc_url", cls.go2rtc_url),
             stream=raw.get("stream", cls.stream),
@@ -549,6 +582,8 @@ class SpeakerConfig:
             respawn_backoff_s=respawn_backoff_s,
             reopen_timeout_s=reopen_timeout_s,
             tcp_url=tcp_url,
+            tail_pad_s=tail_pad_s,
+            tail_pad_idle_s=tail_pad_idle_s,
         )
 
 

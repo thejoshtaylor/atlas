@@ -595,6 +595,16 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
         for slot_name, status in app_module.app.state.provider_slots.items():
             assert status.state == "running", f"{slot_name} unexpectedly degraded: {status.reason}"
 
+        # 260923-sfi (D1): the go2rtc backend gets a padded FifoWriter too --
+        # this fixture's fake config has no tts.codec/sample_rate, so the
+        # camera sink is the alaw/8000 default.
+        from atlas.audio.cue import silence
+        from atlas.providers.tts_xai import SinkFormat
+
+        speaker_writer = app_module.app.state.speaker_writer
+        assert speaker_writer._pad_bytes == silence(SinkFormat("alaw", 8000), 0.2)
+        assert speaker_writer._pad_idle_s == 0.15
+
 
 async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
     """260923-pds (T-pds-02), extended 260923-pyj (D1): the tcp egress
@@ -663,6 +673,15 @@ def test_lifespan_dispatches_tcp_backend_through_build_tcp_supervisor(tmp_path, 
     with TestClient(app_module.app):
         assert len(calls) == 1
         assert app_module.app.state.ffmpeg_supervisor is fake_supervisor
+
+        # 260923-sfi (D1): the tcp backend gets a padded FifoWriter too --
+        # padding is not tied to one backend.
+        from atlas.audio.cue import silence
+        from atlas.providers.tts_xai import SinkFormat
+
+        speaker_writer = app_module.app.state.speaker_writer
+        assert speaker_writer._pad_bytes == silence(SinkFormat("alaw", 8000), 0.2)
+        assert speaker_writer._pad_idle_s == 0.15
 
 
 def test_a_failing_migration_stops_the_boot_rather_than_yielding_a_running_application(
