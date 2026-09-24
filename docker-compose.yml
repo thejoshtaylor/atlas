@@ -88,6 +88,19 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # This is the Compose form of the chart's memory request
+    # (charts/atlas/values.yaml). Docker applies it as a memory
+    # reservation.
+    #
+    # There is no CPU entry on purpose. Compose applies a CPU
+    # reservation only under Swarm, and Docker already gives every
+    # container the same CPU weight.
+    #
+    # There are no limits, for the same reasons as the chart.
+    deploy:
+      resources:
+        reservations:
+          memory: 1g
     # No healthcheck: block here -- the image's own HEALTHCHECK
     # (Dockerfile, on /health) already applies to every container run
     # from it, Compose included.
