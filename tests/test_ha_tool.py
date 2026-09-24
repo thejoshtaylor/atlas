@@ -176,7 +176,7 @@ async def test_a_non_2xx_that_does_not_ask_for_responses_is_not_retried(status_c
             "test-token",
             "light",
             "turn_on",
-            "light.kitchen",
+            "light.example_kitchen",
         )
     finally:
         await scripted.client.aclose()
@@ -196,7 +196,7 @@ async def test_error_result_carries_home_assistants_message():
             "test-token",
             "light",
             "turn_on",
-            "light.kitchen",
+            "light.example_kitchen",
         )
     finally:
         await scripted.client.aclose()
@@ -215,7 +215,7 @@ async def test_error_result_cuts_a_non_json_body_to_200_characters():
             "test-token",
             "light",
             "turn_on",
-            "light.kitchen",
+            "light.example_kitchen",
         )
     finally:
         await scripted.client.aclose()

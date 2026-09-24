@@ -69,7 +69,7 @@ from test_plugin_env_isolation import _MCP_ROOT, _ha_plugin, _weather_plugin
 from test_wizard_flow import _authed_app
 
 _HA_URL = "http://ha.invalid:8123"
-_HA_TOKEN = "a-plainly-fictional-test-token-not-a-real-credential"
+_HA_BEARER = "a-plainly-fictional-test-token-not-a-real-credential"
 
 
 def _config(
@@ -82,7 +82,7 @@ def _config(
 
 
 def _ha_plugin_repo(
-    *, ha_url: "str | None" = _HA_URL, ha_token: "str | None" = _HA_TOKEN
+    *, ha_url: str | None = _HA_URL, ha_token: str | None = _HA_BEARER
 ) -> conftest.FakePluginRepository:
     plugin = _ha_plugin()
     config_values: list[PluginConfigValue] = []
@@ -126,7 +126,7 @@ def _never_called_transport() -> httpx.MockTransport:
 async def test_resolve_timezone_falls_back_to_home_assistant():
     def _answer(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/config"
-        assert request.headers["Authorization"] == f"Bearer {_HA_TOKEN}"
+        assert request.headers["Authorization"] == f"Bearer {_HA_BEARER}"
         return httpx.Response(200, json={"time_zone": "Europe/Berlin"})
 
     transport, requests = _recording_transport(_answer)
@@ -238,7 +238,7 @@ async def test_a_home_assistant_failure_falls_through_to_the_process_zone(
     assert resolution.zone is None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings, f"{case_id}: expected a WARNING"
-    assert _HA_TOKEN not in caplog.text
+    assert _HA_BEARER not in caplog.text
 
 
 async def test_no_ha_url_configured_falls_through_with_no_request(monkeypatch):
@@ -420,7 +420,7 @@ def test_lifespan_resolves_the_zone_from_home_assistant_end_to_end(tmp_path, mon
             1: [
                 PluginConfigValue(key="HA_URL", secret=False, value=_HA_URL, ciphertext=None, key_version=None),
                 PluginConfigValue(
-                    key="HA_TOKEN", secret=False, value=_HA_TOKEN, ciphertext=None, key_version=None
+                    key="HA_TOKEN", secret=False, value=_HA_BEARER, ciphertext=None, key_version=None
                 ),
             ],
         },
