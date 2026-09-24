@@ -63,6 +63,9 @@ services:
       # always shipped for a Phase-1, no-camera dev clone.
       CAMERA_RTSP_URL: "${CAMERA_RTSP_URL:-rtsp://unused-in-phase-1:unused-in-phase-1@camera.invalid:554/stream1}"
       SPEAKER_BACKEND: "${SPEAKER_BACKEND:-go2rtc}"
+      # Only read when SPEAKER_BACKEND is tcp -- blank is safe on every
+      # other backend.
+      SPEAKER_TCP_URL: "${SPEAKER_TCP_URL:-}"
       # 260922-fmi (D-15, D-20): the calibration echo-path route's on/off
       # switch. Safe default false, same as the shipped config.
       CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"

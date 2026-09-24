@@ -108,8 +108,11 @@ env:
   # must be set (via a values file or the hand-applied Secret named by
   # secretName) for the camera source to work.
   cameraRtspUrl: ""
-  # go2rtc | tapo_talk -- see config/config.example.yaml's own comment.
+  # go2rtc | tapo_talk | tcp -- see config/config.example.yaml's own comment.
   speakerBackend: go2rtc
+  # Only used when speakerBackend is tcp: the tcp://host:port of the
+  # listener that plays reply audio. Blank is safe on every other backend.
+  speakerTcpUrl: ""
   # 260922-fmi (D-15, D-20): public safe default. The house turns the
   # calibration echo-path route on by setting this true in its own
   # hand-applied Secret (D-2), never in this chart.

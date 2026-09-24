@@ -165,7 +165,7 @@ camera:
   preroll_ms: 300
 
 speaker:
-  # go2rtc | tapo_talk
+  # go2rtc | tapo_talk | tcp
   #
   # go2rtc: the long-lived ffmpeg egress below, pushed into go2rtc's own
   # tapo:// producer for the camera's speaker -- the same path the gesture
@@ -180,14 +180,29 @@ speaker:
   # file -- read at point of use, never stored on Config), derives the
   # camera host from camera.rtsp_url above, and connects as admin@host:8800.
   #
+  # tcp (260923-pds): the same long-lived ffmpeg egress as go2rtc above, but
+  # it pushes raw 8 kHz A-law over plain TCP to tcp_url below, to a listener
+  # on another machine (for example a Raspberry Pi) that plays it. go2rtc_url,
+  # stream, and ensure_url are not used on this path. respawn_backoff_s also
+  # sets the wait before the pod reconnects to a listener that went away.
+  # Example listener command, on the Pi:
+  #   ffmpeg -f alaw -ar 8000 -ac 1 -listen 1 -i tcp://0.0.0.0:5701 -f pulse default
+  #
   # Default stays go2rtc so an existing deployment's behaviour is never
   # silently changed by this key's addition.
   #
   # 260922-cmo (D-1): read from the environment rather than committed as a
   # literal -- an expanded value still passes SpeakerConfig.from_config's
-  # {go2rtc, tapo_talk} allowlist below, since env expansion runs over raw
-  # text before that validation ever sees this field.
+  # {go2rtc, tapo_talk, tcp} allowlist below, since env expansion runs over
+  # raw text before that validation ever sees this field.
   backend: "${SPEAKER_BACKEND}"
+
+  # Only read when backend is tcp: the tcp://host:port of the listener that
+  # plays reply audio. The address belongs in the environment, not in this
+  # file -- the empty default here means a deployment on another backend
+  # needs no value. A tcp backend with an empty or non-tcp:// value stops
+  # startup with a ConfigError naming speaker.tcp_url.
+  tcp_url: "${SPEAKER_TCP_URL:-}"
 
   # go2rtc, running inside the Frigate pod. It already holds a tapo:// producer
   # for the camera's speaker -- the same path the gesture beeps use.
