@@ -64,6 +64,10 @@ spec:
       # actually fixes the race, and a fixed `sleep` here would only add
       # latency to every restart without addressing it.
       terminationGracePeriodSeconds: 30
+      # See charts/atlas/values.yaml for why this is empty by default.
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
       initContainers:
         # Waits for the bundled database rather than restarting the whole
         # pod until it happens to be up -- a StatefulSet's own pod can take

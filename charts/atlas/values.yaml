@@ -60,7 +60,29 @@ persistence:
     size: 10Gi
     storageClassName: ""
 
-resources: {}
+# Without a request, the pod is BestEffort and gets the lowest CPU
+# weight. A busy node then delays the audio loop and the event loop.
+#
+# There is no CPU limit on purpose. A limit throttles the container for
+# the rest of each 100 ms period once it spends its quota, and that adds
+# delay to every reply.
+#
+# There is no memory limit by default. A limit sends SIGKILL, and SIGKILL
+# skips the shutdown that closes the camera talk session. Memory use also
+# changes with the provider set.
+#
+# Lower these requests on a small node. Add resources.limits.memory here
+# if you want a memory limit.
+resources:
+  requests:
+    cpu: 1000m
+    memory: 1Gi
+
+# Empty means no priority class. The chart does not create the
+# PriorityClass, because a PriorityClass is a cluster-wide object that
+# one release must not own. The scheduler can preempt lower-priority
+# pods to place this one.
+priorityClassName: ""
 
 config:
   # This deployment's own values for the two variables plan 07-05 made
