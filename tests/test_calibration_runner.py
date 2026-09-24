@@ -282,6 +282,7 @@ async def test_uncorrelated_noise_saves_an_echo_cancelled_record_instead_of_a_fa
     result = await run_echo_calibration(
         fake, fake, camera_config, calibration_config, "note",
         sleep=_make_traced_sleep(fake),
+        speaker_has_aec=True,
     )
 
     assert result.failure_reason is None
@@ -305,6 +306,7 @@ async def test_near_floor_room_tone_still_counts_as_an_echo_cancelled_camera(tmp
     result = await run_echo_calibration(
         fake, fake, camera_config, calibration_config, "note",
         sleep=_make_traced_sleep(fake),
+        speaker_has_aec=True,
     )
 
     assert result.failure_reason is None

@@ -36,6 +36,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from atlas.audio.cue import silence
 from atlas.calibration.record import EchoCalibration
 from atlas.calibration.runner import CalibrationRunResult, run_echo_calibration
 from atlas.config import CameraConfig, Config, ConfigError, load_config
@@ -143,14 +144,27 @@ def _latest_record_path(calibration_dir: Path) -> Path | None:
 async def _run(config: Config, placement_note: str) -> CalibrationRunResult:
     source = _open_camera(config.camera)
     source.start()
-    speaker = FifoWriter(config.speaker.fifo_path, reopen_timeout_s=config.speaker.reopen_timeout_s)
+    # The script writes into the same FIFO the running pod's own egress
+    # reads, so the probe must be in that same TTS sink format.
+    sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
+    # The probe is short, so without padding its end stays in the egress
+    # reader and the calibration measures a cut probe.
+    speaker = FifoWriter(
+        config.speaker.fifo_path,
+        reopen_timeout_s=config.speaker.reopen_timeout_s,
+        pad_bytes=silence(sink, config.speaker.tail_pad_s),
+        pad_idle_s=config.speaker.tail_pad_idle_s,
+    )
     await speaker.open()
     try:
-        # The script writes into the same FIFO the running pod's own
-        # egress reads, so the probe must be in that same TTS sink format.
-        sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
         return await run_echo_calibration(
-            source, speaker, config.camera, config.calibration, placement_note, sink=sink
+            source,
+            speaker,
+            config.camera,
+            config.calibration,
+            placement_note,
+            sink=sink,
+            speaker_has_aec=config.speaker.cancels_own_echo,
         )
     finally:
         await speaker.close()

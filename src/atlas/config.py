@@ -519,6 +519,23 @@ class SpeakerConfig:
     tail_pad_s: float = 0.2
     tail_pad_idle_s: float = 0.15
 
+    @property
+    def cancels_own_echo(self) -> bool:
+        """260923-sfi (D2): true only for `tapo_talk` -- the one backend
+        where "no echo came back" is known to mean the camera cancelled
+        its own speaker output from its microphone, not that the probe
+        never played.
+
+        On `tcp`, the speaker is a different device, and the camera
+        microphone has no link to it at all -- "no echo" there just means
+        nothing reached the microphone. On `go2rtc`, a speaker that never
+        played (a failed backchannel) records the exact same silence a
+        real echo-cancelling camera would, so it is not trustworthy
+        either. `calibration/runner.py`'s echo_cancelled fallback reads
+        this before it ever assumes a camera cancelled anything.
+        """
+        return self.backend == "tapo_talk"
+
     @classmethod
     def from_config(cls, raw: dict | None) -> "SpeakerConfig":
         raw = raw or {}

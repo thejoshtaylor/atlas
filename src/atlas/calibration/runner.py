@@ -252,6 +252,7 @@ async def run_echo_calibration(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     probe_seed: int = DEFAULT_PROBE_SEED,
     sink: SinkFormat | None = None,
+    speaker_has_aec: bool = False,
 ) -> CalibrationRunResult:
     """Measure the echo path once, end to end, and persist the result --
     or return the reason it could not be measured, writing nothing.
@@ -270,6 +271,13 @@ async def run_echo_calibration(
     sink`. `None` means A-law at the source's own rate, the camera case of
     today: the probe is written unconverted, byte for byte, the same as
     before this parameter existed.
+
+    `speaker_has_aec` (260923-sfi, D2) gates the echo_cancelled fallback
+    below. It defaults to `False`, the safe side: only `SpeakerConfig.
+    cancels_own_echo` (true for `tapo_talk` alone) is trusted to explain
+    "no echo came back" as the camera cancelling its own speaker output.
+    On every other backend the same recording shape is refused as a plain
+    failure instead, and nothing is saved.
     """
     fmt = source.source_format()
     alaw_bytes, reference_pcm16 = build_probe(
@@ -314,7 +322,12 @@ async def run_echo_calibration(
         # echo still recorded *something* (room tone, at minimum), while a
         # dead microphone recorded digital silence. Checked here, not by
         # matching `failure_reason`'s text (T-260922-eca).
-        if measurement.no_echo and _has_signal_above_codec_floor(recorded_pcm16):
+        #
+        # 260923-sfi (D2): `speaker_has_aec` gates this fallback too -- a
+        # speaker on another device, or one that never played at all, can
+        # produce this exact same "something came back, none of it is the
+        # probe" shape with no camera echo cancellation involved.
+        if speaker_has_aec and measurement.no_echo and _has_signal_above_codec_floor(recorded_pcm16):
             logger.warning(
                 "no echo came back for source=%s (confidence=%.3f) -- "
                 "assuming the camera cancels its own speaker output from its microphone",
@@ -343,6 +356,13 @@ async def run_echo_calibration(
             target = Path(calibration_config.dir) / _timestamped_filename(taken_at)
             calibration.save(target)
             return CalibrationRunResult(calibration=calibration, failure_reason=None)
+        if measurement.no_echo and not speaker_has_aec:
+            logger.warning(
+                "no echo came back for source=%s (confidence=%.3f) from a speaker with no "
+                "echo cancellation -- the probe did not reach the microphone, no record saved",
+                DEFAULT_SOURCE_NAME,
+                measurement.confidence,
+            )
         return CalibrationRunResult(calibration=None, failure_reason=measurement.failure_reason)
 
     taken_at = now()

@@ -1770,6 +1770,7 @@ async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str,
             config.calibration,
             payload.placement_note,
             sink=sink,
+            speaker_has_aec=config.speaker.cancels_own_echo,
         )
     finally:
         app.state.calibration_in_progress = False
