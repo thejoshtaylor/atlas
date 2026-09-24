@@ -12,7 +12,7 @@ image:
 
 secretName: atlas
 
-# The public ingress: `voice.jtlabs.co` already resolves (the wildcard
+# The public ingress: `atlas.jtlabs.co` already resolves (the wildcard
 # `*.jtlabs.co` record is Cloudflare-proxied) straight to this cluster.
 # Cloudflare terminates public TLS in "Full" mode (not "Full strict"), so
 # the origin hop lands on k3s Traefik's `websecure` entrypoint and is
@@ -22,7 +22,7 @@ secretName: atlas
 ingress:
   enabled: true
   className: traefik
-  host: voice.jtlabs.co
+  host: atlas.jtlabs.co
   tls: []
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure

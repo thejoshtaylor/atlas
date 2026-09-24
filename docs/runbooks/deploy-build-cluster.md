@@ -92,7 +92,7 @@ The shipped configuration needs every key below.
 | `CAMERA_RTSP_URL` | The whole authenticated camera RTSP URL. This value never appears in this repository. This Secret is the one place it lives. |
 | `SPEAKER_BACKEND` | `go2rtc` or `tapo_talk`. |
 | `BIND_HOST` | `0.0.0.0`. This matches `values-build.yaml`'s `config.bindHost`. |
-| `COOKIE_SECURE` | Set `COOKIE_SECURE=true` once the public ingress at `voice.jtlabs.co` is enabled (section 7 below) — public HTTPS in front of this release means the session cookie must be Secure. `false` is only correct for a deploy with no ingress and no TLS in front of it at all. |
+| `COOKIE_SECURE` | Set `COOKIE_SECURE=true` once the public ingress at `atlas.jtlabs.co` is enabled (section 7 below) — public HTTPS in front of this release means the session cookie must be Secure. `false` is only correct for a deploy with no ingress and no TLS in front of it at all. |
 | `DATABASE_URL` | See the pairing rule below. |
 | `POSTGRES_PASSWORD` | See the pairing rule below. |
 | `ATLAS_SECRET_KEY` | See the generation command below. |
@@ -175,10 +175,10 @@ namespace, so this one command places each in the right place: the Sensor
 goes into `argo-events`, the WorkflowTemplate goes into `argo`, and the
 Application and the ImageUpdater go into `argocd`.
 
-## 7. The public ingress at voice.jtlabs.co, and the cookie it requires
+## 7. The public ingress at atlas.jtlabs.co, and the cookie it requires
 
 `values-build.yaml` enables the chart's ingress. Once it is applied, this
-webapp is reachable at `https://voice.jtlabs.co` over public HTTPS
+webapp is reachable at `https://atlas.jtlabs.co` over public HTTPS
 (Cloudflare-terminated, in "Full" mode). A session cookie served over
 public HTTPS must be Secure, so the hand-applied `home/atlas`
 Secret must set `COOKIE_SECURE=true` — see the table in section 3.
