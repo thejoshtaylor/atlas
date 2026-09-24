@@ -1,11 +1,54 @@
 """Table tests for `turn/controller.py`'s pre-brain transcript guard
 (260923-kao): a wake-only or filler-only final transcript must never reach
 a macro, the local on/off matcher, or the tier race.
+
+Also tests `asks_for_information` (260924-4it): the pure predicate the
+first-round done shortcut in `_run_tool_rounds` checks before speaking a
+canned "done" reply instead of taking a second model round.
 """
 
 import pytest
 
-from atlas.turn.transcript_guard import is_no_command
+from atlas.turn.transcript_guard import asks_for_information, is_no_command
+
+# 260924-4it: True cases -- the operator may be waiting for spoken
+# information, so the done shortcut must not fire.
+_ASKS = (
+    "What's the temperature and turn on the fan",
+    "turn on the fan and tell me the temperature",
+    "Is the door locked?",
+    "hey atlas is the door locked",
+    "turn on the fan and is the window open",
+    "turn on the fan?",
+    "how warm is it in here",
+    "which lights are on",
+    "turn off the lamp. what time is it",
+    "check if the door is locked and turn on the lamp",
+    "read me the forecast then turn off the lamp",
+)
+
+# False cases -- plain commands, nothing to answer aloud.
+_DOES_NOT_ASK = (
+    "turn on the fan",
+    "Turn off the lamp.",
+    "could you turn off the lamp",
+    "can you switch on the fan please",
+    "hey atlas turn off the lamp",
+    "set the lamp to fifty percent",
+    "turn on the light that is by the door",
+    "turn off the fan and the lamp",
+    "",
+)
+
+
+@pytest.mark.parametrize("text", _ASKS)
+def test_asks_for_information_is_true(text: str) -> None:
+    assert asks_for_information(text) is True
+
+
+@pytest.mark.parametrize("text", _DOES_NOT_ASK)
+def test_asks_for_information_is_false(text: str) -> None:
+    assert asks_for_information(text) is False
 
 # Wake-only against the default keyword ("atlas", used when no wake_phrase
 # is configured) -- an echo of the wake phrase, or a near-miss of it.

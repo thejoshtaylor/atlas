@@ -68,6 +68,64 @@ _KEYWORD_SIMILARITY = 0.6
 _MAX_WAKE_ONLY_TOKENS = 3
 _NON_WORD_RE = re.compile(r"[^\w\s]")
 
+# 260924-4it: words that open a genuine information request -- the words
+# themselves ("what", "how", "check", ...), not question marks alone, since
+# a spoken command often carries no punctuation at all. Apostrophe-free
+# ("whats", not "what's") because `_tokens` drops the apostrophe.
+_QUESTION_WORDS: frozenset[str] = frozenset(
+    {
+        "what",
+        "whats",
+        "how",
+        "hows",
+        "when",
+        "where",
+        "wheres",
+        "which",
+        "who",
+        "whos",
+        "whose",
+        "why",
+        "tell",
+        "check",
+        "read",
+    }
+)
+
+# An auxiliary verb that opens a yes/no question ("is the door locked").
+# "can", "could", "would", and "will" are deliberately absent: they open a
+# polite command ("could you turn off the lamp"), not a question.
+_AUX_WORDS: frozenset[str] = frozenset(
+    {
+        "is",
+        "are",
+        "am",
+        "was",
+        "were",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "isnt",
+        "arent",
+        "wasnt",
+        "werent",
+        "dont",
+        "doesnt",
+        "didnt",
+        "hasnt",
+        "havent",
+    }
+)
+
+# Words that precede a real sentence without carrying meaning of their own
+# -- dropped from the front before checking for a leading auxiliary.
+_LEAD_IN_WORDS: frozenset[str] = frozenset(
+    {"hey", "hi", "hay", "ok", "okay", "so", "um", "uh", "oh", "please", "atlas"}
+)
+
 
 def _tokens(text: str) -> list[str]:
     """Lowercase, drop every punctuation mark (including a curly
@@ -97,3 +155,41 @@ def is_no_command(text: str, wake_phrase: str | None = None) -> bool:
     keyword = phrase_tokens[-1] if phrase_tokens else _DEFAULT_KEYWORD
 
     return difflib.SequenceMatcher(None, content[-1], keyword).ratio() >= _KEYWORD_SIMILARITY
+
+
+def asks_for_information(text: str) -> bool:
+    """True when `text` may be asking to hear something, not just asking
+    for an action.
+
+    The done shortcut in `turn/controller.py`'s `_run_tool_rounds` calls
+    this predicate. True means the operator may be waiting to hear spoken
+    information, so the model must phrase the reply -- False lets the
+    shortcut speak the canned "done" reply after a plain action succeeds,
+    with no second model round.
+
+    The predicate errs toward True on purpose. A false True costs one
+    model round of latency. A false False drops information the operator
+    asked for.
+
+    Accepted miss: a custom wake word that is not in `_LEAD_IN_WORDS`,
+    followed by an unpunctuated yes/no question, is not caught. xAI STT
+    usually adds a question mark, and rule 1 below then catches it anyway.
+    """
+    if "?" in text:
+        return True
+
+    tokens = _tokens(text)
+    if any(token in _QUESTION_WORDS for token in tokens):
+        return True
+
+    lead = 0
+    while lead < len(tokens) and tokens[lead] in _LEAD_IN_WORDS:
+        lead += 1
+    if lead < len(tokens) and tokens[lead] in _AUX_WORDS:
+        return True
+
+    for index, token in enumerate(tokens):
+        if index > 0 and tokens[index - 1] in ("and", "also", "then") and token in _AUX_WORDS:
+            return True
+
+    return False
