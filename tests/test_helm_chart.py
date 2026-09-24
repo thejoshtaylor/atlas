@@ -544,3 +544,70 @@ def test_a_slow_start_is_not_killed_by_the_liveness_probe() -> None:
     probe = container["startupProbe"]
     assert probe["httpGet"]["path"] == "/health"
     assert probe["periodSeconds"] * probe["failureThreshold"] >= 300
+
+
+# --- 260924-jth: CPU and memory requests, optional priority class (issue #3) ---
+
+
+def _app_container(docs: list[dict]) -> dict:
+    deployment = _find_one(docs, "Deployment")
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    return next(c for c in containers if c["name"] == "atlas")
+
+
+@skip_without_helm
+def test_default_render_requests_one_cpu_and_one_gi_memory() -> None:
+    """Issue #3 item 1. A pod with no request is BestEffort and gets the
+    lowest CPU weight. The default request keeps a share of CPU and memory
+    for ATLAS on a busy node."""
+    container = _app_container(_helm_template())
+    assert container["resources"]["requests"] == {"cpu": "1000m", "memory": "1Gi"}
+
+
+@skip_without_helm
+def test_default_render_sets_no_cpu_limit_and_no_memory_limit() -> None:
+    """A CPU limit throttles the container for the rest of each 100 ms
+    period once it spends its quota, and that delays audio and replies. A
+    memory limit sends SIGKILL, which skips the shutdown that closes the
+    camera talk session."""
+    container = _app_container(_helm_template())
+    limits = container["resources"].get("limits", {})
+    assert "cpu" not in limits
+    assert "memory" not in limits
+
+
+@skip_without_helm
+def test_an_operator_overrides_requests_and_adds_a_memory_limit_through_values() -> None:
+    """Issue #3 item 1 (configurable). No template edit is needed to
+    change a request or add a limit."""
+    docs = _helm_template(
+        "--set-string",
+        "resources.requests.cpu=2",
+        "--set-string",
+        "resources.requests.memory=2Gi",
+        "--set-string",
+        "resources.limits.memory=4Gi",
+    )
+    container = _app_container(docs)
+    assert container["resources"]["requests"] == {"cpu": "2", "memory": "2Gi"}
+    assert container["resources"]["limits"] == {"memory": "4Gi"}
+
+
+@skip_without_helm
+def test_default_render_has_no_priority_class_name() -> None:
+    """Issue #3 item 2. Empty by default -- the chart creates no
+    PriorityClass, so a pod-spec key with no value would name nothing."""
+    docs = _helm_template()
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert "priorityClassName" not in pod_spec
+
+
+@skip_without_helm
+def test_priority_class_name_renders_when_set() -> None:
+    """Issue #3 item 2. `--set priorityClassName=...` reaches the pod
+    spec with no template edit."""
+    docs = _helm_template("--set", "priorityClassName=atlas-high")
+    deployment = _find_one(docs, "Deployment")
+    pod_spec = deployment["spec"]["template"]["spec"]
+    assert pod_spec["priorityClassName"] == "atlas-high"
