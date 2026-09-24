@@ -38,7 +38,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -46,20 +46,27 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from mcp.client.stdio import get_default_environment
+from mcp.types import CallToolResult, TextContent
 
 import conftest
 import atlas.app as app_module
 import atlas.routes.wizard as wizard_module
 import test_startup_smoke as smoke
-from atlas.config import SecurityConfig
+from atlas.auth.tokens import issue_access_token
+from atlas.config import SecurityConfig, WorkflowConfig
 from atlas.db.repository import PluginConfigValue
 from atlas.plugins.manager import PluginManager
 from atlas.routes.wizard import (
     TIMEZONE_SETTING_KEY,
     TIMEZONE_UTC_WARNING,
+    TimezoneResolution,
     resolve_timezone,
 )
+from atlas.workflow.scheduler import WorkflowScheduler
+from atlas.workflow.steps import execute_step
+from atlas.workflow.tool import WorkflowToolHost
 from test_plugin_env_isolation import _MCP_ROOT, _ha_plugin, _weather_plugin
+from test_wizard_flow import _authed_app
 
 _HA_URL = "http://ha.invalid:8123"
 _HA_TOKEN = "a-plainly-fictional-test-token-not-a-real-credential"
@@ -476,3 +483,208 @@ def test_lifespan_logs_the_utc_warning_once_with_no_zone_anywhere(tmp_path, monk
         and r.getMessage() == TIMEZONE_UTC_WARNING
     ]
     assert len(records) == 1
+
+
+# ---------------------------------------------------------------------
+# GET/PUT /api/wizard/timezone (issue item 5, plan Task 2)
+# ---------------------------------------------------------------------
+
+
+def _process_fallback_resolution(*, warning: "str | None" = TIMEZONE_UTC_WARNING) -> TimezoneResolution:
+    return TimezoneResolution(
+        zone=None, name="the local zone", resolved_from="process", child_tz=None, warning=warning
+    )
+
+
+def test_get_timezone_reports_the_boot_value_and_warning(monkeypatch):
+    app, client, *_ = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution()
+
+    response = client.get("/api/wizard/timezone")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "zone": "the local zone",
+        "resolved_from": "process",
+        "stored": None,
+        "warning": TIMEZONE_UTC_WARNING,
+        "applies_live": False,
+    }
+
+
+def test_put_timezone_stores_the_zone_and_leaves_boot_values_unchanged(monkeypatch):
+    app, client, security, admin, credential_repo, setup_repo, settings_repo = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution()
+
+    response = client.put("/api/wizard/timezone", json={"zone": "America/New_York"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["stored"] == "America/New_York"
+    assert body["applies_live"] is False
+    assert body["zone"] == "the local zone"
+    assert body["resolved_from"] == "process"
+    assert body["warning"] == TIMEZONE_UTC_WARNING
+
+    stored = settings_repo.settings[TIMEZONE_SETTING_KEY]
+    assert stored.value == "America/New_York"
+    assert stored.updated_by_user_id == admin["id"]
+
+
+async def test_after_a_put_the_next_boot_resolves_the_stored_zone(monkeypatch):
+    app, client, *_rest, settings_repo = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution(warning=None)
+
+    write = client.put("/api/wizard/timezone", json={"zone": "America/New_York"})
+    assert write.status_code == 200, write.text
+
+    client_for_ha = httpx.AsyncClient(transport=_never_called_transport())
+    try:
+        resolution = await resolve_timezone(
+            _config(), settings_repo, _ha_plugin_repo(), client=client_for_ha
+        )
+    finally:
+        await client_for_ha.aclose()
+
+    assert resolution.resolved_from == "database"
+    assert resolution.zone == ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize("bad_zone", ["Not/AZone", "", "../../etc/passwd", "/etc/localtime"])
+def test_put_timezone_refuses_bad_zone_names(monkeypatch, bad_zone):
+    app, client, *_rest, settings_repo = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution()
+
+    response = client.put("/api/wizard/timezone", json={"zone": bad_zone})
+    assert response.status_code == 400, response.text
+    assert settings_repo.settings == {}
+
+
+def test_get_and_put_timezone_require_authentication(monkeypatch):
+    app, client, *_ = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution()
+    anonymous = TestClient(app)
+
+    assert anonymous.get("/api/wizard/timezone").status_code == 401
+    assert anonymous.put("/api/wizard/timezone", json={"zone": "America/New_York"}).status_code == 401
+
+
+async def test_put_timezone_refuses_an_operator(monkeypatch):
+    app, client, security, admin, *_rest = _authed_app(monkeypatch)
+    app.state.timezone_resolution = _process_fallback_resolution()
+
+    # `current_user` re-reads the role fresh from `account_repo` by the
+    # token's own user id (auth/dependencies.py's own docstring) -- a
+    # token merely *claiming* role="operator" for the admin's own id
+    # would still resolve to "admin", so this needs a real operator row.
+    operator = await app.state.account_repo.create_user(
+        email="operator@example.invalid",
+        display_name="An Operator",
+        password_hash="not-checked-by-this-test",
+        role="operator",
+    )
+    operator_client = TestClient(app)
+    operator_client.cookies.set(
+        security.cookie_name,
+        issue_access_token(user_id=operator.id, role="operator", security=security),
+    )
+
+    response = operator_client.put("/api/wizard/timezone", json={"zone": "America/New_York"})
+    assert response.status_code == 403, response.text
+
+
+# ---------------------------------------------------------------------
+# A 22:00 local schedule fires at 22:00 local, across both DST directions
+# ---------------------------------------------------------------------
+
+
+class _RecordingToolHost:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name: str, arguments: dict) -> CallToolResult:
+        self.calls.append((name, dict(arguments)))
+        return CallToolResult(
+            content=[TextContent(type="text", text="ok")],
+            structured_content={"changed": [arguments.get("entity_id")]},
+        )
+
+
+@pytest.mark.parametrize(
+    "direction,clock_start,at,expected_due_at",
+    [
+        (
+            "fall-back",
+            datetime(2026, 10, 31, 16, 0, tzinfo=timezone.utc),
+            "2026-11-01T22:00:00",
+            datetime(2026, 11, 2, 3, 0, tzinfo=timezone.utc),
+        ),
+        (
+            "spring-forward",
+            datetime(2027, 3, 13, 17, 0, tzinfo=timezone.utc),
+            "2027-03-14T22:00:00",
+            datetime(2027, 3, 15, 2, 0, tzinfo=timezone.utc),
+        ),
+    ],
+)
+async def test_a_22_00_local_schedule_fires_at_22_00_local_across_dst(
+    direction, clock_start, at, expected_due_at
+):
+    settings_repo = conftest.FakeSettingsRepository()
+    await settings_repo.set_setting(
+        TIMEZONE_SETTING_KEY,
+        "America/New_York",
+        updated_by_user_id=None,
+        updated_at=datetime.now(timezone.utc),
+    )
+    client = httpx.AsyncClient(transport=_never_called_transport())
+    try:
+        resolution = await resolve_timezone(
+            _config(), settings_repo, _ha_plugin_repo(), client=client
+        )
+    finally:
+        await client.aclose()
+    assert resolution.resolved_from == "database"
+    zone = resolution.zone
+
+    clock_time = [clock_start]
+    workflow_repo = conftest.FakeWorkflowRepository()
+    tool_host = WorkflowToolHost(workflow_repo, zone=zone, clock=lambda: clock_time[0])
+
+    result = await tool_host.call_tool(
+        "schedule_workflow",
+        {
+            "kind": "call_service",
+            "arguments": {
+                "domain": "switch",
+                "service": "turn_off",
+                "entity_id": "switch.example_dst_lamp",
+            },
+            "at": at,
+            "summary": "turn off the example lamp",
+        },
+    )
+    assert not getattr(result, "is_error", False), result
+
+    run = await workflow_repo.get_run(1)
+    assert run is not None
+    due_at = run.steps[0].due_at
+    assert due_at == expected_due_at, f"{direction}: due_at={due_at}"
+    assert due_at.astimezone(zone).hour == 22
+
+    recording_host = _RecordingToolHost()
+    config = WorkflowConfig()
+    scheduler = WorkflowScheduler(
+        workflow_repo,
+        lambda step, now: execute_step(step, recording_host, config, now),
+        config,
+        clock=lambda: clock_time[0],
+    )
+
+    clock_time[0] = due_at - timedelta(seconds=1)
+    await scheduler._poll_once()
+    assert scheduler.claimed_count == 0
+    assert recording_host.calls == []
+
+    clock_time[0] = due_at
+    await scheduler._poll_once()
+    assert scheduler.claimed_count == 1
+    assert len(recording_host.calls) == 1

@@ -761,6 +761,43 @@ class FakeWorkflowRepository:
             fired_at=s["fired_at"],
         )
 
+    def _claimed_step_snapshot(self, step_id: int) -> WorkflowStep:
+        """260924-h2f (Rule 1): the step handed to `claim_and_execute_
+        next_due_step`'s own `executor` callback, with `due_at`/`fired_at`
+        stripped of `tzinfo` -- `db/postgres.py::_claimed_step_snapshot`'s
+        own documented convention, which `workflow.steps.execute_step`'s
+        `_late_by_seconds` depends on (`WorkflowStepRow`'s naive-UTC
+        column, never `_to_aware_utc`'d). `_step_view` above stays aware,
+        matching `WorkflowStep`'s own always-aware read shape
+        (`get_run`/`list_runs`) -- only the executor-facing snapshot needs
+        the naive form, the same split the real repository draws between
+        `_workflow_step_from_row` and `_claimed_step_snapshot`. Surfaced
+        by the first test to combine this fake's own claim path with a
+        real `execute_step` call (`tests/test_timezone.py`'s DST test) --
+        every earlier caller either drove `execute_step` directly with a
+        hand-built, already-naive `WorkflowStepRow`, or never exercised
+        this fake's claim path against it at all.
+        """
+        s = self._steps[step_id]
+
+        def _naive(dt: datetime | None) -> datetime | None:
+            if dt is None or dt.tzinfo is None:
+                return dt
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+        return WorkflowStep(
+            id=s["id"],
+            run_id=s["run_id"],
+            position=s["position"],
+            kind=s["kind"],
+            arguments=s["arguments"],
+            due_at=_naive(s["due_at"]),
+            status=s["status"],
+            attempts=s["attempts"],
+            result_detail=s["result_detail"],
+            fired_at=_naive(s["fired_at"]),
+        )
+
     def _run_view(self, run_id: int) -> WorkflowRun:
         run = self._runs[run_id]
         ordered_step_ids = sorted(
@@ -839,7 +876,7 @@ class FakeWorkflowRepository:
         if run["status"] == "pending":
             run["status"] = "firing"
 
-        outcome = await executor(self._step_view(step["id"]))
+        outcome = await executor(self._claimed_step_snapshot(step["id"]))
 
         step["attempts"] += 1
         step["result_detail"] = outcome.detail
