@@ -31,6 +31,36 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENTRYPOINT = _REPO_ROOT / "deploy" / "docker-entrypoint.sh"
 _COMPOSE_FILE = _REPO_ROOT / "docker-compose.yml"
 _CONFIG_EXAMPLE = _REPO_ROOT / "config" / "config.example.yaml"
+_CHART_VALUES = _REPO_ROOT / "charts" / "atlas" / "values.yaml"
+
+# 260924-jth: Kubernetes and Compose spell the same binary units with
+# different suffixes. Both are powers of 1024, so one table converts
+# either form to a byte count for a direct equality check.
+_BINARY_UNIT_POWERS = {
+    "ki": 1,
+    "kb": 1,
+    "k": 1,
+    "mi": 2,
+    "mb": 2,
+    "m": 2,
+    "gi": 3,
+    "gb": 3,
+    "g": 3,
+}
+
+
+def _binary_bytes(text: str) -> int:
+    """Parses a Kubernetes quantity (`1Gi`) or a Compose byte value
+    (`1g`, `1GB`) into a byte count, treating every suffix as a power of
+    1024. Raises ValueError on any other suffix or shape."""
+    match = re.fullmatch(r"(\d+)([A-Za-z]+)", text.strip())
+    if not match:
+        raise ValueError(f"not a binary size: {text!r}")
+    number, suffix = match.groups()
+    power = _BINARY_UNIT_POWERS.get(suffix.lower())
+    if power is None:
+        raise ValueError(f"unrecognized binary unit suffix: {suffix!r} in {text!r}")
+    return int(number) * (1024**power)
 
 # The same ${NAME} shape config.py::expand_env matches -- kept here as an
 # independent, deliberately duplicated regex (not an import) so this test
@@ -314,3 +344,38 @@ def test_the_test_stage_can_see_every_artifact_its_tests_read() -> None:
         "deploy/",
     ):
         assert needed in test_stage, f"the test stage does not copy in {needed}"
+
+
+# --- 260924-jth: same memory reservation as the chart's memory request --
+
+
+def test_compose_memory_reservation_equals_the_chart_default_memory_request():
+    """Issue #3 item 4. The app service reserves the same memory the
+    Helm chart requests by default, so an operator sees one number
+    repeated across both deployment paths, not two that can drift."""
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    reservations = compose["services"]["app"]["deploy"]["resources"]["reservations"]
+    compose_bytes = _binary_bytes(str(reservations["memory"]))
+
+    chart_values = yaml.safe_load(_CHART_VALUES.read_text(encoding="utf-8"))
+    chart_bytes = _binary_bytes(chart_values["resources"]["requests"]["memory"])
+
+    assert compose_bytes == chart_bytes == 1024**3
+
+
+def test_compose_app_deploy_resources_has_no_limits():
+    """No Compose limit, for the same reason the chart sets no default
+    limit: a memory limit sends SIGKILL, which skips the shutdown that
+    closes the camera talk session."""
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    resources = compose["services"]["app"]["deploy"]["resources"]
+    assert "limits" not in resources
+
+
+def test_compose_app_deploy_reservations_has_no_cpu_entry():
+    """Compose applies `reservations.cpus` only under Swarm, and Docker
+    already gives every container the CPU weight Kubernetes gives a
+    1-CPU request. A `cpus` entry here would reserve nothing."""
+    compose = yaml.safe_load(_COMPOSE_FILE.read_text(encoding="utf-8"))
+    reservations = compose["services"]["app"]["deploy"]["resources"]["reservations"]
+    assert "cpus" not in reservations
