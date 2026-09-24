@@ -42,6 +42,8 @@ from atlas.calibration.runner import (
     run_echo_calibration,
 )
 from atlas.config import CalibrationConfig, CameraConfig
+from atlas.providers.tts_xai import SinkFormat
+from atlas.providers.tts_piper import _resample_pcm16
 from atlas.transports.base import SourceFormat
 
 # `scripts/` is not on `pythonpath` (only `src`/`mcp` are, per
@@ -110,6 +112,7 @@ class _LoopbackFake:
         scale: float = 1.0,
         silence: bool = False,
         uncorrelated_noise_rms: float = 0.0,
+        sink: SinkFormat | None = None,
     ) -> None:
         self._sample_rate = sample_rate
         self._encoding = encoding
@@ -118,11 +121,19 @@ class _LoopbackFake:
         self._scale = scale
         self._silence = silence
         self._uncorrelated_noise_rms = uncorrelated_noise_rms
+        # 260923-pyj: the sink the probe was written in, when the test sets
+        # one -- `sink_format()` is what `app.py`'s route reads (duck-typed,
+        # like the real camera source) to decide whether to convert the
+        # probe before writing it.
+        self._sink = sink
         self.written: bytes | None = None
         self.events: list[tuple[str, object]] = []
 
     def source_format(self) -> SourceFormat:
         return SourceFormat(self._encoding, self._sample_rate)
+
+    def sink_format(self) -> SinkFormat | None:
+        return self._sink
 
     async def write(self, chunk: bytes) -> None:
         self.events.append(("write", len(chunk)))
@@ -143,8 +154,19 @@ class _LoopbackFake:
             await asyncio.sleep(0)
 
     def _build_recording(self) -> np.ndarray:
+        """Decode `self.written` -- the probe as it was actually written,
+        in `self._sink`'s format when one is set -- back to PCM16 at this
+        fake's own source rate, so the delay/gain injection below still
+        operates in one consistent rate regardless of what format the
+        probe travelled in."""
         assert self.written is not None
-        reference = np.frombuffer(alaw_to_pcm16(self.written), dtype="<i2").astype(np.float64)
+        if self._sink is None or self._sink.codec == "alaw":
+            pcm16_bytes = alaw_to_pcm16(self.written)
+        else:
+            pcm16_bytes = self.written
+        if self._sink is not None and self._sink.sample_rate != self._sample_rate:
+            pcm16_bytes = _resample_pcm16(pcm16_bytes, self._sink.sample_rate, self._sample_rate)
+        reference = np.frombuffer(pcm16_bytes, dtype="<i2").astype(np.float64)
         n = len(reference)
         total = self._delay_samples + n + self._delay_samples
         recording = np.zeros(total, dtype=np.float64)
@@ -383,6 +405,83 @@ def test_runner_module_contains_no_reference_to_the_camera_url_field():
 
 
 # ---------------------------------------------------------------------------
+# 260923-pyj: the probe follows the speaker sink format (D4)
+# ---------------------------------------------------------------------------
+
+
+async def test_probe_matches_todays_bytes_when_no_sink_is_given(tmp_path):
+    """No sink means the camera case of today: unconverted A-law at the
+    source's own rate -- proven byte for byte against build_probe itself,
+    not just "some bytes were written"."""
+    from atlas.audio.probe import build_probe
+
+    fake = _LoopbackFake(delay_samples=200, scale=0.6)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+    )
+
+    assert result.failure_reason is None
+    expected_alaw, _ = build_probe(SAMPLE_RATE, calibration_config.probe_duration_s)
+    assert fake.written == expected_alaw
+
+
+@pytest.mark.parametrize(
+    "sink, expected_written_bytes",
+    [
+        (SinkFormat("alaw", 8000), 9600),
+        (SinkFormat("alaw", 16000), 19200),
+        (SinkFormat("pcm", 8000), 19200),
+        (SinkFormat("pcm", 24000), 57600),
+    ],
+)
+async def test_probe_is_written_in_the_sink_format_and_still_correlates_at_the_source_rate(
+    tmp_path, sink, expected_written_bytes
+):
+    """The probe travels in the speaker's own format (D4) -- delay and
+    gain must still recover against the 8 kHz microphone reference, and
+    the saved record must still describe the microphone, never the sink."""
+    fake = _LoopbackFake(delay_samples=300, scale=0.55, sink=sink)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+        sink=sink,
+    )
+
+    assert fake.written is not None
+    assert len(fake.written) == expected_written_bytes
+    assert result.failure_reason is None
+    assert result.calibration is not None
+    expected_delay_s = 300 / SAMPLE_RATE
+    assert abs(result.calibration.delay_s - expected_delay_s) <= 2.0 / SAMPLE_RATE
+    assert abs(result.calibration.gain - 0.55) < 0.05
+    assert result.calibration.encoding == "alaw"
+    assert result.calibration.sample_rate == SAMPLE_RATE
+
+
+async def test_an_unsupported_sink_codec_raises_before_anything_plays(tmp_path):
+    fake = _LoopbackFake(delay_samples=200, scale=0.6)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    with pytest.raises(CalibrationRunnerError) as exc:
+        await run_echo_calibration(
+            fake, fake, camera_config, calibration_config, "note",
+            sleep=_make_traced_sleep(fake),
+            sink=SinkFormat("mulaw", 8000),
+        )
+
+    assert "mulaw" in str(exc.value)
+    assert fake.written is None
+
+
+# ---------------------------------------------------------------------------
 # Task 2 seam: the command-line caller imports run_echo_calibration and
 # nothing from atlas.audio.echo_path -- the mechanism that makes the
 # "one implementation" claim checkable rather than aspirational (D-20).
@@ -415,6 +514,53 @@ def test_calibrate_echo_path_script_reads_no_environment_variable_directly():
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
             if node.value.attr == "environ":
                 pytest.fail("scripts/calibrate_echo_path.py reads os.environ[...] directly")
+
+
+async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeypatch):
+    """260923-pyj (D4): the script writes the probe into the same FIFO the
+    pod's own egress reads, so it must convert the probe the same way --
+    `_run` reads `config.tts` and passes it through as `run_echo_
+    calibration`'s `sink` keyword."""
+    from atlas.config import TtsConfig
+
+    recorded: dict[str, object] = {}
+
+    class _FakeCameraSource:
+        def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class _FakeFifoWriter:
+        def __init__(self, path, *, reopen_timeout_s):
+            self.path = path
+            self.reopen_timeout_s = reopen_timeout_s
+
+        async def open(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    async def _fake_run_echo_calibration(source, speaker, camera_config, calibration_config, placement_note, **kwargs):
+        recorded.update(kwargs)
+        return CalibrationRunResult(calibration=None, failure_reason="stub")
+
+    monkeypatch.setattr(calibrate_echo_path, "_open_camera", lambda camera_config: _FakeCameraSource())
+    monkeypatch.setattr(calibrate_echo_path, "FifoWriter", _FakeFifoWriter)
+    monkeypatch.setattr(calibrate_echo_path, "run_echo_calibration", _fake_run_echo_calibration)
+
+    config = SimpleNamespace(
+        camera=_make_camera_config(),
+        speaker=SimpleNamespace(fifo_path=str(tmp_path / "speaker.fifo"), reopen_timeout_s=1.0),
+        calibration=_make_calibration_config(tmp_path),
+        tts=TtsConfig(codec="pcm", sample_rate=24000),
+    )
+
+    await calibrate_echo_path._run(config, "note")
+
+    assert recorded["sink"] == SinkFormat(codec="pcm", sample_rate=24000)
 
 
 def test_validate_environment_rejects_a_placement_note_shaped_like_a_url(tmp_path):
@@ -595,6 +741,20 @@ async def test_run_route_returns_measured_numbers_when_enabled_with_no_url_in_th
     body = json.dumps(response)
     assert "rtsp://" not in body
     assert "redacted" not in body
+
+
+async def test_run_route_reads_the_sink_from_the_camera_source_duck_typed(tmp_path):
+    """260923-pyj (D4): the route reads `sink_format()` off the camera
+    source it already holds -- never `config.tts`, which the route's own
+    tests give as a `SimpleNamespace` with no `tts` attribute at all."""
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(delay_samples=120, scale=0.6, sink=SinkFormat("pcm", 24000))
+    _install_calibration_state(camera_config, calibration_config, fake, fake)
+
+    await app_module.run_echo_path_calibration(app_module.CalibrationRunRequest(placement_note="kitchen shelf"))
+
+    assert len(fake.written) == 57600
 
 
 async def test_run_route_returns_conflict_when_a_run_is_already_in_progress(tmp_path):

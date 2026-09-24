@@ -18,14 +18,18 @@ specified and the code review (CR-02) found absent.
 from __future__ import annotations
 
 import struct
+from types import SimpleNamespace
 
 import pytest
 
 from atlas.audio.alaw import pcm16_to_alaw
 from atlas.audio.energy import rms_amplitude
 from atlas.calibration.record import EchoCalibration
+from atlas.config import BargeInConfig
+from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.output_trace import EmittedAudioTrace
-from atlas.sources.runner import BargeInMonitor
+from atlas.sources.runner import BargeInMonitor, SourceRunner
+from atlas.transports.base import SourceFormat
 
 # --- Task 1: rms_amplitude alone, no policy, no duration --------------------
 
@@ -636,3 +640,72 @@ def test_the_delay_shift_is_applied_the_unshifted_offset_gives_the_opposite_answ
     assert unshifted.interrupt_requested is True, (
         "querying the un-shifted offset lands past the end of the trace -- nothing explains it"
     )
+
+
+# ---------------------------------------------------------------------------
+# 260923-pyj (D5): the trace is built from the speaker's sink format
+# ---------------------------------------------------------------------------
+
+
+class _AlwaysHitDetector:
+    """Fires on every chunk with a fixed score -- these tests only need one
+    wake hit, never gate policy or refractory timing."""
+
+    def process(self, chunk: bytes):
+        return SimpleNamespace(score=1.0)
+
+
+class _NoSinkSource:
+    """The two `AudioSource` members `SourceRunner` actually reads, with no
+    `sink_format` at all -- the fallback case. Deliberately no import from
+    `tests.conftest` (module docstring)."""
+
+    def source_format(self) -> SourceFormat:
+        return SourceFormat("alaw", 8000)
+
+    async def frames(self):
+        return
+        yield  # pragma: no cover -- makes this an async generator; never reached
+
+
+class _SinkDeclaringSource(_NoSinkSource):
+    def sink_format(self) -> SinkFormat:
+        return SinkFormat("pcm", 24000)
+
+
+async def _drive_one_hit(source) -> "BargeInMonitor":
+    captured: dict[str, object] = {}
+
+    async def run_turn_fn(turn_source) -> None:
+        captured["monitor"] = turn_source.barge_in
+
+    runner = SourceRunner(
+        "camera",
+        source,
+        _AlwaysHitDetector(),
+        lambda chunk: chunk,
+        run_turn_fn,
+        barge_in_config=BargeInConfig(enabled=True, correlation_enabled=True),
+        calibration=_calibration(),
+    )
+    await runner._process_chunk(bytes(160))
+    return captured["monitor"]
+
+
+async def test_trace_is_sized_from_the_sink_format_when_the_source_declares_one():
+    """1 s of sink-format audio must span 1 s -- if the trace were (wrongly)
+    built from the 8 kHz A-law source format instead, the same bytes would
+    span 6 s."""
+    monitor = await _drive_one_hit(_SinkDeclaringSource())
+
+    monitor.trace.append(bytes(48000))  # 1 s of PCM16 at 24 kHz
+    assert monitor.trace.level_at(0.5) is not None
+    assert monitor.trace.level_at(1.5) is None
+
+
+async def test_trace_falls_back_to_the_source_format_when_the_source_declares_no_sink():
+    monitor = await _drive_one_hit(_NoSinkSource())
+
+    monitor.trace.append(bytes(8000))  # 1 s of A-law at 8 kHz
+    assert monitor.trace.level_at(0.5) is not None
+    assert monitor.trace.level_at(1.5) is None
