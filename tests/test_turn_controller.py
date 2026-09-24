@@ -1694,6 +1694,277 @@ async def test_empty_and_blank_fallback_prefers_the_cache_when_it_has_the_phrase
     assert timings.turn_outcome == "empty_answer"
 
 
+# --- 260924-4iu (b): an answer that exactly matches a cached phrase -------
+
+
+async def test_exact_cached_answer_plays_from_the_cache(fake_stt, fake_envelope_client):
+    """A confident triage tier's own answer, once normalized, equals a
+    phrase already in the sink's cache -- it plays from there, with zero
+    live TTS calls, and `reply.text` carries the cached phrase (the audio
+    actually played), not the model's original capitalized, punctuated
+    text."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    top_reply = TierReply(answer="Done.", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=top_reply),
+        calls_tools=False,
+    )
+
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {"done": b"\xfe\xff"}},
+    )
+
+    assert source.sent_audio == [b"\xfe\xff"]
+    assert tts.call_count == 0
+    assert {"type": "reply.text", "text": "done"} in source.sent_events
+
+
+async def test_cached_answer_match_ignores_case_punctuation_and_apostrophes(fake_stt, fake_envelope_client):
+    """The match is against `normalize()`'s form, the same fold macros use
+    (D-11) -- case, punctuation, and apostrophes never keep an answer from
+    matching its cached phrase."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    top_reply = TierReply(
+        answer="I can't do that one.", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT
+    )
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=top_reply),
+        calls_tools=False,
+    )
+
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the moon")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {"i can't do that one": b"\xfe\xff"}},
+    )
+
+    assert source.sent_audio == [b"\xfe\xff"]
+    assert tts.call_count == 0
+
+
+async def test_non_matching_answer_still_uses_live_tts(fake_audio_source, fake_stt, fake_envelope_client):
+    """An answer with no cached phrase to match behaves exactly as before
+    this fix: one live TTS call, the model's own text unchanged."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    top_reply = TierReply(
+        answer="Done, the kitchen light is off.",
+        confident=True,
+        needs_tool=False,
+        filler=FillerPhrase.ONE_MOMENT,
+    )
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=top_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the kitchen light")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {"done": b"\xfe\xff"}},
+    )
+
+    assert tts.call_count == 1
+    assert tts.received_text == ["Done, the kitchen light is off."]
+
+
+async def test_cached_answer_lookup_uses_the_sinks_own_cache_entry(fake_stt, fake_envelope_client):
+    """260922-cts's own discipline, applied to the answer-cache lookup: a
+    camera-sink source only ever matches against the camera-sink cache
+    entry. "done" being in the browser entry only must never play browser
+    bytes through the camera speaker."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    top_reply = TierReply(answer="Done.", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=top_reply),
+        calls_tools=False,
+    )
+
+    source = _CameraSinkSource(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {"done": b"browser-bytes"}},
+    )
+
+    assert tts.call_count == 1
+    assert source.sent_audio == [b"\x01\x02"]
+
+
+async def test_punctuation_only_answer_never_matches_the_cache(fake_audio_source, fake_stt, fake_envelope_client):
+    """An answer that normalizes to an empty string (punctuation only) can
+    never match a cache entry -- not even one whose own key is the empty
+    string, which is why the guard checks the normalized target itself
+    rather than only comparing keys."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    top_reply = TierReply(answer="...", confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=top_reply),
+        calls_tools=False,
+    )
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[tier],
+        filler_cache={None: {"": b"\xfe\xff"}},
+    )
+
+    assert tts.call_count == 1
+    assert tts.received_text == ["..."]
+
+
+async def test_all_success_action_round_done_reply_plays_from_the_cache(
+    fake_audio_source, fake_stt, fake_brain, fake_ha
+):
+    """260924-4it's canned `_DONE_REPLY` reaches `run_turn` as an ordinary
+    winning answer, through the same `winner.answer` path every other tier
+    reply takes -- so when "done" is itself in the sink's cache, the
+    first-round shortcut and this cache lookup compose: zero live TTS
+    calls for the most common action turn."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"] * 3)
+    stt = fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="ha_call_service",
+                        arguments={
+                            "domain": "switch",
+                            "service": "turn_on",
+                            "entity_id": "switch.example_fan",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    tts = _CountingTts(chunks=[b"\x01\x02"])
+    policy = Policy.from_config(None)
+    tool_host = _FakeToolHost(fake_ha, policy)
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        filler_cache={None: {"done": b"\xfe\xff"}},
+    )
+
+    assert brain.call_count == 1
+    assert tts.call_count == 0
+    assert source.sent_audio == [b"\xfe\xff"]
+
+
 async def test_brain_slower_than_turn_timeout_speaks_the_cached_fallback_and_cancels(
     fake_audio_source, fake_stt, fake_tts, fake_envelope_client
 ):
