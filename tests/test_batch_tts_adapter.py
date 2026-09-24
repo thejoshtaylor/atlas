@@ -16,7 +16,11 @@ from typing import AsyncIterator
 import pytest
 
 from atlas.providers.base import TtsError
-from atlas.providers.batch_tts_adapter import CHUNK_BYTES, BatchTtsAdapter
+from atlas.providers.batch_tts_adapter import (
+    CHUNK_BYTES,
+    BatchTtsAdapter,
+    _split_first_sentence,
+)
 
 
 class _FakeBatchProvider:
@@ -231,3 +235,195 @@ def test_a_half_constructed_adapter_raises_attribute_error_not_recursion_error()
 
     with pytest.raises(AttributeError):
         orphan.browser_sink
+
+
+# --- 260924-4iu (c): head-then-tail sentence rendering ---------------------
+
+
+def test_split_first_sentence_cases():
+    """`_split_first_sentence`'s own boundary rule, table-tested rather
+    than asserted one case at a time -- every case is a distinct reason a
+    split does, or does not, happen."""
+    cases = [
+        (
+            "It is eighteen degrees and sunny right now. Tomorrow brings rain after noon.",
+            "It is eighteen degrees and sunny right now.",
+            "Tomorrow brings rain after noon.",
+        ),
+        ("the light is off", "the light is off", ""),
+        # The head ("Sure.") is below _MIN_HEAD_CHARS -- no boundary qualifies.
+        ("Sure. The kitchen light is now off.", "Sure. The kitchen light is now off.", ""),
+        # "3.5" has no whitespace after the decimal point -- not a boundary.
+        (
+            "The temperature outside is 3.5 degrees right now",
+            "The temperature outside is 3.5 degrees right now",
+            "",
+        ),
+        # The only boundary's tail is whitespace only -- disqualified.
+        (
+            "It is eighteen degrees and sunny right now.   ",
+            "It is eighteen degrees and sunny right now.   ",
+            "",
+        ),
+        # The first boundary ("Short.") is too short; the second qualifies.
+        (
+            "Short. It is eighteen degrees and sunny today! Rain comes later.",
+            "Short. It is eighteen degrees and sunny today!",
+            "Rain comes later.",
+        ),
+    ]
+    for text, expected_head, expected_tail in cases:
+        assert _split_first_sentence(text) == (expected_head, expected_tail), text
+
+
+class _FakeSplitProvider:
+    """A `BatchTts` double shaped for head/tail rendering: per-text audio,
+    an optional `asyncio.Event` a call waits on before returning, an
+    optional error one text raises instead of returning, an in-flight
+    counter that records its own peak (for proving at most one call is
+    ever concurrent), and cancellation recording.
+    """
+
+    def __init__(
+        self,
+        audio_by_text: dict,
+        *,
+        wait_event_by_text: dict | None = None,
+        delay_by_text: dict | None = None,
+        error_by_text: dict | None = None,
+    ) -> None:
+        self.audio_by_text = audio_by_text
+        self.wait_event_by_text = wait_event_by_text or {}
+        self.delay_by_text = delay_by_text or {}
+        self.error_by_text = error_by_text or {}
+        self.calls: list[str] = []
+        self.completed_texts: list[str] = []
+        self.cancelled_texts: list[str] = []
+        self._in_flight = 0
+        self.peak_in_flight = 0
+
+    async def synthesize_once(self, text: str, sink=None) -> bytes:
+        self.calls.append(text)
+        self._in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
+        try:
+            event = self.wait_event_by_text.get(text)
+            if event is not None:
+                await event.wait()
+            delay = self.delay_by_text.get(text, 0.0)
+            if delay:
+                await asyncio.sleep(delay)
+            error = self.error_by_text.get(text)
+            if error is not None:
+                raise error
+            self.completed_texts.append(text)
+            return self.audio_by_text.get(text, b"")
+        except asyncio.CancelledError:
+            self.cancelled_texts.append(text)
+            raise
+        finally:
+            self._in_flight -= 1
+
+
+_TWO_SENTENCE_REPLY = (
+    "It is eighteen degrees and sunny right now. Tomorrow brings rain after noon."
+)
+_HEAD_TEXT, _TAIL_TEXT = _split_first_sentence(_TWO_SENTENCE_REPLY)
+
+
+@pytest.mark.asyncio
+async def test_multi_sentence_reply_plays_the_head_while_the_tail_renders():
+    tail_event = asyncio.Event()
+    head_audio = b"\x01" * 10
+    tail_audio = b"\x02" * 10
+    provider = _FakeSplitProvider(
+        {_HEAD_TEXT: head_audio, _TAIL_TEXT: tail_audio},
+        wait_event_by_text={_TAIL_TEXT: tail_event},
+    )
+    adapter = BatchTtsAdapter(provider)
+
+    chunks_iter = adapter.synthesize(_deltas(_TWO_SENTENCE_REPLY))
+    first_chunk = await chunks_iter.__anext__()
+
+    await asyncio.sleep(0)
+    assert provider.calls == [_HEAD_TEXT, _TAIL_TEXT]
+    assert _TAIL_TEXT not in provider.completed_texts
+
+    tail_event.set()
+    tail_chunks = [c async for c in chunks_iter]
+
+    assert first_chunk == head_audio
+    assert b"".join(tail_chunks) == tail_audio
+
+
+@pytest.mark.asyncio
+async def test_at_most_one_provider_call_is_in_flight():
+    provider = _FakeSplitProvider({_HEAD_TEXT: b"\x01" * 10, _TAIL_TEXT: b"\x02" * 10})
+    adapter = BatchTtsAdapter(provider)
+
+    [c async for c in adapter.synthesize(_deltas(_TWO_SENTENCE_REPLY))]
+
+    assert provider.peak_in_flight == 1
+
+
+@pytest.mark.asyncio
+async def test_last_synthesis_ms_measures_only_the_head_call():
+    provider = _FakeSplitProvider(
+        {_HEAD_TEXT: b"\x01" * 10, _TAIL_TEXT: b"\x02" * 10},
+        delay_by_text={_HEAD_TEXT: 0.05, _TAIL_TEXT: 0.3},
+    )
+    adapter = BatchTtsAdapter(provider)
+
+    chunks_iter = adapter.synthesize(_deltas(_TWO_SENTENCE_REPLY))
+    first_chunk = await chunks_iter.__anext__()
+    measured_at_first_chunk = adapter.last_synthesis_ms
+
+    assert measured_at_first_chunk is not None
+    assert 40 <= measured_at_first_chunk < 250, (
+        f"expected the figure to fall inside the head call's own delay, got {measured_at_first_chunk}"
+    )
+
+    remaining = [c async for c in chunks_iter]
+
+    assert [first_chunk, *remaining]
+    assert adapter.last_synthesis_ms == measured_at_first_chunk, (
+        "the figure must not change once the tail finishes"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failing_tail_raises_after_the_head_audio():
+    head_audio = b"\x01" * 10
+    provider = _FakeSplitProvider(
+        {_HEAD_TEXT: head_audio}, error_by_text={_TAIL_TEXT: TtsError("tail boom")}
+    )
+    adapter = BatchTtsAdapter(provider)
+
+    received: list[bytes] = []
+    with pytest.raises(TtsError):
+        async for chunk in adapter.synthesize(_deltas(_TWO_SENTENCE_REPLY)):
+            received.append(chunk)
+
+    assert b"".join(received) == head_audio, "every head chunk must reach the caller before the raise"
+
+
+@pytest.mark.asyncio
+async def test_closing_the_iterator_early_cancels_the_tail_render():
+    tail_event = asyncio.Event()
+    provider = _FakeSplitProvider(
+        {_HEAD_TEXT: b"\x01" * 10, _TAIL_TEXT: b"\x02" * 10},
+        wait_event_by_text={_TAIL_TEXT: tail_event},
+    )
+    adapter = BatchTtsAdapter(provider)
+
+    chunks_iter = adapter.synthesize(_deltas(_TWO_SENTENCE_REPLY))
+    await chunks_iter.__anext__()
+    await chunks_iter.aclose()
+
+    tail_event.set()
+    await asyncio.sleep(0.05)
+
+    assert _TAIL_TEXT not in provider.completed_texts
+    assert _TAIL_TEXT in provider.cancelled_texts or _TAIL_TEXT not in provider.calls, (
+        "a cancelled-before-its-first-step task never runs, so 'never called' is also valid"
+    )
