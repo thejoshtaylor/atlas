@@ -85,7 +85,7 @@ from spire_voice.session.observers import ObserverPublishingSource, ObserverRegi
 from spire_voice.session.recorder import SessionRecorder
 from spire_voice.session.retention import RetentionScheduler
 from spire_voice.sources.runner import SourceRunner
-from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor
+from spire_voice.speaker.ffmpeg_supervisor import FfmpegSupervisor, build_tcp_argv
 from spire_voice.speaker.fifo_writer import FifoWriter, SpeakerError
 from spire_voice.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
 from spire_voice.timing import TurnTimings
@@ -452,6 +452,18 @@ def _build_tapo_talk_supervisor(config: Config) -> TapoTalkSupervisor:
     (T-vqa-02)."""
     host = camera_host_from_rtsp_url(config.camera.rtsp_url)
     return TapoTalkSupervisor(config.speaker, host)
+
+
+def _build_tcp_supervisor(config: Config) -> FfmpegSupervisor:
+    """Build the `tcp` egress supervisor (260923-pds) -- the existing
+    `FfmpegSupervisor` wired to `build_tcp_argv`, with no `http_client`.
+    `ensure_url` is a go2rtc-only PUT that holds the camera password;
+    passing no client means `_ensure_backchannel` returns at once, so that
+    PUT is never sent on this path. A separate, monkeypatchable function so
+    tests can substitute a fake, the same reason its siblings
+    (`_build_ffmpeg_supervisor`, `_build_tapo_talk_supervisor`) are also
+    separate functions."""
+    return FfmpegSupervisor(config.speaker, build_argv=build_tcp_argv)
 
 
 def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
@@ -1241,9 +1253,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # in this file (there isn't one shared today) -- opened and closed with
     # the supervisor's own lifetime, since nothing else in this process
     # needs to issue the go2rtc backchannel PUT. Unused by the tapo_talk
-    # backend (pytapo is an in-process library call, not an HTTP PUT), but
-    # still built and closed unconditionally so the lifespan's own
-    # resource-cleanup shape stays the same either way.
+    # and tcp backends (pytapo is an in-process library call, not an HTTP
+    # PUT, and the tcp backend has no HTTP client at all), but still built
+    # and closed unconditionally so the lifespan's own resource-cleanup
+    # shape stays the same either way.
     speaker_http_client = httpx.AsyncClient()
     # speaker.backend selects which FIFO reader owns egress (D-vqa): the
     # variable and app.state attribute names stay `ffmpeg_supervisor`
@@ -1252,6 +1265,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # handle_reconnect() shape both supervisors implement.
     if config.speaker.backend == "tapo_talk":
         ffmpeg_supervisor = _build_tapo_talk_supervisor(config)
+    elif config.speaker.backend == "tcp":
+        ffmpeg_supervisor = _build_tcp_supervisor(config)
     else:
         ffmpeg_supervisor = _build_ffmpeg_supervisor(config, speaker_http_client)
     ffmpeg_supervisor.start()

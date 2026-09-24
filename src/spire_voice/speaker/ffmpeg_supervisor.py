@@ -66,6 +66,37 @@ def build_ffmpeg_argv(config: SpeakerConfig) -> list[str]:
     ]
 
 
+def build_tcp_argv(config: SpeakerConfig) -> list[str]:
+    """The `ffmpeg` invocation for the `tcp` backend (260923-pds): the FIFO
+    already holds raw 8 kHz A-law, so `-c copy` again -- there is nothing to
+    transcode. `-flush_packets 1` sends each packet as soon as `ffmpeg` has
+    it, so a short reply is not held in an output buffer waiting for more
+    data. The far end is a listener on another machine (for example a
+    Raspberry Pi) that plays what it receives.
+    """
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-f",
+        "alaw",
+        "-ar",
+        "8000",
+        "-ac",
+        "1",
+        "-i",
+        config.fifo_path,
+        "-c",
+        "copy",
+        "-flush_packets",
+        "1",
+        "-f",
+        "alaw",
+        config.tcp_url,
+    ]
+
+
 async def _default_spawn(argv: list[str]) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(*argv)
 

@@ -465,10 +465,14 @@ class SpeakerConfig:
     exact silent failure this field exists to rule out.
 
     `backend` selects which FIFO reader owns egress: `go2rtc` (default,
-    `FfmpegSupervisor`) or `tapo_talk` (`TapoTalkSupervisor`, for firmware
-    where go2rtc's built-in `tapo://` client can no longer authenticate).
-    The default stays `go2rtc` so an existing deployment's behaviour is
-    never silently changed by this field's addition.
+    `FfmpegSupervisor`), `tapo_talk` (`TapoTalkSupervisor`, for firmware
+    where go2rtc's built-in `tapo://` client can no longer authenticate),
+    or `tcp` (260923-pds: the same `FfmpegSupervisor`, pushing raw 8 kHz
+    A-law to `tcp_url` for a listener on another machine, such as a
+    Raspberry Pi speaker -- `go2rtc_url`, `stream`, and `ensure_url` are
+    not used on this path). The default stays `go2rtc` so an existing
+    deployment's behaviour is never silently changed by this field's
+    addition.
     """
 
     go2rtc_url: str = "http://frigate:1984"
@@ -478,6 +482,7 @@ class SpeakerConfig:
     respawn_backoff_s: float = 30.0
     reopen_timeout_s: float = 10.0
     backend: str = "go2rtc"
+    tcp_url: str = ""
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SpeakerConfig":
@@ -497,11 +502,18 @@ class SpeakerConfig:
                 "including one a respawning ffmpeg child was about to win"
             )
         backend = raw.get("backend", cls.backend)
-        supported_backends = ("go2rtc", "tapo_talk")
+        supported_backends = ("go2rtc", "tapo_talk", "tcp")
         if backend not in supported_backends:
             raise ConfigError(
                 f"speaker.backend {backend!r} is not one this codebase implements -- "
                 f"supported values are {supported_backends!r}"
+            )
+        tcp_url = str(raw.get("tcp_url") or "")
+        if backend == "tcp" and not (tcp_url.startswith("tcp://") and len(tcp_url) > len("tcp://")):
+            raise ConfigError(
+                f"speaker.tcp_url {tcp_url!r} is not a usable tcp:// address -- "
+                "set SPEAKER_TCP_URL to the tcp://host:port of the listener that "
+                "plays reply audio (for example a Raspberry Pi) when speaker.backend is tcp"
             )
         return cls(
             go2rtc_url=raw.get("go2rtc_url", cls.go2rtc_url),
@@ -511,6 +523,7 @@ class SpeakerConfig:
             fifo_path=raw.get("fifo_path", cls.fifo_path),
             respawn_backoff_s=respawn_backoff_s,
             reopen_timeout_s=reopen_timeout_s,
+            tcp_url=tcp_url,
         )
 
 
