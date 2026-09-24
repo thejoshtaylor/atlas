@@ -336,3 +336,111 @@ async def test_write_after_a_failed_reopen_retries_and_recovers(tmp_path):
     assert b"".join(second) == b"after-recovery"
 
     await writer.close()
+
+
+# ---------------------------------------------------------------------------
+# 260923-sfi (D1, D3): idle tail padding. ffmpeg's raw demuxer holds a
+# partial last packet until more audio arrives -- one silence write after an
+# idle gap pushes that packet out. These tests use a readable marker
+# (`b"<pad>"`) in place of real silence, since the pad's own bytes are
+# exercised for real in tests/test_speaker_tail_flush.py.
+# ---------------------------------------------------------------------------
+
+
+async def test_pad_fires_once_then_rearms_on_the_next_real_write(tmp_path):
+    fifo_path = str(tmp_path / "speaker.fifo")
+    os.mkfifo(fifo_path)
+
+    received: list[bytes] = []
+    stop_reader = threading.Event()
+    reader_thread = threading.Thread(target=_drain_forever, args=(fifo_path, received, stop_reader), daemon=True)
+    reader_thread.start()
+
+    writer = FifoWriter(fifo_path, pad_bytes=b"<pad>", pad_idle_s=0.05)
+    await writer.open()
+
+    await writer.write(b"one")
+    await _wait_for(lambda: b"".join(received) == b"one<pad>")
+    await asyncio.sleep(0.25)
+    assert b"".join(received) == b"one<pad>"  # no second, unprompted pad
+
+    await writer.write(b"two")
+    await _wait_for(lambda: b"".join(received) == b"one<pad>two<pad>")
+
+    await writer.close()
+    stop_reader.set()
+    reader_thread.join(timeout=2)
+
+
+async def test_rapid_writes_are_not_split_by_padding(tmp_path):
+    fifo_path = str(tmp_path / "speaker.fifo")
+    os.mkfifo(fifo_path)
+
+    received: list[bytes] = []
+    stop_reader = threading.Event()
+    reader_thread = threading.Thread(target=_drain_forever, args=(fifo_path, received, stop_reader), daemon=True)
+    reader_thread.start()
+
+    writer = FifoWriter(fifo_path, pad_bytes=b"<pad>", pad_idle_s=0.3)
+    await writer.open()
+
+    await writer.write(b"a")
+    await asyncio.sleep(0.02)
+    await writer.write(b"b")
+    await asyncio.sleep(0.02)
+    await writer.write(b"c")
+
+    await _wait_for(lambda: b"".join(received) == b"abc")
+    assert b"".join(received) == b"abc"  # each write cancelled the prior pad
+
+    await _wait_for(lambda: b"".join(received) == b"abc<pad>")
+
+    await writer.close()
+    stop_reader.set()
+    reader_thread.join(timeout=2)
+
+
+async def test_close_cancels_a_pending_pad(tmp_path):
+    fifo_path = str(tmp_path / "speaker.fifo")
+    os.mkfifo(fifo_path)
+
+    received: list[bytes] = []
+    stop_reader = threading.Event()
+    reader_thread = threading.Thread(target=_drain_forever, args=(fifo_path, received, stop_reader), daemon=True)
+    reader_thread.start()
+
+    writer = FifoWriter(fifo_path, pad_bytes=b"<pad>", pad_idle_s=0.1)
+    await writer.open()
+
+    await writer.write(b"x")
+    await writer.close()
+    await asyncio.sleep(0.3)
+
+    assert b"".join(received) == b"x"
+    assert writer._pad_task is None or writer._pad_task.done()
+
+    stop_reader.set()
+    reader_thread.join(timeout=2)
+
+
+async def test_padding_is_disabled_by_default(tmp_path):
+    fifo_path = str(tmp_path / "speaker.fifo")
+    os.mkfifo(fifo_path)
+
+    received: list[bytes] = []
+    stop_reader = threading.Event()
+    reader_thread = threading.Thread(target=_drain_forever, args=(fifo_path, received, stop_reader), daemon=True)
+    reader_thread.start()
+
+    writer = FifoWriter(fifo_path)
+    await writer.open()
+
+    await writer.write(b"x")
+    await asyncio.sleep(0.2)
+
+    assert b"".join(received) == b"x"
+    assert writer._pad_task is None
+
+    await writer.close()
+    stop_reader.set()
+    reader_thread.join(timeout=2)
