@@ -15,6 +15,11 @@ from alembic import context
 # migration that never actually ran, with no error.
 from atlas.db.models import Base
 
+# Phase 9: a model module nobody imports is invisible to `Base.metadata`
+# even though it subclasses `Base` (`db/models.py`'s own docstring) --
+# this import is what makes the six Google tables visible to Alembic.
+from atlas.db import google_models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

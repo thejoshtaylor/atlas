@@ -1151,7 +1151,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # The real migration runner `lifespan` calls -- not a fake, not a
         # second reimplementation of it (the plan's own key link).
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0014"
+        assert get_current_revision(migration_url) == "0015"
 
         async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
             reread_rules = {r.id: r for r in await policy_repo.list_rules()}
@@ -1182,7 +1182,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # A second run at head: no-op. The stamped revision is unchanged
         # and nothing is added, removed, or rewritten -- old data or new.
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0014"
+        assert get_current_revision(migration_url) == "0015"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
 
         # A downgrade of this phase's own migration, and a re-upgrade,
@@ -1195,7 +1195,74 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         assert get_current_revision(migration_url) == "0010"
 
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0014"
+        assert get_current_revision(migration_url) == "0015"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
     finally:
         await engine.dispose()
+
+
+@skip_without_postgres
+async def test_migration_0015_creates_every_google_table_and_is_idempotent(monkeypatch):
+    """Migration 0015 (Phase 9, plan 09-01, Task 1): `google_oauth_client`,
+    `google_oauth_states`, `google_accounts`, `google_calendars`,
+    `google_account_style`, and `pending_actions` all exist after an
+    upgrade to head from empty, `uq_google_calendars_account_calendar`
+    exists on `google_calendars`, and running every migration twice is
+    still a no-op the second time -- the same idempotency guarantee this
+    file's other migration tests already prove."""
+    from sqlalchemy import inspect
+
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+
+    def _inspect(sync_conn):
+        inspector = inspect(sync_conn)
+        table_names = set(inspector.get_table_names())
+        constraint_names = {
+            uc["name"] for uc in inspector.get_unique_constraints("google_calendars")
+        }
+        return table_names, constraint_names
+
+    try:
+        async with engine.connect() as conn:
+            table_names, constraint_names = await conn.run_sync(_inspect)
+    finally:
+        await engine.dispose()
+
+    expected_tables = {
+        "google_oauth_client",
+        "google_oauth_states",
+        "google_accounts",
+        "google_calendars",
+        "google_account_style",
+        "pending_actions",
+    }
+    assert expected_tables <= table_names
+    assert "uq_google_calendars_account_calendar" in constraint_names
+
+    # Idempotent: a second upgrade to the same head must not error and
+    # must not duplicate a single table or constraint.
+    _run_upgrade_head()
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            second_table_names, second_constraint_names = await conn.run_sync(_inspect)
+    finally:
+        await engine.dispose()
+    assert second_table_names == table_names
+    assert second_constraint_names == constraint_names

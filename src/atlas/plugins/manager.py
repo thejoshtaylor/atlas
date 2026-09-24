@@ -38,7 +38,9 @@ import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Sequence
+
+from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV
 
 from atlas.config import PluginsConfig, SecurityConfig
 from atlas.crypto.credentials import decrypt_credential
@@ -50,8 +52,15 @@ from atlas.mcp_client import (
     RenamedToolHostView,
     mcp_tools_to_openai_tools,
 )
-from atlas.plugins.host import start_plugin_host
+from atlas.plugins.host import module_for_stdio_args, start_plugin_host
 from atlas.plugins.naming import NamingResult, PluginTool, PluginTools, rename_collisions
+
+# Phase 9: the `Plugin -> its own literal environment` builder a plugin can
+# register in place of the generic `plugin_config_values` path
+# (`_env_from_config_values` below) -- see `_build_env`'s own docstring for
+# why this exists as a second, parallel path rather than a special-cased
+# branch inside the generic one.
+CustomEnvBuilder = Callable[[Plugin], Awaitable["dict[str, str]"]]
 
 logger = logging.getLogger("atlas.plugins.manager")
 
@@ -107,7 +116,16 @@ REMOTE_AUTH_KEY = "AUTH_TOKEN"
 # guarantee, and pointing its `PYTHONPATH` at a writable directory holding
 # a `atlas_mcp/safety.py` would have let an admin-supplied policy module
 # replace the one in-child boundary this system has.
-RESERVED_ENV_KEYS = frozenset({"PYTHONPATH", "ATLAS_SAFETY"})
+RESERVED_ENV_KEYS = frozenset({"PYTHONPATH", "ATLAS_SAFETY", GOOGLE_ACCOUNTS_ENV})
+
+# The two keys this process writes itself, after either env-building path
+# runs (`_build_env`'s own final lines) -- what a *custom* env builder's
+# own output is filtered against. Deliberately narrower than
+# `RESERVED_ENV_KEYS`: `GOOGLE_ACCOUNTS_ENV` is reserved against a plugin
+# *config value* (the generic path) setting it, but the one builder this
+# process registers for that exact key is exactly what is allowed, and
+# expected, to produce it.
+_PROCESS_WRITTEN_ENV_KEYS = frozenset({"PYTHONPATH", "ATLAS_SAFETY"})
 
 # Quick task 260924-4is (D4): at the default `timeout_ms` of 5000, `_ping_
 # interval_s` is about 1.7s, so a wedged child loses its tools after about
@@ -153,11 +171,18 @@ class PluginManager:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         on_rebuild: "Callable[[], None] | None" = None,
         zone_name: "str | None" = None,
+        custom_env_builders: "Mapping[str, CustomEnvBuilder] | None" = None,
     ) -> None:
         self._repository = repository
         self._mcp_root = mcp_root
         self._security = security
         self._safety_block_provider = safety_block_provider
+        # Phase 9: a stdio plugin's own module name (`plugins.host.
+        # module_for_stdio_args`) -> the `CustomEnvBuilder` that replaces
+        # the generic config-value env path for it entirely (`_build_env`
+        # below). `{}` for every caller that predates this (every plugin
+        # this project shipped before Phase 9) -- byte-identical behavior.
+        self._custom_env_builders: "Mapping[str, CustomEnvBuilder]" = custom_env_builders or {}
         # 260924-h2f (issue #1): `lifespan` resolves the house's own time
         # zone exactly once (`routes/wizard.py::resolve_timezone`) and
         # passes its `child_tz` here -- every stdio child this manager
@@ -300,6 +325,24 @@ class PluginManager:
         plugin's host rather than the merged `tool_host_lookup`."""
         for running in self._plugins.values():
             if running.plugin.slug == slug:
+                return running.host
+        return None
+
+    def tool_host_for_module(self, module: str) -> McpToolHost | None:
+        """The running host of the (stdio) plugin whose args name
+        `module` (`plugins.host.module_for_stdio_args`), or `None` if no
+        such plugin is running -- a lookup by the module a plugin runs,
+        never by its slug (which an admin can rename), for a caller like
+        a test that wants "the plugin that runs `atlas_mcp.google`"
+        without needing to know which row it happens to be."""
+        for running in self._plugins.values():
+            if running.plugin.transport != "stdio" or running.host is None:
+                continue
+            try:
+                plugin_module = module_for_stdio_args(running.plugin.slug, running.plugin.args)
+            except RuntimeError:
+                continue
+            if plugin_module == module:
                 return running.host
         return None
 
@@ -816,7 +859,17 @@ class PluginManager:
                 bearer_token=bearer_token,
             )
         env = await self._build_env(plugin, safety_block=safety_block)
-        env_factory = self._make_env_factory(plugin) if plugin.enforces_policy else None
+        # Phase 9: a plugin with a registered custom env builder gets a
+        # fresh `env_factory` too, exactly like an `enforces_policy` row --
+        # `request_respawn` rebuilds this plugin's environment from
+        # scratch (a fresh read of every linked account's own access
+        # token), never repeating the mapping this call already built.
+        has_custom_builder = self._has_custom_env_builder(plugin)
+        env_factory = (
+            self._make_env_factory(plugin)
+            if (plugin.enforces_policy or has_custom_builder)
+            else None
+        )
         return await start_plugin_host(
             plugin,
             mcp_root=self._mcp_root,
@@ -885,6 +938,24 @@ class PluginManager:
             )
         return decrypt_credential(chosen.ciphertext, chosen.key_version, self._security)
 
+    def _custom_env_builder_for(self, plugin: Plugin) -> "CustomEnvBuilder | None":
+        """`plugin`'s own registered `CustomEnvBuilder`, keyed by its
+        stdio module name (`plugins.host.module_for_stdio_args`), or
+        `None` when it has none -- the one place this lookup happens, so
+        `_build_env`, `_start_one`'s `has_custom_builder` check, and
+        `tool_host_for_module` below all agree on what "this plugin has a
+        custom env builder" means. A remote plugin, or a stdio plugin
+        whose `args` are not the fixed `["-m", "<module>"]` shape, has
+        none -- `module_for_stdio_args` raising is not this method's
+        problem to catch; every caller of this method already only
+        reaches it for a stdio plugin.
+        """
+        module = module_for_stdio_args(plugin.slug, plugin.args)
+        return self._custom_env_builders.get(module)
+
+    def _has_custom_env_builder(self, plugin: Plugin) -> bool:
+        return self._custom_env_builder_for(plugin) is not None
+
     async def _build_env(self, plugin: Plugin, *, safety_block: "dict | None") -> dict[str, str]:
         """The literal, key-by-key environment `plugin`'s child gets
         (SAFE-09, D-02): every declared config value (a secret one
@@ -894,7 +965,44 @@ class PluginManager:
         serialized safety block for the one row `enforces_policy` names,
         plus `TZ` (260924-h2f) when `self._zone_name` is set. Never a
         filtered copy of this process's own `os.environ`.
+
+        Phase 9: when `plugin`'s own stdio module has a registered
+        `CustomEnvBuilder` (`self._custom_env_builders`), that builder's
+        output replaces the generic config-value loop entirely -- a
+        second, parallel env-building path reached only for the plugin
+        that module names (09-RESEARCH.md's own worked example), never a
+        branch inside the generic loop above. `RESERVED_ENV_KEYS` is a
+        broader set than what is filtered *here*: it also names
+        `GOOGLE_ACCOUNTS_ENV` so a plugin *config value* (the generic
+        path above) can never set it, but the builder registered for
+        that exact key is the one caller allowed to produce it -- only
+        `_PROCESS_WRITTEN_ENV_KEYS` (`PYTHONPATH`/`ATLAS_SAFETY`) are
+        dropped with a warning here, the two keys this process itself
+        always decides regardless of which path built the rest of the
+        environment; both, plus `TZ`, are written after, in the
+        identical order `_env_from_config_values` writes them.
         """
+        builder = self._custom_env_builder_for(plugin)
+        if builder is not None:
+            custom_env = await builder(plugin)
+            env: dict[str, str] = {}
+            for key, value in custom_env.items():
+                if key in _PROCESS_WRITTEN_ENV_KEYS:
+                    logger.warning(
+                        "plugin %r custom env builder produced reserved key %r -- "
+                        "this process decides it",
+                        plugin.slug,
+                        key,
+                    )
+                    continue
+                env[key] = value
+            env["PYTHONPATH"] = str(self._mcp_root)
+            if safety_block is not None:
+                env["ATLAS_SAFETY"] = json.dumps(safety_block)
+            if self._zone_name:
+                env["TZ"] = self._zone_name
+            return env
+
         config_values = await self._repository.get_config_values(plugin.id)
         return _env_from_config_values(
             config_values,
