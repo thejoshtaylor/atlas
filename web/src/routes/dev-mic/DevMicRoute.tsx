@@ -11,21 +11,23 @@ import {
   type TurnTimingMessage,
 } from "./transports"
 
-// The eight stages `atlas.timing.TurnTimings` actually records
-// (`timing.py`'s own module docstring: "eight timestamps and their
-// derived durations, nothing else") -- 03-UI-SPEC.md's own overflow row
-// and this plan's own task text both say "seven"; the real dataclass has
-// eight fields (`turn_started_at` through `answer_audio_at`), confirmed
-// directly against the source rather than the plan's recollection of it.
-// Rendered here against the real field count, not the stated one -- see
-// this plan's own SUMMARY for the discrepancy, named rather than quietly
-// dropping a real stage to match a miscounted spec.
+// The nine stages `atlas.timing.TurnTimings` actually records
+// (`timing.py`'s own module docstring: "nine timestamps and their
+// derived durations, nothing else"). 260924-4iv (item e) added
+// `speech_end_at` (the true end of speech, before xAI's own endpointing
+// delay) and renamed the old `brain_first_token_at` mark to
+// `brain_first_round_at` (it measures a chat round returning, never a
+// streamed token). This page renders live `turn.timing` events only,
+// never an old recording, so it needs no legacy label for the renamed
+// key -- unlike `session/timeline.py`, which still renders one for an
+// old session folder.
 const STAGE_LABELS: Record<string, string> = {
   turn_started_at: "Turn started",
   stt_socket_open_at: "STT socket open",
   first_partial_at: "First partial",
-  stt_final_at: "STT final (end of speech)",
-  brain_first_token_at: "Brain first token",
+  speech_end_at: "Speech end (last new words)",
+  stt_final_at: "STT final (endpointed)",
+  brain_first_round_at: "Brain first round",
   tool_rounds_done_at: "Tool rounds done",
   first_audio_at: "First audio",
   answer_audio_at: "Answer audio",

@@ -1144,11 +1144,28 @@ async def _drain_to_final_transcript(
     returns the instant the pending `__anext__()` task completes, so
     `poll_interval_s` only bounds how quickly a *stuck* session notices its
     deadline passed, never the latency of an ordinary turn.
+
+    260924-4iv (item e): each event's arrival time is recorded with
+    `_time.monotonic()` -- the same clock `TurnTimings` itself uses, not
+    the injectable `clock` argument, which exists only for the deadline
+    above. `timings.mark_first_partial(at=...)` is called with the held-
+    back event's own recorded arrival, not the arrival of the event that
+    confirmed it a partial. `speech_end_at` is set, on every return path,
+    to the arrival time of the last partial whose normalized words differ
+    from the previous *counted* partial (`brain_race._normalize_for_echo_check`,
+    already imported by this module) -- a partial that normalizes to empty
+    is never counted, and the final event itself is never counted, since it
+    is the endpointing decision this stage exists to measure against. Per
+    T-4iv-03, only that float ever leaves this function; the normalized
+    words themselves stay in these locals.
     """
     timings.mark_stt_socket_open()
     stream = stt.stream(source.frames(), source.source_format())
     deadline = clock() + max_utterance_s
     pending: Any | None = None
+    pending_arrival: float | None = None
+    last_counted_words: str | None = None
+    last_word_change_arrival: float | None = None
     next_event_task = asyncio.ensure_future(stream.__anext__())
     while True:
         if clock() >= deadline:
@@ -1160,6 +1177,7 @@ async def _drain_to_final_transcript(
             with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                 await next_event_task
             await stream.aclose()
+            timings.mark_speech_end(last_word_change_arrival)
             return None
 
         done, _pending_tasks = await asyncio.wait({next_event_task}, timeout=poll_interval_s)
@@ -1169,12 +1187,20 @@ async def _drain_to_final_transcript(
         try:
             event = next_event_task.result()
         except StopAsyncIteration:
+            timings.mark_speech_end(last_word_change_arrival)
             return pending
 
+        arrival = _time.monotonic()
+
         if pending is not None:
-            timings.mark_first_partial()
+            timings.mark_first_partial(at=pending_arrival)
             await _emit_event(source, {"type": "transcript.partial", "text": getattr(pending, "text", "")})
+            normalized = brain_race._normalize_for_echo_check(getattr(pending, "text", ""))
+            if normalized and normalized != last_counted_words:
+                last_counted_words = normalized
+                last_word_change_arrival = pending_arrival
         pending = event
+        pending_arrival = arrival
         next_event_task = asyncio.ensure_future(stream.__anext__())
 
 
@@ -1341,7 +1367,7 @@ async def _run_tool_rounds(
     """
     for round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
-        timings.mark_brain_first_token()
+        timings.mark_brain_first_round()
         if not reply.tool_calls:
             if not reply.text:
                 # A tool-call-free reply with no text is a valid, reachable

@@ -227,6 +227,13 @@ def _serialize_timings(
     payload["stage_durations_ms"] = timings.stage_durations_ms()
     payload["end_of_speech_to_first_audio_ms"] = timings.end_of_speech_to_first_audio_ms
     payload["end_of_speech_to_answer_audio_ms"] = timings.end_of_speech_to_answer_audio_ms
+    # 260924-4iv (item e): the true end-of-speech numbers, next to the
+    # older end_of_speech_to_* pair above -- speech_end_at/
+    # brain_first_round_at themselves arrive through dataclasses.asdict
+    # already, needing no extra code here.
+    payload["endpointing_delay_ms"] = timings.endpointing_delay_ms
+    payload["speech_end_to_first_audio_ms"] = timings.speech_end_to_first_audio_ms
+    payload["speech_end_to_answer_audio_ms"] = timings.speech_end_to_answer_audio_ms
     payload["audio_format"] = audio_format
     payload["preroll_bytes"] = preroll_bytes
     return payload

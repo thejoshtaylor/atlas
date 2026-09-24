@@ -47,15 +47,25 @@ TIMELINE_FILENAME = "timeline.jsonl"
 # rate it guesses at.
 _MODELLED_ENCODINGS = ("pcm", "alaw")
 
-# Encounter order, matching `timing.py`'s own `_STAGE_ORDER` exactly -- not
-# re-declared there and imported here, because `timing.py`'s own privacy
-# boundary keeps it free of any dependency on this phase's session store.
+# `timing.py`'s own `_STAGE_ORDER`, plus one legacy label
+# (`brain_first_token_at`) kept for an old recording that still carries it
+# -- not re-declared there and imported here, because `timing.py`'s own
+# privacy boundary keeps it free of any dependency on this phase's session
+# store. 260924-4iv (item e) renamed `brain_first_token_at` to
+# `brain_first_round_at` and inserted `speech_end_at` after
+# `first_partial_at`; the legacy label sits directly before the new one so
+# an old `timing.json` (which carries `brain_first_token_at` and no
+# `brain_first_round_at`) still renders its own stage, and a new one
+# (which carries `brain_first_round_at` and never the old key) never
+# renders both.
 _STAGE_LABELS = (
     "turn_started_at",
     "stt_socket_open_at",
     "first_partial_at",
+    "speech_end_at",
     "stt_final_at",
     "brain_first_token_at",
+    "brain_first_round_at",
     "tool_rounds_done_at",
     "first_audio_at",
     "answer_audio_at",

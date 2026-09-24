@@ -1,4 +1,4 @@
-"""Per-turn stage timing: eight timestamps and their derived durations,
+"""Per-turn stage timing: nine timestamps and their derived durations,
 nothing else.
 
 Field names say what they measure without needing a comment, matching
@@ -9,14 +9,28 @@ recorded-session store with its own retention schedule is Phase 2 (DBG-01,
 DBG-06); this is the narrower, always-on measurement that proves the
 1.5 second budget, not a substitute for it.
 
-The eight stages, in the order a turn reaches them: the turn starting, the
+The nine stages, in the order a turn reaches them: the turn starting, the
 speech-to-text socket opening, the first partial transcript arriving, the
-final transcript arriving, the first brain token arriving, the tool calls
+last partial whose words actually changed arriving (`speech_end_at` --
+the true end of speech, before xAI's own endpointing delay), the final
+transcript arriving, the first brain chat round returning, the tool calls
 completing, the first audio chunk leaving for the browser, and the first
 chunk of the answer utterance specifically leaving for the browser. A turn
 closed early by either VOICE-08 guard reaches only a prefix of these -- an
 unset (`None`) stage is what "never reached" looks like, distinguishable
 from a reached stage that happened to take zero time.
+
+260924-4iv (e): `stt_final_at` is when xAI's own endpointing decided the
+utterance was over, not when the operator actually stopped talking --
+there is a real gap between the two (xAI's own endpointing delay), and
+before this plan nothing measured it. `speech_end_at` is the arrival time
+of the last partial whose normalized words differ from the one before it
+-- the best available proxy for "the operator stopped talking" from the
+partial stream alone. `endpointing_delay_ms` is `stt_final_at -
+speech_end_at`, and the `speech_end_to_*` properties are the *true*
+end-of-speech budget numbers; the older `end_of_speech_to_*` properties
+stay exactly as they were (measuring from `stt_final_at`) for backward
+compatibility with every existing reader.
 
 `first_audio_at` and `answer_audio_at` are deliberately two fields, not one
 field marked twice. This phase adds a filler utterance that can play before
@@ -45,8 +59,9 @@ _STAGE_ORDER = (
     "turn_started_at",
     "stt_socket_open_at",
     "first_partial_at",
+    "speech_end_at",
     "stt_final_at",
-    "brain_first_token_at",
+    "brain_first_round_at",
     "tool_rounds_done_at",
     "first_audio_at",
     "answer_audio_at",
@@ -68,8 +83,9 @@ class TurnTimings:
     turn_started_at: float | None = None
     stt_socket_open_at: float | None = None
     first_partial_at: float | None = None
+    speech_end_at: float | None = None
     stt_final_at: float | None = None
-    brain_first_token_at: float | None = None
+    brain_first_round_at: float | None = None
     tool_rounds_done_at: float | None = None
     first_audio_at: float | None = None
     answer_audio_at: float | None = None
@@ -82,32 +98,58 @@ class TurnTimings:
         """Record the moment the turn started consuming the STT stream."""
         self.stt_socket_open_at = time.monotonic()
 
-    def mark_first_partial(self) -> None:
+    def mark_first_partial(self, at: float | None = None) -> None:
         """Record the first partial transcript forwarded to the page.
+
+        `at`, when given (260924-4iv), is the caller's own recorded arrival
+        time -- `turn/controller.py::_drain_to_final_transcript` records
+        each event's arrival with the same clock this module uses, and
+        passes it through rather than letting this call re-read the clock
+        a moment later. `at=None` (the default) reads `time.monotonic()`
+        here, exactly as before this plan.
 
         Idempotent: only the first call after construction has any effect,
         matching every other mark's "this stage happened once" contract.
         """
         if self.first_partial_at is None:
-            self.first_partial_at = time.monotonic()
+            self.first_partial_at = at if at is not None else time.monotonic()
+
+    def mark_speech_end(self, at: float | None) -> None:
+        """Record the arrival time of the last partial whose words actually
+        changed -- the best available proxy for "the operator stopped
+        talking," before xAI's own endpointing delay (260924-4iv, item e).
+
+        Assigns unconditionally, with no first-call guard: unlike every
+        other mark in this class, a later call must win. `run_turn`'s
+        wake-phrase handling can drain the STT stream twice in one turn
+        (a wake-only first drain, then a second drain for the actual
+        command); the second drain's own speech-end time is the one that
+        describes this turn, and an idempotent guard would leave the first
+        drain's wake-only timing behind instead. `at=None` clears the mark
+        (a drain that reached no word-changing partial before its final
+        event, or before its timeout) -- also unconditional, for the
+        identical reason.
+        """
+        self.speech_end_at = at
 
     def mark_stt_final(self) -> None:
         """Record the moment the final transcript arrived."""
         self.stt_final_at = time.monotonic()
 
-    def mark_brain_first_token(self) -> None:
+    def mark_brain_first_round(self) -> None:
         """Record the first `chat()` round returning.
 
         `BrainProvider.chat()`'s public contract returns one assembled
         `BrainReply` per round rather than per-token deltas (the streaming
         happens inside the provider; the controller never sees it) -- this
-        is the earliest point a turn genuinely reaches "the model answered,"
-        and the closest available proxy for "first token" without changing
-        that contract. Idempotent, so a multi-round tool loop times only the
-        first round.
+        is the earliest point a turn genuinely reaches "the model answered
+        this round," not a streamed first token (260924-4iv renamed this
+        mark from `brain_first_token_at`/`mark_brain_first_token` to say
+        exactly that). Idempotent, so a multi-round tool loop times only
+        the first round.
         """
-        if self.brain_first_token_at is None:
-            self.brain_first_token_at = time.monotonic()
+        if self.brain_first_round_at is None:
+            self.brain_first_round_at = time.monotonic()
 
     def mark_tool_rounds_done(self) -> None:
         """Record the moment the tool-calling loop settled on a reply.
@@ -152,6 +194,12 @@ class TurnTimings:
         This is the number VOICE-02's 1.5-second criterion is about, and it
         is derived from `stt_final_at`/`first_audio_at` -- never measured a
         second, separate way.
+
+        260924-4iv: `stt_final_at` is xAI's own endpointing decision, which
+        arrives after the operator actually stopped talking (see
+        `endpointing_delay_ms`) -- this property is kept, unchanged, for
+        every existing reader; `speech_end_to_first_audio_ms` below is the
+        true end-of-speech number.
         """
         if self.stt_final_at is None or self.first_audio_at is None:
             return None
@@ -166,10 +214,51 @@ class TurnTimings:
         second budget is compared against this unrounded float, and a
         rounded duration that crossed the budget by a fraction would be
         reported as meeting it.
+
+        260924-4iv: measures from `stt_final_at`, after xAI's own
+        endpointing delay -- kept, unchanged, for every existing reader;
+        `speech_end_to_answer_audio_ms` below is the true end-of-speech
+        number.
         """
         if self.stt_final_at is None or self.answer_audio_at is None:
             return None
         return (self.answer_audio_at - self.stt_final_at) * 1000
+
+    @property
+    def endpointing_delay_ms(self) -> float | None:
+        """How long xAI's own endpointing took past the operator's last
+        word, or `None` until both marks exist (260924-4iv, item e).
+
+        `stt_final_at - speech_end_at`: the gap between the true end of
+        speech and the STT provider's own decision that the utterance was
+        over. Never rounded, matching every other derived property here.
+        """
+        if self.stt_final_at is None or self.speech_end_at is None:
+            return None
+        return (self.stt_final_at - self.speech_end_at) * 1000
+
+    @property
+    def speech_end_to_first_audio_ms(self) -> float | None:
+        """The true end-of-speech-to-first-audio number, or `None` until
+        both marks exist (260924-4iv, item e).
+
+        Derived from `speech_end_at`/`first_audio_at` -- unlike
+        `end_of_speech_to_first_audio_ms`, this includes no part of xAI's
+        own endpointing delay, only the assistant's own processing time.
+        """
+        if self.speech_end_at is None or self.first_audio_at is None:
+            return None
+        return (self.first_audio_at - self.speech_end_at) * 1000
+
+    @property
+    def speech_end_to_answer_audio_ms(self) -> float | None:
+        """The true end-of-speech-to-answer-audio number, or `None` until
+        both marks exist (260924-4iv, item e). Mirrors
+        `speech_end_to_first_audio_ms` exactly, for the answer utterance.
+        """
+        if self.speech_end_at is None or self.answer_audio_at is None:
+            return None
+        return (self.answer_audio_at - self.speech_end_at) * 1000
 
     def stage_durations_ms(self) -> dict[str, float | None]:
         """Each stage's duration since the previous *reached* stage.
@@ -203,13 +292,17 @@ class TurnTimings:
                 "turn_started_at": self.turn_started_at,
                 "stt_socket_open_at": self.stt_socket_open_at,
                 "first_partial_at": self.first_partial_at,
+                "speech_end_at": self.speech_end_at,
                 "stt_final_at": self.stt_final_at,
-                "brain_first_token_at": self.brain_first_token_at,
+                "brain_first_round_at": self.brain_first_round_at,
                 "tool_rounds_done_at": self.tool_rounds_done_at,
                 "first_audio_at": self.first_audio_at,
                 "answer_audio_at": self.answer_audio_at,
                 "end_of_speech_to_first_audio_ms": self.end_of_speech_to_first_audio_ms,
                 "end_of_speech_to_answer_audio_ms": self.end_of_speech_to_answer_audio_ms,
+                "endpointing_delay_ms": self.endpointing_delay_ms,
+                "speech_end_to_first_audio_ms": self.speech_end_to_first_audio_ms,
+                "speech_end_to_answer_audio_ms": self.speech_end_to_answer_audio_ms,
             },
         )
 
@@ -227,4 +320,7 @@ class TurnTimings:
             "stage_durations_ms": self.stage_durations_ms(),
             "end_of_speech_to_first_audio_ms": self.end_of_speech_to_first_audio_ms,
             "end_of_speech_to_answer_audio_ms": self.end_of_speech_to_answer_audio_ms,
+            "endpointing_delay_ms": self.endpointing_delay_ms,
+            "speech_end_to_first_audio_ms": self.speech_end_to_first_audio_ms,
+            "speech_end_to_answer_audio_ms": self.speech_end_to_answer_audio_ms,
         }
