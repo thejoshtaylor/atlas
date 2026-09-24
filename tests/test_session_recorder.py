@@ -368,6 +368,98 @@ async def test_record_audio_off_keeps_the_directory_events_and_timing_but_not_au
     assert list(recorder.directory.glob("audio.*")) == []
 
 
+async def test_a_real_run_turn_writes_speech_end_at_and_the_new_derived_keys(
+    fake_audio_source, fake_brain, fake_tts, tmp_path
+):
+    """260924-4iv (item e), the tracer's own integration check: a real
+    `run_turn` with a `SessionRecorder`, driven by a partial before the
+    final, writes a `timing.json` carrying the new keys and none of the
+    old (renamed) one."""
+    from atlas.providers.base import BrainReply, FinalTranscript, PartialTranscript
+
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    class _SttOnePartial:
+        async def stream(self, frames, source_format=None):
+            yield PartialTranscript(text="turn")
+            yield PartialTranscript(text="turn on the fan")
+            yield FinalTranscript(text="turn on the fan")
+
+    source = fake_audio_source(frames=[b"\x00\x01", b"\x02\x03", b"\x04\x05"])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+
+    await run_turn(
+        source,
+        _SttOnePartial(),
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+
+    assert payload["speech_end_at"] is not None
+    assert payload["endpointing_delay_ms"] is not None
+    assert payload["speech_end_to_first_audio_ms"] is not None
+    assert payload["speech_end_to_answer_audio_ms"] is not None
+    assert payload["brain_first_round_at"] is not None
+    assert "brain_first_token_at" not in payload
+    assert "speech_end_at" in payload["stage_durations_ms"]
+    # The older, still-supported keys stay exactly as they were.
+    assert payload["end_of_speech_to_first_audio_ms"] is not None
+    assert payload["end_of_speech_to_answer_audio_ms"] is not None
+
+
+def test_regenerate_timeline_on_a_legacy_payload_still_renders_the_old_brain_stage_label(tmp_path):
+    """A session folder recorded before 260924-4iv carries
+    `brain_first_token_at` and no `brain_first_round_at` -- `render_timeline`
+    must still emit a stage entry labelled `brain_first_token_at` for it."""
+    directory = tmp_path / "legacy-session"
+    directory.mkdir()
+    (directory / timeline_module.EVENTS_FILENAME).write_text("", encoding="utf-8")
+    legacy_payload = {
+        "turn_started_at": 1.0,
+        "brain_first_token_at": 2.0,
+    }
+    (directory / timeline_module.TIMING_FILENAME).write_text(
+        json.dumps(legacy_payload), encoding="utf-8"
+    )
+
+    timeline_module.regenerate_timeline(directory)
+
+    rendered = [
+        json.loads(line)
+        for line in (directory / timeline_module.TIMELINE_FILENAME).read_text(encoding="utf-8").splitlines()
+    ]
+    stage_labels = [entry["stage"] for entry in rendered if entry["kind"] == "stage"]
+    assert "brain_first_token_at" in stage_labels
+    assert "brain_first_round_at" not in stage_labels
+
+
+def test_render_timeline_on_a_new_payload_emits_speech_end_and_brain_first_round():
+    events = []
+    timing_payload = {
+        "turn_started_at": 1.0,
+        "speech_end_at": 1.4,
+        "brain_first_round_at": 2.0,
+    }
+
+    rendered = timeline_module.render_timeline(events, timing_payload)
+
+    stage_labels = [entry["stage"] for entry in rendered if entry["kind"] == "stage"]
+    assert "speech_end_at" in stage_labels
+    assert "brain_first_round_at" in stage_labels
+    assert "brain_first_token_at" not in stage_labels
+
+
 def test_timeline_module_holds_no_state_between_calls():
     """`render_timeline` computes its view fresh every call -- calling it
     twice on the same inputs must produce the same output, not a cached

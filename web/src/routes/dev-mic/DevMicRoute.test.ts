@@ -20,13 +20,14 @@ describe("DevMicRoute -- the two things this plan decides are owed to a developm
     expect(SOURCE).toMatch(/understood no speech/)
   })
 
-  test("every one of the real eight stage timings renders -- none silently dropped to match a miscounted spec", () => {
+  test("every one of the real nine stage timings renders -- none silently dropped to match a miscounted spec", () => {
     for (const stage of [
       "turn_started_at",
       "stt_socket_open_at",
       "first_partial_at",
+      "speech_end_at",
       "stt_final_at",
-      "brain_first_token_at",
+      "brain_first_round_at",
       "tool_rounds_done_at",
       "first_audio_at",
       "answer_audio_at",
