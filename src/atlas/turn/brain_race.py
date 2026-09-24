@@ -44,7 +44,10 @@ class TierBrain:
     `calls_tools` is derived once, in `build_tiers`, from position in the
     list -- never settable per entry (D-05). `brain` is exercised only by
     `run_top_tier`; a triage tier never touches it, since it never runs a
-    tool round at all.
+    tool round at all. `envelope_client` is `None` for the top tier
+    (260924-4it) -- only a triage tier's `run_triage_tier` ever makes an
+    envelope call; the top tier wraps its own settled text into a
+    `TierReply` locally, in `run_top_tier`.
     """
 
     index: int
@@ -75,10 +78,14 @@ class ToolCommitment:
 def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
     """One `TierBrain` per `brain.models` entry, in list order.
 
-    One shared `instructor`-wrapped client backs every tier's envelope call:
-    `instructor.from_openai(AsyncOpenAI(...))`, never `from_provider`, which
-    reads `XAI_API_KEY` from the environment directly and bypasses
-    `BrainConfig.api_key`/`base_url` and config.py's env-expansion contract.
+    One shared `instructor`-wrapped client backs every triage tier's
+    envelope call: `instructor.from_openai(AsyncOpenAI(...))`, never
+    `from_provider`, which reads `XAI_API_KEY` from the environment directly
+    and bypasses `BrainConfig.api_key`/`base_url` and config.py's
+    env-expansion contract. The top tier gets no envelope client at all
+    (260924-4it) -- `run_top_tier` wraps its own settled text locally, so a
+    one-model config (only the top tier, no triage tiers) builds no
+    `instructor` client whatsoever.
 
     `Mode.JSON` is fixed at client-construction time -- `instructor`'s own
     `.create()` call has no per-call `mode=` parameter, and `Mode.JSON` is
@@ -87,16 +94,20 @@ def build_tiers(brain_config: BrainConfig) -> tuple[TierBrain, ...]:
     with tool calling, unlike `Mode.TOOLS`, which re-enters the exact wire
     channel the top tier's tool rounds just used.
     """
-    envelope_client = instructor.from_openai(
-        AsyncOpenAI(api_key=brain_config.api_key, base_url=brain_config.base_url),
-        mode=instructor.Mode.JSON,
+    envelope_client = (
+        instructor.from_openai(
+            AsyncOpenAI(api_key=brain_config.api_key, base_url=brain_config.base_url),
+            mode=instructor.Mode.JSON,
+        )
+        if brain_config.triage_tiers
+        else None
     )
     return tuple(
         TierBrain(
             index=index,
             model=entry.model,
             brain=XaiBrain(brain_config, model=entry.model),
-            envelope_client=envelope_client,
+            envelope_client=None if entry is brain_config.top_tier else envelope_client,
             calls_tools=(entry is brain_config.top_tier),
         )
         for index, entry in enumerate(brain_config.models)
@@ -180,17 +191,21 @@ async def run_top_tier(
     timings: Any,
     commitment: ToolCommitment | None = None,
 ) -> TierReply:
-    """The existing, unmodified tool-calling loop, then one structured
-    envelope call over the settled conversation.
+    """The existing, unmodified tool-calling loop, wrapped locally into a
+    `TierReply` -- no envelope call.
 
-    Two phases, never one call carrying both a caller tool schema and a
-    forced response-model tool: xAI's own docs describe combining structured
-    outputs with tool calling as two sequential steps within one
-    conversation, not one request carrying both channels at once. Plan
-    01.1-01's spike A2 confirmed `Mode.JSON` coexists cleanly with a message
-    history containing a completed tool round, so this is the decomposition
-    that ships, not the trimmed-message-list fallback RESEARCH.md also
-    named.
+    `_run_tool_rounds`'s settled text is already the final reply. It used to
+    be handed to a second `instructor` call whose only job was to wrap that
+    same text into a `TierReply` -- one full model round trip that added no
+    information, and could reword a refusal `_compose_mixed_outcome_reply`
+    composed in code, breaking CMD-08's verbatim guarantee on a multi-tier
+    turn (260924-4it). `confident` is `True` only when the settled text
+    carries real content: a whitespace-only settled text (`reply.text` can
+    be whitespace, though `_run_tool_rounds` never returns an empty string)
+    gives `confident=False`, so `run_turn`'s empty-answer branch speaks the
+    fallback instead of `TierReply`'s own validator raising on a
+    `confident=True` empty answer. This function no longer reads
+    `tier.envelope_client` at all -- see `build_tiers` below.
     """
     # Deferred, not module-level: `controller.py` imports this module at
     # load time to dispatch tiers, so a module-level import here of anything
@@ -206,20 +221,11 @@ async def run_top_tier(
         tier.brain, tool_host, tools_schema, messages, max_tool_rounds, timings, commitment=commitment
     )
 
-    if tier.envelope_client is None:
-        # The degenerate one-tier case (`run_turn`'s `tiers=None` default):
-        # no instructor client exists to call out to, so the settled text is
-        # wrapped locally as a confident reply. This is the seam that keeps
-        # every Phase 01 test -- which drives `run_turn` with a `FakeBrain`
-        # and no instructor client -- working unchanged, and it is the
-        # degenerate one-tier case, not a second code path.
-        return TierReply(answer=settled_text, confident=True, needs_tool=False, filler=DEFAULT_FILLER)
-
-    envelope_messages = [*messages, {"role": "assistant", "content": settled_text}]
-    return await tier.envelope_client.chat.completions.create(
-        model=tier.model,
-        messages=envelope_messages,
-        response_model=TierReply,
+    return TierReply(
+        answer=settled_text,
+        confident=bool(settled_text.strip()),
+        needs_tool=False,
+        filler=DEFAULT_FILLER,
     )
 
 
@@ -278,19 +284,13 @@ async def race_tiers(
     awaited, its underlying request left running detached from the turn
     that started it.
 
-    `needs_clarification` is exercised on the triage tier only, this
-    release. A top-tier reply still wins unconditionally at
-    `index == top_index`, unchanged by this function -- if the top tier's
-    own settled-conversation envelope call ever set `needs_clarification`
-    itself, that reply would win exactly like any other top-tier outcome,
-    with no special handling here. This is a known, accepted gap rather
-    than something this function closes: the top tier only reaches its
-    envelope call after its own tool round has already run (and may already
-    have dispatched real, uncancellable calls), so a clarification
-    discovered there arrives too late to be an honest "nothing happened
-    yet" question -- and this house's small, low-collision entity catalogue
-    makes that path unlikely enough that closing it now is not worth the
-    mechanism it would need.
+    `needs_clarification` is exercised on the triage tier only. A top-tier
+    reply still wins unconditionally at `index == top_index`, unchanged by
+    this function. `run_top_tier` builds its `TierReply` locally, from its
+    own settled tool-round text, and never sets `needs_clarification`
+    itself (260924-4it) -- there is no longer an envelope call on the top
+    tier's own path that could set it, so a top-tier clarification cannot
+    arise.
     """
     top_index = max(tasks_by_index)
     task_index = {task: index for index, task in tasks_by_index.items()}

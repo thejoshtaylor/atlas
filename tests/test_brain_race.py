@@ -19,11 +19,13 @@ async def test_tracer_races_tiers_covers_the_wait_and_answers(
     marks stay distinct.
 
     The triage tier resolves immediately with a non-confident reply; the top
-    tier's tool-round settles immediately too, but its envelope call is
-    delayed, so it "returns later" without a real network call. The fake
-    clock advances past `filler_after_ms` after exactly one real poll cycle,
-    which is what gives the fast triage tier a chance to complete before the
-    deadline fires -- mirroring `test_silence_timeout_closes_turn`'s idiom.
+    tier's own brain call is delayed (260924-4it: `run_top_tier` makes no
+    envelope call anymore, so the delay that used to sit on the envelope
+    client now sits on the brain itself), so it "returns later" without a
+    real network call. The fake clock advances past `filler_after_ms` after
+    exactly one real poll cycle, which is what gives the fast triage tier a
+    chance to complete before the deadline fires -- mirroring
+    `test_silence_timeout_closes_turn`'s idiom.
     """
     from atlas.providers.base import FinalTranscript
     from atlas.providers.tier_reply import FILLER_TEXT, FillerPhrase, TierReply
@@ -48,8 +50,8 @@ async def test_tracer_races_tiers_covers_the_wait_and_answers(
     top_tier = brain_race.TierBrain(
         index=1,
         model="top-model",
-        brain=fake_brain(replies=[BrainReply(text=top_answer)]),
-        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.05),
+        brain=fake_brain(replies=[BrainReply(text=top_answer)], delay_s=0.05),
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
         calls_tools=True,
     )
 
@@ -99,6 +101,9 @@ async def test_tracer_races_tiers_covers_the_wait_and_answers(
     # The answer FakeTts received is the top tier's, and it received nothing
     # else -- proof the filler never touched the live synthesis path.
     assert tts.received_text == [top_answer]
+    # 260924-4it: run_top_tier makes no envelope call at all -- the top
+    # tier's own envelope client never sees a single call this turn.
+    assert top_tier.envelope_client.calls == []
 
 
 async def test_a_one_entry_tier_list_still_resolves_through_the_list(
@@ -139,6 +144,140 @@ async def test_a_one_entry_tier_list_still_resolves_through_the_list(
     # top tier, so its arrival ends the race with nothing left pending. Only
     # the one answer chunk ever reached the source.
     assert source.sent_audio == [b"\x01\x02"]
+
+
+async def test_run_top_tier_builds_its_reply_locally_with_no_envelope_call(
+    fake_brain, fake_envelope_client
+):
+    """260924-4it: `run_top_tier` wraps its own settled text as a
+    `TierReply` in code, never through a second `instructor` call --
+    `tier.envelope_client` is read for its `.calls` list only, to prove it
+    was never invoked."""
+    from atlas.providers.tier_reply import DEFAULT_FILLER
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+
+    for settled_text, expected_confident in (("it is teatime", True), ("   ", False)):
+        tier = brain_race.TierBrain(
+            index=0,
+            model="top-model",
+            brain=fake_brain(replies=[BrainReply(text=settled_text)]),
+            envelope_client=fake_envelope_client(reply=None),
+            calls_tools=True,
+        )
+        timings = TurnTimings()
+
+        reply = await brain_race.run_top_tier(
+            tier,
+            None,
+            [],
+            [{"role": "user", "content": "what time is it"}],
+            3,
+            timings,
+        )
+
+        assert reply.answer == settled_text
+        assert reply.confident is expected_confident
+        assert reply.needs_tool is False
+        assert reply.needs_clarification is False
+        assert reply.filler == DEFAULT_FILLER
+        assert tier.envelope_client.calls == []
+
+
+async def test_build_tiers_gives_the_top_tier_no_envelope_client():
+    """260924-4it: only a triage tier's envelope call needs the shared
+    `instructor` client. `build_tiers` gives every triage tier that shared
+    client and gives the top tier `None` -- and a one-model config, whose
+    only tier IS the top tier, builds no `instructor` client at all."""
+    from atlas.config import BrainConfig, BrainTierConfig
+    from atlas.turn import brain_race
+
+    two_tier_config = BrainConfig(
+        api_key="test-key",
+        models=(BrainTierConfig(model="triage-model"), BrainTierConfig(model="top-model")),
+    )
+    tiers = brain_race.build_tiers(two_tier_config)
+    assert tiers[0].envelope_client is not None
+    assert tiers[1].envelope_client is None
+    assert tiers[1].calls_tools is True
+
+    one_tier_config = BrainConfig(api_key="test-key", models=(BrainTierConfig(model="top-model"),))
+    tiers = brain_race.build_tiers(one_tier_config)
+    assert tiers[0].envelope_client is None
+
+
+async def test_a_denied_call_on_a_two_tier_turn_reaches_speech_verbatim(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    """CMD-08, 260924-4it: with the envelope call removed, a code-composed
+    refusal reaches speech byte-for-byte on a multi-tier turn -- there is no
+    envelope call left that could reword it. Mirrors
+    `test_a_needs_tool_triage_reply_never_reaches_the_tool_host`'s shape."""
+    from atlas.providers.base import FinalTranscript, ToolCall
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    class _DenyingToolHost:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def call_tool(self, name, arguments):
+            from types import SimpleNamespace
+
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=True, content=[SimpleNamespace(text="that one is off limits")])
+
+    triage_reply = TierReply(answer="", confident=False, needs_tool=True, filler=FillerPhrase.STILL_LOOKING)
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=triage_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+
+    never_used_reply = TierReply(
+        answer="i turned it off for you", confident=True, needs_tool=False, filler=FillerPhrase.LET_ME_CHECK
+    )
+    tool_call = ToolCall(
+        name="ha_call_service",
+        arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_server_socket"},
+    )
+    top_brain = fake_brain(replies=[BrainReply(tool_calls=[tool_call])])
+    top_tier = brain_race.TierBrain(
+        index=1,
+        model="top-model",
+        brain=top_brain,
+        envelope_client=fake_envelope_client(reply=never_used_reply, delay_s=0.0),
+        calls_tools=True,
+    )
+
+    tool_host = _DenyingToolHost()
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the server socket")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        top_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier, top_tier],
+        filler_after_ms=0,
+        filler_cache=None,
+    )
+
+    assert tool_host.calls == [("ha_call_service", tool_call.arguments)]
+    assert tts.received_text == ["that one is off limits"]
+    assert top_tier.envelope_client.calls == []
 
 
 async def test_two_confident_tiers_in_one_batch_resolve_to_the_lower_index():

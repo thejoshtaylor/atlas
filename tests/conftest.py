@@ -184,10 +184,15 @@ class FakeBrain:
     `BrainReply`. Calling `chat()` more times than replies were scripted
     raises, so a test proving the `max_tool_rounds` cap can construct a
     reply list shorter than the rounds it expects the pipeline to attempt.
+
+    `delay_s` lets a test make the top tier's tool round settle later than
+    a triage tier's envelope call -- now that the top tier has no envelope
+    call of its own to delay (260924-4it).
     """
 
-    def __init__(self, replies: Sequence[BrainReply] = ()) -> None:
+    def __init__(self, replies: Sequence[BrainReply] = (), delay_s: float = 0.0) -> None:
         self._replies = list(replies)
+        self._delay_s = delay_s
         self.call_count = 0
 
     async def chat(self, messages, tools=None) -> BrainReply:
@@ -195,6 +200,8 @@ class FakeBrain:
             raise AssertionError("FakeBrain.chat called more times than scripted")
         reply = self._replies[self.call_count]
         self.call_count += 1
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
         return reply
 
 

@@ -820,9 +820,10 @@ async def run_turn(
         messages.append({"role": "user", "content": final_text})
 
         if tiers is None:
-            # The degenerate one-tier case: no instructor client exists, so
-            # `run_top_tier` wraps its settled text locally as a confident
-            # `TierReply` instead of calling out. This is the seam that keeps
+            # The degenerate one-tier case: `run_top_tier` always wraps its
+            # settled text locally now (260924-4it), for every top tier, not
+            # only this one -- this one-element list just names the
+            # single-model default explicitly. This is the seam that keeps
             # every Phase 01 test -- which drives `run_turn` with a `FakeBrain`
             # and no instructor client -- working unchanged.
             tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]

@@ -498,8 +498,8 @@ async def test_filler_plays_once_from_the_cache_when_the_deadline_passes(
     top_tier = brain_race.TierBrain(
         index=0,
         model="top-model",
-        brain=fake_brain(replies=[BrainReply(text=top_answer)]),
-        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.05),
+        brain=fake_brain(replies=[BrainReply(text=top_answer)], delay_s=0.05),
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
         calls_tools=True,
     )
 
@@ -540,6 +540,9 @@ async def test_filler_plays_once_from_the_cache_when_the_deadline_passes(
     # The live provider was invoked exactly once -- for the answer. The
     # filler never touched it.
     assert tts.call_count == 1
+    # 260924-4it: run_top_tier makes no envelope call -- the delay that
+    # kept this race running past the deadline now sits on the brain call.
+    assert top_tier.envelope_client.calls == []
     assert timings.first_audio_at is not None
     assert timings.answer_audio_at is not None
     assert timings.first_audio_at < timings.answer_audio_at
@@ -565,8 +568,8 @@ async def test_filler_cache_miss_raises_and_never_calls_the_live_provider(
     top_tier = brain_race.TierBrain(
         index=0,
         model="top-model",
-        brain=fake_brain(replies=[BrainReply(text="done")]),
-        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.05),
+        brain=fake_brain(replies=[BrainReply(text="done")], delay_s=0.05),
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
         calls_tools=True,
     )
 
@@ -618,8 +621,8 @@ async def test_empty_filler_cache_waits_in_silence_and_still_speaks(
     top_tier = brain_race.TierBrain(
         index=0,
         model="top-model",
-        brain=fake_brain(replies=[BrainReply(text=top_answer)]),
-        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.05),
+        brain=fake_brain(replies=[BrainReply(text=top_answer)], delay_s=0.05),
+        envelope_client=fake_envelope_client(reply=top_reply, delay_s=0.0),
         calls_tools=True,
     )
 
