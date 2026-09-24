@@ -519,3 +519,44 @@ async def test_the_liveness_probe_carries_the_plugins_own_deadline():
     await host.ping()
 
     assert session.requests == [("ping", 2.5)]
+
+
+# ---------------------------------------------------------------------------
+# Quick task 260924-4is (D4): ping() classifies REQUEST_TIMEOUT
+# ---------------------------------------------------------------------------
+
+
+class _RaisingSession:
+    """A session whose `send_request` always raises `error`."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def send_request(self, request, result_type, request_read_timeout_seconds=None, **kwargs):
+        raise self._error
+
+
+async def test_ping_raises_ping_timeout_error_for_a_request_timeout():
+    from mcp.shared.exceptions import MCPError
+    from mcp_types.jsonrpc import REQUEST_TIMEOUT
+
+    from atlas.mcp_client import PingTimeoutError
+
+    error = MCPError(code=REQUEST_TIMEOUT, message="Request 'ping' timed out")
+    host = _host_with_fake_session(_RaisingSession(error))
+
+    with pytest.raises(PingTimeoutError):
+        await host.ping()
+
+
+async def test_ping_reraises_every_other_mcp_error_unchanged():
+    from mcp.shared.exceptions import MCPError
+    from mcp_types.jsonrpc import CONNECTION_CLOSED
+
+    error = MCPError(code=CONNECTION_CLOSED, message="connection closed")
+    host = _host_with_fake_session(_RaisingSession(error))
+
+    with pytest.raises(MCPError) as excinfo:
+        await host.ping()
+
+    assert excinfo.value is error

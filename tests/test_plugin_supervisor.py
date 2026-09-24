@@ -43,6 +43,7 @@ import pytest
 
 from atlas.config import PluginsConfig, SecurityConfig
 from atlas.db.repository import Plugin
+from atlas.mcp_client import PingTimeoutError
 from atlas.plugins import manager as manager_module
 from atlas.plugins.manager import PluginManager, PluginState
 
@@ -92,6 +93,10 @@ class _FakeHost:
         self.aclose_count = 0
         self.ping_calls = 0
         self.ping_should_fail = False
+        # Quick task 260924-4is (D4): a `PingTimeoutError` miss -- distinct
+        # from `ping_should_fail`'s dead-connection `RuntimeError`, which
+        # must keep withdrawing on the very first failure.
+        self.ping_should_time_out = False
         # CR-02 (code review): every safety block this host was actually
         # respawned with, in order -- the tests below assert on what
         # reached the child, not merely on what a caller asked for.
@@ -104,6 +109,8 @@ class _FakeHost:
         self.ping_calls += 1
         if self.ping_should_fail:
             raise RuntimeError("simulated: plugin ping failed -- child appears dead")
+        if self.ping_should_time_out:
+            raise PingTimeoutError("simulated: ping timed out")
 
     async def respawn(self, safety_block: "dict | None") -> None:
         self.respawn_blocks.append(safety_block)
@@ -440,6 +447,144 @@ async def test_a_dead_plugin_is_respawned_on_backoff_and_its_tools_return(
         tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
         assert "ha_list_entities" in tool_names
         assert attempts == ["initial", "retry-1-fails", "retry-2-succeeds"]
+    finally:
+        await manager.stop_all()
+
+
+# ---------------------------------------------------------------------------
+# Quick task 260924-4is (D4): the watchdog tolerates a single late ping.
+# ---------------------------------------------------------------------------
+
+
+async def test_two_consecutive_ping_timeouts_keep_the_plugin_running_and_its_tools_offered(
+    fake_plugin_repository, monkeypatch
+):
+    """A `PingTimeoutError` miss must not withdraw a plugin's tools alone
+    -- prod showed both plugins losing their tools on the same single
+    late ping, which a stalled parent loop (not a dead child) can cause.
+    An answered ping in between must reset the count, so two more misses
+    afterward still keep the plugin running."""
+    host = _FakeHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    try:
+        await manager.start_all()
+        assert manager.state_for("ha") is PluginState.RUNNING
+
+        host.ping_should_time_out = True
+        for _ in range(2):
+            await gate.wait_until_entered()  # ping-interval sleep
+            gate.release()  # ping times out -- a miss, not a withdrawal
+
+        await gate.wait_until_entered()  # next ping-interval sleep
+        assert manager.state_for("ha") is PluginState.RUNNING
+        assert manager.tool_host_for("ha") is host
+        assert host.aclose_count == 0
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert "ha_list_entities" in tool_names
+
+        host.ping_should_time_out = False
+        gate.release()  # this ping answers -- resets the miss count
+
+        for _ in range(2):
+            await gate.wait_until_entered()  # ping-interval sleep
+            host.ping_should_time_out = True
+            gate.release()  # ping times out again -- still only 2 in a row
+
+        await gate.wait_until_entered()  # next ping-interval sleep
+        assert manager.state_for("ha") is PluginState.RUNNING, (
+            "two misses after a reset must not add up with the two misses before it"
+        )
+        assert host.aclose_count == 0
+    finally:
+        await manager.stop_all()
+
+
+async def test_three_consecutive_ping_timeouts_withdraw_tools_and_schedule_a_respawn(
+    fake_plugin_repository, monkeypatch
+):
+    """The third consecutive `PingTimeoutError` miss withdraws the tools
+    and schedules a respawn, exactly like today's single-miss behavior --
+    it is only the *count* that changed, not the eventual action."""
+    first_host = _FakeHost("ha_list_entities")
+    second_host = _FakeHost("ha_list_entities")
+    attempts: list[str] = []
+
+    async def _start_plugin_host(plugin, **kwargs):
+        if not attempts:
+            attempts.append("initial")
+            return first_host
+        attempts.append("respawn")
+        return second_host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    try:
+        await manager.start_all()
+        first_host.ping_should_time_out = True
+
+        for _ in range(3):
+            await gate.wait_until_entered()  # ping-interval sleep
+            gate.release()  # ping times out
+
+        await gate.wait_until_entered()  # backoff sleep before respawn
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING
+        assert manager.tools_schema == []
+        assert first_host.aclose_count == 1
+        gate.release()  # respawn attempted -- succeeds
+
+        await gate.wait_until_entered()  # ping-interval sleep, running again
+        assert manager.state_for("ha") is PluginState.RUNNING
+        assert manager.tool_host_for("ha") is second_host
+        tool_names = {entry["function"]["name"] for entry in manager.tools_schema}
+        assert "ha_list_entities" in tool_names
+        assert attempts == ["initial", "respawn"]
+    finally:
+        await manager.stop_all()
+
+
+async def test_a_dead_connection_still_withdraws_tools_on_the_first_failure(
+    fake_plugin_repository, monkeypatch
+):
+    """The pre-existing behavior for a real dead connection (any failure
+    that is not `PingTimeoutError`) must be unchanged: it withdraws the
+    tools and schedules a respawn on the very first failure, not the
+    third."""
+    host = _FakeHost("ha_list_entities")
+
+    async def _start_plugin_host(plugin, **kwargs):
+        return host
+
+    monkeypatch.setattr(manager_module, "start_plugin_host", _start_plugin_host)
+
+    gate = _StepGate()
+    ha = _plugin(1, "ha", enforces_policy=True)
+    repo = fake_plugin_repository(plugins=[ha])
+    manager = _manager(repo, sleep=gate)
+    try:
+        await manager.start_all()
+
+        await gate.wait_until_entered()  # ping-interval sleep
+        host.ping_should_fail = True
+        gate.release()  # ping fails outright -- withdrawn at once
+
+        await gate.wait_until_entered()  # backoff sleep before respawn
+        assert manager.state_for("ha") is PluginState.CRASHED_RETRYING
+        assert manager.tools_schema == []
+        assert host.aclose_count == 1
+        assert host.ping_calls == 1
     finally:
         await manager.stop_all()
 
