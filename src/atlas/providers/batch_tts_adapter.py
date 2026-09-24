@@ -18,16 +18,59 @@ work that has not started; reading it any later (say, once the first
 chunk has been handed back) would credit the wrapper with speed the
 provider never had, and that is exactly the corruption D-06 exists to
 rule out.
+
+Quick task 260924-4iu (c): `synthesize` used to join the whole reply and
+make one provider call for it, so a long reply's audio started only
+after every sentence had rendered. A reply of two sentences or more now
+renders as a head (its first sentence) and a tail (the rest): the head
+call is the one D-06 times and the one whose audio starts playing first;
+the tail call starts only after the head call returns -- never
+concurrently with it, since Piper renders in a worker thread and its
+phonemizer is not safe to call twice at once -- and its audio follows the
+head's. A single-sentence reply, or one whose first sentence is shorter
+than `_MIN_HEAD_CHARS`, still makes exactly one provider call, unchanged.
 """
 
 from __future__ import annotations
 
+import asyncio
+import re
 import time
 from typing import Any, AsyncIterator, Protocol
 
 from atlas.providers.tts_xai import CHUNK_BYTES, SinkFormat
 
 __all__ = ["BatchTts", "BatchTtsAdapter", "CHUNK_BYTES"]
+
+# A sentence boundary: `.`, `!`, or `?`, an optional closing quote or
+# parenthesis, then at least one whitespace character. A decimal point
+# ("3.5") has no whitespace after it and is never a boundary.
+_SENTENCE_BOUNDARY_RE = re.compile(r"""[.!?]['")\]]?(\s+)""")
+
+# Speech runs at roughly 15 characters per second, so a 20-character head
+# plays for about 1.3 s -- enough to cover most of a tail render
+# (production p50 is 1.25 s) without an audible gap after a short head
+# such as "Sure." (5 characters, below this floor on its own).
+_MIN_HEAD_CHARS = 20
+
+
+def _split_first_sentence(text: str) -> tuple[str, str]:
+    """Split `text` at the first sentence boundary whose head reaches
+    `_MIN_HEAD_CHARS` and whose tail is not only whitespace.
+
+    Returns `(text, "")` -- the whole text as the head, no tail -- when no
+    boundary qualifies: a single-sentence reply, a reply whose first
+    sentence is too short to be worth a head/tail split on its own, or a
+    reply with a trailing boundary and nothing but whitespace after it.
+    """
+    for match in _SENTENCE_BOUNDARY_RE.finditer(text):
+        head_end = match.start(1)
+        tail_start = match.end(1)
+        head = text[:head_end]
+        tail = text[tail_start:]
+        if len(head.strip()) >= _MIN_HEAD_CHARS and tail.strip():
+            return head, tail
+    return text, ""
 
 
 class BatchTts(Protocol):
@@ -97,30 +140,74 @@ class BatchTtsAdapter:
     async def synthesize(
         self, text_deltas: AsyncIterator[str], sink: "SinkFormat | None" = None
     ) -> AsyncIterator[bytes]:
-        """Join `text_deltas`, call the batch provider once, then yield
-        the result in `chunk_bytes`-sized pieces.
+        """Join `text_deltas`, call the batch provider for the head (and,
+        for a longer reply, the tail), then yield each in `chunk_bytes`
+        pieces -- one provider call for a single-sentence reply, two
+        (head, then tail) for a longer one (260924-4iu, c).
 
         The steps below run in this exact order because the order is
         D-06 itself, not an implementation detail: join the text, return
-        early on nothing to say, read the clock, await the one provider
-        call, read the clock again and store the elapsed time, and only
-        then start yielding chunks. Nothing before the provider's own
-        return produces one real byte of audio, so the stored figure
-        covers exactly the span the provider took -- never the time a
-        slow caller spends consuming what was already rendered.
+        early on nothing to say, split it into a head and a tail, read
+        the clock, await the head call, read the clock again and store
+        the elapsed time -- `last_synthesis_ms` is the head call only,
+        the time a listener actually waits before the first audio, which
+        is what D-06 protects -- and only then start yielding chunks.
+        Nothing before the head call's own return produces one real byte
+        of audio, so the stored figure covers exactly that call's span,
+        never the time a slow caller spends consuming what was already
+        rendered.
+
+        The tail call, when there is a tail, starts as a task right after
+        the head call returns -- never before, and never concurrently
+        with it, so at most one provider call is in flight at any time
+        (Piper's phonemizer is not safe to call twice at once). Its audio
+        overlaps the head's playback rather than the head's own render:
+        the caller is already consuming head chunks while the tail
+        renders in the background.
 
         A provider that raises propagates the error rather than this
         method yielding silence in its place (`providers/base.py`'s
         raise-do-not-return rule) -- a caller must never read a failed
-        synthesis as an empty reply.
+        synthesis as an empty reply. A tail failure surfaces the same way,
+        after every head chunk has already been yielded.
+
+        `finally` cancels a tail task the caller never waited out (the
+        consumer stopped early, or was itself cancelled) and retrieves the
+        exception of one that finished but was never awaited, so asyncio
+        never logs an unretrieved exception either way. It does not await
+        the cancelled task -- that could hold the generator's own close
+        open on however long the task takes to unwind.
         """
         text = "".join([delta async for delta in text_deltas])
         if not text.strip():
             return
 
+        head, tail = _split_first_sentence(text)
+
         start = time.monotonic()
-        audio = await self._provider.synthesize_once(text, sink=sink)
+        head_audio = await self._provider.synthesize_once(head, sink=sink)
         self.last_synthesis_ms = (time.monotonic() - start) * 1000
 
-        for chunk_start in range(0, len(audio), self._chunk_bytes):
-            yield audio[chunk_start : chunk_start + self._chunk_bytes]
+        tail_task: asyncio.Task[bytes] | None = None
+        if tail:
+            tail_task = asyncio.create_task(self._provider.synthesize_once(tail, sink=sink))
+
+        try:
+            for chunk_start in range(0, len(head_audio), self._chunk_bytes):
+                yield head_audio[chunk_start : chunk_start + self._chunk_bytes]
+
+            if tail_task is not None:
+                tail_audio = await tail_task
+                for chunk_start in range(0, len(tail_audio), self._chunk_bytes):
+                    yield tail_audio[chunk_start : chunk_start + self._chunk_bytes]
+        finally:
+            if tail_task is not None:
+                if not tail_task.done():
+                    tail_task.cancel()
+                elif not tail_task.cancelled():
+                    # Already resolved (result or exception) but never
+                    # awaited above -- an early-closed consumer skips the
+                    # `await tail_task` entirely. Reading the exception
+                    # here (and discarding it) is what keeps asyncio from
+                    # logging "Task exception was never retrieved".
+                    tail_task.exception()
