@@ -22,6 +22,7 @@ import threading
 import pytest
 
 from atlas.config import SpeakerConfig
+from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.ffmpeg_supervisor import FfmpegSupervisor
 from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 
@@ -81,24 +82,31 @@ def _drain_forever(path: str, out: list[bytes], stop: threading.Event) -> None:
             out.append(chunk)
 
 
-def test_build_tcp_argv_pushes_raw_alaw_over_tcp_with_no_transcode():
-    """260923-pds: the tcp backend's ffmpeg invocation -- same -c copy, no
-    re-encode, as build_ffmpeg_argv, but pushed to a plain tcp:// listener
-    instead of go2rtc's rtsp:// producer."""
+@pytest.mark.parametrize(
+    "sink, expected_demuxer, expected_rate",
+    [
+        (SinkFormat("alaw", 8000), "alaw", "8000"),
+        (SinkFormat("pcm", 24000), "s16le", "24000"),
+    ],
+)
+def test_build_tcp_argv_reads_the_fifo_in_the_sink_format(sink, expected_demuxer, expected_rate):
+    """260923-pyj (D1): the tcp backend's ffmpeg invocation reads the FIFO
+    in the TTS sink format and writes NUT -- the listener learns the codec
+    and the rate from the stream header, so no format flag has to travel
+    with the operator's own config."""
     from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
-    argv = build_tcp_argv(
-        SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
-    )
+    config = SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
+    argv = build_tcp_argv(config, sink)
     assert argv == [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "warning",
         "-f",
-        "alaw",
+        expected_demuxer,
         "-ar",
-        "8000",
+        expected_rate,
         "-ac",
         "1",
         "-i",
@@ -108,10 +116,21 @@ def test_build_tcp_argv_pushes_raw_alaw_over_tcp_with_no_transcode():
         "-flush_packets",
         "1",
         "-f",
-        "alaw",
+        "nut",
         "tcp://speaker.invalid:5701",
     ]
     assert "rtsp" not in argv
+
+
+def test_build_tcp_argv_rejects_an_unsupported_sink_codec():
+    """A codec this codebase never emits must fail loudly at argv-build
+    time, not silently pick the wrong demuxer."""
+    from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
+
+    config = SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
+    with pytest.raises(ValueError) as exc:
+        build_tcp_argv(config, SinkFormat("mulaw", 8000))
+    assert "mulaw" in str(exc.value)
 
 
 async def test_speaker_fifo_reuses_one_subprocess_across_two_utterances(tmp_path):

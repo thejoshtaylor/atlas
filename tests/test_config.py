@@ -519,6 +519,97 @@ def test_tts_config_defaults_cache_dir_and_precache_when_absent():
     assert tts.precache == ()
 
 
+# --- 260923-pyj (D2, D6): tts.codec/tts.sample_rate validation and coercion ---
+
+
+@pytest.mark.parametrize(
+    "raw, expected_codec, expected_sample_rate",
+    [
+        ({}, "alaw", 8000),
+        ({"codec": "pcm", "sample_rate": "24000"}, "pcm", 24000),
+        ({"codec": "alaw", "sample_rate": "8000"}, "alaw", 8000),
+    ],
+)
+def test_tts_config_accepts_codec_and_sample_rate(raw, expected_codec, expected_sample_rate):
+    """The quoted-string row proves the int coercion: env expansion always
+    hands TtsConfig a string, even for a numeric-looking default."""
+    from atlas.config import TtsConfig
+
+    tts = TtsConfig.from_config(raw)
+    assert tts.codec == expected_codec
+    assert tts.sample_rate == expected_sample_rate
+    assert type(tts.sample_rate) is int
+
+
+@pytest.mark.parametrize(
+    "raw, error_substring",
+    [
+        ({"codec": "mulaw"}, "tts.codec"),
+        ({"codec": ""}, "tts.codec"),
+        ({"sample_rate": "0"}, "tts.sample_rate"),
+        ({"sample_rate": -8000}, "tts.sample_rate"),
+        ({"sample_rate": "fast"}, "tts.sample_rate"),
+        ({"sample_rate": ""}, "tts.sample_rate"),
+    ],
+)
+def test_tts_config_rejects_bad_codec_or_sample_rate(raw, error_substring):
+    """"fast" must raise ConfigError, never a bare ValueError -- an
+    operator reading a startup log should never see a traceback from a
+    stdlib int() call with no config key attached to it."""
+    from atlas.config import TtsConfig
+
+    with pytest.raises(ConfigError) as exc:
+        TtsConfig.from_config(raw)
+    assert error_substring in str(exc.value)
+
+
+# --- 260923-pyj (D3, D6): a camera backend refuses a non-camera TTS pair ---
+
+
+def _raw_config_with(*, tts_overrides: dict | None = None, speaker: dict | None = None) -> dict:
+    """`_minimal_raw_config()` builds a fresh dict on every call, so this
+    only needs to layer the two blocks the guard reads -- no deep copy is
+    needed for the same reason."""
+    raw = _minimal_raw_config()
+    if tts_overrides:
+        raw["tts"] = {**raw["tts"], **tts_overrides}
+    if speaker is not None:
+        raw["speaker"] = speaker
+    return raw
+
+
+@pytest.mark.parametrize(
+    "speaker, codec, sample_rate, should_raise",
+    [
+        (None, "alaw", 8000, False),
+        ({"backend": "tapo_talk"}, "alaw", 8000, False),
+        ({"backend": "tcp", "tcp_url": "tcp://speaker.invalid:5701"}, "pcm", 24000, False),
+        ({"backend": "tcp", "tcp_url": "tcp://speaker.invalid:5701"}, "alaw", 8000, False),
+        (None, "pcm", 24000, True),
+        ({"backend": "go2rtc"}, "pcm", 8000, True),
+        ({"backend": "tapo_talk"}, "alaw", 16000, True),
+    ],
+)
+def test_speaker_backend_tts_format_guard(speaker, codec, sample_rate, should_raise):
+    """go2rtc and tapo_talk drive the camera speaker, which plays only
+    8 kHz A-law -- anything else must stop startup rather than play noise
+    or play at the wrong speed with no error (T-pyj-01)."""
+    from atlas.config import Config, ConfigError
+
+    raw = _raw_config_with(tts_overrides={"codec": codec, "sample_rate": sample_rate}, speaker=speaker)
+    if should_raise:
+        with pytest.raises(ConfigError) as exc:
+            Config.from_config(raw)
+        message = str(exc.value)
+        assert "speaker.backend" in message
+        assert "tts.codec" in message
+        assert "tts.sample_rate" in message
+    else:
+        config = Config.from_config(raw)
+        assert config.tts.codec == codec
+        assert config.tts.sample_rate == sample_rate
+
+
 def test_example_config_loads_end_to_end(monkeypatch):
     from atlas.config import load_config
 

@@ -597,11 +597,13 @@ def test_lifespan_starts_and_assigns_every_owned_resource(tmp_path, monkeypatch)
 
 
 async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
-    """260923-pds (T-pds-02): the tcp egress supervisor is the existing
-    FfmpegSupervisor wired to build_tcp_argv, with no HTTP client --
-    proving the go2rtc ensure_url PUT (which holds the camera password)
-    can never be sent on this path, even when ensure_url is set."""
-    from atlas.config import SpeakerConfig
+    """260923-pds (T-pds-02), extended 260923-pyj (D1): the tcp egress
+    supervisor is the existing FfmpegSupervisor wired to build_tcp_argv
+    with the TTS sink bound in, and no HTTP client -- proving the go2rtc
+    ensure_url PUT (which holds the camera password) can never be sent on
+    this path, even when ensure_url is set."""
+    from atlas.config import SpeakerConfig, TtsConfig
+    from atlas.providers.tts_xai import SinkFormat
     from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
     config = SimpleNamespace(
@@ -609,10 +611,15 @@ async def test_build_tcp_supervisor_returns_a_supervisor_with_no_http_client():
             backend="tcp",
             tcp_url="tcp://speaker.invalid:5701",
             ensure_url="http://go2rtc.invalid/api/streams",
-        )
+        ),
+        tts=TtsConfig(codec="pcm", sample_rate=24000),
     )
     supervisor = app_module._build_tcp_supervisor(config)
-    assert supervisor._build_argv is build_tcp_argv
+    built_argv = supervisor._build_argv(supervisor._config)
+    assert built_argv == build_tcp_argv(config.speaker, SinkFormat(codec="pcm", sample_rate=24000))
+    assert "s16le" in built_argv
+    assert "24000" in built_argv
+    assert "nut" in built_argv
     assert supervisor._http_client is None
 
     # _ensure_backchannel returns at once when there is no http client --
