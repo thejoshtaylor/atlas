@@ -63,48 +63,107 @@ def _reason_for(exc: Exception) -> str:
     return "not reachable"
 
 
-async def _events_for_account(
+async def _events_for_calendar(
     account: AccountGrant,
+    calendar: "Any",
+    client: httpx.AsyncClient,
+    zone: ZoneInfo,
+    *,
+    time_min_s: str,
+    time_max_s: str,
+    query: "str | None",
+) -> list[dict[str, Any]]:
+    """Every event one calendar carries, formatted with its own account
+    and calendar labels -- one `asyncio.gather` job (D-04's own fan-out
+    unit is a calendar, not an account, so one account's second calendar
+    can succeed even while its first one fails). A `GoogleAuthError`/
+    `GoogleApiError`/`httpx.HTTPError` here propagates to the caller's
+    `gather(..., return_exceptions=True)` -- never caught in this
+    function, so the caller's own per-account bookkeeping is the one
+    place a failure is turned into a reason.
+    """
+    raw_events = await list_events(
+        client,
+        access_token=account.access_token,
+        calendar_id=calendar.calendar_id,
+        time_min=time_min_s,
+        time_max=time_max_s,
+        time_zone=str(zone),
+        query=query,
+    )
+    return [
+        _format_event(raw_event, account=account.label, calendar=calendar.name)
+        for raw_event in raw_events
+    ]
+
+
+async def _fan_out_events(
+    resolved: "tuple[AccountGrant, ...]",
     client: httpx.AsyncClient,
     zone: ZoneInfo,
     *,
     time_min: datetime,
     time_max: datetime,
     query: "str | None",
-) -> tuple[list[dict[str, Any]], "dict[str, str] | None"]:
-    """Every event from every enabled calendar `account` carries, or the
-    one `{"account", "reason"}` entry naming why none could be fetched.
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Every event across every resolved account, and the
+    `{"account", "reason"}` entry for every account this call could not
+    fully answer.
+
+    `asyncio.gather(..., return_exceptions=True)` -- never the structured-
+    concurrency construct whose first failure would cancel every other
+    account and calendar still in flight (the same reasoning
+    `turn/brain_race.py`'s own module docstring gives, and Task 2's own
+    action text names directly) -- fans out one job per (account,
+    calendar) pair, so one calendar failing never loses another
+    calendar's already-succeeding events for the SAME account (D-04's
+    "that account's successful calendars still contribute events").
 
     An account with no `access_token` (GOOG-12: `GoogleTokenService`
-    could not refresh it) is reported unreachable with its own
-    `unreachable_reason` and makes no request at all. Otherwise every
-    calendar is queried in turn; the first calendar that fails marks the
-    whole account unreachable for this call (Task 2 fans these out
-    concurrently and isolates one account's failure from every other's --
-    this function's own per-account body is unchanged by that).
+    could not refresh it) contributes no job at all -- no request is ever
+    made for it -- and is reported unreachable with its own
+    `unreachable_reason` directly.
     """
-    if account.access_token is None:
-        reason = account.unreachable_reason or "not reachable"
-        return [], {"account": account.label, "reason": reason}
     time_min_s = time_min.astimezone(_timezone.utc).isoformat().replace("+00:00", "Z")
     time_max_s = time_max.astimezone(_timezone.utc).isoformat().replace("+00:00", "Z")
-    events: list[dict[str, Any]] = []
-    for calendar in account.calendars:
-        try:
-            raw_events = await list_events(
-                client,
-                access_token=account.access_token,
-                calendar_id=calendar.calendar_id,
-                time_min=time_min_s,
-                time_max=time_max_s,
-                time_zone=str(zone),
-                query=query,
+
+    unreachable_by_account: dict[str, str] = {}
+    jobs: list[tuple[AccountGrant, Any]] = []
+    for one_account in resolved:
+        if one_account.access_token is None:
+            unreachable_by_account[one_account.label] = one_account.unreachable_reason or "not reachable"
+            continue
+        for calendar in one_account.calendars:
+            # D-05, defense in depth: the boundary enforces this itself,
+            # never trusting only `GoogleEnvBuilder`'s own upstream
+            # filter (`ha.py`'s own "the call site exists uniformly here"
+            # doctrine).
+            if calendar.access == "off":
+                continue
+            jobs.append((one_account, calendar))
+
+    results = await asyncio.gather(
+        *(
+            _events_for_calendar(
+                one_account, calendar, client, zone, time_min_s=time_min_s, time_max_s=time_max_s, query=query
             )
-        except (GoogleAuthError, GoogleApiError, httpx.HTTPError) as exc:
-            return [], {"account": account.label, "reason": _reason_for(exc)}
-        for raw_event in raw_events:
-            events.append(_format_event(raw_event, account=account.label, calendar=calendar.name))
-    return events, None
+            for one_account, calendar in jobs
+        ),
+        return_exceptions=True,
+    )
+
+    all_events: list[dict[str, Any]] = []
+    for (one_account, _calendar), result in zip(jobs, results):
+        if isinstance(result, Exception):
+            if one_account.label not in unreachable_by_account:
+                unreachable_by_account[one_account.label] = _reason_for(result)
+            continue
+        all_events.extend(result)
+
+    unreachable = [
+        {"account": label, "reason": reason} for label, reason in sorted(unreachable_by_account.items())
+    ]
+    return all_events, unreachable
 
 
 def _format_event(raw_event: dict[str, Any], *, account: str, calendar: str) -> dict[str, Any]:
@@ -137,8 +196,9 @@ async def handle_calendar_list_events(
 ) -> dict[str, Any]:
     """Answer a calendar-events question, gated by `resolve_accounts`
     (D-04) and this account's own per-calendar `access` (D-05, enforced
-    upstream by `GoogleEnvBuilder` -- an off calendar is never in
-    `account.calendars` at all).
+    both upstream by `GoogleEnvBuilder` -- an off calendar is normally
+    never in `account.calendars` at all -- and again by `_fan_out_events`
+    itself, never trusting only the upstream filter).
 
     Refuses (never queries) a range longer than `_MAX_RANGE_DAYS` days or
     an end not after the start, and refuses when no account is linked at
@@ -155,15 +215,9 @@ async def handle_calendar_list_events(
     if time_max - time_min > timedelta(days=_MAX_RANGE_DAYS):
         raise Denied(f"i can only look across {_MAX_RANGE_DAYS} days at a time")
 
-    all_events: list[dict[str, Any]] = []
-    unreachable: list[dict[str, str]] = []
-    for one_account in resolved:
-        events, failure = await _events_for_account(
-            one_account, client, zone, time_min=time_min, time_max=time_max, query=query
-        )
-        all_events.extend(events)
-        if failure is not None:
-            unreachable.append(failure)
+    all_events, unreachable = await _fan_out_events(
+        resolved, client, zone, time_min=time_min, time_max=time_max, query=query
+    )
 
     all_events.sort(key=lambda e: e["start"] or "")
     return {
