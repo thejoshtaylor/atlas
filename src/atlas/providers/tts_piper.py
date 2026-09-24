@@ -84,6 +84,19 @@ def _render_pcm16(voice: Any, text: str) -> "tuple[bytes, int]":
     return pcm16, chunks[0].sample_rate
 
 
+def _render_for_sink(voice: Any, text: str, sample_rate: int, codec: str) -> bytes:
+    """Quick task 260924-4is (D3): render, resample, and the optional
+    A-law encode, all in the one worker-thread call `synthesize_once`
+    below makes -- `_render_pcm16`/`_resample_pcm16`/`pcm16_to_alaw` are
+    looked up as this module's own globals at call time, so an existing
+    test's `monkeypatch.setattr` on any of them still applies here."""
+    pcm16, native_rate = _render_pcm16(voice, text)
+    pcm16 = _resample_pcm16(pcm16, native_rate, sample_rate)
+    if codec == "alaw":
+        return pcm16_to_alaw(pcm16)
+    return pcm16
+
+
 class PiperTts:
     """Speech synthesis via a local Piper voice -- no account, no per-turn
     network call (D-09, D-10)."""
@@ -141,8 +154,4 @@ class PiperTts:
         Web-Audio-facing PCM path cannot share one hardcoded shape.
         """
         sink = sink or self.browser_sink()
-        pcm16, native_rate = await asyncio.to_thread(_render_pcm16, self._voice, text)
-        pcm16 = _resample_pcm16(pcm16, native_rate, sink.sample_rate)
-        if sink.codec == "alaw":
-            return pcm16_to_alaw(pcm16)
-        return pcm16
+        return await asyncio.to_thread(_render_for_sink, self._voice, text, sink.sample_rate, sink.codec)

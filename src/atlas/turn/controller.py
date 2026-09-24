@@ -972,9 +972,14 @@ async def run_turn(
         # Covers every exit path above, including the two early returns --
         # exactly the turns whose folders an operator will want, and the
         # easiest ones to leak (D-13, T-02-22). A no-op when
-        # `session_recorder` is `None`.
+        # `session_recorder` is `None`. Quick task 260924-4is (D3): the
+        # file writes inside `close()` block on disk, so they run on a
+        # worker thread rather than the loop -- nothing else still holds a
+        # reference to append to this recorder by the time this `finally`
+        # starts (the barge-in listener reads the raw source, never the
+        # `_RecordingAudioSource` wrapper this function built above).
         if session_recorder is not None:
-            session_recorder.close(timings)
+            await asyncio.to_thread(session_recorder.close, timings)
 
 
 def _validate_tiers(tiers: "list[brain_race.TierBrain]") -> None:

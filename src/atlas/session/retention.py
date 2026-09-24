@@ -275,7 +275,9 @@ class RetentionScheduler:
         while not self._stopping:
             self.sweep_count += 1
             try:
-                sweep_expired_sessions(self._root, self._retain_days, clock=self._clock)
+                # Quick task 260924-4is (D3): directory listing and
+                # `shutil.rmtree` both block on disk -- off the loop.
+                await asyncio.to_thread(sweep_expired_sessions, self._root, self._retain_days, clock=self._clock)
             except asyncio.CancelledError:
                 raise
             except Exception:

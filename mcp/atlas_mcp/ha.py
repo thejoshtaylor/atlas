@@ -21,6 +21,7 @@ model ever rewording it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import os
@@ -222,6 +223,26 @@ async def handle_get_state(
     }
 
 
+def _entities_from_states_response(response: httpx.Response) -> list[dict[str, Any]]:
+    """Quick task 260924-4is (D3): the `response.json()` parse and the
+    per-entity `allow_read` filter, in the one worker-thread call
+    `handle_list_entities` below makes -- a big house's full `/api/states`
+    body is the only place this child process parses that whole payload,
+    so this is what keeps a large house from holding this child's own
+    loop (and so, its own ping reply) for the parse."""
+    entities: list[dict[str, Any]] = []
+    for state in response.json():
+        entity_id = allow_read(state["entity_id"])
+        entities.append(
+            {
+                "entity_id": entity_id,
+                "friendly_name": state.get("attributes", {}).get("friendly_name", entity_id),
+                "state": state["state"],
+            }
+        )
+    return entities
+
+
 async def handle_list_entities(
     policy: Policy,
     client: httpx.AsyncClient,
@@ -237,17 +258,7 @@ async def handle_list_entities(
     """
     response = await client.get(f"{base_url}/api/states", headers={"Authorization": f"Bearer {token}"})
     response.raise_for_status()
-    entities: list[dict[str, Any]] = []
-    for state in response.json():
-        entity_id = allow_read(state["entity_id"])
-        entities.append(
-            {
-                "entity_id": entity_id,
-                "friendly_name": state.get("attributes", {}).get("friendly_name", entity_id),
-                "state": state["state"],
-            }
-        )
-    return entities
+    return await asyncio.to_thread(_entities_from_states_response, response)
 
 
 mcp_server = MCPServer("atlas-ha")
