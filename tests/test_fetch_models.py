@@ -397,12 +397,15 @@ def test_every_url_the_shipped_configuration_plans_carries_a_pinned_digest():
     # Parsed directly rather than through `load_config`, which would
     # demand every ${VAR} in the file be set in this process's
     # environment. Only the four local-model paths matter here, and none
-    # of them is a placeholder.
+    # of them is a placeholder -- tts.codec/tts.sample_rate are, since
+    # 260923-pyj, so they are dropped here and TtsConfig falls back to its
+    # own (valid) defaults for the two this test does not exercise.
     raw = yaml.safe_load(
         (Path(__file__).resolve().parent.parent / "config" / "config.example.yaml").read_text()
     )
+    tts_raw = {k: v for k, v in raw["tts"].items() if k not in ("codec", "sample_rate")}
     _root, planned = fetch_models.plan_fetches(
-        SttConfig.from_config(raw["stt"]), TtsConfig.from_config(raw["tts"])
+        SttConfig.from_config(raw["stt"]), TtsConfig.from_config(tts_raw)
     )
 
     assert planned
@@ -560,9 +563,13 @@ def test_the_default_model_root_is_the_mount_point_both_deployments_use():
     raw = yaml.safe_load(
         (Path(__file__).resolve().parent.parent / "config" / "config.example.yaml").read_text()
     )
+    # tts.codec/tts.sample_rate are ${VAR} placeholders since 260923-pyj and
+    # are not relevant to this test's own local-model-path claim -- dropped
+    # so TtsConfig falls back to its own (valid) defaults for them.
+    tts_raw = {k: v for k, v in raw["tts"].items() if k not in ("codec", "sample_rate")}
     _root, planned = fetch_models.plan_fetches(
         SttConfig.from_config(raw["stt"]),
-        TtsConfig.from_config(raw["tts"]),
+        TtsConfig.from_config(tts_raw),
         fetch_models._DEFAULT_MODEL_ROOT,
     )
     for model_file in planned:
