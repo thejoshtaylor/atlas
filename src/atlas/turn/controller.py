@@ -94,7 +94,7 @@ from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.local_intent import match_on_off
-from atlas.turn.macros import fire_macro, match as match_macro
+from atlas.turn.macros import fire_macro, match as match_macro, normalize
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.wake_echo import is_wake_only
 
@@ -966,8 +966,21 @@ async def run_turn(
             reply_text = _CANNOT_DO_REPLY
             speaking_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
         else:
-            reply_text = answer_text
-            speaking_tts = tts
+            # 260924-4iu (b): reply_text becomes the cached phrase, not the
+            # model's own text, because reply_text is what the `reply.text`
+            # event carries (`_speak` below) and it must name the audio
+            # that is actually about to play. The match is exact after
+            # normalize(), never fuzzy -- the same rule macros use (D-11).
+            # Model text comes from an untrusted transcript; it can only
+            # select audio for a phrase the operator already configured, and
+            # it never builds a cache path or a cache key itself.
+            cached_phrase = _precached_phrase_for(filler_cache, sink, answer_text)
+            if cached_phrase is not None:
+                reply_text = cached_phrase
+                speaking_tts = CachedTts(filler_cache)
+            else:
+                reply_text = answer_text
+                speaking_tts = tts
         await _speak(
             source,
             speaking_tts,
@@ -1059,6 +1072,38 @@ def _tts_for_precached_fallback(
         if text in cache:
             return CachedTts(filler_cache)
     return live_tts
+
+
+def _precached_phrase_for(
+    filler_cache: Mapping[tuple[str, int] | None, Mapping[str, bytes]] | None,
+    sink: SinkFormat | None,
+    text: str,
+) -> str | None:
+    """The cache key for `sink`'s cache entry whose `normalize()` form
+    equals `normalize(text)`, or `None` (260924-4iu, b).
+
+    Selects the cache entry with the same rule `_tts_for_precached_fallback`
+    above uses: the key is `(sink.codec, sink.sample_rate)`, or `None` when
+    `sink` is `None`. Returns `None` when `filler_cache` is empty or `None`,
+    when that sink has no entry, when `normalize(text)` is empty (a
+    punctuation-only answer normalizes to nothing and can never match), or
+    when nothing in the entry matches. The cache holds a few dozen phrases
+    at most, so this normalizes each key on every call rather than building
+    and maintaining a second, precomputed index.
+    """
+    if not filler_cache:
+        return None
+    key = (sink.codec, sink.sample_rate) if sink is not None else None
+    cache = filler_cache.get(key)
+    if not cache:
+        return None
+    target = normalize(text)
+    if not target:
+        return None
+    for phrase in cache:
+        if normalize(phrase) == target:
+            return phrase
+    return None
 
 
 async def _cancel_state_task(state_task: "asyncio.Task[Any] | None") -> None:
