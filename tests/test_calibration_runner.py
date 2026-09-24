@@ -41,7 +41,7 @@ from atlas.calibration.runner import (
     find_latest_calibration,
     run_echo_calibration,
 )
-from atlas.config import CalibrationConfig, CameraConfig
+from atlas.config import CalibrationConfig, CameraConfig, SpeakerConfig
 from atlas.providers.tts_xai import SinkFormat
 from atlas.providers.tts_piper import _resample_pcm16
 from atlas.transports.base import SourceFormat
@@ -312,6 +312,53 @@ async def test_near_floor_room_tone_still_counts_as_an_echo_cancelled_camera(tmp
     assert result.calibration.echo_cancelled is True
 
 
+# --- 260923-sfi (D2): only tapo_talk is trusted to explain "no echo" as its own AEC ---
+
+
+async def test_uncorrelated_noise_with_no_camera_aec_stays_a_failure(tmp_path):
+    """tcp and go2rtc speak through a different device (or a failed
+    backchannel) -- "no echo came back" there means the probe never
+    reached the microphone, not that a camera cancelled its own echo.
+    `speaker_has_aec=False` must keep this the plain failure it always
+    was, and save no record."""
+    fake = _LoopbackFake(uncorrelated_noise_rms=400.0)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+        speaker_has_aec=False,
+    )
+
+    assert result.calibration is None
+    assert result.failure_reason
+    assert list(Path(calibration_config.dir).glob("*")) == []
+
+
+async def test_uncorrelated_noise_with_no_speaker_has_aec_argument_defaults_to_refusing(tmp_path):
+    """The default must refuse -- proven by omitting the keyword entirely,
+    not by passing False explicitly."""
+    fake = _LoopbackFake(uncorrelated_noise_rms=400.0)
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path)
+
+    result = await run_echo_calibration(
+        fake, fake, camera_config, calibration_config, "note",
+        sleep=_make_traced_sleep(fake),
+    )
+
+    assert result.calibration is None
+    assert result.failure_reason
+    assert list(Path(calibration_config.dir).glob("*")) == []
+
+
+def test_speaker_config_cancels_own_echo_only_on_tapo_talk():
+    assert SpeakerConfig(backend="tapo_talk").cancels_own_echo is True
+    assert SpeakerConfig(backend="tcp", tcp_url="tcp://speaker.invalid:1").cancels_own_echo is False
+    assert SpeakerConfig(backend="go2rtc").cancels_own_echo is False
+
+
 async def test_settle_elapses_before_the_probe_is_written_and_window_covers_duration_plus_tail(tmp_path):
     fake = _LoopbackFake(delay_samples=100, scale=0.9)
     camera_config = _make_camera_config()
@@ -522,14 +569,27 @@ def test_calibrate_echo_path_script_reads_no_environment_variable_directly():
                 pytest.fail("scripts/calibrate_echo_path.py reads os.environ[...] directly")
 
 
-async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "backend, expected_has_aec",
+    [
+        ("tcp", False),
+        ("tapo_talk", True),
+        ("go2rtc", False),
+    ],
+)
+async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeypatch, backend, expected_has_aec):
     """260923-pyj (D4): the script writes the probe into the same FIFO the
     pod's own egress reads, so it must convert the probe the same way --
     `_run` reads `config.tts` and passes it through as `run_echo_
-    calibration`'s `sink` keyword."""
+    calibration`'s `sink` keyword. 260923-sfi (D1, D2): it must also pad
+    that FifoWriter with sink-format silence -- the probe is short, so an
+    unpadded FIFO would cut it the same way an unpadded reply is cut --
+    and pass `speaker_has_aec` from `config.speaker.cancels_own_echo`."""
+    from atlas.audio.cue import silence
     from atlas.config import TtsConfig
 
     recorded: dict[str, object] = {}
+    fifo_kwargs: dict[str, object] = {}
 
     class _FakeCameraSource:
         def start(self) -> None:
@@ -539,9 +599,9 @@ async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeyp
             return None
 
     class _FakeFifoWriter:
-        def __init__(self, path, *, reopen_timeout_s):
+        def __init__(self, path, **kwargs):
             self.path = path
-            self.reopen_timeout_s = reopen_timeout_s
+            fifo_kwargs.update(kwargs)
 
         async def open(self) -> None:
             return None
@@ -559,7 +619,7 @@ async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeyp
 
     config = SimpleNamespace(
         camera=_make_camera_config(),
-        speaker=SimpleNamespace(fifo_path=str(tmp_path / "speaker.fifo"), reopen_timeout_s=1.0),
+        speaker=SpeakerConfig(fifo_path=str(tmp_path / "speaker.fifo"), reopen_timeout_s=1.0, backend=backend),
         calibration=_make_calibration_config(tmp_path),
         tts=TtsConfig(codec="pcm", sample_rate=24000),
     )
@@ -567,6 +627,9 @@ async def test_run_passes_the_tts_sink_to_run_echo_calibration(tmp_path, monkeyp
     await calibrate_echo_path._run(config, "note")
 
     assert recorded["sink"] == SinkFormat(codec="pcm", sample_rate=24000)
+    assert recorded["speaker_has_aec"] is expected_has_aec
+    assert fifo_kwargs["pad_bytes"] == silence(SinkFormat("pcm", 24000), 0.2)
+    assert fifo_kwargs["pad_idle_s"] == 0.15
 
 
 def test_validate_environment_rejects_a_placement_note_shaped_like_a_url(tmp_path):
@@ -686,13 +749,21 @@ def test_calibration_routes_are_disabled_by_default_and_name_the_config_key(tmp_
         assert "calibration.route_enabled" in run_response.json()["detail"]
 
 
-def _install_calibration_state(camera_config, calibration_config, camera_source, speaker_writer) -> None:
+def _install_calibration_state(
+    camera_config, calibration_config, camera_source, speaker_writer, *, speaker_backend: str = "go2rtc"
+) -> None:
     """Sets exactly the `app.state` attributes the two calibration routes
     read, with no real lifespan boot -- the route handlers are plain
     coroutines FastAPI's `@app.get`/`@app.post` decorators register and
     return unchanged, so calling them directly here needs no ASGI
-    machinery, no tool host, no brain tier, and no wake detector."""
-    app_module.app.state.config = SimpleNamespace(calibration=calibration_config, camera=camera_config)
+    machinery, no tool host, no brain tier, and no wake detector.
+
+    260923-sfi (D2): `speaker_backend` builds the `SpeakerConfig` the route
+    reads `cancels_own_echo` from -- `"go2rtc"` (default) matches every
+    existing caller's behaviour before this field existed."""
+    app_module.app.state.config = SimpleNamespace(
+        calibration=calibration_config, camera=camera_config, speaker=SpeakerConfig(backend=speaker_backend)
+    )
     app_module.app.state.camera_source = camera_source
     app_module.app.state.speaker_writer = speaker_writer
     app_module.app.state.calibration_in_progress = False
@@ -788,3 +859,34 @@ async def test_run_route_reports_a_failed_measurement_by_name_rather_than_a_part
     assert exc.value.status_code == 422
     assert exc.value.detail
     assert list(Path(calibration_config.dir).glob("*")) == []
+
+
+async def test_run_route_refuses_the_echo_cancelled_fallback_on_the_tcp_backend(tmp_path):
+    """260923-sfi (D2): the route reads `speaker_has_aec` from
+    `config.speaker.cancels_own_echo`, which is False on tcp -- an
+    uncorrelated recording there must report the plain failure, never a
+    saved echo_cancelled record."""
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(uncorrelated_noise_rms=400.0)
+    _install_calibration_state(camera_config, calibration_config, fake, fake, speaker_backend="tcp")
+
+    with pytest.raises(HTTPException) as exc:
+        await app_module.run_echo_path_calibration(app_module.CalibrationRunRequest(placement_note="note"))
+
+    assert exc.value.status_code == 422
+    assert list(Path(calibration_config.dir).glob("*")) == []
+
+
+async def test_run_route_allows_the_echo_cancelled_fallback_on_the_tapo_talk_backend(tmp_path):
+    """The one backend this fallback is trusted for."""
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(uncorrelated_noise_rms=400.0)
+    _install_calibration_state(camera_config, calibration_config, fake, fake, speaker_backend="tapo_talk")
+
+    response = await app_module.run_echo_path_calibration(
+        app_module.CalibrationRunRequest(placement_note="note")
+    )
+
+    assert response["echo_cancelled"] is True
