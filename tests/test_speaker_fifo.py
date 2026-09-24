@@ -96,7 +96,7 @@ def test_build_tcp_argv_reads_the_fifo_in_the_sink_format(sink, expected_demuxer
     with the operator's own config."""
     from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
-    config = SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
+    config = SpeakerConfig(fifo_path="/data/speaker.fifo", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
     argv = build_tcp_argv(config, sink)
     assert argv == [
         "ffmpeg",
@@ -110,7 +110,7 @@ def test_build_tcp_argv_reads_the_fifo_in_the_sink_format(sink, expected_demuxer
         "-ac",
         "1",
         "-i",
-        "/data/speaker.alaw",
+        "/data/speaker.fifo",
         "-c",
         "copy",
         "-flush_packets",
@@ -127,7 +127,7 @@ def test_build_tcp_argv_rejects_an_unsupported_sink_codec():
     time, not silently pick the wrong demuxer."""
     from atlas.speaker.ffmpeg_supervisor import build_tcp_argv
 
-    config = SpeakerConfig(fifo_path="/data/speaker.alaw", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
+    config = SpeakerConfig(fifo_path="/data/speaker.fifo", backend="tcp", tcp_url="tcp://speaker.invalid:5701")
     with pytest.raises(ValueError) as exc:
         build_tcp_argv(config, SinkFormat("mulaw", 8000))
     assert "mulaw" in str(exc.value)
@@ -138,7 +138,7 @@ async def test_speaker_fifo_reuses_one_subprocess_across_two_utterances(tmp_path
     cost a second `ffmpeg` spawn -- asserted by counting spawns, not by
     timing them, since a timing assertion would pass on a slow machine that
     spawned twice anyway."""
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     received: list[bytes] = []
@@ -170,7 +170,7 @@ async def test_dead_child_restarts_after_backoff_and_logs_exit_status(tmp_path, 
     """T-02-11: a child that exits is restarted after the configured
     backoff, and the restart is visible in the log -- a silent drop is the
     exact failure mode this supervisor exists to prevent."""
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     first_process = _FakeProcess()
@@ -207,7 +207,7 @@ async def test_write_after_reader_loss_reopens_the_pipe(tmp_path):
     was CR-04's own second finding: not a flaky assertion, a race the test
     itself was running against the code under test.
     """
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     first_reader_done = threading.Event()
@@ -268,7 +268,7 @@ async def test_reopen_with_no_reader_fails_instead_of_hanging_forever(tmp_path):
     ever regresses back to unbounded, this one test times out on its own
     schedule instead of hanging the whole suite.
     """
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     first_reader_done = threading.Event()
@@ -305,7 +305,7 @@ async def test_write_after_a_failed_reopen_retries_and_recovers(tmp_path):
     reader again. Live, the speaker then stayed silent after the camera's
     talk session came back, until the pod restarted.
     """
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     def _read_once(into: list[bytes], done: threading.Event) -> None:

@@ -503,7 +503,7 @@ class SpeakerConfig:
     go2rtc_url: str = "http://frigate:1984"
     stream: str = "cam"
     ensure_url: str = ""
-    fifo_path: str = "/run/atlas/speaker.alaw"
+    fifo_path: str = "/data/speaker.fifo"
     respawn_backoff_s: float = 30.0
     reopen_timeout_s: float = 10.0
     backend: str = "go2rtc"

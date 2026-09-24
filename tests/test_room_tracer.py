@@ -96,7 +96,7 @@ async def test_one_wake_hit_runs_one_turn_and_the_reply_reaches_the_speaker(tmp_
     _write_alaw_fixture(fixture_path)
     _FIXTURE_PATH = fixture_path
 
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     # Created here, before the reader thread starts: `FifoWriter` also
     # creates the node itself if it is missing (a real deployment's mount
     # may only provide the directory), but racing that self-creation

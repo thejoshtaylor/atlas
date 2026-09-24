@@ -78,7 +78,7 @@ def test_camera_host_from_rtsp_url_derives_the_host_only():
 async def test_tapo_talk_supervisor_frames_header_then_alaw_to_the_fake_session(tmp_path, monkeypatch):
     monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
 
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     fake_session = _FakeMediaSession()
@@ -140,7 +140,7 @@ async def test_tapo_talk_supervisor_stop_closes_the_session_while_blocked_on_a_f
     still closes the session (and returns) within a bounded time."""
     monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
 
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     fake_session = _FakeMediaSession()
@@ -202,7 +202,7 @@ async def test_tapo_talk_supervisor_stop_closes_the_session_while_blocked_on_a_f
 async def test_tapo_talk_supervisor_stays_in_backoff_without_the_cloud_password(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv(TAPO_CLOUD_PASSWORD_ENV, raising=False)
 
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     build_calls = 0
@@ -231,7 +231,7 @@ async def test_tapo_talk_supervisor_times_out_a_stalled_connect_into_backoff(tmp
     retry, not hang the supervisor loop forever."""
     monkeypatch.setenv(TAPO_CLOUD_PASSWORD_ENV, "not-a-real-password")
 
-    fifo_path = str(tmp_path / "speaker.alaw")
+    fifo_path = str(tmp_path / "speaker.fifo")
     os.mkfifo(fifo_path)
 
     build_calls = 0
@@ -275,7 +275,7 @@ async def test_tapo_talk_supervisor_doubles_its_backoff_on_consecutive_failures(
     import atlas.speaker.tapo_talk as tapo_talk_module
 
     monkeypatch.setattr(tapo_talk_module.asyncio, "sleep", recording_sleep)
-    config = SpeakerConfig(fifo_path=str(tmp_path / "speaker.alaw"), respawn_backoff_s=30.0)
+    config = SpeakerConfig(fifo_path=str(tmp_path / "speaker.fifo"), respawn_backoff_s=30.0)
     supervisor = TapoTalkSupervisor(config, "192.0.2.5", build_session=failing_build_session)
     supervisor.start()
     await _wait_for(lambda: len(delays) >= 7)

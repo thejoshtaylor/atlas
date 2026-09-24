@@ -230,7 +230,7 @@ speaker:
   # directories) always failed against this shipped default. /data is the
   # one writable volume both the Helm chart (a PVC) and Compose (a named
   # volume) already mount.
-  fifo_path: "/data/speaker.alaw"
+  fifo_path: "/data/speaker.fifo"
   # 260922-gde: the camera's talk port (8800) locks out every client after
   # a run of failed auths. A short backoff re-armed that lockout on every
   # retry, so a dead speaker session never recovered while the pod kept
