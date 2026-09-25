@@ -47,6 +47,7 @@ from atlas.config import (
 )
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
+from atlas.db.google_postgres import PostgresGoogleAccountRepository
 from atlas.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
@@ -68,6 +69,12 @@ from atlas.db.repository import (
     WakeEventRepository,
     WorkflowRepository,
 )
+from atlas_mcp.google_tools import GOOGLE_PLUGIN_MODULE
+
+from atlas.google.env import GoogleEnvBuilder
+from atlas.google.plugin import refresh_google_plugin
+from atlas.google.scheduler import GoogleTokenRefreshScheduler
+from atlas.google.token_service import GoogleTokenService
 from atlas.loop_stall import LoopStallReporter
 from atlas.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
 from atlas.plugins.manager import PluginManager
@@ -598,6 +605,12 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
             retry_backoff_s=config.workflow.retry_backoff_s,
             claim_recovery_after_s=config.workflow.claim_recovery_after_s,
         ),
+        # Phase 9 (09-01, D-01, D-03): linked Google accounts, their
+        # calendars, and the one OAuth client -- read with `.get(...)`,
+        # like `wake_event_repo`, since `tests/test_startup_smoke.py`'s
+        # fake repository dict predates this key (Task 3's own "boots
+        # unchanged with no Google repository" requirement).
+        "google_account_repo": PostgresGoogleAccountRepository(sessionmaker),
     }
 
 
@@ -1025,6 +1038,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # configuration discipline the gate and barge-in policy already carry
     # in that constructor).
     wake_event_repo: WakeEventRepository | None = repositories.get("wake_event_repo")
+    # Phase 9 (09-01, Task 3): same tolerant `.get(...)` -- a deployment
+    # (or a test's own fake repository dict) with no Google repository at
+    # all boots exactly as it did before this plan; nothing below runs.
+    google_account_repo = repositories.get("google_account_repo")
 
     # The wizard's own audio-source choice (`routes/wizard.py`'s
     # `AUDIO_SOURCE_SETTING_KEY`) joins the same resolution discipline the
@@ -1280,6 +1297,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # save builds a *new* `McpToolHost`; the previous one is closed.
         app.state.tool_host = plugin_manager.enforcing_host
 
+    # Phase 9 (09-01, Task 3): only when a Google repository actually
+    # exists (every real deployment; `tests/test_startup_smoke.py`'s fake
+    # repository dict, deliberately, does not) -- `google_http_client` is
+    # the same test seam `ha_http_client` above already establishes, owned
+    # by this process unless a test injected one, and closed in shutdown
+    # only when this process is the one that opened it.
+    google_http_client: "httpx.AsyncClient | None" = None
+    owns_google_http_client = False
+    custom_env_builders: "dict[str, Any] | None" = None
+    if google_account_repo is not None:
+        injected_google_client = getattr(app.state, "google_http_client", None)
+        owns_google_http_client = injected_google_client is None
+        google_http_client = (
+            injected_google_client if injected_google_client is not None else httpx.AsyncClient(timeout=10.0)
+        )
+        app.state.google_http_client = google_http_client
+        google_token_service = GoogleTokenService(google_account_repo, security_config, google_http_client)
+        app.state.google_token_service = google_token_service
+        custom_env_builders = {
+            GOOGLE_PLUGIN_MODULE: GoogleEnvBuilder(google_account_repo, google_token_service)
+        }
+
     plugin_manager = PluginManager(
         plugin_repo,
         mcp_root=MCP_ROOT,
@@ -1288,6 +1327,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         plugins_config=config.plugins,
         on_rebuild=_publish_tool_view,
         zone_name=timezone_resolution.child_tz,
+        custom_env_builders=custom_env_builders,
     )
     app.state.plugin_manager = plugin_manager
     # Publishes an empty view first, so every attribute above exists even
@@ -1295,6 +1335,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # own closing `rebuild()`.
     _publish_tool_view()
     await plugin_manager.start_all()
+
+    # Phase 9 (09-01, Task 3): started only when a Google repository
+    # exists -- 1500s, below the 1800s `min_validity_s`
+    # `GoogleEnvBuilder`/`GoogleTokenService` use by default, so a
+    # respawned child's token always has at least five minutes left.
+    google_token_scheduler: "GoogleTokenRefreshScheduler | None" = None
+    if google_account_repo is not None:
+
+        async def _refresh_google_plugin() -> None:
+            await refresh_google_plugin(plugin_manager, plugin_repo)
+
+        google_token_scheduler = GoogleTokenRefreshScheduler(_refresh_google_plugin)
+        google_token_scheduler.start()
+    app.state.google_token_scheduler = google_token_scheduler
+
     # Kept on app.state so plan 03-07's write routes can compare a would-be
     # new block against the one the running child was actually spawned
     # with, before deciding whether a respawn is needed. `None` when no
@@ -1712,6 +1767,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if tts_closer is not None:
         await tts_closer()
     await speaker_writer.close()
+    # Phase 9 (09-01, Task 3): stopped before `plugin_manager.stop_all()`
+    # -- a refresh mid-shutdown would race a plugin teardown already in
+    # progress -- and the http client closed only when this process is
+    # the one that opened it (the same `owns_google_http_client` test seam
+    # `ha_http_client` above already establishes).
+    if google_token_scheduler is not None:
+        await google_token_scheduler.stop()
+    if google_http_client is not None and owns_google_http_client:
+        await google_http_client.aclose()
     # Plan 06-01: the manager owns every plugin child's teardown now --
     # one call, not a per-host `aclose()` for however many plugins happen
     # to be running.
