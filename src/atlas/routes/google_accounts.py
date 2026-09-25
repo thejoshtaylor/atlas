@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import secrets
 import urllib.parse
@@ -34,11 +35,13 @@ from atlas_mcp.google_account_api import build_consent_url, list_calendars, revo
 from atlas_mcp.google_api import GoogleApiError
 
 from atlas.auth.dependencies import CurrentUser, Role, require_role
-from atlas.crypto.credentials import decrypt_credential, encrypt_credential
+from atlas.crypto.credentials import InvalidToken, decrypt_credential, encrypt_credential
 from atlas.db.google_repository import CALENDAR_ACCESS, GoogleAccount, GoogleAccountRepository, GoogleAccountStyle
 from atlas.google.linking import LinkError, complete_link
 from atlas.google.plugin import find_google_plugin, reconcile_google_plugin
 from atlas.google.style import learn_style
+
+logger = logging.getLogger("atlas.routes.google_accounts")
 
 router = APIRouter(tags=["google"])
 
@@ -631,8 +634,22 @@ async def delete_account(
 
     security = request.app.state.config.security
     http_client = request.app.state.google_http_client
-    refresh_token = decrypt_credential(account.refresh_token_ciphertext, account.key_version, security)
-    await revoke_token(http_client, refresh_token)  # best effort -- never blocks the unlink
+    # B1-WR-03: `revoke_token` is already best effort (it swallows
+    # `httpx.HTTPError` so a revoke failure never blocks the unlink), but
+    # the decrypt step that produces its argument was not -- a corrupted
+    # ciphertext or a rotated/incompatible secret key raised `InvalidToken`
+    # here, before `repo.delete_account` ever ran, leaving the row (and
+    # the broken credential) in place with no way to remove it through
+    # this endpoint. Make the decrypt-and-revoke pair itself best effort
+    # with respect to the delete, the same way the revoke call already is.
+    try:
+        refresh_token = decrypt_credential(account.refresh_token_ciphertext, account.key_version, security)
+        await revoke_token(http_client, refresh_token)  # best effort -- never blocks the unlink
+    except InvalidToken:
+        logger.warning(
+            "google account %r: refresh token could not be decrypted for revoke; unlinking anyway",
+            account.label,
+        )
 
     await repo.delete_account(account_id)
     token_service = request.app.state.google_token_service

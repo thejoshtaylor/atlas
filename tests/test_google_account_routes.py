@@ -466,6 +466,48 @@ def test_delete_account_unlinks_even_when_revoke_fails(
     assert google_repo._accounts == {}
 
 
+def test_delete_account_unlinks_even_when_the_stored_ciphertext_cannot_be_decrypted(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """B1-WR-03 regression: a corrupted refresh-token ciphertext (or an
+    incompatible/rotated secret key) must never leave the row permanently
+    stuck -- `decrypt_credential`'s own `InvalidToken` is caught the same
+    best-effort way a revoke failure already is, and the row is still
+    removed. `revoke_token` is never reached: there is no refresh token to
+    revoke with."""
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    manager = _FakePluginManagerForGoogle()
+    fake_google = FakeGoogle()
+    _seed_client(google_repo, security)
+    # Deliberately not `encrypt_credential`'s own output -- an arbitrary
+    # byte string a real Fernet token can never decrypt, standing in for a
+    # corrupted ciphertext or a key rotated out from under it.
+    account = _run(
+        google_repo.insert_account(
+            label="work",
+            email="work@example.com",
+            refresh_token_ciphertext=b"not-a-real-fernet-token",
+            key_version=1,
+            granted_scopes=" ".join(REQUIRED_SCOPES),
+            refresh_token_expires_at=None,
+            linked_by_user_id=None,
+            linked_at=datetime.now(timezone.utc),
+        )
+    )
+
+    app = _build_app(security, account_repo, google_repo, plugin_repo, manager, fake_google)
+    client = _client_as(app, security, account_repo, role="admin")
+
+    response = client.delete(f"/api/google/accounts/{account.id}")
+    assert response.status_code == 204
+    assert google_repo._accounts == {}
+    assert fake_google.revoked == []
+
+
 def test_every_task_2_route_is_403_for_viewer_and_operator(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
