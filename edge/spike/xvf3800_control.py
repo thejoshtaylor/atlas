@@ -44,6 +44,11 @@ _BM_REQUEST_TYPE = _CTRL_IN | _CTRL_TYPE_VENDOR | _CTRL_RECIPIENT_DEVICE
 _B_REQUEST = 0
 
 _TIMEOUT_MS = 1000  # not the SDK example's 100_000ms -- T-10-SP2
+# The device answers 64 (SERVICER_COMMAND_RETRY) while its control servicer is
+# busy; the vendor's xvf_host retries the same read. Bounded so a wedged
+# device still raises instead of spinning.
+_STATUS_RETRY = 64
+_MAX_RETRIES = 100
 
 
 @dataclass(frozen=True)
@@ -106,17 +111,20 @@ def find_device():
 
 def read_parameter(device, parameter: Parameter) -> bytes:
     """Read `parameter` from `device` and return its payload, with the
-    leading status byte stripped. Raises `XvfControlError` if the status
-    byte is non-zero."""
+    leading status byte stripped. Retries while the device answers 64
+    (busy), then raises `XvfControlError` if the status byte is non-zero."""
     w_value = 0x80 | parameter.command_id
     w_index = parameter.resource_id
     length = parameter.length + 1  # status byte first
 
-    raw = device.ctrl_transfer(
-        _BM_REQUEST_TYPE, _B_REQUEST, w_value, w_index, length, _TIMEOUT_MS
-    )
-    payload = bytes(raw)
-    status, data = payload[0], payload[1:]
+    for _ in range(_MAX_RETRIES):
+        raw = device.ctrl_transfer(
+            _BM_REQUEST_TYPE, _B_REQUEST, w_value, w_index, length, _TIMEOUT_MS
+        )
+        payload = bytes(raw)
+        status, data = payload[0], payload[1:]
+        if status != _STATUS_RETRY:
+            break
     if status != 0:
         raise XvfControlError(parameter, status)
     return data

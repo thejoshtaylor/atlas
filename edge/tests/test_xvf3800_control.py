@@ -37,7 +37,35 @@ class FakeDevice:
         return self.response
 
 
+class BusyThenReadyDevice(FakeDevice):
+    """Answers status 64 (busy) `busy` times before the real response."""
+
+    def __init__(self, response: bytes, busy: int) -> None:
+        super().__init__(response)
+        self.busy = busy
+
+    def ctrl_transfer(self, *args):
+        super().ctrl_transfer(*args)
+        if len(self.calls) <= self.busy:
+            return bytes([64]) + bytes(len(self.response) - 1)
+        return self.response
+
+
 class TestReadParameter:
+    def test_retries_while_the_device_answers_busy(self) -> None:
+        response = bytes([0]) + struct.pack("<HH", 90, 1)
+        device = BusyThenReadyDevice(response, busy=3)
+
+        assert read_parameter(device, PARAMETERS["DOA_VALUE"]) == struct.pack("<HH", 90, 1)
+        assert len(device.calls) == 4
+
+    def test_gives_up_on_a_device_that_stays_busy(self) -> None:
+        device = BusyThenReadyDevice(bytes([0, 0, 0, 0, 0]), busy=10_000)
+
+        with pytest.raises(XvfControlError) as excinfo:
+            read_parameter(device, PARAMETERS["DOA_VALUE"])
+        assert excinfo.value.status == 64
+
     def test_sends_the_documented_request_shape(self) -> None:
         parameter = PARAMETERS["DOA_VALUE"]
         response = bytes([0]) + struct.pack("<HH", 90, 1)
