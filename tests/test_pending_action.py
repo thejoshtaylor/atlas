@@ -433,3 +433,107 @@ async def test_handle_calendar_propose_event_makes_no_http_call_and_defaults_to_
     assert body["action"] == "calendar_create"
     assert body["start"] == "2026-10-02T15:00:00-04:00"
     assert body["end"] == "2026-10-02T16:00:00-04:00"
+
+
+# --- Task 2: the right account when none is named ---------------------------
+
+
+def _account(label: str, *, is_default: bool = False, access_token: "str | None" = "at", calendars=None) -> AccountGrant:
+    return AccountGrant(
+        label=label,
+        email=f"{label}@example.com",
+        is_default=is_default,
+        access_token=access_token,
+        unreachable_reason=None if access_token is not None else "needs_relink",
+        calendars=calendars
+        if calendars is not None
+        else (CalendarGrant(calendar_id=f"cal-{label}-primary", name=label.title(), primary=True, access="read_write"),),
+    )
+
+
+def test_resolve_write_target_unnamed_picks_the_only_account_with_a_writable_calendar():
+    home = _account("home")
+    work = _account(
+        "work",
+        calendars=(CalendarGrant(calendar_id="cal-work-primary", name="Work", primary=True, access="read_only"),),
+    )
+    result = resolve_write_target((home, work), None, None)
+    assert result == (home, home.calendars[0])
+
+
+def test_resolve_write_target_unnamed_picks_the_default_when_several_are_writable():
+    home = _account("home", is_default=False)
+    work = _account("work", is_default=True)
+    result = resolve_write_target((home, work), None, None)
+    assert result == (work, work.calendars[0])
+
+
+def test_resolve_write_target_unnamed_asks_when_several_writable_and_no_default():
+    home = _account("home")
+    work = _account("work")
+    result = resolve_write_target((home, work), None, None)
+    assert isinstance(result, Clarification)
+    assert result.about == "account"
+    assert result.candidates == ("home", "work")
+
+
+def test_resolve_write_target_unnamed_denies_when_no_account_has_a_writable_calendar():
+    home = _account(
+        "home",
+        calendars=(CalendarGrant(calendar_id="cal-home", name="Home", primary=True, access="read_only"),),
+    )
+    with pytest.raises(Denied):
+        resolve_write_target((home,), None, None)
+
+
+def test_resolve_write_target_denies_a_named_account_with_no_access_token():
+    home = _account("home", access_token=None)
+    with pytest.raises(Denied):
+        resolve_write_target((home,), "home", None)
+
+
+async def test_no_account_named_and_several_candidates_asks_which_one_and_stores_nothing(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    home = _account("home")
+    work = _account("work")
+    accounts = (home, work)
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_event",
+                        arguments={"title": "Dentist", "start": "2026-10-02T15:00"},
+                    )
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    stt = fake_stt(events=[FinalTranscript(text="add a dentist appointment")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    pending_actions = FakePendingActionRepository()
+    handoff_context = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=pending_actions, brain=brain, now=_NOW
+    )
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["i'm not sure which one you mean -- home, work?"]
+    assert timings.turn_outcome == "needs_clarification"
+    assert pending_actions._rows == {}
