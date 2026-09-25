@@ -1,0 +1,45 @@
+[project]
+name = "atlas-edge"
+version = "0.1.0"
+description = "Pi-side capture, VAD, and vendor-control service for the reSpeaker XVF3800 (D-04)."
+requires-python = ">=3.11"
+dependencies = [
+    # Human-approved 2026-09-25 (10-01-PLAN.md Task 1, gate=blocking-human,
+    # never auto-approved). Operator confirmed pypi.org/project/sherpa-onnx/
+    # -- source reaches github.com/k2-fsa/sherpa-onnx, 28 releases since
+    # 2023-11-21, cp311 manylinux2014_aarch64 wheel present.
+    "sherpa-onnx==1.13.8",
+    # Human-approved 2026-09-25 (10-01-PLAN.md Task 1, gate=blocking-human,
+    # never auto-approved). Operator confirmed pypi.org/project/sounddevice/
+    # -- source reaches github.com/spatialaudio/python-sounddevice, 36
+    # releases since 2015.
+    "sounddevice==0.5.6",
+    # Human-approved 2026-09-25 (10-01-PLAN.md Task 1, gate=blocking-human,
+    # never auto-approved). Operator confirmed pypi.org/project/pyusb/ --
+    # source reaches github.com/pyusb/pyusb, 17 releases since 2011. The
+    # research's recorded "0.11.0" was a stale registry read; current is
+    # 1.3.1 -- this is the pin the operator actually saw and approved.
+    "pyusb==1.3.1",
+    "numpy",
+    # Same range the root project's pyproject.toml already pins -- edge/'s
+    # own outbound WebSocket client (edge/src/atlas_edge/client.py, plan
+    # 10-02) reuses it rather than re-deriving a separate pin.
+    "websockets>=17.1,<18",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[tool.uv]
+# Dependencies only -- never built as a wheel. The service runs from
+# edge/src on PYTHONPATH, the same way the server runs `python -m
+# atlas.app`. No build backend is needed.
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src", "spike"]

@@ -50,6 +50,11 @@ web/src/__typecheck_probe__.ts
 # Models are large binaries, downloaded at build or first run.
 models/
 
+# D-18 spike recordings (edge/spike/run_spike.py): real speech in a real
+# house. The ignore rule lands in the same task that first writes a
+# recording (10-01-PLAN.md Task 2), before anything is captured.
+edge/spike/results/
+
 # OS
 .DS_Store
 
