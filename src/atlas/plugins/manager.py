@@ -172,6 +172,7 @@ class PluginManager:
         on_rebuild: "Callable[[], None] | None" = None,
         zone_name: "str | None" = None,
         custom_env_builders: "Mapping[str, CustomEnvBuilder] | None" = None,
+        hidden_tools_by_module: "Mapping[str, frozenset[str]] | None" = None,
     ) -> None:
         self._repository = repository
         self._mcp_root = mcp_root
@@ -183,6 +184,17 @@ class PluginManager:
         # below). `{}` for every caller that predates this (every plugin
         # this project shipped before Phase 9) -- byte-identical behavior.
         self._custom_env_builders: "Mapping[str, CustomEnvBuilder]" = custom_env_builders or {}
+        # T-09-27, plan 09-05: a stdio plugin's own module name
+        # (`plugins.host.module_for_stdio_args`, the same key
+        # `_custom_env_builders` is keyed by) -> the set of that plugin's
+        # OWN bare tool names `rebuild()` below withholds from
+        # `tools_schema` while still keeping them in `self.hosts`/
+        # `tool_host_lookup` -- a tool a model is never offered but code can
+        # still call directly (`atlas_mcp.google_tools.CODE_ONLY_TOOL_NAMES`
+        # is the one caller today). `{}` for every caller that predates
+        # this (every plugin this project shipped before this plan) --
+        # byte-identical behavior, nothing hidden.
+        self._hidden_tools_by_module: "Mapping[str, frozenset[str]]" = hidden_tools_by_module or {}
         # 260924-h2f (issue #1): `lifespan` resolves the house's own time
         # zone exactly once (`routes/wizard.py::resolve_timezone`) and
         # passes its `child_tz` here -- every stdio child this manager
@@ -1088,8 +1100,32 @@ class PluginManager:
             bare_name_by_offered_name = {
                 renamed.offered_name: renamed.bare_name for renamed in renamed_tools_for_plugin
             }
+            # T-09-27, plan 09-05: `renamed_mcp_tools` above -- the FULL
+            # list -- still backs `RenamedToolHostView`/`tool_host_lookup`
+            # below, so code can still call a hidden tool directly; only
+            # the schema this loop extends withholds a bare name this
+            # plugin's own module declared hidden (`self.
+            # _hidden_tools_by_module`, keyed by `module_for_stdio_args`,
+            # the same key `_custom_env_builders` already uses). A remote
+            # plugin, or a stdio plugin whose args are not the fixed
+            # `["-m", "<module>"]` shape, has no module name to key
+            # against and so nothing to hide -- identical to
+            # `_custom_env_builder_for`'s own `RuntimeError` handling.
+            hidden_names: frozenset[str] = frozenset()
+            if plugin.transport == "stdio":
+                try:
+                    stdio_module = module_for_stdio_args(plugin.slug, plugin.args)
+                except RuntimeError:
+                    stdio_module = None
+                if stdio_module is not None:
+                    hidden_names = self._hidden_tools_by_module.get(stdio_module, frozenset())
+            visible_mcp_tools = [
+                tool
+                for tool, renamed in zip(renamed_mcp_tools, renamed_tools_for_plugin)
+                if renamed.bare_name not in hidden_names
+            ]
             hosts.append(RenamedToolHostView(host, renamed_mcp_tools, bare_name_by_offered_name))
-            schema.extend(mcp_tools_to_openai_tools(renamed_mcp_tools))
+            schema.extend(mcp_tools_to_openai_tools(visible_mcp_tools))
 
         self._hosts_view = hosts
         self.tool_host_lookup = McpToolHostLookup(hosts)

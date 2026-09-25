@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from atlas_mcp.google_tools import HANDOFF_KEY
+from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, HANDOFF_KEY
 
 from atlas.db.pending_action_repository import PendingActionRepository
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
@@ -36,6 +36,27 @@ from atlas.turn.pending_action import (
 # `atlas_handoff` uses elsewhere) are deliberately out of this frozenset:
 # widening it is a later plan's own decision, not implied by this one.
 HANDOFF_KINDS: frozenset[str] = frozenset({"pending_action", "needs_clarification"})
+
+# T-09-27: the fixed refusal `_run_tool_rounds` (turn/controller.py) speaks
+# in place of dispatching a code-only tool a model named anyway -- the
+# second of the two independent controls (`PluginManager.rebuild`'s schema
+# hiding is the first) that keep `atlas_mcp.google_tools.CODE_ONLY_TOOL_NAMES`
+# unreachable from the model, regardless of what a tool's own description
+# says or what the schema currently hides.
+CODE_ONLY_REFUSAL = "that is not something i can do directly"
+
+
+def is_code_only_tool(name: str) -> bool:
+    """True when `name` -- the offered name a model round actually called,
+    bare or collision-prefixed (`{slug}__{bare_name}`, `plugins/naming.py`'s
+    own `NAME_SEPARATOR`) -- names a code-only tool. Checked against both
+    the name as given and its part after the last `"__"`, so a prefix this
+    plugin never asked for (a future naming collision) still refuses the
+    bare tool it wraps, and a plugin slug that itself contains `"__"` still
+    resolves to its own last segment, matching `plugins/naming.py`'s own
+    prefixing rule exactly."""
+    bare = name.rsplit("__", 1)[-1] if "__" in name else name
+    return name in CODE_ONLY_TOOL_NAMES or bare in CODE_ONLY_TOOL_NAMES
 
 
 @dataclass(frozen=True)

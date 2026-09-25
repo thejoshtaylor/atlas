@@ -70,7 +70,7 @@ from atlas.db.repository import (
     WakeEventRepository,
     WorkflowRepository,
 )
-from atlas_mcp.google_tools import GOOGLE_PLUGIN_MODULE
+from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
 
 from atlas.google.env import GoogleEnvBuilder
 from atlas.google.plugin import refresh_google_plugin
@@ -1341,6 +1341,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         on_rebuild=_publish_tool_view,
         zone_name=timezone_resolution.child_tz,
         custom_env_builders=custom_env_builders,
+        # T-09-27, plan 09-05: the Google plugin's own code-only tools
+        # (`calendar_insert_event`/`calendar_delete_event`, and Gmail's own
+        # pair once a later plan adds them) never reach the model's tool
+        # schema, regardless of whether a Google repository is configured
+        # -- `custom_env_builders` above is the one gate deciding whether
+        # the Google plugin can start at all; this hides its code-only
+        # tools whenever it does.
+        hidden_tools_by_module={GOOGLE_PLUGIN_MODULE: CODE_ONLY_TOOL_NAMES},
     )
     app.state.plugin_manager = plugin_manager
     # Publishes an empty view first, so every attribute above exists even

@@ -95,7 +95,14 @@ from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.follow_up import FollowUpChannel
-from atlas.turn.handoff import HandoffContext, HandoffSlot, dispatch_handoff, parse_handoff
+from atlas.turn.handoff import (
+    CODE_ONLY_REFUSAL,
+    HandoffContext,
+    HandoffSlot,
+    dispatch_handoff,
+    is_code_only_tool,
+    parse_handoff,
+)
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
 from atlas.turn.pending_action import BULK_REFUSAL_REPLY, HANDOFF_NOT_ALONE_REPLY
@@ -1565,10 +1572,31 @@ async def _run_tool_rounds(
         # no separate correlation step to get wrong.
         if commitment is not None:
             commitment.committed = True
-        results = await asyncio.gather(
-            *(tool_host.call_tool(tc.name, tc.arguments) for tc in reply.tool_calls),
+        # T-09-27: a code-only tool (`atlas_mcp.google_tools.CODE_ONLY_TOOL_NAMES`)
+        # is never dispatched to `tool_host`, regardless of what
+        # `PluginManager.rebuild`'s own schema hiding already withheld --
+        # this is the second, independent control, checked here by name
+        # rather than trusted from the schema the model happened to be
+        # offered. Refused calls never reach `tool_host.call_tool` at all;
+        # each gets an error-shaped result carrying `CODE_ONLY_REFUSAL` at
+        # its own position, so every composer downstream (the mixed-outcome
+        # composer, the handoff detector) sees a normal, positionally
+        # aligned result list.
+        dispatchable = [
+            (index, tc) for index, tc in enumerate(reply.tool_calls) if not is_code_only_tool(tc.name)
+        ]
+        dispatched_results = await asyncio.gather(
+            *(tool_host.call_tool(tc.name, tc.arguments) for _, tc in dispatchable),
             return_exceptions=True,
         )
+        results: list[Any] = [None] * len(reply.tool_calls)
+        for (index, _tc), result in zip(dispatchable, dispatched_results):
+            results[index] = result
+        for index, tc in enumerate(reply.tool_calls):
+            if is_code_only_tool(tc.name):
+                results[index] = SimpleNamespace(
+                    isError=True, content=[SimpleNamespace(text=CODE_ONLY_REFUSAL)]
+                )
 
         # Plan 09-04 (D-08, D-10): detect any handoff among this round's
         # results before the existing mixed-outcome check below -- a
