@@ -16,6 +16,7 @@ by an eight-plus character value, and a mistake here is permanent.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.parse
 from typing import Any
@@ -61,6 +62,18 @@ class FakeGoogle:
         self.inserted: list[dict[str, Any]] = []
         self.deleted_event_ids: list[str] = []
         self._write_failures: dict[tuple[str, str, str], int] = {}
+        # Plan 09-08: Gmail `messages.list`/`messages.get` -- `_gmail_messages`
+        # is one access token's own ordered `{"id", "threadId"}` list
+        # (`messages.list` pages at `maxResults`, reporting `nextPageToken`
+        # for anything left over); `_gmail_metadata`/`_gmail_full` are each
+        # keyed `(access_token, message_id)`, seeded independently so a test
+        # can give a message metadata headers without ever giving it a body,
+        # or the reverse. `_gmail_list_failures` mirrors `_event_failures`'
+        # own per-account failure-injection shape for `messages.list`.
+        self._gmail_messages: dict[str, list[dict[str, str]]] = {}
+        self._gmail_metadata: dict[tuple[str, str], dict[str, Any]] = {}
+        self._gmail_full: dict[tuple[str, str], dict[str, Any]] = {}
+        self._gmail_list_failures: dict[str, tuple["int | None", bool]] = {}
         self._transport = httpx.MockTransport(self._handle)
 
     @property
@@ -158,6 +171,82 @@ class FakeGoogle:
         `access_token`."""
         self._calendar_lists[access_token] = calendars
 
+    def add_gmail_messages(self, access_token: str, message_ids: list[str]) -> None:
+        """Seed `access_token`'s own `messages.list` result, in the order
+        given -- every call (unread list or search alike) returns this
+        same page regardless of `q`; a test asserts the query separately
+        off `requests_by_bearer`."""
+        self._gmail_messages[access_token] = [{"id": mid, "threadId": mid} for mid in message_ids]
+
+    def add_gmail_metadata(
+        self,
+        access_token: str,
+        message_id: str,
+        *,
+        headers: dict[str, str],
+        internal_date: "str | None" = None,
+    ) -> None:
+        """Seed one message's `format=metadata` response -- `headers` is
+        `{name: value}` (already RFC 2047 encoded when a test wants to
+        prove decoding); `internal_date` is Gmail's own epoch-millisecond
+        string, defaulted to `"0"` (the epoch) so every seeded message
+        sorts deterministically even when a test does not care about
+        ordering."""
+        self._gmail_metadata[(access_token, message_id)] = {
+            "id": message_id,
+            "threadId": message_id,
+            "internalDate": internal_date if internal_date is not None else "0",
+            "payload": {"headers": [{"name": name, "value": value} for name, value in headers.items()]},
+        }
+
+    def add_gmail_full(
+        self,
+        access_token: str,
+        message_id: str,
+        *,
+        headers: dict[str, str],
+        text: "str | None" = None,
+        html: "str | None" = None,
+    ) -> None:
+        """Seed one message's `format=full` response -- a `text/plain`
+        part when `text` is given, else a `text/html` part when `html`
+        is given, else a part with no `body.data` at all (an empty
+        message). Base64url-encoded the same way Gmail's own API does
+        (`=` padding stripped), so `mail_clean.extract_text`'s own padding
+        restoration is exercised for real."""
+        if text is not None:
+            data = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
+            payload = {
+                "mimeType": "text/plain",
+                "headers": [{"name": name, "value": value} for name, value in headers.items()],
+                "body": {"data": data},
+            }
+        elif html is not None:
+            data = base64.urlsafe_b64encode(html.encode("utf-8")).decode("ascii").rstrip("=")
+            payload = {
+                "mimeType": "text/html",
+                "headers": [{"name": name, "value": value} for name, value in headers.items()],
+                "body": {"data": data},
+            }
+        else:
+            payload = {
+                "mimeType": "text/plain",
+                "headers": [{"name": name, "value": value} for name, value in headers.items()],
+                "body": {},
+            }
+        self._gmail_full[(access_token, message_id)] = {
+            "id": message_id,
+            "threadId": message_id,
+            "payload": payload,
+        }
+
+    def fail_gmail_list(
+        self, access_token: str, *, status: "int | None" = None, raise_connect_error: bool = False
+    ) -> None:
+        """Make `messages.list` fail for `access_token` -- the Gmail
+        equivalent of `fail_events` above."""
+        self._gmail_list_failures[access_token] = (status, raise_connect_error)
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.copy_with(query=None) == httpx.URL(TOKEN_URL):
@@ -166,6 +255,10 @@ class FakeGoogle:
             return self._handle_revoke(request)
         if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/profile"):
             return self._handle_profile(request)
+        if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/messages"):
+            return self._handle_gmail_list(request)
+        if str(request.url).startswith(GMAIL_BASE) and "/messages/" in request.url.path:
+            return self._handle_gmail_get(request)
         if str(request.url).startswith(CALENDAR_BASE) and request.url.path.endswith("/calendarList"):
             return self._handle_calendar_list(request)
         if str(request.url).startswith(CALENDAR_BASE) and request.url.path.endswith("/events"):
@@ -217,6 +310,35 @@ class FakeGoogle:
         if token:
             self.revoked.append(token)
         return httpx.Response(200, json={})
+
+    def _handle_gmail_list(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        failure = self._gmail_list_failures.get(access_token)
+        if failure is not None:
+            status, raise_connect_error = failure
+            if raise_connect_error:
+                raise httpx.ConnectError("connection refused", request=request)
+            if status is not None:
+                return httpx.Response(status, json={"error": {"message": "forced failure"}})
+        max_results = int(request.url.params.get("maxResults") or 25)
+        all_messages = self._gmail_messages.get(access_token, [])
+        page = all_messages[:max_results]
+        body: dict[str, Any] = {"messages": page}
+        if len(all_messages) > max_results:
+            body["nextPageToken"] = "more"
+        return httpx.Response(200, json=body)
+
+    def _handle_gmail_get(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        segments = request.url.path.split("/")
+        message_id = urllib.parse.unquote(segments[-1])
+        store = self._gmail_metadata if request.url.params.get("format") == "metadata" else self._gmail_full
+        message = store.get((access_token, message_id))
+        if message is None:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json=message)
 
     def _handle_profile(self, request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("authorization", "")

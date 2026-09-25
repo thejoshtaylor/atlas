@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import date, datetime, timedelta, timezone as _timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,11 +37,26 @@ from atlas_mcp.google_boundary import (
     resolve_accounts,
     resolve_write_target,
 )
+from atlas_mcp.google_gmail_api import get_message_full, get_message_metadata, header_value, list_message_ids, parse_from
 from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV, HANDOFF_KEY
+from atlas_mcp.mail_clean import MODEL_INPUT_CAP, cap_text, clean_body, extract_text
 from atlas_mcp.safety import Denied
 
 _MAX_RANGE_DAYS = 31
 _MAX_TITLE_LEN = 120
+
+# Task 1 (D-14, D-15): the fixed query "any new email?" always sends --
+# unread mail in the Primary inbox category only. Promotions/Social/
+# Updates are excluded on purpose (09-CONTEXT.md D-14): a mailbox with
+# hundreds of promotional unread messages must never drown out the two
+# real ones.
+_GMAIL_UNREAD_QUERY = "in:inbox category:primary is:unread"
+_MAX_MESSAGE_IDS = 25
+_METADATA_CONCURRENCY = 8
+_MAX_SEARCH_QUERY_LEN = 200
+_MAX_READ_POSITION = 50
+_MAX_SENDER_LEN = 60
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def _parse_boundary(value: str, zone: ZoneInfo) -> datetime:
@@ -480,6 +496,221 @@ async def handle_calendar_delete_event(
     }
 
 
+def _format_message_item(message: dict[str, Any], *, account: str) -> dict[str, Any]:
+    """One `email_list` item's own shape (D-16: no body field, by
+    construction) -- `received_at` comes from Gmail's own `internalDate`
+    (epoch milliseconds, present on every format, metadata included),
+    formatted as an ISO 8601 UTC instant so items sort newest first with
+    a plain string comparison."""
+    from_name, from_address = parse_from(header_value(message, "From"))
+    received_at = ""
+    internal_date = message.get("internalDate")
+    if internal_date:
+        try:
+            received_at = (
+                datetime.fromtimestamp(int(internal_date) / 1000, tz=_timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            received_at = ""
+    return {
+        "account": account,
+        "message_id": message.get("id"),
+        "thread_id": message.get("threadId"),
+        "from_name": from_name,
+        "from_address": from_address,
+        "subject": header_value(message, "Subject"),
+        "received_at": received_at,
+    }
+
+
+async def _account_messages(
+    account: AccountGrant, client: httpx.AsyncClient, query: str, semaphore: asyncio.Semaphore
+) -> "tuple[list[dict[str, Any]], bool]":
+    """Every matching message's own headers for one account -- `has_more`
+    true when this account carries more than `_MAX_MESSAGE_IDS` matching
+    ids. A `GoogleAuthError`/`GoogleApiError`/`httpx.HTTPError` here
+    propagates to the caller's own `gather(..., return_exceptions=True)`,
+    the same "never caught in this function" discipline
+    `_events_for_calendar` already follows."""
+    ids, has_more = await list_message_ids(
+        client, access_token=account.access_token, query=query, max_results=_MAX_MESSAGE_IDS
+    )
+
+    async def _one(message_id: str) -> dict[str, Any]:
+        async with semaphore:
+            metadata = await get_message_metadata(client, access_token=account.access_token, message_id=message_id)
+        return _format_message_item(metadata, account=account.label)
+
+    items = list(await asyncio.gather(*(_one(entry["id"]) for entry in ids if entry.get("id"))))
+    return items, has_more
+
+
+async def _fan_out_messages(
+    resolved: "tuple[AccountGrant, ...]", client: httpx.AsyncClient, *, query: str
+) -> "tuple[list[dict[str, Any]], list[str], list[dict[str, str]]]":
+    """Every matching message across every resolved account, the labels
+    of every account that carried more than `_MAX_MESSAGE_IDS` matches,
+    and the `{"account", "reason"}` entry for every account this call
+    could not fully answer -- the Gmail-read equivalent of
+    `_fan_out_events` (D-04), one job per account rather than per
+    calendar (Gmail carries no calendar concept)."""
+    unreachable_by_account: dict[str, str] = {}
+    jobs: list[AccountGrant] = []
+    for one_account in resolved:
+        if one_account.access_token is None:
+            unreachable_by_account[one_account.label] = one_account.unreachable_reason or "not reachable"
+            continue
+        jobs.append(one_account)
+
+    semaphore = asyncio.Semaphore(_METADATA_CONCURRENCY)
+    results = await asyncio.gather(
+        *(_account_messages(one_account, client, query, semaphore) for one_account in jobs),
+        return_exceptions=True,
+    )
+
+    all_items: list[dict[str, Any]] = []
+    has_more_labels: list[str] = []
+    for one_account, result in zip(jobs, results):
+        if isinstance(result, Exception):
+            if one_account.label not in unreachable_by_account:
+                unreachable_by_account[one_account.label] = _reason_for(result)
+            continue
+        items, has_more = result
+        all_items.extend(items)
+        if has_more:
+            has_more_labels.append(one_account.label)
+
+    unreachable = [
+        {"account": label, "reason": reason} for label, reason in sorted(unreachable_by_account.items())
+    ]
+    return all_items, has_more_labels, unreachable
+
+
+async def handle_gmail_list_unread(
+    accounts: "tuple[AccountGrant, ...]", client: httpx.AsyncClient, *, account: "str | None" = None
+) -> dict[str, Any]:
+    """Answer "any new email?" -- unread mail in the Primary inbox category
+    of every linked account, or the one named (D-14, D-15). Returns an
+    `email_list` handoff; code, never this function, decides what to say
+    (`src/atlas/turn/email_handoff.py::handle_email_list`)."""
+    if not accounts:
+        raise Denied("no google account is linked -- link one in the admin webapp under google accounts")
+    resolved = resolve_accounts(accounts, account)
+    items, has_more, unreachable = await _fan_out_messages(resolved, client, query=_GMAIL_UNREAD_QUERY)
+    items.sort(key=lambda item: item["received_at"], reverse=True)
+    return {
+        HANDOFF_KEY: {
+            "kind": "email_list",
+            "source": "unread",
+            "items": items,
+            "has_more": has_more,
+            "unreachable_accounts": unreachable,
+        }
+    }
+
+
+async def handle_gmail_search(
+    accounts: "tuple[AccountGrant, ...]",
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    account: "str | None" = None,
+) -> dict[str, Any]:
+    """A Gmail search the model itself built (for example `from:dana
+    newer_than:7d`), sent exactly as given after stripping and a length/
+    control-character check -- never queried when empty, too long, or
+    carrying a control character (T-09-45). Returns an `email_list`
+    handoff, same shape as `handle_gmail_list_unread`."""
+    if not accounts:
+        raise Denied("no google account is linked -- link one in the admin webapp under google accounts")
+    stripped = query.strip()
+    if not stripped:
+        raise Denied("i need something to search for")
+    if len(stripped) > _MAX_SEARCH_QUERY_LEN:
+        raise Denied(f"that search is too long -- keep it under {_MAX_SEARCH_QUERY_LEN} characters")
+    if _CONTROL_CHAR_RE.search(stripped):
+        raise Denied("that search has characters i can't use")
+    resolved = resolve_accounts(accounts, account)
+    items, has_more, unreachable = await _fan_out_messages(resolved, client, query=stripped)
+    items.sort(key=lambda item: item["received_at"], reverse=True)
+    return {
+        HANDOFF_KEY: {
+            "kind": "email_list",
+            "source": "search",
+            "query": stripped,
+            "items": items,
+            "has_more": has_more,
+            "unreachable_accounts": unreachable,
+        }
+    }
+
+
+async def handle_gmail_read(
+    *, position: "int | None" = None, sender: "str | None" = None, word_for_word: bool = False
+) -> dict[str, Any]:
+    """Read one message from the list the operator last heard, by
+    position or by sender -- makes no request at all (D-16): resolving
+    "the second one" against the last spoken list is code's own job
+    (`src/atlas/turn/email_memory.py::EmailListMemory.resolve`), never
+    this handler's. Refuses both or neither of `position`/`sender`, a
+    position outside `1..50`, and a sender longer than
+    `_MAX_SENDER_LEN` characters."""
+    if (position is None) == (sender is None):
+        raise Denied("tell me which email, by its position in the list or by who sent it -- not both")
+    if position is not None and not (1 <= position <= _MAX_READ_POSITION):
+        raise Denied("that's not a position in the last list i read")
+    if sender is not None and len(sender) > _MAX_SENDER_LEN:
+        raise Denied("that sender name is too long")
+    return {
+        HANDOFF_KEY: {
+            "kind": "email_read",
+            "position": position,
+            "sender": sender,
+            "word_for_word": bool(word_for_word),
+        }
+    }
+
+
+async def handle_gmail_fetch_body(
+    accounts: "tuple[AccountGrant, ...]", client: httpx.AsyncClient, *, account: str, message_id: str
+) -> dict[str, Any]:
+    """Code-only (`atlas_mcp.google_tools.CODE_ONLY_TOOL_NAMES`): fetch one
+    message's full payload, clean its body (`mail_clean.clean_body`, D-17),
+    and cap it at `MODEL_INPUT_CAP` before it can ever reach a model round
+    -- called by `src/atlas/turn/email_handoff.py` only, after the
+    operator's own list or read request named this exact message."""
+    normalized = account.strip().casefold()
+    account_grant = next((a for a in accounts if a.label.casefold() == normalized), None)
+    if account_grant is None:
+        linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
+        raise Denied(f"i don't have a google account called {account!r} -- linked accounts: {linked}")
+    if account_grant.access_token is None:
+        raise Denied(f"i can't reach your {account_grant.label} account right now")
+    try:
+        raw_message = await get_message_full(
+            client, access_token=account_grant.access_token, message_id=message_id
+        )
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        raise Denied(f"gmail couldn't fetch that message: {exc.message}") from exc
+
+    from_name, from_address = parse_from(header_value(raw_message, "From"))
+    subject = header_value(raw_message, "Subject")
+    raw_text = extract_text(raw_message.get("payload") or {})
+    cleaned = clean_body(raw_text)
+    capped, truncated = cap_text(cleaned, MODEL_INPUT_CAP)
+    return {
+        "body": capped,
+        "truncated": truncated,
+        "from_name": from_name,
+        "from_address": from_address,
+        "subject": subject,
+    }
+
+
 mcp_server = MCPServer("atlas-google")
 
 _accounts: tuple[AccountGrant, ...] = ()
@@ -603,6 +834,61 @@ async def calendar_delete_event(account: str, calendar_id: str, event_id: str) -
         return await handle_calendar_delete_event(
             _accounts, _http_client, account=account, calendar_id=calendar_id, event_id=event_id
         )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_list_unread(account: "str | None" = None) -> dict[str, Any]:
+    """Answer "any new email?" -- unread mail in the Primary inbox category
+    of every linked Google account, or the one `account` names. Never
+    returns any email's own text to you: for one or two unread messages
+    you get a short summary each; for more you get the count and the
+    senders. Leave `account` unset unless the operator named one."""
+    assert _http_client is not None, "gmail_list_unread invoked before startup"
+    try:
+        return await handle_gmail_list_unread(_accounts, _http_client, account=account)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_search(query: str, account: "str | None" = None) -> dict[str, Any]:
+    """Search Gmail with a query you build in Gmail's own search grammar
+    (for example `from:dana newer_than:7d`), across every linked account
+    unless `account` names one. Never returns any email's own text to
+    you -- the same summarized-or-counted answer `gmail_list_unread`
+    gives."""
+    assert _http_client is not None, "gmail_search invoked before startup"
+    try:
+        return await handle_gmail_search(_accounts, _http_client, query=query, account=account)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_read(
+    position: "int | None" = None, sender: "str | None" = None, word_for_word: bool = False
+) -> dict[str, Any]:
+    """Read one message from the list the operator last heard -- name it
+    by its position in that list (1 for the first one spoken) or by who
+    sent it, not both. Summarized by default; set `word_for_word` true
+    only when the operator asked to hear it exactly as written. Never
+    returns any email's own text to you."""
+    try:
+        return await handle_gmail_read(position=position, sender=sender, word_for_word=word_for_word)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_fetch_body(account: str, message_id: str) -> dict[str, Any]:
+    """Code-only: fetch and clean one message's body. Never call this --
+    it is reached only after the operator's own request to read a
+    specific message, resolved by code from the last list you spoke."""
+    assert _http_client is not None, "gmail_fetch_body invoked before startup"
+    try:
+        return await handle_gmail_fetch_body(_accounts, _http_client, account=account, message_id=message_id)
     except Denied as exc:
         raise ToolError(exc.reason) from exc
 

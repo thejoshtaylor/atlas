@@ -125,7 +125,7 @@ async def test_rfc2047_subject_and_from_are_decoded():
         "m1",
         headers={
             "From": "=?UTF-8?B?RMOhbmE=?= <dana@example.com>",
-            "Subject": "=?UTF-8?B?SGVsbG8gdGjDqXJl?=",
+            "Subject": "=?UTF-8?B?SGVsbG8gdGjDqHJl?=",
         },
     )
     fake.add_gmail_messages("at-home", [])
