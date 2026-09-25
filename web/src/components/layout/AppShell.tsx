@@ -7,6 +7,7 @@ import {
   Gauge,
   History,
   House,
+  Mail,
   Menu,
   Mic,
   Radio,
@@ -59,6 +60,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: "/providers", label: "Providers", minimumRole: "admin", icon: Cpu },
       { to: "/accounts", label: "Accounts", minimumRole: "admin", icon: Users },
       { to: "/settings", label: "Settings", minimumRole: "admin", icon: Settings },
+      { to: "/google", label: "Google accounts", minimumRole: "admin", icon: Mail },
     ],
   },
   {
