@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import email
+import email.policy
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -45,9 +46,9 @@ def _account(label: str, access_token: str) -> AccountGrant:
     )
 
 
-def _decode_raw(raw: str) -> "email.message.Message":
+def _decode_raw(raw: str) -> "email.message.EmailMessage":
     padded = raw + "=" * (-len(raw) % 4)
-    return email.message_from_bytes(base64.urlsafe_b64decode(padded))
+    return email.message_from_bytes(base64.urlsafe_b64decode(padded), policy=email.policy.default)
 
 
 # --- handle_gmail_create_draft (the code-only, header-reading half) --------

@@ -171,3 +171,51 @@ def parse_from(value: str) -> "tuple[str, str]":
     empty `display_name` and keeps the address."""
     name, address = email.utils.parseaddr(value)
     return name, address
+
+
+async def get_reply_headers(
+    client: httpx.AsyncClient, *, access_token: str, message_id: str
+) -> "dict[str, str]":
+    """The five headers plus `threadId` a threaded reply needs
+    (09-RESEARCH.md Pitfall 2: a thread needs matching `Subject`,
+    `In-Reply-To`, and `References`, not only `threadId`) -- one
+    `format=metadata` fetch, RFC 2047 decoded through `header_value`.
+    Every value defaults to `""` (never absent) when the original message
+    carried no such header."""
+    encoded_id = urllib.parse.quote(message_id, safe="")
+    response = await client.get(
+        f"{GMAIL_BASE}/users/me/messages/{encoded_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={
+            "format": "metadata",
+            "metadataHeaders": ["From", "Reply-To", "Subject", "Message-Id", "References"],
+        },
+    )
+    _raise_for_status(response)
+    body = response.json()
+    return {
+        "from": header_value(body, "From"),
+        "reply_to": header_value(body, "Reply-To"),
+        "subject": header_value(body, "Subject"),
+        "message_id": header_value(body, "Message-Id"),
+        "references": header_value(body, "References"),
+        "thread_id": str(body.get("threadId") or ""),
+    }
+
+
+async def create_draft(
+    client: httpx.AsyncClient, *, access_token: str, raw: str, thread_id: str
+) -> "dict[str, Any]":
+    """`users/me/drafts.create` -- `raw` is `google_mime.encode_raw`'s own
+    output; `thread_id` places the draft inside the original's own thread
+    (09-RESEARCH.md Pitfall 2)."""
+    body: dict[str, Any] = {"message": {"raw": raw}}
+    if thread_id:
+        body["message"]["threadId"] = thread_id
+    response = await client.post(
+        f"{GMAIL_BASE}/users/me/drafts",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json=body,
+    )
+    _raise_for_status(response)
+    return response.json()

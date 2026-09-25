@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING, Any
 from atlas_mcp.mail_clean import cap_text
 
 from atlas.turn.email_memory import EmailListItem, ResolveMiss
-from atlas.turn.quarantine import SUMMARY_INSTRUCTION, QuarantineError, quarantine_round
+from atlas.turn.quarantine import (
+    DRAFT_INSTRUCTION,
+    SUMMARY_INSTRUCTION,
+    QuarantineError,
+    parse_draft_output,
+    quarantine_round,
+)
 
 if TYPE_CHECKING:
     from atlas.turn.handoff import Handoff, HandoffContext, HandoffOutcome
@@ -56,6 +62,12 @@ _FETCH_UNAVAILABLE_REPLY = "i can't check email right now"
 VERBATIM_READ_CAP = 1500
 _VERBATIM_CARRIER = "{sender} wrote: {text}"
 _VERBATIM_TRUNCATED_SUFFIX = " ... that's where i stop reading."
+
+# Plan 09-09 (D-12, D-18, D-23): a draft is composed in a `tools=None`
+# quarantine round and saved by code, never confirmed out loud -- it
+# sends nothing (D-12), so there is nothing to ask the operator to
+# approve first.
+DRAFT_SAVED_CARRIER = "draft to {first_name} saved in {label}: {gist}"
 
 
 def _sender_display(item: EmailListItem) -> str:
@@ -343,3 +355,131 @@ async def handle_email_read(handoff: "Handoff", ctx: "HandoffContext | None") ->
 
     reply = f"{item.account}: {sender_display}: {summary}"
     return HandoffOutcome(reply_text=reply, turn_outcome="email_read")
+
+
+def _draft_recipient_first_name(to_name: str, to_address: str) -> str:
+    """The first name to speak (D-23): the `To` display name's own first
+    word when one exists, else the address's own local part -- never the
+    bare address."""
+    stripped_name = to_name.strip()
+    if stripped_name:
+        return stripped_name.split()[0]
+    return to_address.split("@", 1)[0]
+
+
+async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -> "HandoffOutcome":
+    """Resolve one `email_draft` handoff -- "reply to Dana that I'll be 15
+    minutes late" -- into a saved Gmail draft (D-08, D-12, D-18, D-21,
+    D-23), never a send.
+
+    Resolves the item exactly as `handle_email_read` does (identical miss
+    replies, `turn_outcome="email_draft"` for a legitimate spoken answer
+    that never reached a draft). Loads the account's own style through
+    `ctx.style_repo.get_style_by_label` (a missing repository or an
+    unlearned style both degrade to an empty profile/samples/signature,
+    never a failure), fetches the cleaned original body through the
+    code-only `gmail_fetch_body`, runs the drafting quarantine round
+    (`tools=None`), and calls the code-only `gmail_create_draft` with the
+    item's own account and message id plus the stored signature -- the
+    child reads the original's own headers itself and resolves the
+    recipient and thread from them, never from this function's own
+    arguments (T-09-48).
+
+    A failed fetch or a failed draft creation speaks the failing tool's
+    own error text verbatim, `turn_outcome="email_draft_failed"`; success
+    speaks `DRAFT_SAVED_CARRIER` and is `"email_draft"` -- stores no
+    pending action and requests no follow-up (D-12: a draft sends
+    nothing, so there is nothing to confirm).
+    """
+    from atlas.turn.handoff import HandoffOutcome
+
+    payload = handoff.payload
+    position = payload.get("position")
+    sender = payload.get("sender")
+    instructions = str(payload.get("instructions") or "")
+
+    if ctx is None or ctx.email_memory is None:
+        return HandoffOutcome(reply_text=_NO_RECENT_LIST_REPLY, turn_outcome="email_draft")
+
+    resolved = ctx.email_memory.resolve(ctx.source_name, position=position, sender=sender)
+    if isinstance(resolved, ResolveMiss):
+        if resolved.reason == "no_list":
+            return HandoffOutcome(reply_text=_NO_RECENT_LIST_REPLY, turn_outcome="email_draft")
+        if resolved.reason == "out_of_range":
+            return HandoffOutcome(
+                reply_text=_OUT_OF_RANGE_CARRIER.format(count=resolved.count), turn_outcome="email_draft"
+            )
+        return HandoffOutcome(
+            reply_text=_NO_SENDER_MATCH_CARRIER.format(sender=sender), turn_outcome="email_draft"
+        )
+
+    item = resolved
+    if ctx.tool_host is None or ctx.brain is None:
+        return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_draft_failed")
+
+    from atlas.turn.controller import _is_error, _result_payload, _result_text
+
+    style = None
+    if ctx.style_repo is not None:
+        style = await ctx.style_repo.get_style_by_label(item.account)
+    style_profile = style.profile if style is not None else ""
+    style_samples = style.samples if style is not None else ()
+    signature_text = style.signature_text if style is not None else None
+    signature_html = style.signature_html if style is not None else None
+
+    try:
+        fetch_result = await ctx.tool_host.call_tool(
+            "gmail_fetch_body", {"account": item.account, "message_id": item.message_id}
+        )
+    except Exception as exc:
+        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
+    if _is_error(fetch_result):
+        return HandoffOutcome(reply_text=_result_text(fetch_result), turn_outcome="email_draft_failed")
+
+    body_payload = _result_payload(fetch_result)
+    original_body = str(body_payload.get("body", "")) if isinstance(body_payload, dict) else ""
+    original_sender = str(body_payload.get("from_name") or body_payload.get("from_address") or "")
+    original_subject = str(body_payload.get("subject") or "") if isinstance(body_payload, dict) else ""
+
+    prompt = (
+        f"style profile: {style_profile}\n"
+        f"style samples: {' | '.join(style_samples)}\n"
+        f"original sender: {original_sender}\n"
+        f"original subject: {original_subject}\n"
+        f"operator's instructions: {instructions}\n\n"
+        f"original email:\n{original_body}"
+    )
+    try:
+        raw_output = await quarantine_round(
+            ctx.brain, instruction=DRAFT_INSTRUCTION, content=prompt, timeout_s=ctx.quarantine_timeout_s
+        )
+    except QuarantineError:
+        return HandoffOutcome(reply_text=_SUMMARY_FAILED_REPLY, turn_outcome="email_draft_failed")
+
+    gist, body_text = parse_draft_output(raw_output)
+
+    try:
+        create_result = await ctx.tool_host.call_tool(
+            "gmail_create_draft",
+            {
+                "account": item.account,
+                "message_id": item.message_id,
+                "body_text": body_text,
+                "signature_text": signature_text,
+                "signature_html": signature_html,
+            },
+        )
+    except Exception as exc:
+        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
+    if _is_error(create_result):
+        return HandoffOutcome(reply_text=_result_text(create_result), turn_outcome="email_draft_failed")
+
+    draft_payload = _result_payload(create_result)
+    draft = draft_payload.get("draft") if isinstance(draft_payload, dict) else None
+    draft = draft if isinstance(draft, dict) else {}
+    to_name = str(draft.get("to_name") or "")
+    to_address = str(draft.get("to_address") or "")
+    first_name = _draft_recipient_first_name(to_name, to_address)
+
+    reply = DRAFT_SAVED_CARRIER.format(first_name=first_name, label=item.account, gist=gist)
+    return HandoffOutcome(reply_text=reply, turn_outcome="email_draft")

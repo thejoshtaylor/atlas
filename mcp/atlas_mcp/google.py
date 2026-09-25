@@ -37,7 +37,16 @@ from atlas_mcp.google_boundary import (
     resolve_accounts,
     resolve_write_target,
 )
-from atlas_mcp.google_gmail_api import get_message_full, get_message_metadata, header_value, list_message_ids, parse_from
+from atlas_mcp.google_gmail_api import (
+    create_draft,
+    get_message_full,
+    get_message_metadata,
+    get_reply_headers,
+    header_value,
+    list_message_ids,
+    parse_from,
+)
+from atlas_mcp.google_mime import build_reply_message, encode_raw
 from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV, HANDOFF_KEY
 from atlas_mcp.mail_clean import MODEL_INPUT_CAP, cap_text, clean_body, extract_text
 from atlas_mcp.safety import Denied
@@ -57,6 +66,12 @@ _MAX_SEARCH_QUERY_LEN = 200
 _MAX_READ_POSITION = 50
 _MAX_SENDER_LEN = 60
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# Plan 09-09 (D-21): the operator's own drafting instructions, bounded
+# the same way a calendar proposal's own `title` is (`_sanitize_title`'s
+# neighbor here) -- long enough for a real instruction, short enough that
+# a runaway transcript can never become the entire drafting prompt.
+_MAX_DRAFT_INSTRUCTIONS_LEN = 500
 
 
 def _parse_boundary(value: str, zone: ZoneInfo) -> datetime:
@@ -711,6 +726,116 @@ async def handle_gmail_fetch_body(
     }
 
 
+async def handle_gmail_draft_reply(
+    *, position: "int | None" = None, sender: "str | None" = None, instructions: str
+) -> dict[str, Any]:
+    """Propose a reply draft to a message from the list the operator last
+    heard -- makes no request at all (D-21), the same "resolving is
+    code's own job" doctrine `handle_gmail_read` already follows for
+    position/sender. Refuses both or neither of `position`/`sender`, a
+    position outside `1..50`, a sender longer than `_MAX_SENDER_LEN`
+    characters, and `instructions` that are empty or longer than
+    `_MAX_DRAFT_INSTRUCTIONS_LEN` characters."""
+    if (position is None) == (sender is None):
+        raise Denied("tell me which email, by its position in the list or by who sent it -- not both")
+    if position is not None and not (1 <= position <= _MAX_READ_POSITION):
+        raise Denied("that's not a position in the last list i read")
+    if sender is not None and len(sender) > _MAX_SENDER_LEN:
+        raise Denied("that sender name is too long")
+    stripped_instructions = instructions.strip()
+    if not stripped_instructions:
+        raise Denied("tell me what the reply should say")
+    if len(stripped_instructions) > _MAX_DRAFT_INSTRUCTIONS_LEN:
+        raise Denied(f"keep that instruction under {_MAX_DRAFT_INSTRUCTIONS_LEN} characters")
+    return {
+        HANDOFF_KEY: {
+            "kind": "email_draft",
+            "position": position,
+            "sender": sender,
+            "instructions": stripped_instructions,
+        }
+    }
+
+
+async def handle_gmail_create_draft(
+    accounts: "tuple[AccountGrant, ...]",
+    client: httpx.AsyncClient,
+    *,
+    account: str,
+    message_id: str,
+    body_text: str,
+    signature_text: "str | None" = None,
+    signature_html: "str | None" = None,
+) -> dict[str, Any]:
+    """Code-only (`atlas_mcp.google_tools.CODE_ONLY_TOOL_NAMES`): create one
+    Gmail reply draft, threaded on `message_id`'s own thread (T-09-48).
+    The recipient and thread never come from this function's own caller --
+    they are read here, from `message_id`'s own `From`/`Reply-To`/`Subject`/
+    `Message-Id`/`References` headers (`get_reply_headers`), exactly like
+    `handle_gmail_fetch_body` reads its own message independently of
+    whatever the model or the operator's instructions said. A header
+    value carrying a line break refuses before any draft is created
+    (T-09-50)."""
+    normalized = account.strip().casefold()
+    account_grant = next((a for a in accounts if a.label.casefold() == normalized), None)
+    if account_grant is None:
+        linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
+        raise Denied(f"i don't have a google account called {account!r} -- linked accounts: {linked}")
+    if account_grant.access_token is None:
+        raise Denied(f"i can't reach your {account_grant.label} account right now")
+
+    try:
+        headers = await get_reply_headers(
+            client, access_token=account_grant.access_token, message_id=message_id
+        )
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        raise Denied(f"gmail couldn't look up that message: {exc.message}") from exc
+
+    reply_to_header = headers.get("reply_to") or ""
+    from_header = headers.get("from") or ""
+    to_name, to_address = parse_from(reply_to_header if reply_to_header.strip() else from_header)
+    if not to_address:
+        raise Denied("that email has no address i can reply to")
+
+    try:
+        message = build_reply_message(
+            to_name=to_name,
+            to_address=to_address,
+            original_subject=headers.get("subject") or "",
+            original_message_id=headers.get("message_id") or "",
+            original_references=headers.get("references") or "",
+            body_text=body_text,
+            signature_text=signature_text,
+            signature_html=signature_html,
+        )
+    except ValueError as exc:
+        raise Denied("that email's own headers aren't safe to reply to") from exc
+
+    raw = encode_raw(message)
+    try:
+        raw_draft = await create_draft(
+            client,
+            access_token=account_grant.access_token,
+            raw=raw,
+            thread_id=headers.get("thread_id") or "",
+        )
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        raise Denied(f"gmail couldn't save that draft: {exc.message}") from exc
+
+    return {
+        "draft": {
+            "draft_id": raw_draft.get("id"),
+            "to_name": to_name,
+            "to_address": to_address,
+            "account": account_grant.label,
+        }
+    }
+
+
 mcp_server = MCPServer("atlas-google")
 
 _accounts: tuple[AccountGrant, ...] = ()
@@ -889,6 +1014,48 @@ async def gmail_fetch_body(account: str, message_id: str) -> dict[str, Any]:
     assert _http_client is not None, "gmail_fetch_body invoked before startup"
     try:
         return await handle_gmail_fetch_body(_accounts, _http_client, account=account, message_id=message_id)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_draft_reply(
+    position: "int | None" = None, sender: "str | None" = None, instructions: str = ""
+) -> dict[str, Any]:
+    """Draft a reply to a message from the list the operator last heard --
+    name it by its position in that list (1 for the first one spoken) or
+    by who sent it, not both. `instructions` is what the reply should
+    say, in your own words from what the operator asked for. This does
+    NOT send anything: the reply is written in the operator's own style
+    and saved to Gmail Drafts for them to review -- it is never sent."""
+    try:
+        return await handle_gmail_draft_reply(position=position, sender=sender, instructions=instructions)
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def gmail_create_draft(
+    account: str,
+    message_id: str,
+    body_text: str,
+    signature_text: "str | None" = None,
+    signature_html: "str | None" = None,
+) -> dict[str, Any]:
+    """Code-only: create and save one Gmail reply draft. Never call this
+    -- it is reached only after a reply has been drafted for the
+    operator, and it never sends anything."""
+    assert _http_client is not None, "gmail_create_draft invoked before startup"
+    try:
+        return await handle_gmail_create_draft(
+            _accounts,
+            _http_client,
+            account=account,
+            message_id=message_id,
+            body_text=body_text,
+            signature_text=signature_text,
+            signature_html=signature_html,
+        )
     except Denied as exc:
         raise ToolError(exc.reason) from exc
 

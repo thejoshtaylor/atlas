@@ -32,12 +32,14 @@ from atlas.turn.pending_action import (
 )
 
 # Plan 09-08 adds "email_list" and "email_read" -- every Gmail read hands
-# off to code the same way a calendar write proposal does (D-08, D-14). A
-# workflow handoff (already-shipped `atlas_handoff` uses elsewhere) stays
-# deliberately out of this frozenset: widening it further is a later
-# plan's own decision, not implied by this one.
+# off to code the same way a calendar write proposal does (D-08, D-14).
+# Plan 09-09 adds "email_draft" (D-08, D-21): a reply draft is written and
+# saved by code, never by the model, exactly like every other handoff
+# here. A workflow handoff (already-shipped `atlas_handoff` uses
+# elsewhere) stays deliberately out of this frozenset: widening it
+# further is a later plan's own decision, not implied by this one.
 HANDOFF_KINDS: frozenset[str] = frozenset(
-    {"pending_action", "needs_clarification", "email_list", "email_read"}
+    {"pending_action", "needs_clarification", "email_list", "email_read", "email_draft"}
 )
 
 # T-09-27: the fixed refusal `_run_tool_rounds` (turn/controller.py) speaks
@@ -138,9 +140,15 @@ class HandoffContext:
     # gives `tool_host`/`pending_actions`/`brain`.
     email_memory: "Any | None" = None
     # How long a quarantine round (`turn/quarantine.py`) may take before
-    # `handle_email_list`/`handle_email_read` fall back to
-    # "i couldn't summarize that one" for that one message.
+    # `handle_email_list`/`handle_email_read`/`handle_email_draft` fall
+    # back to "i couldn't summarize that one" for that one message.
     quarantine_timeout_s: float = 20.0
+    # Plan 09-09: the style repository `handle_email_draft` reads a
+    # drafting round's own profile/samples/signature from
+    # (`atlas.db.google_repository.GoogleAccountRepository`) -- `None`
+    # with the same "no Google repository configured" tolerance every
+    # other Google-only field on this dataclass already has.
+    style_repo: "Any | None" = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +198,11 @@ async def dispatch_handoff(
         from atlas.turn.email_handoff import handle_email_read
 
         return await handle_email_read(handoff, ctx)
+
+    if handoff.kind == "email_draft":
+        from atlas.turn.email_handoff import handle_email_draft
+
+        return await handle_email_draft(handoff, ctx)
 
     # kind == "pending_action"
     if not follow_up_available or ctx is None or ctx.pending_actions is None:

@@ -46,4 +46,8 @@ def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
         pending_actions=getattr(app.state, "pending_action_repo", None),
         brain=getattr(app.state, "brain", None),
         email_memory=email_memory,
+        # Plan 09-09: the same repository the style routes read/write --
+        # `handle_email_draft` reads a drafting round's own profile,
+        # samples, and signature through it.
+        style_repo=getattr(app.state, "google_account_repo", None),
     )
