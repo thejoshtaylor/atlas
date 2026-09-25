@@ -1,15 +1,21 @@
 """Shared edge-protocol test doubles (Phase 10).
 
 `FakeEdgeDeviceRepository` and `interleave` back `tests/test_edge_tracer.py`
-(Task 1). Every token literal anywhere in this project's tests stays under
-8 characters (for example `"t-1"`), because `tests/test_repo_hygiene.py`'s
-`_CREDENTIAL_RE` flags any quoted `token = "..."`-shaped literal of 8 or
-more characters as a possible leaked credential.
+(Task 1). `FakeEdgeSocket` backs `tests/test_edge_source.py` (Task 2) --
+a scripted double for the subset of `starlette.websockets.WebSocket`
+`EdgeAudioSource.serve` actually calls, driving the real class under test
+end to end with no mock of it anywhere. Every token literal anywhere in
+this project's tests stays under 8 characters (for example `"t-1"`),
+because `tests/test_repo_hygiene.py`'s `_CREDENTIAL_RE` flags any quoted
+`token = "..."`-shaped literal of 8 or more characters as a possible
+leaked credential.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from typing import Any
 
 from atlas.db.edge_repository import EdgeDevice
 
@@ -48,6 +54,47 @@ def fake_edge_device(
         revoked_at=revoked_at,
         last_connected_at=None,
     )
+
+
+class FakeEdgeSocket:
+    """A scripted double for the one-way-in-two-ways-out shape
+    `EdgeAudioSource.serve` drives: `receive()` returns whatever this test
+    pushed, in order; `send_text`/`send_bytes`/`close` are recorded rather
+    than sent anywhere. Never mocks `EdgeAudioSource` itself -- the class
+    under test runs unchanged against this socket.
+
+    A test drives inbound traffic with `push_bytes`/`push_text`/
+    `push_disconnect`; `receive()` awaits the next one, matching
+    Starlette's own ASGI message shape (`{"type": "websocket.receive",
+    "bytes": ...}` or `{"type": "websocket.disconnect", "code": ...}`).
+    """
+
+    def __init__(self) -> None:
+        self._inbound: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
+        self.sent_text: list[str] = []
+        self.sent_bytes: list[bytes] = []
+        self.close_calls: list[tuple[int, str | None]] = []
+
+    def push_bytes(self, data: bytes) -> None:
+        self._inbound.put_nowait({"type": "websocket.receive", "bytes": data})
+
+    def push_text(self, text: str) -> None:
+        self._inbound.put_nowait({"type": "websocket.receive", "text": text})
+
+    def push_disconnect(self, code: int = 1000) -> None:
+        self._inbound.put_nowait({"type": "websocket.disconnect", "code": code})
+
+    async def receive(self) -> "dict[str, Any]":
+        return await self._inbound.get()
+
+    async def send_text(self, data: str) -> None:
+        self.sent_text.append(data)
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.sent_bytes.append(data)
+
+    async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
+        self.close_calls.append((code, reason))
 
 
 def interleave(ch0: int, ch1: int, samples: int) -> bytes:
