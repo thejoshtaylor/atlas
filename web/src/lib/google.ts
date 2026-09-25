@@ -116,7 +116,13 @@ export const updateGoogleAccountMutationOptions: UseMutationOptions<GoogleAccoun
     apiFetch<GoogleAccount>(`/api/google/accounts/${accountId}`, { method: "PATCH", body }),
   onSuccess: (account) => {
     queryClient.setQueryData(googleAccountQueryKey(account.id), account)
-    void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY })
+    // `exact: true` -- a plain prefix match on `GOOGLE_ACCOUNTS_QUERY_KEY`
+    // also matches this very account's own `googleAccountQueryKey(id)`
+    // (`["google","accounts",id]` starts with `["google","accounts"]`),
+    // which would trigger a refetch racing the `setQueryData` write above
+    // and, on a background refetch that resolves out of order, could
+    // overwrite the fresh value this mutation just confirmed.
+    void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, exact: true })
   },
 }
 
@@ -156,8 +162,11 @@ export interface UnlinkGoogleAccountInput {
 export const unlinkGoogleAccountMutationOptions: UseMutationOptions<void, unknown, UnlinkGoogleAccountInput> = {
   mutationFn: ({ accountId }) => apiFetch<void>(`/api/google/accounts/${accountId}`, { method: "DELETE" }),
   onSuccess: (_data, { accountId }) => {
-    void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY })
     queryClient.removeQueries({ queryKey: googleAccountQueryKey(accountId) })
+    // `exact: true` for the same reason `updateGoogleAccountMutationOptions`
+    // uses it -- without it this prefix-matches (and would try to refetch)
+    // the just-removed `googleAccountQueryKey(accountId)` entry too.
+    void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, exact: true })
   },
 }
 

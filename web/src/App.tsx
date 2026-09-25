@@ -16,6 +16,7 @@ import { HomeRoute } from "@/routes/HomeRoute"
 import { LiveRoute } from "@/routes/live/LiveRoute"
 import { MacroEditorRoute } from "@/routes/macros/MacroEditorRoute"
 import { MacrosRoute } from "@/routes/macros/MacrosRoute"
+import { GoogleAccountRoute } from "@/routes/google/GoogleAccountRoute"
 import { GoogleAccountsRoute } from "@/routes/google/GoogleAccountsRoute"
 import { PluginEditorRoute } from "@/routes/plugins/PluginEditorRoute"
 import { PluginsRoute } from "@/routes/plugins/PluginsRoute"
@@ -92,6 +93,7 @@ function AppRoutes() {
             <Route path="/plugins/new" element={<PluginEditorRoute />} />
             <Route path="/plugins/:id" element={<PluginEditorRoute />} />
             <Route path="/google" element={<GoogleAccountsRoute />} />
+            <Route path="/google/accounts/:id" element={<GoogleAccountRoute />} />
           </Route>
           <Route path="/calibration" element={<CalibrationRoute />} />
         </Route>

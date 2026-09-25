@@ -81,7 +81,7 @@ function stubGoogle(
       mutationFn: options.updateGoogleAccount ?? notStubbed("updateGoogleAccount"),
       onSuccess: (account: { id: number }) => {
         queryClient.setQueryData(googleAccountQueryKey(account.id), account)
-        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"] })
+        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"], exact: true })
       },
     },
     setCalendarAccessMutationOptions: {
@@ -99,8 +99,8 @@ function stubGoogle(
     unlinkGoogleAccountMutationOptions: {
       mutationFn: options.unlinkGoogleAccount ?? notStubbed("unlinkGoogleAccount"),
       onSuccess: (_data: unknown, input: { accountId: number }) => {
-        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"] })
         queryClient.removeQueries({ queryKey: googleAccountQueryKey(input.accountId) })
+        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"], exact: true })
       },
     },
     LINK_ERROR_MESSAGES,
@@ -160,7 +160,7 @@ test("editing the label and saving sends PATCH with only {label}; a 409 shows th
   fireEvent.change(labelInput, { target: { value: "home" } })
   fireEvent.click(screen.getByRole("button", { name: "Save label" }))
 
-  await waitFor(() => expect(patchCalls).toEqual([{ label: "home" }]))
+  await waitFor(() => expect(patchCalls).toEqual([{ accountId: 7, label: "home" }]))
 
   cleanup()
 
@@ -202,10 +202,22 @@ test("toggling default saves {is_default: true}, clearing it saves {is_default: 
 
   const checkbox = await screen.findByRole("checkbox", { name: "Use for new events when I don't name an account" })
   fireEvent.click(checkbox)
-  await waitFor(() => expect(calls).toEqual([{ is_default: true }]))
+  await waitFor(() => expect(calls).toEqual([{ accountId: 7, is_default: true }]))
 
-  fireEvent.click(await screen.findByRole("checkbox", { name: "Use for new events when I don't name an account" }))
-  await waitFor(() => expect(calls).toEqual([{ is_default: true }, { is_default: false }]))
+  // Wait for the cache-driven re-render to actually show the box checked
+  // before clicking again -- otherwise the second click can land on the
+  // still-unchecked element and send `is_default: true` a second time.
+  const checkedBox = await screen.findByRole("checkbox", {
+    name: "Use for new events when I don't name an account",
+    checked: true,
+  })
+  fireEvent.click(checkedBox)
+  await waitFor(() =>
+    expect(calls).toEqual([
+      { accountId: 7, is_default: true },
+      { accountId: 7, is_default: false },
+    ]),
+  )
 })
 
 test("choosing a calendar option sends exactly one PUT with that access value; Read and write is disabled with a note when Google marks the calendar read-only", async () => {
