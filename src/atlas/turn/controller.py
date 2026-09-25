@@ -220,6 +220,16 @@ _UNREACHABLE_ACCOUNT_NOTE = " i can't reach your {label} account right now."
 # latency of an ordinary turn.
 _DEFAULT_POLL_INTERVAL_S = 0.05
 
+# 10-07-PLAN.md (D-17): the prefix every edge `speech_signals` event is
+# recorded under -- `edge.vad.start`, `edge.vad.end`, `edge.doa`,
+# `edge.latency` -- so a reader of `events.jsonl` can tell an edge-source
+# event apart from a browser/camera one without depending on the exact
+# type strings `transports/edge.py` happens to use today. A module
+# constant, not an import from `transports/`: this module has no concrete
+# transport dependency (D-02), and the literal string is all this prefix
+# needs to be.
+_EDGE_EVENT_PREFIX = "edge."
+
 # 260924-4iv (item a): the one value `_read_prefetched` returns for "this
 # fetch was never given, never finished in time, or raised" -- distinct
 # from every real fetch result (`None` is itself a legitimate scripted
@@ -631,6 +641,24 @@ async def run_turn(
     # which case `_drain_to_final_transcript` behaves exactly as it did
     # before this plan.
     speech_signals = getattr(source, "speech_signals", None)
+
+    # 10-07-PLAN.md (D-17): a Pi's own vad.start/vad.end/doa/latency events
+    # land in this turn's session, prefixed `edge.`, for the turn's whole
+    # life -- never through `_emit_event` (which reaches the observer feed
+    # and the browser), because DoA is recorded only, never shown. Only
+    # when both `speech_signals` and `session_recorder` exist: no
+    # `speech_signals` means no edge source; no `session_recorder` means
+    # no session to record into. `replay_segment=True` (the default)
+    # means a turn that subscribes mid-segment still gets that segment's
+    # own vad.start and every DoA reading already published, not only
+    # what arrives from this instant forward.
+    _edge_event_unsubscribe: "Callable[[], None] | None" = None
+    if speech_signals is not None and session_recorder is not None:
+
+        def _record_edge_event(event: dict[str, Any]) -> None:
+            session_recorder.record_event({**event, "type": _EDGE_EVENT_PREFIX + event["type"]})
+
+        _edge_event_unsubscribe = speech_signals.subscribe(_record_edge_event, replay_segment=True)
 
     if session_recorder is not None:
         # Resolved from the source's own declaration, never assumed (D-13),
@@ -1491,6 +1519,14 @@ async def run_turn(
         await _emit_event(source, timings.to_event())
         timings.log()
     finally:
+        # 10-07-PLAN.md (D-17): unsubscribed before the recorder closes
+        # below -- an edge event arriving after this point must never
+        # reach a turn that has already finished writing its own
+        # `events.jsonl` (this plan's own "an edge event arriving after
+        # the turn ended is not written to that turn's session" case). A
+        # no-op when no subscription was ever made.
+        if _edge_event_unsubscribe is not None:
+            _edge_event_unsubscribe()
         # Covers every exit path above, including the two early returns --
         # exactly the turns whose folders an operator will want, and the
         # easiest ones to leak (D-13, T-02-22). A no-op when

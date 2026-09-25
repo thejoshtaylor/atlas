@@ -111,6 +111,16 @@ MAX_SEGMENT_EVENTS = 64
 # schema's own documented range, never a number this file derives from
 # one specific firmware build.
 MAX_DOA_VALUES = 8
+# Keep only the latest few outstanding ping ids (10-07-PLAN.md) -- a Pi
+# that never answers a ping cannot grow this without bound, the same
+# `deque(maxlen=...)` discipline `SpeechSignals`' own segment history
+# already uses for the identical reason.
+MAX_OUTSTANDING_PINGS = 8
+# The ROADMAP's Phase 10 bullet: "less than 50 ms of added delay" --
+# `added_delay_ms_p95` is measured against this budget with no shared
+# clock needed (10-CONTEXT.md Open Question 1): the Pi's own measured
+# capture-to-send p95 plus half the server-measured ping round trip.
+ADDED_DELAY_BUDGET_MS = 50
 
 
 class EdgeProtocolError(ValueError):
@@ -349,6 +359,15 @@ class EdgeAudioSource:
         # own saturation case.
         self._queue_saturation_warned = False
         self._send_audio_warned = False
+        # Per-connection ping/added-delay state (10-07-PLAN.md) -- reset at
+        # the top of `serve()` every time a connection becomes the active
+        # one, so a reconnect never carries a stale outstanding-ping id or
+        # a previous connection's own worst/last delay figure forward.
+        self._outstanding_pings: "deque[int]" = deque(maxlen=MAX_OUTSTANDING_PINGS)
+        self._next_ping_id: int = 0
+        self._connection_worst_added_delay_ms: float | None = None
+        self._connection_last_added_delay_ms: float | None = None
+        self._added_delay_over_budget_warned = False
 
     @property
     def speech_signals(self) -> SpeechSignals:
@@ -437,60 +456,105 @@ class EdgeAudioSource:
         self._connected_device_id = device.id
         self._send_audio_warned = False
         invalid_message_count = 0
+        # 10-07-PLAN.md: fresh per connection -- a reconnect never inherits
+        # a previous connection's own outstanding ping ids or delay figures.
+        self._outstanding_pings = deque(maxlen=MAX_OUTSTANDING_PINGS)
+        self._next_ping_id = 0
+        self._connection_worst_added_delay_ms = None
+        self._connection_last_added_delay_ms = None
+        self._added_delay_over_budget_warned = False
 
         await websocket.send_text(build_hello(self._config, device.id))
+        ping_task = asyncio.create_task(self._ping_loop(websocket))
         try:
-            while True:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    return
-                data = message.get("bytes")
-                if data is not None:
-                    if len(data) > MAX_AUDIO_FRAME_BYTES or not self._is_whole_number_of_frames(data):
+            try:
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    data = message.get("bytes")
+                    if data is not None:
+                        if len(data) > MAX_AUDIO_FRAME_BYTES or not self._is_whole_number_of_frames(data):
+                            invalid_message_count += 1
+                            if invalid_message_count >= MAX_INVALID_MESSAGES:
+                                await websocket.close(code=CLOSE_POLICY_VIOLATION)
+                                return
+                            continue
+                        self._enqueue_frame(data)
+                        continue
+                    text = message.get("text")
+                    if text is None:
+                        continue
+                    if len(text.encode("utf-8")) > MAX_TEXT_FRAME_BYTES:
                         invalid_message_count += 1
                         if invalid_message_count >= MAX_INVALID_MESSAGES:
                             await websocket.close(code=CLOSE_POLICY_VIOLATION)
                             return
                         continue
-                    self._enqueue_frame(data)
-                    continue
-                text = message.get("text")
-                if text is None:
-                    continue
-                if len(text.encode("utf-8")) > MAX_TEXT_FRAME_BYTES:
-                    invalid_message_count += 1
-                    if invalid_message_count >= MAX_INVALID_MESSAGES:
-                        await websocket.close(code=CLOSE_POLICY_VIOLATION)
-                        return
-                    continue
-                try:
-                    event = parse_edge_event(text)
-                except EdgeProtocolError:
-                    logger.debug("edge source dropped a malformed text frame", exc_info=True)
-                    invalid_message_count += 1
-                    if invalid_message_count >= MAX_INVALID_MESSAGES:
-                        await websocket.close(code=CLOSE_POLICY_VIOLATION)
-                        return
-                    continue
-                self._handle_event(event)
+                    try:
+                        event = parse_edge_event(text)
+                    except EdgeProtocolError:
+                        logger.debug("edge source dropped a malformed text frame", exc_info=True)
+                        invalid_message_count += 1
+                        if invalid_message_count >= MAX_INVALID_MESSAGES:
+                            await websocket.close(code=CLOSE_POLICY_VIOLATION)
+                            return
+                        continue
+                    if not self._handle_event(event):
+                        # T-10-25: an unmatched pong is the one event
+                        # `_handle_event` can call invalid post-parse --
+                        # counted the same way a malformed text frame is.
+                        invalid_message_count += 1
+                        if invalid_message_count >= MAX_INVALID_MESSAGES:
+                            await websocket.close(code=CLOSE_POLICY_VIOLATION)
+                            return
+            finally:
+                # A superseded connection's own cancellation lands here too --
+                # `self._active_task` already names the connection that
+                # replaced it by the time this runs (module docstring), so
+                # this guard is what keeps a superseded call's cleanup from
+                # clobbering the connection that is now active.
+                if self._active_task is asyncio.current_task():
+                    if self._speech_signals.in_speech:
+                        # D-13: a lost `vad.end` (a dropped connection mid-
+                        # segment) never hangs a turn -- ending the segment
+                        # synthetically is what "the fallbacks hold even
+                        # without one" means in practice.
+                        self._speech_signals.publish(
+                            {"type": MSG_VAD_END, "seq": self._last_seq, "reason": "disconnected"}
+                        )
+                    self._websocket = None
+                    self._connected_device_id = None
+                    self._active_task = None
         finally:
-            # A superseded connection's own cancellation lands here too --
-            # `self._active_task` already names the connection that
-            # replaced it by the time this runs (module docstring), so
-            # this guard is what keeps a superseded call's cleanup from
-            # clobbering the connection that is now active.
-            if self._active_task is asyncio.current_task():
-                if self._speech_signals.in_speech:
-                    # D-13: a lost `vad.end` (a dropped connection mid-
-                    # segment) never hangs a turn -- ending the segment
-                    # synthetically is what "the fallbacks hold even
-                    # without one" means in practice.
-                    self._speech_signals.publish(
-                        {"type": MSG_VAD_END, "seq": self._last_seq, "reason": "disconnected"}
-                    )
-                self._websocket = None
-                self._connected_device_id = None
-                self._active_task = None
+            # 10-07-PLAN.md: cancelled regardless of supersede/rival
+            # outcome -- this ping task belongs to this specific `serve()`
+            # call, never the shared connection state the guard above
+            # protects, so it is always torn down when this call ends.
+            ping_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ping_task
+            logger.info(
+                "edge source: connection ended (device_id=%s, worst_added_delay_ms_p95=%s, "
+                "last_added_delay_ms_p95=%s)",
+                device.id,
+                self._connection_worst_added_delay_ms,
+                self._connection_last_added_delay_ms,
+            )
+
+    async def _ping_loop(self, websocket: Any) -> None:
+        """Send `ping` every `config.ping_interval_s`, cancelled with the
+        connection (10-07-PLAN.md). `server_t_ms` is an integer -- the Pi
+        echoes it back verbatim in its own `pong`, and `parse_edge_event`'s
+        `pong` schema requires an integer, so a float sent here would make
+        a real device's own honest echo fail parsing on the way back."""
+        while True:
+            await asyncio.sleep(self._config.ping_interval_s)
+            ping_id = self._next_ping_id
+            self._next_ping_id += 1
+            self._outstanding_pings.append(ping_id)
+            server_t_ms = int(round(self._clock() * 1000.0))
+            await websocket.send_text(json.dumps({"type": MSG_PING, "id": ping_id, "server_t_ms": server_t_ms}))
 
     async def disconnect_device(self, device_id: int, *, code: int, reason: str) -> None:
         """Close the live connection for `device_id` at once, if one is
@@ -548,17 +612,72 @@ class EdgeAudioSource:
                     MAX_QUEUED_FRAMES,
                 )
 
-    def _handle_event(self, event: dict[str, Any]) -> None:
-        """Route one parsed event: `vad.start`/`vad.end`/`doa`/`latency`
-        publish to `speech_signals`; `pong` never does (`SpeechSignals`'
-        own docstring) -- it updates `last_rtt_ms` instead, the round trip
-        from this server's own `server_t_ms` echoed back."""
+    def _handle_event(self, event: dict[str, Any]) -> bool:
+        """Route one parsed event: `vad.start`/`vad.end`/`doa` publish to
+        `speech_signals` unchanged; `latency` is enriched with `rtt_ms`/
+        `added_delay_ms_p95` first (`_publish_latency_event`, 10-07-PLAN.md).
+        `pong` never reaches `speech_signals` (`SpeechSignals`' own
+        docstring) -- it updates `last_rtt_ms` instead, through
+        `_handle_pong`.
+
+        Returns `False` for the one case that counts as malformed after
+        successfully parsing (T-10-25): a `pong` whose `id` matches no
+        outstanding ping. `serve()`'s own loop counts that the same way it
+        counts a malformed text frame. Every other event type always
+        returns `True`.
+        """
         msg_type = event["type"]
         if msg_type in (MSG_VAD_START, MSG_VAD_END):
             self._last_seq = event["seq"]
             self._speech_signals.publish(event)
-        elif msg_type in (MSG_DOA, MSG_LATENCY):
+        elif msg_type == MSG_DOA:
             self._speech_signals.publish(event)
+        elif msg_type == MSG_LATENCY:
+            self._publish_latency_event(event)
         elif msg_type == MSG_PONG:
-            now_ms = self._clock() * 1000.0
-            self.last_rtt_ms = max(0.0, now_ms - event["server_t_ms"])
+            return self._handle_pong(event)
+        return True
+
+    def _handle_pong(self, event: dict[str, Any]) -> bool:
+        """Match `event["id"]` against `self._outstanding_pings`; on a
+        match, remove it and set `last_rtt_ms` from this server's own
+        `server_t_ms` echoed back. An unmatched id never changes
+        `last_rtt_ms` and is reported invalid (T-10-25)."""
+        ping_id = event["id"]
+        try:
+            self._outstanding_pings.remove(ping_id)
+        except ValueError:
+            return False
+        now_ms = self._clock() * 1000.0
+        self.last_rtt_ms = max(0.0, now_ms - event["server_t_ms"])
+        return True
+
+    def _publish_latency_event(self, event: dict[str, Any]) -> None:
+        """Enrich `event` with `rtt_ms` (the last matched RTT, or `None`
+        without one -- never guessed) and `added_delay_ms_p95` (the Pi's
+        own `capture_to_send_ms_p95` plus half that RTT, or `None` when
+        `rtt_ms` is `None`) before publishing, and track this
+        connection's own worst/last `added_delay_ms_p95` (10-07-PLAN.md,
+        ROADMAP Phase 10's 50 ms budget). One warning per connection when
+        the budget is exceeded -- the same warn-once-per-episode
+        discipline `_enqueue_frame`'s own saturation warning already
+        uses."""
+        rtt_ms = self.last_rtt_ms
+        added_delay_ms_p95 = event["capture_to_send_ms_p95"] + rtt_ms / 2 if rtt_ms is not None else None
+        enriched = {**event, "rtt_ms": rtt_ms, "added_delay_ms_p95": added_delay_ms_p95}
+        if added_delay_ms_p95 is not None:
+            if (
+                self._connection_worst_added_delay_ms is None
+                or added_delay_ms_p95 > self._connection_worst_added_delay_ms
+            ):
+                self._connection_worst_added_delay_ms = added_delay_ms_p95
+            self._connection_last_added_delay_ms = added_delay_ms_p95
+            if added_delay_ms_p95 > ADDED_DELAY_BUDGET_MS and not self._added_delay_over_budget_warned:
+                self._added_delay_over_budget_warned = True
+                logger.warning(
+                    "edge source: device %s added_delay_ms_p95=%.1fms exceeds the %dms budget",
+                    self._connected_device_id,
+                    added_delay_ms_p95,
+                    ADDED_DELAY_BUDGET_MS,
+                )
+        self._speech_signals.publish(enriched)

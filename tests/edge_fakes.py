@@ -14,6 +14,7 @@ leaked credential.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -144,6 +145,23 @@ class FakeEdgeSocket:
 
     async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
         self.close_calls.append((code, reason))
+
+    def latest_ping(self) -> "dict[str, Any] | None":
+        """The most recent `{"type": "ping", ...}` message `send_text`
+        recorded, or `None` -- `10-07-PLAN.md`'s Task 2: a test scripts a
+        `pong` reply by reading the `id`/`server_t_ms` a real `ping` sent,
+        never by guessing them."""
+        for text in reversed(self.sent_text):
+            parsed = json.loads(text)
+            if parsed.get("type") == "ping":
+                return parsed
+        return None
+
+    def push_pong(self, ping: "dict[str, Any]") -> None:
+        """Push a `pong` echoing `ping`'s own `id`/`server_t_ms` back
+        verbatim, the same way a real Pi answers a real `ping` -- a test
+        never invents its own id or timestamp."""
+        self.push_text(json.dumps({"type": "pong", "id": ping["id"], "server_t_ms": ping["server_t_ms"]}))
 
 
 def interleave(ch0: int, ch1: int, samples: int) -> bytes:
