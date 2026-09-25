@@ -993,14 +993,14 @@ async def test_calendar_create_requires_confirmation_round(
     assert len(confirmation_brain.calls) == 1
     call = confirmation_brain.calls[0]
     assert call["tools"] == CONFIRM_CANCEL_TOOLS
-    # A-CR-01: the readback and the operator's own reply are two separate
-    # user messages -- neither ever occupies the system role, which
-    # carries only the fixed instruction, free of any proposal-derived
-    # text.
+    # A-CR-01, R2-WR-03: the readback is JSON data in the first user
+    # message, and the operator's own reply is the second, unlabeled --
+    # neither ever occupies the system role, which carries only the fixed
+    # instruction, free of any proposal-derived text.
     assert [message["role"] for message in call["messages"]] == ["system", "user", "user"]
     assert created.readback not in call["messages"][0]["content"]
-    assert created.readback in call["messages"][1]["content"]
-    assert call["messages"][2]["content"] == "the operator's reply: yes"
+    assert json.loads(call["messages"][1]["content"])["question_you_asked"] == created.readback
+    assert call["messages"][2]["content"] == "yes"
 
     assert tts.received_text == [CONFIRMED_CREATE_REPLY]
     assert timings.turn_outcome == "confirmed"

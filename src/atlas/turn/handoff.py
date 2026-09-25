@@ -30,6 +30,7 @@ from atlas.turn.pending_action import (
     PROPOSAL_STORE_FAILED_REPLY,
     PendingProposal,
     compose_readback,
+    confirmation_data,
     execution_arguments,
 )
 
@@ -295,5 +296,6 @@ async def dispatch_handoff(
         original_transcript=transcript,
         question=readback,
         pending_action_id=action_row.id,
+        proposal=confirmation_data(proposal, now=ctx.now),
     )
     return HandoffOutcome(reply_text=readback, turn_outcome="needs_confirmation", follow_up=follow_up)

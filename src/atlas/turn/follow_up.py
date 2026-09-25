@@ -69,6 +69,11 @@ class FollowUpRequest:
     # belongs to the chain, not to one turn, so no later link of the chain
     # can reach a tool that is not a calendar proposal.
     proposals_only: bool = False
+    # R2-WR-03: a `"confirmation"` request's own proposal fields
+    # (`atlas.turn.pending_action.confirmation_data`), already flattened
+    # and capped. The confirmation round reads them as JSON data, never as
+    # text next to the operator's reply. Empty for a clarification.
+    proposal: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
