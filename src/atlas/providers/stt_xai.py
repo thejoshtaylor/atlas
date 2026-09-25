@@ -32,14 +32,24 @@ from atlas.config import SttConfig
 from atlas.providers.base import FinalTranscript, PartialTranscript, SttError
 from atlas.transports.base import SourceFormat
 
-# 10-05-PLAN.md D-12: the wire message that ends the current utterance at
-# once, on request, instead of waiting for xAI's own endpointing or for the
-# mic to stop streaming. xAI's own documentation spells this "Finalize";
-# D-12 wrote lowercase "finalize" -- neither has been checked against the
-# live socket. Task 3's `scripts/verify_xai_finalize.py` is that check; this
-# constant is what its result updates, with the date and measured times
-# recorded in the comment above it once run.
-FINALIZE_MESSAGE = {"type": "Finalize"}
+# VERIFIED AGAINST THE LIVE API, 2026-09-25 (10-05-PLAN.md Task 3,
+# scripts/verify_xai_finalize.py). xAI's own documentation spells this
+# "Finalize"; D-12 wrote lowercase "finalize". Both spellings worked
+# against the live socket, streaming one synthesized command's audio with
+# no trailing `audio.done` and no other finalize message, timed from the
+# moment each variant was sent to the first `speech_final` partial that
+# followed it, against a control that sent neither and never finalized
+# within the 5 s limit:
+#
+#     "Finalize" (xAI's documented spelling): speech_final in 289.3ms
+#     "finalize" (D-12's spelling):           speech_final in 153.9ms
+#     control (no finalize message sent):     no final within 5000ms
+#
+# Both spellings work, so D-12's own lowercase spelling is what this
+# constant keeps (10-05-PLAN.md's own rule for this exact outcome) -- the
+# decision's intent, a finalize message on the provider's own socket, holds
+# either way.
+FINALIZE_MESSAGE = {"type": "finalize"}
 
 
 class XaiStt:

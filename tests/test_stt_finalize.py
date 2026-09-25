@@ -251,3 +251,11 @@ def test_every_registered_stt_provider_accepts_finalize(tmp_path):
         assert finalize_param is not None, f"{name} provider's stream() has no finalize parameter"
         assert finalize_param.kind == inspect.Parameter.KEYWORD_ONLY, name
         assert finalize_param.default is None, name
+
+
+def test_finalize_message_is_the_live_verified_value():
+    """10-05-PLAN.md Task 3: `scripts/verify_xai_finalize.py` proved both
+    spellings work against the live socket (2026-09-25); D-12's own
+    lowercase spelling is what the constant keeps. Pinned exactly, so a
+    later edit cannot drift away from the live-verified value silently."""
+    assert FINALIZE_MESSAGE == {"type": "finalize"}
