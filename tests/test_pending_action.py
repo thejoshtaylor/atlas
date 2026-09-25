@@ -1062,6 +1062,69 @@ async def test_run_confirmation_round_follows_the_model_cancel_for_a_negated_rep
     assert decision.amended is False
 
 
+async def test_run_confirmation_round_settles_on_cancel_for_a_non_brain_error_exception(caplog):
+    """R3-WR-01: no provider in this codebase raises `BrainError` -- the
+    `openai` SDK's own exceptions (a connection error, a 5xx status error)
+    propagate as themselves. The round must settle on `cancel` and log the
+    failure for any of them, not just the two named exceptions, so the
+    operator who just said "yes" never hears silence."""
+
+    class _ConnectionFailingBrain:
+        async def chat(self, messages, tools=None):
+            raise RuntimeError("connection reset by peer")
+
+    with caplog.at_level("ERROR"):
+        decision = await run_confirmation_round(
+            _ConnectionFailingBrain(),
+            readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+            transcript="yes",
+            timeout_s=5.0,
+        )
+
+    assert decision.decision == "cancel"
+    assert decision.amended is False
+    assert any("confirmation round failed" in record.getMessage() for record in caplog.records)
+
+
+async def test_run_confirmation_round_settles_on_cancel_for_malformed_streamed_tool_call_arguments(caplog):
+    """A `json.JSONDecodeError` from `accumulate_stream` reading malformed
+    streamed tool-call arguments is exactly the shape of exception this
+    round previously let escape uncaught."""
+
+    class _MalformedStreamBrain:
+        async def chat(self, messages, tools=None):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    with caplog.at_level("ERROR"):
+        decision = await run_confirmation_round(
+            _MalformedStreamBrain(),
+            readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+            transcript="yes",
+            timeout_s=5.0,
+        )
+
+    assert decision.decision == "cancel"
+    assert any("confirmation round failed" in record.getMessage() for record in caplog.records)
+
+
+async def test_run_confirmation_round_leaves_cancellation_to_propagate():
+    """`asyncio.CancelledError` is task cancellation, not a round failure --
+    it must never be rewritten into a `cancel` decision."""
+    import asyncio
+
+    class _CancellingBrain:
+        async def chat(self, messages, tools=None):
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_confirmation_round(
+            _CancellingBrain(),
+            readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+            transcript="yes",
+            timeout_s=5.0,
+        )
+
+
 # --- A-WR-01: exception handling on the pending-action/email-draft paths ----
 
 

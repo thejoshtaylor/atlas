@@ -13,8 +13,6 @@ import logging
 import re
 from typing import Any
 
-from atlas.providers.base import BrainError
-
 logger = logging.getLogger("atlas.turn.quarantine")
 
 # The fixed system instruction every quarantine round carries -- composed
@@ -91,8 +89,13 @@ async def quarantine_round(brain: Any, *, instruction: str, content: str, timeou
 
     Any tool calls the reply carries are ignored -- only their count is
     logged, since a model asked for no tools has nothing to act on even if
-    it tries. Raises `QuarantineError` on a timeout, a raised `BrainError`,
-    or a reply whose text is empty or whitespace-only.
+    it tries. Raises `QuarantineError` on a timeout, on any other
+    exception the round raises -- a `BrainError`, an SDK connection/status
+    error, anything (R3-WR-01; `asyncio.CancelledError` excepted -- it is
+    task cancellation, not a round failure, and is left to propagate) --
+    or on a reply whose text is empty or whitespace-only. A non-timeout
+    exception is logged before `QuarantineError` is raised, so every
+    caller's fixed fallback reply is never reached silently.
     """
     messages = [
         {"role": "system", "content": instruction},
@@ -100,7 +103,12 @@ async def quarantine_round(brain: Any, *, instruction: str, content: str, timeou
     ]
     try:
         reply = await asyncio.wait_for(brain.chat(messages, tools=None), timeout=timeout_s)
-    except (asyncio.TimeoutError, BrainError) as exc:
+    except asyncio.TimeoutError as exc:
+        raise QuarantineError("quarantine round did not produce a summary") from exc
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception("quarantine round failed")
         raise QuarantineError("quarantine round did not produce a summary") from exc
     if reply.tool_calls:
         logger.warning(

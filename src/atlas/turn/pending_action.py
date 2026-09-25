@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, model_validator
 
-from atlas.providers.base import BrainError
 from atlas.turn.follow_up import FollowUpRequest
 
 logger = logging.getLogger("atlas.turn.pending_action")
@@ -485,10 +484,15 @@ async def run_confirmation_round(
     therefore stays inside one JSON string value -- it cannot forge a label
     or become a second reply, whatever quotes or line breaks it holds.
 
-    A timeout or a raised `BrainError` settles on `cancel` (D-08, D-11) --
-    the same posture `decision_from_reply` takes for every reply it
-    cannot read as a clear confirm, extended to cover the round never
-    settling on a reply at all.
+    A timeout, or any other exception the round raises -- a `BrainError`,
+    an SDK connection/status error, malformed streamed tool-call
+    arguments, anything -- settles on `cancel` (D-08, D-11, R3-WR-01), the
+    same posture `decision_from_reply` takes for every reply it cannot
+    read as a clear confirm, extended to cover the round never settling on
+    a reply at all. `asyncio.CancelledError` is not "any other exception"
+    here -- it is task cancellation, not a round failure, and it is left
+    to propagate. A non-timeout exception is logged, so this settling
+    is never silent.
 
     R2-WR-01: the round's own `confirm`/`cancel` call is the decision.
     D-08 records that the operator chose model interpretation over a fixed
@@ -506,7 +510,12 @@ async def run_confirmation_round(
     ]
     try:
         reply = await asyncio.wait_for(brain.chat(messages, tools=CONFIRM_CANCEL_TOOLS), timeout=timeout_s)
-    except (asyncio.TimeoutError, BrainError):
+    except asyncio.TimeoutError:
+        return ConfirmationDecision(decision="cancel")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("confirmation round failed; settling on cancel")
         return ConfirmationDecision(decision="cancel")
     return decision_from_reply(reply)
 

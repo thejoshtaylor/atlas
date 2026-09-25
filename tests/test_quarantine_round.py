@@ -67,6 +67,37 @@ async def test_quarantine_round_raises_on_brain_error():
         await quarantine_round(_FailingBrain(), instruction=SUMMARY_INSTRUCTION, content="x", timeout_s=5.0)
 
 
+async def test_quarantine_round_raises_on_a_non_brain_error_exception(caplog):
+    """R3-WR-01: a provider failure that is not `BrainError` -- an SDK
+    connection error, malformed streamed tool-call arguments, anything --
+    must still settle on `QuarantineError`, logged, never propagate
+    unguarded past every caller's own `except QuarantineError` fallback."""
+
+    class _ConnectionFailingBrain:
+        async def chat(self, messages, tools=None):
+            raise RuntimeError("connection reset by peer")
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(QuarantineError):
+            await quarantine_round(
+                _ConnectionFailingBrain(), instruction=SUMMARY_INSTRUCTION, content="x", timeout_s=5.0
+            )
+
+    assert any("quarantine round failed" in record.getMessage() for record in caplog.records)
+
+
+async def test_quarantine_round_leaves_cancellation_to_propagate():
+    """`asyncio.CancelledError` is task cancellation, not a round failure --
+    it must never be rewritten into a `QuarantineError`."""
+
+    class _CancellingBrain:
+        async def chat(self, messages, tools=None):
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await quarantine_round(_CancellingBrain(), instruction=SUMMARY_INSTRUCTION, content="x", timeout_s=5.0)
+
+
 async def test_quarantine_round_raises_on_empty_reply():
     brain = RecordingFakeBrain(replies=[BrainReply(text="   ")])
 
