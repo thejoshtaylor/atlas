@@ -305,6 +305,36 @@ def test_callback_completed_by_a_different_admin_than_started_it_redirects_state
     assert response.headers["location"] == "/google?link_error=state_invalid"
 
 
+def test_callback_with_an_expired_state_redirects_state_invalid(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """B2-WR-03 regression: D-02's own ten-minute state TTL --
+    `consume_oauth_state`'s `expires_at > now` check -- must actually
+    refuse a state past its expiry, not just one that never existed or
+    was already used. Fabricates an already-expired state directly
+    through the repository (bypassing real time), the same way
+    `test_relearn_while_learning_is_refused_with_409` in
+    `test_style_learning.py` bypasses a race by writing status directly.
+    A regression flipping the comparison (`>=`/`<` typo) or dropping the
+    check entirely would pass every other test in this file but not
+    this one."""
+    _sec, _acct, google_repo, _plugins, _mgr, fake_google, _app, client = _linked_scenario(
+        monkeypatch, fake_account_repository, fake_plugin_repository
+    )
+    raw_state = _start_link(client, fake_google)
+    [state] = google_repo._oauth_states.values()
+    google_repo._oauth_states[state.id] = replace(
+        state, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+    fake_google.add_code("code-1", access_token="at-1", refresh_token="rt-1")
+
+    response = client.get(
+        "/api/google/oauth/callback", params={"code": "code-1", "state": raw_state}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/google?link_error=state_invalid"
+
+
 def test_callback_with_access_denied_redirects_denied(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
