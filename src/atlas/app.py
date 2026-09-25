@@ -48,6 +48,7 @@ from atlas.config import (
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
 from atlas.db.google_postgres import PostgresGoogleAccountRepository
+from atlas.db.pending_action_repository import PostgresPendingActionRepository
 from atlas.db.postgres import (
     PostgresAccountRepository,
     PostgresCredentialRepository,
@@ -75,6 +76,7 @@ from atlas.google.env import GoogleEnvBuilder
 from atlas.google.plugin import refresh_google_plugin
 from atlas.google.scheduler import GoogleTokenRefreshScheduler
 from atlas.google.token_service import GoogleTokenService
+from atlas.google.turn_context import build_handoff_context
 from atlas.loop_stall import LoopStallReporter
 from atlas.mcp_client import McpToolHostLookup, UnknownToolError, mcp_tools_to_openai_tools
 from atlas.plugins.manager import PluginManager
@@ -611,6 +613,13 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # fake repository dict predates this key (Task 3's own "boots
         # unchanged with no Google repository" requirement).
         "google_account_repo": PostgresGoogleAccountRepository(sessionmaker),
+        # Plan 09-04 (Task 3): where a spoken calendar write proposal is
+        # stored until the operator confirms it (D-08, D-09) -- read with
+        # `.get(...)`, like `google_account_repo` above, so an app (or a
+        # test's own fake repository dict) with no Google repository at all
+        # boots unchanged; `atlas.google.turn_context.build_handoff_context`
+        # reads this same key with an identical tolerant `getattr`.
+        "pending_action_repo": PostgresPendingActionRepository(sessionmaker),
     }
 
 
@@ -871,6 +880,10 @@ def _make_run_turn_for_source(
             # deadline and the state-message domain filter.
             state_timeout_ms=config.brain.state_timeout_ms,
             state_domains=config.brain.state_domains,
+            # Plan 09-04 (Task 3): built fresh for this turn, at this call
+            # site, so it carries `app.state`'s current tool host lookup
+            # and pending-action repository (D-08).
+            handoff_context=build_handoff_context(app, source_name),
         )
 
     return _run
@@ -2152,7 +2165,11 @@ async def _run_webrtc_turn(
         if await _refuse_turn_if_any_slot_is_degraded(app, transport):
             return
         app.state.observer_registry.publish(turn_started_event)
-        await run_turn(source, *args, **kwargs)
+        # Plan 09-04 (Task 3): built fresh for this turn -- `WEBRTC_SOURCE_NAME`
+        # is the same label `turn_started_event["source"]` above carries.
+        await run_turn(
+            source, *args, handoff_context=build_handoff_context(app, WEBRTC_SOURCE_NAME), **kwargs
+        )
     finally:
         await transport.close()
 
@@ -2237,6 +2254,8 @@ async def turn_ws(websocket: WebSocket) -> None:
         brain_turn_timeout_s=config.brain.turn_timeout_s,
         state_timeout_ms=config.brain.state_timeout_ms,
         state_domains=config.brain.state_domains,
+        # Plan 09-04 (Task 3): built fresh for this turn.
+        handoff_context=build_handoff_context(websocket.app, BROWSER_MIC_SOURCE_NAME),
     )
 
 

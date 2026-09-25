@@ -438,7 +438,7 @@ async def test_handle_calendar_propose_event_makes_no_http_call_and_defaults_to_
 # --- Task 2: the right account when none is named ---------------------------
 
 
-def _account(label: str, *, is_default: bool = False, access_token: "str | None" = "at", calendars=None) -> AccountGrant:
+def _account(label: str, *, is_default: bool = False, access_token: str | None = "at", calendars=None) -> AccountGrant:
     return AccountGrant(
         label=label,
         email=f"{label}@example.com",
@@ -537,3 +537,63 @@ async def test_no_account_named_and_several_candidates_asks_which_one_and_stores
     assert tts.received_text == ["i'm not sure which one you mean -- home, work?"]
     assert timings.turn_outcome == "needs_clarification"
     assert pending_actions._rows == {}
+
+
+# --- Task 3: build_handoff_context degrades cleanly with no repository -----
+
+
+def test_build_handoff_context_carries_none_when_the_app_state_has_no_repository():
+    from types import SimpleNamespace as NS
+
+    from atlas.google.turn_context import build_handoff_context
+
+    app = NS(state=NS())  # no pending_action_repo, tool_host_lookup, or brain attribute at all
+    ctx = build_handoff_context(app, "camera")
+    assert ctx.pending_actions is None
+    assert ctx.tool_host is None
+    assert ctx.brain is None
+
+
+async def test_a_proposal_with_a_repository_free_context_speaks_confirmation_unavailable(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    from atlas.google.turn_context import build_handoff_context
+
+    accounts = (_home_account(),)
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_event",
+                        arguments={"title": "Dentist", "start": "2026-10-02T15:00", "account": "home"},
+                    )
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    stt = fake_stt(events=[FinalTranscript(text="add dentist on friday at 3")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    app = SimpleNamespace(state=SimpleNamespace())  # no pending_action_repo attribute at all
+    handoff_context = build_handoff_context(app, "camera")
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == [CONFIRMATION_UNAVAILABLE_REPLY]
+    assert timings.turn_outcome == "confirmation_unavailable"
