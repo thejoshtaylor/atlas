@@ -44,12 +44,23 @@ const MAX_PROFILE_CHARS = 4000
 
 function StyleProfileEditor({ accountId, style }: { accountId: number; style: GoogleStyle }) {
   // Seeded once from the loaded style at mount, like `AccountDetail`'s own
-  // `labelDraft` -- `StyleProfileEditor` only ever mounts once `style` is
-  // loaded (its caller gates on that), so a lazy initial value is enough;
-  // no effect is needed, and a background poll (while `learning`) never
-  // overwrites text the admin is mid-edit on, since only the initial
-  // render reads this value.
+  // `labelDraft` -- but `style` is truthy (and this component mounts) the
+  // moment the FIRST `GET .../style` resolves, which is routinely while
+  // `status === "learning"` (a new account's `learn_style` is scheduled
+  // in the background before the redirect). A background poll must not
+  // overwrite text the admin is mid-edit on, but it MUST resync the draft
+  // the one time `status` actually leaves `learning` -- otherwise the
+  // draft stays frozen at its stale (often empty) mount-time value, "Save
+  // profile" re-enables against the newly-learned server profile, and a
+  // click PUTs the stale draft back over it (C-CR-02).
   const [profileDraft, setProfileDraft] = React.useState(style.profile)
+  const wasLearningRef = React.useRef(style.status === "learning")
+  React.useEffect(() => {
+    if (wasLearningRef.current && style.status !== "learning") {
+      setProfileDraft(style.profile)
+    }
+    wasLearningRef.current = style.status === "learning"
+  }, [style.status, style.profile])
 
   const effectiveProfile = profileDraft
   const save = useMutation(saveGoogleStyleMutationOptions)

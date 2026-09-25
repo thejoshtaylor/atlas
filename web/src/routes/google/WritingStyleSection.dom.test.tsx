@@ -284,6 +284,42 @@ test("Show samples expands a read-only list of the stored samples; with no sampl
   expect(screen.queryByRole("button", { name: /Show samples/ })).toBeNull()
 })
 
+test("C-CR-02: the profile draft resyncs when a background learn finishes, instead of staying frozen at the mount-time value", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const googleStyleQueryKey = (id: number) => ["google", "accounts", id, "style"]
+  stubGoogle(queryClient, {
+    // Mirrors a brand-new account: `learn_style` was scheduled in the
+    // background before the redirect, so the admin's first GET lands
+    // while status is still "learning" and profile is still "".
+    fetchGoogleStyle: async () => sampleStyle({ status: "learning", profile: "" }),
+  })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const textarea = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  expect(textarea.value).toBe("")
+
+  // Simulate the 3s background poll landing after `learn_style` finishes --
+  // the same `setQueryData` mechanism this file's mutation stubs already
+  // use to model a resolved write reaching the cache.
+  queryClient.setQueryData(
+    googleStyleQueryKey(7),
+    sampleStyle({ status: "ready", profile: "Learned from your Sent mail: direct and warm." }),
+  )
+
+  await waitFor(() =>
+    expect((screen.getByLabelText("Style profile") as HTMLTextAreaElement).value).toBe(
+      "Learned from your Sent mail: direct and warm.",
+    ),
+  )
+  // "Save profile" must not be left enabled by a stale draft that no
+  // longer matches the freshly-learned server profile -- clicking it
+  // would PUT the stale (here, empty) draft back over the real profile.
+  const saveButton = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement
+  expect(saveButton.disabled).toBe(true)
+})
+
 test("the signature shows under 'Signature from Gmail', read-only; with none it says 'No Gmail signature.'", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, { fetchGoogleStyle: async () => sampleStyle({ signature_text: "Jane Doe\nATLAS household" }) })
