@@ -578,6 +578,20 @@ class ConfirmationOutcome:
     amended: bool = False
 
 
+async def _resolve_logged(
+    pending_actions: Any, action_id: int, status: str, detail: "str | None", at: datetime
+) -> None:
+    """`pending_actions.resolve`, with a raised exception logged and never
+    propagated (R2-WR-07). The reply the operator hears depends on what
+    happened to the calendar, not on whether the row's own bookkeeping
+    landed: a lost resolve leaves the row for its TTL to end, but it must
+    never turn a spoken "done" or "cancelled" into silence."""
+    try:
+        await pending_actions.resolve(action_id, status, detail, at)
+    except Exception:
+        logger.exception("pending_actions.resolve(%s, %r) raised", action_id, status)
+
+
 async def handle_confirmation_reply(
     ctx: "HandoffContext | None", incoming: FollowUpRequest, transcript: str, *, timeout_s: float
 ) -> ConfirmationOutcome:
@@ -607,7 +621,7 @@ async def handle_confirmation_reply(
 
     if not transcript or not transcript.strip():
         if pending_actions is not None and action_id is not None:
-            await pending_actions.resolve(action_id, "expired", None, now)
+            await _resolve_logged(pending_actions, action_id, "expired", None, now)
         return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="follow_up_silence")
 
     if ctx is None or pending_actions is None:
@@ -630,22 +644,29 @@ async def handle_confirmation_reply(
     if decision.decision == "cancel":
         if decision.amended:
             if pending_actions is not None and action_id is not None:
-                await pending_actions.resolve(action_id, "superseded", None, now)
+                await _resolve_logged(pending_actions, action_id, "superseded", None, now)
             return ConfirmationOutcome(reply_text="", turn_outcome="amended", amended=True)
         if pending_actions is not None and action_id is not None:
-            await pending_actions.resolve(action_id, "cancelled", None, now)
+            await _resolve_logged(pending_actions, action_id, "cancelled", None, now)
         return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="cancelled")
 
     # decision.decision == "confirm"
     if pending_actions is None or action_id is None:
         return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_expired")
-    claimed = await pending_actions.claim_for_confirmation(action_id, now)
+    try:
+        claimed = await pending_actions.claim_for_confirmation(action_id, now)
+    except Exception:
+        # R2-WR-07: nothing has run yet, so "nothing was changed" is true.
+        logger.exception("pending_actions.claim_for_confirmation(%s) raised", action_id)
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_unavailable")
     if claimed is None:
         return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_expired")
 
     result = await execute_pending_action(claimed, ctx.tool_host)
+    # R2-WR-07: the write already happened (or already failed) -- a resolve
+    # that raises is logged, and the operator still hears what happened.
     if result.succeeded:
-        await pending_actions.resolve(claimed.id, "executed", result.detail, now)
+        await _resolve_logged(pending_actions, claimed.id, "executed", result.detail, now)
         return ConfirmationOutcome(reply_text=result.reply_text, turn_outcome="confirmed")
-    await pending_actions.resolve(claimed.id, "failed", result.detail, now)
+    await _resolve_logged(pending_actions, claimed.id, "failed", result.detail, now)
     return ConfirmationOutcome(reply_text=result.reply_text, turn_outcome="confirm_failed")

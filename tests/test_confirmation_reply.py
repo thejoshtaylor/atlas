@@ -206,3 +206,71 @@ async def test_an_attacker_calendar_name_is_flattened_and_capped_in_the_readback
     assert "\n" not in outcome.reply_text
     assert long_name.strip() not in outcome.reply_text
     assert len(outcome.reply_text) < 300
+
+
+# --- R2-WR-07: a repository failure never turns into silence -----------------
+
+
+class _FailingRepository(FakePendingActionRepository):
+    def __init__(self, *, fail_resolve: bool = False, fail_claim: bool = False) -> None:
+        super().__init__()
+        self._fail_resolve = fail_resolve
+        self._fail_claim = fail_claim
+
+    async def resolve(self, action_id, status, detail, at):
+        if self._fail_resolve:
+            raise RuntimeError("connection to the database was lost")
+        await super().resolve(action_id, status, detail, at)
+
+    async def claim_for_confirmation(self, action_id, now):
+        if self._fail_claim:
+            raise RuntimeError("connection to the database was lost")
+        return await super().claim_for_confirmation(action_id, now)
+
+
+async def test_a_resolve_failure_after_a_successful_write_still_speaks_done(caplog):
+    brain = tpa._RecordingConfirmationBrain("confirm")
+    ctx, created, _, fake_google = await _setup(brain, pending_actions=_FailingRepository(fail_resolve=True))
+
+    with caplog.at_level("ERROR"):
+        outcome = await handle_confirmation_reply(ctx, _incoming(created), "yes", timeout_s=5.0)
+
+    assert len(fake_google.inserted) == 1
+    assert outcome.reply_text == CONFIRMED_CREATE_REPLY
+    assert outcome.turn_outcome == "confirmed"
+    assert any("resolve" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("decision", "transcript", "turn_outcome"),
+    [("cancel", "no", "cancelled"), ("confirm", "", "follow_up_silence")],
+)
+async def test_a_resolve_failure_on_a_cancel_path_still_speaks_cancelled(decision, transcript, turn_outcome):
+    brain = tpa._RecordingConfirmationBrain(decision)
+    ctx, created, _, fake_google = await _setup(brain, pending_actions=_FailingRepository(fail_resolve=True))
+
+    outcome = await handle_confirmation_reply(ctx, _incoming(created), transcript, timeout_s=5.0)
+
+    assert outcome.reply_text == CANCELLED_REPLY
+    assert outcome.turn_outcome == turn_outcome
+    assert fake_google.inserted == []
+
+
+async def test_a_resolve_failure_on_an_amendment_still_continues_the_amendment():
+    brain = tpa._RecordingConfirmationBrain("cancel", amended=True)
+    ctx, created, _, _ = await _setup(brain, pending_actions=_FailingRepository(fail_resolve=True))
+
+    outcome = await handle_confirmation_reply(ctx, _incoming(created), "make it 4", timeout_s=5.0)
+
+    assert outcome.amended is True
+
+
+async def test_a_claim_failure_executes_nothing_and_speaks_cancelled():
+    brain = tpa._RecordingConfirmationBrain("confirm")
+    ctx, created, _, fake_google = await _setup(brain, pending_actions=_FailingRepository(fail_claim=True))
+
+    outcome = await handle_confirmation_reply(ctx, _incoming(created), "yes", timeout_s=5.0)
+
+    assert fake_google.inserted == []
+    assert outcome.reply_text == CANCELLED_REPLY
+    assert outcome.turn_outcome == "confirm_unavailable"
