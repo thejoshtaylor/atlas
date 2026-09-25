@@ -61,6 +61,14 @@ class FollowUpRequest:
     # clarification, or an amendment on top of an amendment) still shows
     # a tier the whole conversation, not just the last hop.
     prior_messages: tuple[dict, ...] = ()
+    # A-CR-02: True when the turn that asked this question was itself
+    # proposal-restricted (it continued an `amended` confirmation reply,
+    # or answered a follow-up that already carried this flag). The turn
+    # that answers this request runs with the same restriction, and every
+    # follow-up that turn requests carries the flag on. The restriction
+    # belongs to the chain, not to one turn, so no later link of the chain
+    # can reach a tool that is not a calendar proposal.
+    proposals_only: bool = False
 
 
 @dataclass

@@ -229,8 +229,8 @@ async def run_top_tier(
 
     `proposals_only` (A-CR-02, default `False`) is forwarded unchanged to
     `_run_tool_rounds`: `run_turn`'s own `restrict_tools_to_proposals`,
-    `True` only for the one turn that continues an `amended` confirmation
-    reply.
+    `True` for the turn that continues an `amended` confirmation reply and
+    for every later turn in the same follow-up chain.
     """
     # Deferred, not module-level: `controller.py` imports this module at
     # load time to dispatch tiers, so a module-level import here of anything

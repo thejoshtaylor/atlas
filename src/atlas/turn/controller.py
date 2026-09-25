@@ -682,15 +682,18 @@ async def run_turn(
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
-        # A-CR-02: True only for the one turn that continues an `amended`
-        # confirmation reply -- set below, never for a clarification's own
-        # answer or an ordinary turn. Read by the tier-dispatch loop
+        # A-CR-02: True for the turn that continues an `amended`
+        # confirmation reply, and for every later turn in the same
+        # follow-up chain (`incoming.proposals_only`, set below). Never
+        # True for an ordinary wake turn. Read by the tier-dispatch loop
         # further down to narrow both the offered tool schema and, as the
         # structural backstop, which tool names `_run_tool_rounds` will
-        # actually dispatch (`is_calendar_proposal_tool`): any change the
-        # operator describes in this no-wake-word window can only ever
-        # become a NEW pending_action, never an action that runs with no
-        # confirmation step at all.
+        # actually dispatch (`is_calendar_proposal_tool`). The same flag
+        # keeps every triage tier out of the race, and is copied onto every
+        # follow-up this turn requests. Any change the operator describes
+        # in a no-wake-word window can therefore only ever become a NEW
+        # pending_action, never an action that runs with no confirmation
+        # step at all, however many links the chain has.
         restrict_tools_to_proposals = False
 
         # Plan 09-06 (D-08, D-09): a follow-up turn's own reply to a
@@ -767,6 +770,10 @@ async def run_turn(
                 timings.log()
                 return
             prior_exchange = _continuation_messages(incoming)
+            # A-CR-02: a clarification that a restricted turn asked keeps
+            # that turn's restriction -- the answer is still spoken in a
+            # no-wake-word window.
+            restrict_tools_to_proposals = incoming.proposals_only
         else:
             prior_exchange = None
 
@@ -1071,6 +1078,16 @@ async def run_turn(
             # and no instructor client -- working unchanged.
             tiers = [brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)]
 
+        if restrict_tools_to_proposals:
+            # A-CR-02: a triage tier has no tools, but its own
+            # `needs_clarification` reply can still win the race and open
+            # another no-wake-word window. A restricted turn races the
+            # tool-calling tier alone -- and falls back to the single-model
+            # default when this deployment configured no tool-calling tier.
+            tiers = [tier for tier in tiers if tier.calls_tools] or [
+                brain_race.TierBrain(index=0, model="", brain=brain, envelope_client=None, calls_tools=True)
+            ]
+
         # CR-01: one instance per turn, shared between the top tier's tool
         # round and the race -- set True the instant a real tool call is made,
         # so a triage tier's confident reply can no longer end the race in the
@@ -1238,6 +1255,8 @@ async def run_turn(
                         outcome.follow_up,
                         playback_ends_at=estimate_playback_end(speech_result, sink),
                         prior_messages=tuple(prior_exchange) if prior_exchange else (),
+                        # A-CR-02: the restriction belongs to the chain.
+                        proposals_only=outcome.follow_up.proposals_only or restrict_tools_to_proposals,
                     )
                 )
             await _emit_event(source, timings.to_event())
@@ -1285,6 +1304,8 @@ async def run_turn(
                             question=question,
                             prior_messages=tuple(prior_exchange) if prior_exchange else (),
                             playback_ends_at=estimate_playback_end(clarification_speech, sink),
+                            # A-CR-02: the restriction belongs to the chain.
+                            proposals_only=restrict_tools_to_proposals,
                         )
                     )
             await _emit_event(source, timings.to_event())
