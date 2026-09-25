@@ -39,6 +39,7 @@ import {
   calendarAccessOptions,
   deriveGoogleAccountState,
 } from "./deriveGoogleAccountState"
+import { linkAvailability } from "./deriveGoogleAccountsScreenState"
 import { WritingStyleSection } from "./WritingStyleSection"
 
 // GOOG-01, GOOG-02, 09-CONTEXT.md D-03/D-04/D-05/GOOG-12: one linked
@@ -116,6 +117,8 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
   const unlink = useMutation(unlinkGoogleAccountMutationOptions)
   const [unlinkOpen, setUnlinkOpen] = React.useState(false)
   const [unlinkError, setUnlinkError] = React.useState<string | null>(null)
+
+  const relinkAvailability = linkAvailability(window.location.protocol)
 
   const handleSaveLabel = async () => {
     setLabelError(null)
@@ -224,7 +227,15 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
 
       {account.status === "needs_relink" ? (
         <div className="flex flex-col gap-2">
-          <Button type="button" variant="outline" disabled={startLink.isPending} onClick={() => void handleRelink()}>
+          {!relinkAvailability.available ? (
+            <p className="text-body text-destructive">{relinkAvailability.reason}</p>
+          ) : null}
+          <Button
+            type="button"
+            variant="outline"
+            disabled={startLink.isPending || !relinkAvailability.available}
+            onClick={() => void handleRelink()}
+          >
             Link again
           </Button>
           {relinkError ? <p className="text-body text-destructive">{relinkError}</p> : null}

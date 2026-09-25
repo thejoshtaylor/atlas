@@ -311,7 +311,31 @@ test("Find new calendars calls the refresh mutation and the list refetches", asy
   expect(await screen.findByText("Errands")).toBeTruthy()
 })
 
+test("C-WR-03: 'Link again' is https-gated the same way the primary Link flow is", async () => {
+  Object.defineProperty(window, "location", {
+    value: { ...window.location, protocol: "http:" },
+    writable: true,
+    configurable: true,
+  })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work", status: "needs_relink" }),
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  expect(await screen.findByText(/Linking needs this page served over https/)).toBeTruthy()
+  const relinkButton = (await screen.findByRole("button", { name: "Link again" })) as HTMLButtonElement
+  expect(relinkButton.disabled).toBe(true)
+})
+
 test("C-WR-02: a failed 'Link again' shows the server's own text verbatim, not a generic message", async () => {
+  Object.defineProperty(window, "location", {
+    value: { ...window.location, protocol: "https:" },
+    writable: true,
+    configurable: true,
+  })
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, {
     fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work", status: "needs_relink" }),
@@ -334,7 +358,7 @@ test("C-WR-02: a failed 'Link again' shows the server's own text verbatim, not a
 test("a needs_relink account shows Link again, starting the flow with this account's label and id", async () => {
   const assignCalls: string[] = []
   Object.defineProperty(window, "location", {
-    value: { ...window.location, assign: (url: string) => assignCalls.push(url) },
+    value: { ...window.location, protocol: "https:", assign: (url: string) => assignCalls.push(url) },
     writable: true,
     configurable: true,
   })
