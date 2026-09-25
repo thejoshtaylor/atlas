@@ -99,6 +99,46 @@ test("adding a device shows the token panel with the token and a Copy button; Di
   await waitFor(() => expect(listCalls).toBeGreaterThan(1))
 })
 
+test("the token panel only shows Copied after the clipboard write resolves, and shows a manual-copy notice when it rejects (WR-02, 10-REVIEW.md)", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubEdgeDevices(queryClient, {
+    fetchEdgeDevices: async () => [],
+    createEdgeDevice: async () => ({
+      id: 1,
+      name: "test",
+      token: "tok-abc",
+      created_at: "2026-09-25T00:00:00Z",
+    }),
+  })
+  const { EdgeDevicesRoute } = await import("./EdgeDevicesRoute")
+
+  const originalClipboard = navigator.clipboard
+  Object.defineProperty(navigator, "clipboard", {
+    value: {
+      writeText: async () => {
+        throw new Error("denied")
+      },
+    },
+    configurable: true,
+  })
+
+  try {
+    renderRoute(EdgeDevicesRoute, queryClient)
+
+    await screen.findByText("Edge devices")
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "test" } })
+    fireEvent.click(screen.getByRole("button", { name: "Add device" }))
+
+    await screen.findByText("tok-abc")
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }))
+
+    expect(await screen.findByText("Couldn't copy automatically. Select the text above and copy it manually.")).toBeTruthy()
+    expect(screen.queryByText("Copied")).toBeNull()
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { value: originalClipboard, configurable: true })
+  }
+})
+
 test("Revoke opens an alert dialog naming the device; Cancel sends nothing, confirming sends exactly one DELETE", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const revokeCalls: unknown[] = []
@@ -147,6 +187,27 @@ test("a connected device shows Connected, and a revoked device shows Revoked wit
   const revokedRow = screen.getByText("revoked-device").closest("li") as HTMLElement
   expect(revokedRow).toBeTruthy()
   expect(within(revokedRow).queryByRole("button", { name: "Revoke" })).toBeNull()
+})
+
+test("a rejected revoke shows the server's own error message inline (WR-01, 10-REVIEW.md)", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubEdgeDevices(queryClient, {
+    fetchEdgeDevices: async () => [sampleDevice({ id: 5, name: "hallway" })],
+    revokeEdgeDevice: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(500, "edge source: close on disconnect failed")
+    },
+  })
+  const { EdgeDevicesRoute } = await import("./EdgeDevicesRoute")
+
+  renderRoute(EdgeDevicesRoute, queryClient)
+
+  await screen.findByText("hallway")
+  fireEvent.click(screen.getByRole("button", { name: "Revoke" }))
+  await screen.findByText("Revoke hallway?")
+  fireEvent.click(screen.getByRole("button", { name: "Revoke device" }))
+
+  expect(await screen.findByText("edge source: close on disconnect failed")).toBeTruthy()
 })
 
 test("a 422 from the create route shows the server's own message verbatim", async () => {

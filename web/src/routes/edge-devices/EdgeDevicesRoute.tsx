@@ -47,7 +47,25 @@ function formatLastConnected(lastConnectedAt: string | null): string {
 }
 
 function EdgeDeviceTokenPanel({ device, onDismiss }: { device: EdgeDeviceCreated; onDismiss: () => void }) {
-  const [copied, setCopied] = React.useState(false)
+  // WR-02 (10-REVIEW.md): `copied` only turns on after the copy actually
+  // resolves -- `navigator.clipboard` can be undefined (insecure context,
+  // older browser) or `writeText` can reject (denied permission), and an
+  // admin who trusts a wrongly-shown "Copied" pastes an empty/stale value
+  // into the Pi's config with no way to get this one-time token back.
+  const [copyState, setCopyState] = React.useState<"idle" | "copied" | "failed">("idle")
+
+  const handleCopy = async () => {
+    if (!navigator.clipboard) {
+      setCopyState("failed")
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(device.token)
+      setCopyState("copied")
+    } catch {
+      setCopyState("failed")
+    }
+  }
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border border-primary bg-card p-4">
@@ -58,16 +76,12 @@ function EdgeDeviceTokenPanel({ device, onDismiss }: { device: EdgeDeviceCreated
       <code className="scroll-field rounded-md border border-border bg-muted px-3 py-2 text-label">
         {device.token}
       </code>
+      {copyState === "failed" ? (
+        <p className="text-label text-destructive">Couldn't copy automatically. Select the text above and copy it manually.</p>
+      ) : null}
       <div className="flex gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          onClick={() => {
-            void navigator.clipboard?.writeText(device.token)
-            setCopied(true)
-          }}
-        >
-          {copied ? "Copied" : "Copy"}
+        <Button type="button" variant="outline" onClick={() => void handleCopy()}>
+          {copyState === "copied" ? "Copied" : "Copy"}
         </Button>
         <Button type="button" variant="ghost" onClick={onDismiss}>
           Dismiss
@@ -80,44 +94,57 @@ function EdgeDeviceTokenPanel({ device, onDismiss }: { device: EdgeDeviceCreated
 function EdgeDeviceRow({ device, disabled }: { device: EdgeDevice; disabled: boolean }) {
   const revoke = useMutation(revokeEdgeDeviceMutationOptions)
   const status = statusLabel(device)
+  // WR-01 (10-REVIEW.md): a rejected revoke used to be swallowed -- the
+  // dialog closes either way, and with no error branch here an admin had
+  // no way to tell a failed revoke from a successful one on this screen.
+  const [revokeError, setRevokeError] = React.useState<string | null>(null)
+
+  const handleRevoke = async () => {
+    setRevokeError(null)
+    try {
+      await revoke.mutateAsync({ deviceId: device.id })
+    } catch (error) {
+      setRevokeError(error instanceof ApiError ? error.message : "Couldn't revoke the device. Try again.")
+    }
+  }
 
   return (
-    <li className="flex items-center justify-between gap-3 px-4 py-3">
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate text-body font-medium text-foreground">{device.name}</span>
-        <span className="truncate text-label text-muted-foreground">
-          Last connected: {formatLastConnected(device.last_connected_at)}
-        </span>
+    <li className="flex flex-col gap-1 px-4 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-body font-medium text-foreground">{device.name}</span>
+          <span className="truncate text-label text-muted-foreground">
+            Last connected: {formatLastConnected(device.last_connected_at)}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant={status === "Connected" ? "default" : "secondary"}>{status}</Badge>
+          {device.revoked ? null : (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button type="button" variant="outline" size="sm" disabled={disabled || revoke.isPending}>
+                  Revoke
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{`Revoke ${device.name}?`}</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    The Pi disconnects now and cannot reconnect with this token.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction variant="destructive" onClick={() => void handleRevoke()}>
+                    Revoke device
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
+        </div>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Badge variant={status === "Connected" ? "default" : "secondary"}>{status}</Badge>
-        {device.revoked ? null : (
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button type="button" variant="outline" size="sm" disabled={disabled || revoke.isPending}>
-                Revoke
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>{`Revoke ${device.name}?`}</AlertDialogTitle>
-                <AlertDialogDescription>
-                  The Pi disconnects now and cannot reconnect with this token.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  onClick={() => void revoke.mutateAsync({ deviceId: device.id })}
-                >
-                  Revoke device
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        )}
-      </div>
+      {revokeError ? <p className="text-label text-destructive">{revokeError}</p> : null}
     </li>
   )
 }
