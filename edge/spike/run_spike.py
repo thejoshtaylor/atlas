@@ -86,6 +86,34 @@ def _count_vad_segments(samples: np.ndarray, sample_rate: int, vad_model_path: s
     return segments
 
 
+def _array_sounddevice(name: str = "reSpeaker"):
+    """sounddevice with both default devices pinned to the XVF3800.
+
+    The Pi's ALSA default routes through PipeWire, not the array, so an
+    unpinned sd.rec() records from nothing and sd.wait() never returns.
+    """
+    import sounddevice as sd
+
+    for index, device_info in enumerate(sd.query_devices()):
+        if name.lower() in device_info["name"].lower() and device_info["max_input_channels"] >= 2:
+            sd.default.device = (index, index)
+            return sd
+    raise SystemExit(f"no input device named like {name!r}; run `info` and check USB")
+
+
+def _capture(sd, seconds: float, sample_rate: int = 16000) -> np.ndarray:
+    """Record both channels while playing silence.
+
+    The XVF3800 (firmware 2.0.6) delivers no capture data unless a playback
+    stream is open on the same device -- a bare sd.rec() blocks forever and
+    arecord fails with EIO. Returns int16 of shape (n, 2).
+    """
+    silence = np.zeros((int(seconds * sample_rate), 2), dtype=np.int16)
+    capture = sd.playrec(silence, samplerate=sample_rate, channels=2, dtype="int16")
+    sd.wait()
+    return capture
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     import sounddevice as sd
 
@@ -117,21 +145,17 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 def cmd_channels(args: argparse.Namespace) -> int:
     """Q1: which beam each capture channel carries."""
-    import sounddevice as sd
+    sd = _array_sounddevice()
 
     sample_rate = 16000
     safe_position = args.position.replace(" ", "_")
 
     print(f"[{args.position}] stay quiet for 5 seconds...")
-    silence = sd.rec(int(5.0 * sample_rate), samplerate=sample_rate, channels=2, dtype="int16")
-    sd.wait()
+    silence = _capture(sd, 5.0, sample_rate)
 
     print(f"[{args.position}] now say: {args.sentence!r}")
     time.sleep(1.0)
-    speech = sd.rec(
-        int(args.duration_s * sample_rate), samplerate=sample_rate, channels=2, dtype="int16"
-    )
-    sd.wait()
+    speech = _capture(sd, args.duration_s, sample_rate)
 
     buffer = np.concatenate([silence, speech], axis=0)
     stamp = _timestamp()
@@ -190,18 +214,19 @@ def cmd_doa(args: argparse.Namespace) -> int:
 
 def cmd_aec(args: argparse.Namespace) -> int:
     """Q3: does playback through the aux output give working AEC."""
-    import sounddevice as sd
+    sd = _array_sounddevice()
 
     sample_rate = 16000
     print(f"Volume check: {args.volume_note}")
     print("Recording 20 seconds of you reading -- this becomes the playback reference.")
-    reference = sd.rec(int(20.0 * sample_rate), samplerate=sample_rate, channels=1, dtype="int16")
-    sd.wait()
+    reference = _capture(sd, 20.0, sample_rate)[:, [args.asr_channel]]
     _write_wav(RESULTS_DIR / f"aec-reference-{_timestamp()}.wav", reference, sample_rate)
 
     def _run(label: str) -> int:
         print(f"{label} -- playing the reference back through the XVF3800...")
-        capture = sd.playrec(reference, samplerate=sample_rate, channels=2, dtype="int16")
+        # The playback endpoint is stereo only: the reference goes out on both sides.
+        stereo_reference = np.repeat(reference, 2, axis=1)
+        capture = sd.playrec(stereo_reference, samplerate=sample_rate, channels=2, dtype="int16")
         sd.wait()
         asr_channel = capture[:, args.asr_channel].astype(np.float32) / 32768.0
         return _count_vad_segments(asr_channel, sample_rate, args.vad_model)
@@ -261,7 +286,7 @@ def cmd_multibeam(args: argparse.Namespace) -> int:
 
 def cmd_onset(args: argparse.Namespace) -> int:
     """Q5: the Silero onset delay, for the pre_roll_ms default."""
-    import sounddevice as sd
+    sd = _array_sounddevice()
 
     sample_rate = 16000
     onset_delays_ms: list[float] = []
@@ -270,9 +295,8 @@ def cmd_onset(args: argparse.Namespace) -> int:
         print(f"[{i + 1}/{args.count}] stay quiet for 1 second...")
         time.sleep(1.0)
         print(f"[{i + 1}/{args.count}] now say the wake phrase...")
-        buffer = sd.rec(int(2.0 * sample_rate), samplerate=sample_rate, channels=1, dtype="int16")
-        sd.wait()
-        samples = buffer[:, 0].astype(np.float64)
+        buffer = _capture(sd, 2.0, sample_rate)
+        samples = buffer[:, args.asr_channel].astype(np.float64)
         onset_delays_ms.append(analysis.energy_onset_ms(samples, sample_rate))
         offset_lags_ms.append(analysis.energy_offset_ms(samples, sample_rate))
 
@@ -357,6 +381,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     onset_p.add_argument("--count", type=int, default=20)
     onset_p.add_argument("--vad-model", required=True)
+    onset_p.add_argument(
+        "--asr-channel", type=int, default=1, help="Capture channel index to measure onset on."
+    )
     onset_p.add_argument(
         "--endpointing-ms",
         type=float,
