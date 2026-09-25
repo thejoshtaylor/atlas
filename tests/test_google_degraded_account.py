@@ -198,3 +198,55 @@ async def test_an_answer_already_naming_the_unreachable_account_gets_no_duplicat
     )
 
     assert tts.received_text == ["i couldn't reach your home account, but work has a standup"]
+
+
+async def test_an_empty_winning_answer_still_names_the_unreachable_account(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """A-WR-02 regression: GOOG-12's own "never silently omit an
+    unreachable account" doctrine must also cover the one case it missed
+    -- a winning answer that is empty (whitespace-only text with no tool
+    calls, `confident=False`) reaches `_CANNOT_DO_REPLY`, but the
+    unreachable-account note must still be spoken, not silently dropped
+    with the fallback."""
+    accounts = parse_accounts_env(_ACCOUNTS_ENV)
+    fake_google = FakeGoogle()
+    fake_google.add_events(
+        "at-work",
+        "cal-work",
+        [{"id": "e1", "summary": "Standup", "start": {"dateTime": "2026-10-02T09:00:00Z"}, "end": {"dateTime": "2026-10-02T09:15:00Z"}}],
+    )
+    tool_host = _ListEventsToolHost(accounts, fake_google.client)
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(name="calendar_list_events", arguments={"start": "2026-10-02", "end": "2026-10-03"})
+                ]
+            ),
+            # Whitespace, not a bare "": `_run_tool_rounds` only substitutes
+            # its own fixed `_EMPTY_REPLY` for a bare-empty `reply.text` --
+            # a whitespace-only reply passes through unchanged and reaches
+            # `run_turn`'s own `winner.answer`, blank after `.strip()`.
+            BrainReply(text="   "),
+        ]
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what's on my calendar")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_text == ["i can't do that one i can't reach your home account right now."]
+    assert timings.turn_outcome == "empty_answer"

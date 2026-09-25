@@ -1321,8 +1321,28 @@ async def run_turn(
                 appended_unreachable_note = True
         if not answer_text.strip():
             timings.turn_outcome = "empty_answer"
-            reply_text = _CANNOT_DO_REPLY
-            speaking_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
+            # A-WR-02: GOOG-12's own "never silently omit an unreachable
+            # account" doctrine covers every ordinary answer path except
+            # this one until now -- the `appended_unreachable_note` branch
+            # just above only ever runs when `answer_text.strip()` is
+            # truthy. An empty winning answer with a non-empty
+            # `unreachable_accounts` is a real, reachable shape (this
+            # module's own `260922-woc` comment above), and it is exactly
+            # the turn where the note matters most: the operator hears
+            # "i can't do that one" with no hint that the real reason was
+            # an unreachable account, unless it is named here too. Spoken
+            # live (never the cached fallback, matching the existing
+            # `appended_unreachable_note` branch below): an answer with an
+            # appended note is never the exact phrase a precached entry
+            # holds.
+            if handoff_slot.unreachable_accounts:
+                reply_text = _CANNOT_DO_REPLY
+                for label in handoff_slot.unreachable_accounts:
+                    reply_text = f"{reply_text}{_UNREACHABLE_ACCOUNT_NOTE.format(label=label)}"
+                speaking_tts = tts
+            else:
+                reply_text = _CANNOT_DO_REPLY
+                speaking_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
         elif appended_unreachable_note:
             reply_text = answer_text
             speaking_tts = tts
