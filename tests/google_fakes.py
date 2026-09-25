@@ -16,6 +16,7 @@ by an eight-plus character value, and a mistake here is permanent.
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 from typing import Any
 
@@ -50,6 +51,16 @@ class FakeGoogle:
         self._profiles: dict[str, str] = {}
         self._calendar_lists: dict[str, list[dict[str, Any]]] = {}
         self.revoked: list[str] = []
+        # Plan 09-05, Task 1: `events.get`/`events.insert`/`events.delete` --
+        # `inserted` records every insert's own body (for a test to assert
+        # what was actually posted), `deleted_event_ids` every id this fake
+        # actually removed, and `_write_failures` forces a specific status
+        # (404/410 for "already gone", anything else for a generic API
+        # failure) for one `(access_token, calendar_id, event_id)` triple's
+        # `get`/`delete` call, mirroring `fail_events`'s own shape for reads.
+        self.inserted: list[dict[str, Any]] = []
+        self.deleted_event_ids: list[str] = []
+        self._write_failures: dict[tuple[str, str, str], int] = {}
         self._transport = httpx.MockTransport(self._handle)
 
     @property
@@ -123,6 +134,23 @@ class FakeGoogle:
         `access_token`."""
         self._profiles[access_token] = email
 
+    def add_event(self, access_token: str, calendar_id: str, event: dict[str, Any]) -> None:
+        """Add one event (carrying its own `id`) to a calendar's list --
+        additive, unlike `add_events`' own replace-the-whole-list shape, so
+        a test can seed one known event for `events.get`/`events.delete`
+        to find by id."""
+        self.events.setdefault((access_token, calendar_id), []).append(dict(event))
+
+    def fail_write(
+        self, access_token: str, calendar_id: str, event_id: str, *, status: int
+    ) -> None:
+        """Make `events.get`/`events.delete` for this exact
+        `(access_token, calendar_id, event_id)` triple answer `status`
+        instead of the real lookup -- a 404/410 simulates an event already
+        cancelled or gone; any other status simulates a generic API
+        failure."""
+        self._write_failures[(access_token, calendar_id, event_id)] = status
+
     def add_calendar_list(self, access_token: str, calendars: list[dict[str, Any]]) -> None:
         """Serve `calendars` (each a raw `calendarList.list` item shape --
         `id`, `summary`, optionally `summaryOverride`/`primary`/
@@ -141,7 +169,14 @@ class FakeGoogle:
         if str(request.url).startswith(CALENDAR_BASE) and request.url.path.endswith("/calendarList"):
             return self._handle_calendar_list(request)
         if str(request.url).startswith(CALENDAR_BASE) and request.url.path.endswith("/events"):
+            if request.method == "POST":
+                return self._handle_insert_event(request)
             return self._handle_events(request)
+        if str(request.url).startswith(CALENDAR_BASE) and "/events/" in request.url.path:
+            if request.method == "GET":
+                return self._handle_get_event(request)
+            if request.method == "DELETE":
+                return self._handle_delete_event(request)
         return httpx.Response(404, json={"error": "not_found"})
 
     def _handle_token(self, request: httpx.Request) -> httpx.Response:
@@ -218,3 +253,48 @@ class FakeGoogle:
 
         events = self.events.get((access_token, calendar_id), [])
         return httpx.Response(200, json={"items": events})
+
+    def _handle_insert_event(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        segments = request.url.path.split("/")
+        calendar_id = urllib.parse.unquote(segments[-2])
+        body = json.loads(request.content.decode("utf-8"))
+        event_id = f"evt-{len(self.inserted) + 1}"
+        stored = {"id": event_id, **body}
+        self.events.setdefault((access_token, calendar_id), []).append(stored)
+        self.inserted.append({"access_token": access_token, "calendar_id": calendar_id, "body": body})
+        return httpx.Response(200, json=stored)
+
+    def _event_lookup(
+        self, request: httpx.Request
+    ) -> tuple[str, str, str, "int | None"]:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        segments = request.url.path.split("/")
+        event_id = urllib.parse.unquote(segments[-1])
+        calendar_id = urllib.parse.unquote(segments[-3])
+        forced_status = self._write_failures.get((access_token, calendar_id, event_id))
+        return access_token, calendar_id, event_id, forced_status
+
+    def _handle_get_event(self, request: httpx.Request) -> httpx.Response:
+        access_token, calendar_id, event_id, forced_status = self._event_lookup(request)
+        if forced_status is not None:
+            return httpx.Response(forced_status, json={"error": {"message": "forced failure"}})
+        events = self.events.get((access_token, calendar_id), [])
+        match = next((e for e in events if e.get("id") == event_id), None)
+        if match is None:
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        return httpx.Response(200, json=match)
+
+    def _handle_delete_event(self, request: httpx.Request) -> httpx.Response:
+        access_token, calendar_id, event_id, forced_status = self._event_lookup(request)
+        if forced_status is not None:
+            return httpx.Response(forced_status, json={"error": {"message": "forced failure"}})
+        events = self.events.get((access_token, calendar_id), [])
+        remaining = [e for e in events if e.get("id") != event_id]
+        if len(remaining) == len(events):
+            return httpx.Response(404, json={"error": {"message": "not found"}})
+        self.events[(access_token, calendar_id)] = remaining
+        self.deleted_event_ids.append(event_id)
+        return httpx.Response(200, json={})
