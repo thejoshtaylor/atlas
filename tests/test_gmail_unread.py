@@ -11,6 +11,7 @@ address, and name below is invented -- no real house appears here.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -21,11 +22,26 @@ from atlas_mcp.safety import Denied
 from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
-from atlas.turn.email_memory import EmailListMemory
+from atlas.turn.email_memory import EmailListItem, EmailListMemory
 from atlas.turn.handoff import HandoffContext
 
 from brain_fakes import RecordingFakeBrain
 from google_fakes import FakeGoogle
+
+
+def test_email_list_item_carries_no_body_field():
+    """D-16: `EmailListMemory` may only ever hold metadata -- an
+    `EmailListItem` has no field a body could ever be assigned to, by
+    construction, not by convention."""
+    assert [f.name for f in dataclasses.fields(EmailListItem)] == [
+        "position",
+        "account",
+        "message_id",
+        "thread_id",
+        "from_name",
+        "from_address",
+        "subject",
+    ]
 
 
 def _account(label: str, access_token: str | None, *, unreachable_reason: str | None = None) -> AccountGrant:
