@@ -1645,6 +1645,135 @@ def test_the_application_falls_back_to_the_configuration_file_when_no_setting_is
     assert "from config" in message
 
 
+# --- Plan 10-10 Task 3: app.state.audio_source, the edge sink's own
+# filler cache entry, and the calibration route's D-15 refusal ------------
+
+
+def test_a_boot_with_the_edge_audio_source_sets_app_state_and_precaches_the_edge_sink(
+    tmp_path, monkeypatch
+):
+    """A boot with the stored audio source `edge` sets
+    `app.state.audio_source == "edge"`, and `app.state.filler_caches`
+    gains an entry keyed `("pcm", 16000)` -- `EdgeAudioSource.sink_format()`'s
+    own (codec, sample_rate) pair, the default `edge.sample_rate`."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(
+        app_module, "_build_repositories", _fake_build_repositories_with_audio_source("edge")
+    )
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app):
+        assert app_module.app.state.audio_source == "edge"
+        assert ("pcm", 16000) in app_module.app.state.filler_caches
+
+
+def test_a_boot_with_no_stored_audio_source_precaches_only_the_browser_and_camera_sinks(
+    tmp_path, monkeypatch
+):
+    """The reverse of the test above: no stored setting (the shipped
+    camera default) sets `app.state.audio_source == "camera"` and adds no
+    edge entry to `filler_caches` at all -- exactly the two-key shape this
+    boot produced before this plan."""
+    monkeypatch.setattr(app_module, "CONFIG_PATH", str(_write_fake_config(tmp_path)))
+    monkeypatch.setattr(plugin_manager_module, "start_plugin_host", _fake_start_plugin_host)
+    monkeypatch.setattr(app_module, "precache_all", _fake_precache_all)
+    monkeypatch.setattr(app_module, "run_migrations", _fake_run_migrations)
+    monkeypatch.setattr(app_module, "build_engine", _fake_build_engine)
+    monkeypatch.setattr(
+        app_module, "_build_repositories", _fake_build_repositories_with_audio_source(None)
+    )
+    monkeypatch.setattr(app_module.brain_race, "build_tiers", _fake_build_tiers)
+    monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_wake_detector)
+    monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", _fake_build_ffmpeg_supervisor)
+
+    with TestClient(app_module.app):
+        assert app_module.app.state.audio_source == "camera"
+        assert ("pcm", 16000) not in app_module.app.state.filler_caches
+        assert set(app_module.app.state.filler_caches.keys()) == {None, ("alaw", 8000)}
+
+
+async def test_the_calibration_run_route_refuses_by_name_when_the_edge_source_is_active(tmp_path):
+    """`POST /calibration/echo-path/run` with the edge source active and
+    the route enabled returns 409, naming the camera microphone as off and
+    the edge microphone as not using echo-path calibration -- and never
+    touches `app.state.camera_source` (D-15). Direct route call, no real
+    lifespan boot, mirroring `tests/test_calibration_runner.py`'s own
+    `_install_calibration_state` convention for this exact route."""
+    from fastapi import HTTPException
+
+    from atlas.calibration.record import DEFAULT_CALIBRATION_DIR
+    from atlas.config import CalibrationConfig, SpeakerConfig
+
+    class _RefusesToBeTouched:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(
+                f"app.state.camera_source.{name} was accessed -- the D-15 refusal must return "
+                "before ever touching the camera source"
+            )
+
+    app_module.app.state.config = SimpleNamespace(
+        calibration=CalibrationConfig(dir=str(tmp_path / DEFAULT_CALIBRATION_DIR), route_enabled=True),
+        camera=SimpleNamespace(),
+        speaker=SpeakerConfig(),
+    )
+    app_module.app.state.camera_source = _RefusesToBeTouched()
+    app_module.app.state.speaker_writer = _RefusesToBeTouched()
+    app_module.app.state.calibration_in_progress = False
+    app_module.app.state.audio_source = "edge"
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await app_module.run_echo_path_calibration(app_module.CalibrationRunRequest())
+        assert exc.value.status_code == 409
+        assert "camera microphone is off" in exc.value.detail
+        assert "edge microphone" in exc.value.detail
+        assert "echo-path calibration" in exc.value.detail
+    finally:
+        del app_module.app.state.audio_source
+
+
+async def test_the_calibration_run_route_is_unaffected_when_no_audio_source_is_set(tmp_path):
+    """A calibration state installed with no `audio_source` attribute at
+    all (every test that predates this plan, and `tests/
+    test_calibration_runner.py`'s own `_install_calibration_state`) must
+    keep meaning "camera" -- proven here by running the exact same
+    successful calibration `tests/test_calibration_runner.py`'s own
+    `test_run_route_returns_measured_numbers_when_enabled_with_no_url_in_the_response`
+    proves, with no `audio_source` attribute set at all: the D-15 refusal
+    added by this plan must never fire for a caller that predates it."""
+    from atlas.config import SpeakerConfig
+    from tests.test_calibration_runner import _LoopbackFake, _make_calibration_config, _make_camera_config
+
+    # Deleted rather than merely never-set: `app_module.app` is one
+    # module-level singleton this whole file's other tests share, and an
+    # earlier test in this same run may have already set this attribute
+    # through a real boot -- this line is what actually reproduces "no
+    # audio_source attribute at all," regardless of test execution order.
+    if hasattr(app_module.app.state, "audio_source"):
+        del app_module.app.state.audio_source
+
+    camera_config = _make_camera_config()
+    calibration_config = _make_calibration_config(tmp_path, route_enabled=True)
+    fake = _LoopbackFake(delay_samples=120, scale=0.6)
+    app_module.app.state.config = SimpleNamespace(
+        calibration=calibration_config, camera=camera_config, speaker=SpeakerConfig()
+    )
+    app_module.app.state.camera_source = fake
+    app_module.app.state.speaker_writer = fake
+    app_module.app.state.calibration_in_progress = False
+
+    response = await app_module.run_echo_path_calibration(
+        app_module.CalibrationRunRequest(placement_note="kitchen shelf")
+    )
+
+    assert response["gain"] == pytest.approx(0.6, abs=0.05)
+
+
 # --- CR-01 fix: the seed migration must actually run against a real,
 # populated safety: block, through the real lifespan, before the check
 # that would otherwise reject it -- not `run_migrations` called directly

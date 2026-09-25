@@ -1163,6 +1163,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "audio source resolved to %r from %s", resolved_audio_source, audio_source_resolved_from
     )
+    # Plan 10-10: the one place a later reader (the precache step below,
+    # and `run_echo_path_calibration`'s own D-15 refusal) asks "which
+    # source is the room microphone" -- never re-derived, and never a
+    # second call to `resolve_audio_source` itself.
+    app.state.audio_source = resolved_audio_source
 
     # Plan 08-07 (D-15): the wake threshold an operator moved through
     # `PUT /api/wake-threshold` outlives the process that received it.
@@ -1544,13 +1549,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # two routes (`tts_cache.precache_other_sinks`).
     filler_phrases = [*FILLER_TEXT.values(), *config.tts.precache, *(m.reply for m in seeded_macros)]
     camera_tts_sink = SinkFormat(codec=config.tts.codec, sample_rate=config.tts.sample_rate)
+    # Plan 10-10 (D-14): the edge sink's own `SinkFormat` -- mirrors
+    # `EdgeAudioSource.sink_format()` exactly (mono PCM16 at the
+    # configured sample rate) without constructing the source itself this
+    # early; the `resolved_audio_source` branch further down is what
+    # actually builds it.
+    edge_tts_sink = SinkFormat(codec="pcm", sample_rate=config.edge.sample_rate)
     if app.state.tts is not None:
+        browser_sink = app.state.tts.browser_sink()
         browser_cache = await precache_all(
             app.state.tts,
             Path(config.tts.cache_dir),
             filler_phrases,
             config.tts.voice_id,
-            app.state.tts.browser_sink(),
+            browser_sink,
         )
         camera_cache = await precache_all(
             app.state.tts,
@@ -1564,6 +1576,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             None: browser_cache,
             (camera_tts_sink.codec, camera_tts_sink.sample_rate): camera_cache,
         }
+        if resolved_audio_source == EDGE_SOURCE_NAME:
+            edge_sink_key = (edge_tts_sink.codec, edge_tts_sink.sample_rate)
+            if browser_sink == edge_tts_sink:
+                # The browser sink is already this same (codec,
+                # sample_rate) pair -- reuse it rather than precaching a
+                # second, byte-identical cache under a different key.
+                app.state.filler_caches[edge_sink_key] = browser_cache
+            else:
+                app.state.filler_caches[edge_sink_key] = await precache_all(
+                    app.state.tts,
+                    Path(config.tts.cache_dir),
+                    filler_phrases,
+                    config.tts.voice_id,
+                    edge_tts_sink,
+                )
         logger.info("precached %d phrases for the browser and camera sinks", len(browser_cache))
     else:
         app.state.filler_cache = {}
@@ -2170,6 +2197,21 @@ async def run_echo_path_calibration(payload: CalibrationRunRequest) -> dict[str,
     config: Config = app.state.config
     if not config.calibration.route_enabled:
         raise _calibration_disabled_error()
+    # Plan 10-10 (D-15): `getattr` with the camera default -- every test
+    # that predates this plan installs calibration state with no
+    # `audio_source` attribute at all (`_install_calibration_state`, a
+    # direct route call with no lifespan boot), and that absence must
+    # keep meaning "camera," exactly as it did before this plan. A real
+    # boot always sets `app.state.audio_source` (`lifespan`, above).
+    resolved_audio_source = getattr(app.state, "audio_source", CAMERA_SOURCE_NAME)
+    if resolved_audio_source != CAMERA_SOURCE_NAME:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the camera microphone is off -- the edge microphone does not use "
+                "echo-path calibration"
+            ),
+        )
     if app.state.calibration_in_progress:
         raise HTTPException(status_code=409, detail="a calibration run is already in progress")
 
