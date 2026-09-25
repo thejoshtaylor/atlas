@@ -368,6 +368,62 @@ test("Unlink opens a dialog naming the account; Cancel sends nothing, confirming
   expect(await screen.findByText("google accounts list")).toBeTruthy()
 })
 
+test("C-WR-01: the default checkbox is disabled while its own mutation is pending, so a second click can't overlap it", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let resolveUpdate: (value: unknown) => void = () => {}
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, is_default: false }),
+    updateGoogleAccount: (input) =>
+      new Promise((resolve) => {
+        resolveUpdate = () => resolve(sampleAccount({ id: 7, is_default: (input as { is_default: boolean }).is_default }))
+      }),
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  const checkbox = (await screen.findByRole("checkbox", {
+    name: "Use for new events when I don't name an account",
+  })) as HTMLButtonElement
+  fireEvent.click(checkbox)
+
+  await waitFor(() => expect(checkbox.disabled).toBe(true))
+
+  resolveUpdate(undefined)
+  await waitFor(() => expect(checkbox.disabled).toBe(false))
+})
+
+test("C-WR-01: a calendar-access radio group is disabled while its own mutation is pending, so a second click can't overlap it", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let resolveSetAccess: (value: unknown) => void = () => {}
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () =>
+      sampleAccount({ id: 7, calendars: [sampleCalendar({ id: 10, name: "Home", access: "off" })] }),
+    setCalendarAccess: () =>
+      new Promise((resolve) => {
+        resolveSetAccess = () =>
+          resolve(
+            sampleAccount({
+              id: 7,
+              calendars: [sampleCalendar({ id: 10, name: "Home", access: "read_only" })],
+            }),
+          )
+      }),
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  await screen.findByText("Home")
+  fireEvent.click(screen.getByRole("radio", { name: "Read only" }))
+
+  const writeRadio = (await screen.findByRole("radio", { name: "Read and write" })) as HTMLInputElement
+  expect(writeRadio.disabled).toBe(true)
+
+  resolveSetAccess(undefined)
+  await waitFor(() => expect((screen.getByRole("radio", { name: "Read and write" }) as HTMLInputElement).disabled).toBe(false))
+})
+
 test("a failed unlink shows the server's error text (C-CR-01: AlertDialogAction closes the dialog before the catch runs)", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, {

@@ -64,6 +64,7 @@ function CalendarRow({ accountId, calendar }: { accountId: number; calendar: Goo
       </div>
       <RadioGroup
         value={calendar.access}
+        disabled={setAccess.isPending}
         onValueChange={(value) => {
           setError(null)
           setAccess.mutate(
@@ -194,6 +195,7 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
           <Checkbox
             id="google-account-default"
             checked={account.is_default}
+            disabled={updateDefault.isPending}
             onCheckedChange={(checked) => handleToggleDefault(checked === true)}
           />
           <Label htmlFor="google-account-default">Use for new events when I don&apos;t name an account</Label>
