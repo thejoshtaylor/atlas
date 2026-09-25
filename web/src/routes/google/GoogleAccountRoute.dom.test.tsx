@@ -1,0 +1,373 @@
+// GOOG-01, GOOG-02 (09-10-PLAN.md Task 2). `mock.module` replaces
+// `@/lib/google` before `GoogleAccountRoute` is imported -- see
+// `GoogleAccountsRoute.dom.test.tsx`'s own header comment for why the
+// ordering and the full-export-set requirement both matter. Every
+// mutation's `onSuccess` in `stubGoogle` writes to the SAME per-test
+// `QueryClient` the tree renders with, so an invalidate-then-refetch (or
+// a direct `setQueryData`) is real, the Phase 8 D-17 backfill pattern
+// this plan's own action text names.
+import { afterEach, expect, mock, test } from "bun:test"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { MemoryRouter, Route, Routes } from "react-router-dom"
+
+// Imported statically, before any `mock.module` call in this file runs, so
+// the mock factory below can re-export the module's full, real surface
+// (`mock.module` replaces the module process-wide for the rest of this
+// `bun test` run -- a sibling file's static `import ... from "@/lib/google"`
+// must still find every export it expects, not only the ones this file's
+// own tests exercise).
+import { LINK_ERROR_MESSAGES, linkErrorMessage } from "@/lib/google"
+
+import type * as React from "react"
+
+afterEach(() => {
+  cleanup()
+})
+
+function sampleCalendar(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 10,
+    calendar_id: "primary",
+    name: "Home",
+    is_primary: true,
+    can_write: true,
+    access: "off",
+    ...overrides,
+  }
+}
+
+function sampleAccount(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+    label: "work",
+    email: "operator@example.com",
+    is_default: false,
+    status: "ok",
+    status_detail: null,
+    refresh_token_expires_at: null,
+    linked_at: "2026-09-01T00:00:00Z",
+    calendars: [sampleCalendar()],
+    plugin_state: null,
+    ...overrides,
+  }
+}
+
+function stubGoogle(
+  queryClient: QueryClient,
+  options: {
+    fetchGoogleAccount: (id: number) => Promise<unknown>
+    updateGoogleAccount?: (input: unknown) => Promise<unknown>
+    setCalendarAccess?: (input: unknown) => Promise<unknown>
+    refreshCalendars?: (input: unknown) => Promise<unknown>
+    unlinkGoogleAccount?: (input: unknown) => Promise<unknown>
+    startGoogleLink?: (input: unknown) => Promise<unknown>
+  },
+) {
+  const notStubbed = (name: string) => async () => {
+    throw new Error(`${name} is not stubbed in this test`)
+  }
+  const googleAccountQueryKey = (id: number) => ["google", "accounts", id]
+  mock.module("@/lib/google", () => ({
+    GOOGLE_CLIENT_QUERY_KEY: ["google", "client"],
+    GOOGLE_ACCOUNTS_QUERY_KEY: ["google", "accounts"],
+    googleAccountQueryKey,
+    fetchGoogleClient: notStubbed("fetchGoogleClient"),
+    fetchGoogleAccounts: notStubbed("fetchGoogleAccounts"),
+    fetchGoogleAccount: options.fetchGoogleAccount,
+    saveGoogleClientMutationOptions: { mutationFn: notStubbed("saveGoogleClient"), onSuccess: () => {} },
+    startGoogleLink: options.startGoogleLink ?? notStubbed("startGoogleLink"),
+    updateGoogleAccountMutationOptions: {
+      mutationFn: options.updateGoogleAccount ?? notStubbed("updateGoogleAccount"),
+      onSuccess: (account: { id: number }) => {
+        queryClient.setQueryData(googleAccountQueryKey(account.id), account)
+        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"] })
+      },
+    },
+    setCalendarAccessMutationOptions: {
+      mutationFn: options.setCalendarAccess ?? notStubbed("setCalendarAccess"),
+      onSuccess: (account: { id: number }) => {
+        queryClient.setQueryData(googleAccountQueryKey(account.id), account)
+      },
+    },
+    refreshCalendarsMutationOptions: {
+      mutationFn: options.refreshCalendars ?? notStubbed("refreshCalendars"),
+      onSuccess: (account: { id: number }) => {
+        queryClient.setQueryData(googleAccountQueryKey(account.id), account)
+      },
+    },
+    unlinkGoogleAccountMutationOptions: {
+      mutationFn: options.unlinkGoogleAccount ?? notStubbed("unlinkGoogleAccount"),
+      onSuccess: (_data: unknown, input: { accountId: number }) => {
+        void queryClient.invalidateQueries({ queryKey: ["google", "accounts"] })
+        queryClient.removeQueries({ queryKey: googleAccountQueryKey(input.accountId) })
+      },
+    },
+    LINK_ERROR_MESSAGES,
+    linkErrorMessage,
+  }))
+}
+
+function renderRoute(GoogleAccountRoute: React.ComponentType, queryClient: QueryClient, initialEntry: string) {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <Routes>
+          <Route path="/google/accounts/:id" element={<GoogleAccountRoute />} />
+          <Route path="/google" element={<div>google accounts list</div>} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}
+
+test("loads one account and shows its label, address, and status; ?linked=1 shows the linked banner", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work", email: "work@example.com", status: "ok" }),
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7?linked=1")
+
+  expect(await screen.findByText("work@example.com")).toBeTruthy()
+  expect(screen.getByText("Linked")).toBeTruthy()
+  expect(
+    screen.getByText("Linked. Every calendar starts off -- choose what ATLAS may see below."),
+  ).toBeTruthy()
+})
+
+test("editing the label and saving sends PATCH with only {label}; a 409 shows the server's text verbatim", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const patchCalls: unknown[] = []
+  let shouldFail = false
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    updateGoogleAccount: async (input) => {
+      patchCalls.push(input)
+      if (shouldFail) {
+        const { ApiError } = await import("@/lib/api")
+        throw new ApiError(409, "another account already uses this label")
+      }
+      return sampleAccount({ id: 7, label: "home" })
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  const labelInput = await screen.findByLabelText("Label")
+  fireEvent.change(labelInput, { target: { value: "home" } })
+  fireEvent.click(screen.getByRole("button", { name: "Save label" }))
+
+  await waitFor(() => expect(patchCalls).toEqual([{ label: "home" }]))
+
+  cleanup()
+
+  // Second render: the save fails with a 409, whose text must reach the
+  // screen verbatim.
+  shouldFail = true
+  const queryClient2 = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient2, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    updateGoogleAccount: async (input) => {
+      patchCalls.push(input)
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(409, "another account already uses this label")
+    },
+  })
+  const { GoogleAccountRoute: GoogleAccountRoute2 } = await import("./GoogleAccountRoute")
+  renderRoute(GoogleAccountRoute2, queryClient2, "/google/accounts/7")
+
+  const labelInput2 = await screen.findByLabelText("Label")
+  fireEvent.change(labelInput2, { target: { value: "duplicate" } })
+  fireEvent.click(screen.getByRole("button", { name: "Save label" }))
+
+  expect(await screen.findByText("another account already uses this label")).toBeTruthy()
+})
+
+test("toggling default saves {is_default: true}, clearing it saves {is_default: false}", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const calls: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, is_default: false }),
+    updateGoogleAccount: async (input) => {
+      calls.push(input)
+      return sampleAccount({ id: 7, is_default: (input as { is_default: boolean }).is_default })
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  const checkbox = await screen.findByRole("checkbox", { name: "Use for new events when I don't name an account" })
+  fireEvent.click(checkbox)
+  await waitFor(() => expect(calls).toEqual([{ is_default: true }]))
+
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Use for new events when I don't name an account" }))
+  await waitFor(() => expect(calls).toEqual([{ is_default: true }, { is_default: false }]))
+})
+
+test("choosing a calendar option sends exactly one PUT with that access value; Read and write is disabled with a note when Google marks the calendar read-only", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const puts: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () =>
+      sampleAccount({
+        id: 7,
+        calendars: [
+          sampleCalendar({ id: 10, name: "Home", access: "off", can_write: true }),
+          sampleCalendar({ id: 11, name: "Work (shared)", access: "off", can_write: false }),
+        ],
+      }),
+    setCalendarAccess: async (input) => {
+      puts.push(input)
+      return sampleAccount({
+        id: 7,
+        calendars: [
+          sampleCalendar({ id: 10, name: "Home", access: "read_only", can_write: true }),
+          sampleCalendar({ id: 11, name: "Work (shared)", access: "off", can_write: false }),
+        ],
+      })
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  await screen.findByText("Home")
+  const homeRow = screen.getByText("Home").closest("div[class]")!.parentElement as HTMLElement
+  fireEvent.click(within(homeRow).getByRole("radio", { name: "Read only" }))
+
+  await waitFor(() =>
+    expect(puts).toEqual([{ accountId: 7, calendarId: 10, access: "read_only" }]),
+  )
+  expect(puts.length).toBe(1)
+
+  const sharedRow = screen.getByText("Work (shared)").closest("div[class]")!.parentElement as HTMLElement
+  expect((within(sharedRow).getByRole("radio", { name: "Read and write" }) as HTMLInputElement).disabled).toBe(true)
+  expect(within(sharedRow).getByText("Google shares this calendar read-only")).toBeTruthy()
+})
+
+test("a 503 from a calendar access change shows the server's text verbatim", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, calendars: [sampleCalendar({ id: 10, name: "Home" })] }),
+    setCalendarAccess: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(
+        503,
+        "the setting was saved, but the running google tools could not be updated to match and were stopped -- retry this action to bring them back",
+      )
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  await screen.findByText("Home")
+  fireEvent.click(screen.getByRole("radio", { name: "Read only" }))
+
+  expect(
+    await screen.findByText(
+      "the setting was saved, but the running google tools could not be updated to match and were stopped -- retry this action to bring them back",
+    ),
+  ).toBeTruthy()
+})
+
+test("Find new calendars calls the refresh mutation and the list refetches", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const refreshCalls: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, calendars: [sampleCalendar({ id: 10, name: "Home" })] }),
+    refreshCalendars: async (input) => {
+      refreshCalls.push(input)
+      return sampleAccount({
+        id: 7,
+        calendars: [sampleCalendar({ id: 10, name: "Home" }), sampleCalendar({ id: 12, name: "Errands", is_primary: false })],
+      })
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  await screen.findByText("Home")
+  fireEvent.click(screen.getByRole("button", { name: "Find new calendars" }))
+
+  await waitFor(() => expect(refreshCalls).toEqual([{ accountId: 7 }]))
+  expect(await screen.findByText("Errands")).toBeTruthy()
+})
+
+test("a needs_relink account shows Link again, starting the flow with this account's label and id", async () => {
+  const assignCalls: string[] = []
+  Object.defineProperty(window, "location", {
+    value: { ...window.location, assign: (url: string) => assignCalls.push(url) },
+    writable: true,
+    configurable: true,
+  })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const startCalls: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work", status: "needs_relink" }),
+    startGoogleLink: async (input) => {
+      startCalls.push(input)
+      return { authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?relink=1" }
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  fireEvent.click(await screen.findByRole("button", { name: "Link again" }))
+
+  await waitFor(() => expect(startCalls).toEqual([{ label: "work", relink_account_id: 7 }]))
+  await waitFor(() => expect(assignCalls).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?relink=1"]))
+})
+
+test("Unlink opens a dialog naming the account; Cancel sends nothing, confirming sends DELETE and navigates to /google", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const deleteCalls: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    unlinkGoogleAccount: async (input) => {
+      deleteCalls.push(input)
+      return undefined
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  fireEvent.click(await screen.findByRole("button", { name: "Unlink" }))
+  expect(await screen.findByText("Unlink work?")).toBeTruthy()
+  expect(
+    screen.getByText("ATLAS loses access to this account's calendars and mail. Drafts already in Gmail stay there."),
+  ).toBeTruthy()
+
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+  expect(deleteCalls).toEqual([])
+
+  fireEvent.click(screen.getByRole("button", { name: "Unlink" }))
+  const dialogUnlinkButtons = screen.getAllByRole("button", { name: "Unlink work" })
+  fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
+
+  await waitFor(() => expect(deleteCalls).toEqual([{ accountId: 7 }]))
+  expect(await screen.findByText("google accounts list")).toBeTruthy()
+})
+
+test("an unknown id shows the not-found state with no Retry button", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(404, "no google account with id 999")
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/999")
+
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull())
+  expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+})
