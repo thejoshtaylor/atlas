@@ -8,21 +8,25 @@ module-wide convention comment).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Sequence
+from typing import Mapping, Sequence
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from atlas.db.google_models import (
     GoogleAccountRow,
     GoogleCalendarRow,
     GoogleOAuthClientRow,
+    GoogleOAuthStateRow,
 )
 from atlas.db.google_repository import (
     CALENDAR_ACCESS,
     GoogleAccount,
     GoogleCalendar,
     GoogleOAuthClient,
+    GoogleOAuthState,
 )
 from atlas.db.postgres import _to_aware_utc, _to_naive_utc
 
@@ -61,6 +65,19 @@ def _account_from_row(row: GoogleAccountRow, calendar_rows: Sequence[GoogleCalen
             _calendar_from_row(c)
             for c in sorted(calendar_rows, key=lambda c: c.google_calendar_id)
         ),
+    )
+
+
+def _oauth_state_from_mapping(row: Mapping) -> GoogleOAuthState:
+    return GoogleOAuthState(
+        id=row["id"],
+        state_hash=row["state_hash"],
+        label=row["label"],
+        redirect_uri=row["redirect_uri"],
+        created_by_user_id=row["created_by_user_id"],
+        created_at=_to_aware_utc(row["created_at"]),
+        expires_at=_to_aware_utc(row["expires_at"]),
+        used_at=_to_aware_utc(row["used_at"]) if row["used_at"] is not None else None,
     )
 
 
@@ -256,4 +273,178 @@ class PostgresGoogleAccountRepository:
             row.status_detail = detail
             row.status_at = naive_at
             row.updated_at = naive_at
+            await session.commit()
+
+    # --- Plan 09-03: linking, editing, and unlinking -----------------
+
+    async def create_oauth_state(
+        self,
+        state_hash: str,
+        label: str,
+        redirect_uri: str,
+        created_by_user_id: "int | None",
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> GoogleOAuthState:
+        async with self._sessionmaker() as session:
+            row = GoogleOAuthStateRow(
+                state_hash=state_hash,
+                label=label,
+                redirect_uri=redirect_uri,
+                created_by_user_id=created_by_user_id,
+                created_at=_to_naive_utc(created_at),
+                expires_at=_to_naive_utc(expires_at),
+                used_at=None,
+            )
+            session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return GoogleOAuthState(
+                id=row.id,
+                state_hash=row.state_hash,
+                label=row.label,
+                redirect_uri=row.redirect_uri,
+                created_by_user_id=row.created_by_user_id,
+                created_at=_to_aware_utc(row.created_at),
+                expires_at=_to_aware_utc(row.expires_at),
+                used_at=None,
+            )
+
+    async def consume_oauth_state(self, state_hash: str, now: datetime) -> "GoogleOAuthState | None":
+        naive_now = _to_naive_utc(now)
+        async with self._sessionmaker() as session:
+            stmt = (
+                sa_update(GoogleOAuthStateRow)
+                .where(
+                    GoogleOAuthStateRow.state_hash == state_hash,
+                    GoogleOAuthStateRow.used_at.is_(None),
+                    GoogleOAuthStateRow.expires_at > naive_now,
+                )
+                .values(used_at=naive_now)
+                .returning(*GoogleOAuthStateRow.__table__.c)
+            )
+            result = await session.execute(stmt)
+            row = result.mappings().first()
+            await session.commit()
+            return _oauth_state_from_mapping(row) if row is not None else None
+
+    async def purge_expired_oauth_states(self, now: datetime) -> None:
+        naive_now = _to_naive_utc(now)
+        async with self._sessionmaker() as session:
+            await session.execute(
+                sa_delete(GoogleOAuthStateRow).where(GoogleOAuthStateRow.expires_at < naive_now)
+            )
+            await session.commit()
+
+    async def find_account_by_email(self, email: str) -> "GoogleAccount | None":
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(select(GoogleAccountRow).where(GoogleAccountRow.email == email))
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            calendar_rows = (
+                await session.execute(
+                    select(GoogleCalendarRow).where(GoogleCalendarRow.account_id == row.id)
+                )
+            ).scalars().all()
+            return _account_from_row(row, calendar_rows)
+
+    async def update_account_link(
+        self,
+        account_id: int,
+        refresh_token_ciphertext: bytes,
+        key_version: int,
+        granted_scopes: str,
+        refresh_token_expires_at: "datetime | None",
+        at: datetime,
+    ) -> GoogleAccount:
+        naive_at = _to_naive_utc(at)
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountRow, account_id)
+            assert row is not None, f"update_account_link: no google account with id {account_id}"
+            row.refresh_token_ciphertext = refresh_token_ciphertext
+            row.key_version = key_version
+            row.granted_scopes = granted_scopes
+            row.refresh_token_expires_at = (
+                _to_naive_utc(refresh_token_expires_at) if refresh_token_expires_at is not None else None
+            )
+            row.status = "ok"
+            row.status_detail = None
+            row.status_at = naive_at
+            row.updated_at = naive_at
+            await session.commit()
+            await session.refresh(row)
+            calendar_rows = (
+                await session.execute(
+                    select(GoogleCalendarRow).where(GoogleCalendarRow.account_id == account_id)
+                )
+            ).scalars().all()
+            return _account_from_row(row, calendar_rows)
+
+    async def update_account(
+        self,
+        account_id: int,
+        *,
+        label: "str | None" = None,
+        is_default: "bool | None" = None,
+        at: datetime,
+    ) -> "GoogleAccount | None":
+        naive_at = _to_naive_utc(at)
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountRow, account_id)
+            if row is None:
+                return None
+            if is_default is True:
+                # D-04: clear every *other* account's own default flag in
+                # this same transaction -- never a second call, never a
+                # moment with two rows both default.
+                await session.execute(
+                    sa_update(GoogleAccountRow)
+                    .where(GoogleAccountRow.id != account_id)
+                    .values(is_default=False, updated_at=naive_at)
+                )
+                row.is_default = True
+            elif is_default is False:
+                row.is_default = False
+            if label is not None:
+                row.label = label
+            row.updated_at = naive_at
+            await session.commit()
+            await session.refresh(row)
+            calendar_rows = (
+                await session.execute(
+                    select(GoogleCalendarRow).where(GoogleCalendarRow.account_id == account_id)
+                )
+            ).scalars().all()
+            return _account_from_row(row, calendar_rows)
+
+    async def delete_account(self, account_id: int) -> None:
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountRow, account_id)
+            if row is None:
+                return
+            await session.delete(row)
+            await session.commit()
+
+    async def get_calendar(self, calendar_id: int) -> "GoogleCalendar | None":
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleCalendarRow, calendar_id)
+            return _calendar_from_row(row) if row is not None else None
+
+    async def update_calendar_names(
+        self, account_id: int, names: Mapping[str, str], at: datetime
+    ) -> None:
+        naive_at = _to_naive_utc(at)
+        async with self._sessionmaker() as session:
+            rows = (
+                await session.execute(
+                    select(GoogleCalendarRow).where(GoogleCalendarRow.account_id == account_id)
+                )
+            ).scalars().all()
+            for row in rows:
+                new_name = names.get(row.google_calendar_id)
+                if new_name is not None and new_name != row.name:
+                    row.name = new_name
+                    row.updated_at = naive_at
             await session.commit()

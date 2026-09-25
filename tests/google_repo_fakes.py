@@ -7,10 +7,17 @@ of `tests/conftest.py::FakePluginRepository`.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from atlas.db.google_repository import CALENDAR_ACCESS, GoogleAccount, GoogleCalendar, GoogleOAuthClient
+from atlas.db.google_repository import (
+    CALENDAR_ACCESS,
+    GoogleAccount,
+    GoogleCalendar,
+    GoogleOAuthClient,
+    GoogleOAuthState,
+)
 
 
 class FakeGoogleAccountRepository:
@@ -26,6 +33,8 @@ class FakeGoogleAccountRepository:
         self._calendars: dict[int, GoogleCalendar] = {}
         self._next_account_id = 1
         self._next_calendar_id = 1
+        self._oauth_states: dict[int, GoogleOAuthState] = {}
+        self._next_oauth_state_id = 1
 
     async def get_oauth_client(self) -> "GoogleOAuthClient | None":
         return self._oauth_client
@@ -174,3 +183,112 @@ class FakeGoogleAccountRepository:
             linked_at=account.linked_at,
             calendars=account.calendars,
         )
+
+    # --- Plan 09-03: linking, editing, and unlinking -----------------
+
+    async def create_oauth_state(
+        self,
+        state_hash: str,
+        label: str,
+        redirect_uri: str,
+        created_by_user_id: "int | None",
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> GoogleOAuthState:
+        state = GoogleOAuthState(
+            id=self._next_oauth_state_id,
+            state_hash=state_hash,
+            label=label,
+            redirect_uri=redirect_uri,
+            created_by_user_id=created_by_user_id,
+            created_at=created_at,
+            expires_at=expires_at,
+            used_at=None,
+        )
+        self._oauth_states[state.id] = state
+        self._next_oauth_state_id += 1
+        return state
+
+    async def consume_oauth_state(self, state_hash: str, now: datetime) -> "GoogleOAuthState | None":
+        for state in self._oauth_states.values():
+            if state.state_hash == state_hash and state.used_at is None and state.expires_at > now:
+                consumed = replace(state, used_at=now)
+                self._oauth_states[state.id] = consumed
+                return consumed
+        return None
+
+    async def purge_expired_oauth_states(self, now: datetime) -> None:
+        expired_ids = [sid for sid, state in self._oauth_states.items() if state.expires_at < now]
+        for sid in expired_ids:
+            del self._oauth_states[sid]
+
+    async def find_account_by_email(self, email: str) -> "GoogleAccount | None":
+        for account in self._accounts.values():
+            if account.email == email:
+                return self._with_calendars(account)
+        return None
+
+    async def update_account_link(
+        self,
+        account_id: int,
+        refresh_token_ciphertext: bytes,
+        key_version: int,
+        granted_scopes: str,
+        refresh_token_expires_at: "datetime | None",
+        at: datetime,
+    ) -> GoogleAccount:
+        account = self._accounts[account_id]
+        updated = replace(
+            account,
+            refresh_token_ciphertext=refresh_token_ciphertext,
+            key_version=key_version,
+            granted_scopes=granted_scopes,
+            refresh_token_expires_at=refresh_token_expires_at,
+            status="ok",
+            status_detail=None,
+        )
+        self._accounts[account_id] = updated
+        return self._with_calendars(updated)
+
+    async def update_account(
+        self,
+        account_id: int,
+        *,
+        label: "str | None" = None,
+        is_default: "bool | None" = None,
+        at: datetime,
+    ) -> "GoogleAccount | None":
+        account = self._accounts.get(account_id)
+        if account is None:
+            return None
+        if is_default is True:
+            for other_id, other in list(self._accounts.items()):
+                if other_id != account_id and other.is_default:
+                    self._accounts[other_id] = replace(other, is_default=False)
+            account = self._accounts[account_id]
+        updated = replace(
+            account,
+            label=account.label if label is None else label,
+            is_default=account.is_default if is_default is None else is_default,
+        )
+        self._accounts[account_id] = updated
+        return self._with_calendars(updated)
+
+    async def delete_account(self, account_id: int) -> None:
+        self._accounts.pop(account_id, None)
+        stale_calendar_ids = [cid for cid, c in self._calendars.items() if c.account_id == account_id]
+        for cid in stale_calendar_ids:
+            del self._calendars[cid]
+
+    async def get_calendar(self, calendar_id: int) -> "GoogleCalendar | None":
+        return self._calendars.get(calendar_id)
+
+    async def update_calendar_names(
+        self, account_id: int, names: Mapping[str, str], at: datetime
+    ) -> None:
+        for cid, calendar in list(self._calendars.items()):
+            if calendar.account_id != account_id:
+                continue
+            new_name = names.get(calendar.google_calendar_id)
+            if new_name is not None and new_name != calendar.name:
+                self._calendars[cid] = replace(calendar, name=new_name)
