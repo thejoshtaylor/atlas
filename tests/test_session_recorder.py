@@ -16,7 +16,7 @@ from pathlib import Path
 
 from atlas.config import SessionConfig
 from atlas.session import timeline as timeline_module
-from atlas.session.recorder import SessionRecorder
+from atlas.session.recorder import MAX_RECORDED_EVENTS, SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
 
@@ -55,6 +55,30 @@ def test_turn_that_produced_no_audio_still_writes_its_directory(tmp_path):
     assert (recorder.directory / "events.jsonl").exists()
     assert (recorder.directory / "timing.json").exists()
     assert list(recorder.directory.glob("audio.*")) == []
+
+
+def test_a_flood_of_events_is_capped_and_drops_the_oldest(tmp_path):
+    """10-REVIEW.md WR-03: a flood of valid events (e.g. `doa`/`latency`
+    from a compromised or malfunctioning Pi) must not grow `events.jsonl`
+    without bound -- matches `SpeechSignals._segment_events`'s own
+    `deque(maxlen=...)` cap, dropping the oldest rather than growing
+    forever."""
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    total = MAX_RECORDED_EVENTS + 10
+    for i in range(total):
+        recorder.record_event({"type": "doa", "seq": i})
+    recorder.close(timings)
+
+    lines = (recorder.directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == MAX_RECORDED_EVENTS
+
+    recorded_seqs = [json.loads(line)["seq"] for line in lines]
+    # The oldest 10 were dropped -- only the most recent MAX_RECORDED_EVENTS
+    # survive, in order.
+    assert recorded_seqs == list(range(10, total))
 
 
 def test_turn_timings_survive_serialization_with_an_unset_stage_as_null(tmp_path):

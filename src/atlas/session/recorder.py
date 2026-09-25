@@ -40,6 +40,7 @@ import dataclasses
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -54,6 +55,16 @@ logger = logging.getLogger("atlas.session.recorder")
 # recorder and the timeline reader can never disagree about where to look.
 EVENTS_FILENAME = "events.jsonl"
 TIMING_FILENAME = "timing.json"
+
+# WR-03 (10-REVIEW.md): every other bound on a hostile/buggy edge peer
+# (`MAX_AUDIO_FRAME_BYTES`, `MAX_TEXT_FRAME_BYTES`, `MAX_INVALID_MESSAGES`,
+# `SpeechSignals.MAX_SEGMENT_EVENTS`, `transports/edge.py`) bounds size or
+# count -- a valid `vad.start`/`vad.end`/`doa`/`latency` message flooded for
+# the life of a turn was the one path with no ceiling at all, growing this
+# list (and the `events.jsonl` it serializes to) without bound. Matches
+# `SpeechSignals`' own `deque(maxlen=...)` discipline: an extremely verbose
+# turn drops its oldest recorded events rather than growing forever.
+MAX_RECORDED_EVENTS = 4096
 
 
 class SessionRecorder:
@@ -79,7 +90,7 @@ class SessionRecorder:
         self._audio_format: dict[str, Any] | None = None
         self._preroll_bytes = 0
         self._audio_chunks: list[bytes] = []
-        self._events: list[dict[str, Any]] = []
+        self._events: "deque[dict[str, Any]]" = deque(maxlen=MAX_RECORDED_EVENTS)
         self._closed = False
         self.directory = Path(config.dir) / self._directory_name()
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -194,7 +205,7 @@ class SessionRecorder:
         # already uses for `app.py`.
         from atlas.session import timeline
 
-        rendered_timeline = timeline.render_timeline(self._events, timing_payload)
+        rendered_timeline = timeline.render_timeline(list(self._events), timing_payload)
         timeline.write_timeline(self.directory, rendered_timeline)
 
         logger.info(
