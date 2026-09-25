@@ -74,6 +74,9 @@ class FakeGoogle:
         self._gmail_metadata: dict[tuple[str, str], dict[str, Any]] = {}
         self._gmail_full: dict[tuple[str, str], dict[str, Any]] = {}
         self._gmail_list_failures: dict[str, tuple["int | None", bool]] = {}
+        # Plan 09-09: `users.settings.sendAs.list` -- each access token's
+        # own raw `sendAs` entry list, seeded via `add_send_as`.
+        self._send_as: dict[str, list[dict[str, Any]]] = {}
         self._transport = httpx.MockTransport(self._handle)
 
     @property
@@ -247,6 +250,12 @@ class FakeGoogle:
         equivalent of `fail_events` above."""
         self._gmail_list_failures[access_token] = (status, raise_connect_error)
 
+    def add_send_as(self, access_token: str, entries: list[dict[str, Any]]) -> None:
+        """Seed `access_token`'s own `users.settings.sendAs.list` result --
+        each entry a raw send-as shape (`sendAsEmail`, `isDefault`,
+        `isPrimary`, `signature`, as Gmail's own API returns them)."""
+        self._send_as[access_token] = entries
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.copy_with(query=None) == httpx.URL(TOKEN_URL):
@@ -255,6 +264,8 @@ class FakeGoogle:
             return self._handle_revoke(request)
         if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/profile"):
             return self._handle_profile(request)
+        if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/settings/sendAs"):
+            return self._handle_send_as(request)
         if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/messages"):
             return self._handle_gmail_list(request)
         if str(request.url).startswith(GMAIL_BASE) and "/messages/" in request.url.path:
@@ -322,12 +333,26 @@ class FakeGoogle:
             if status is not None:
                 return httpx.Response(status, json={"error": {"message": "forced failure"}})
         max_results = int(request.url.params.get("maxResults") or 25)
+        # Plan 09-09: `pageToken` is this fake's own start offset into
+        # `all_messages`, encoded as a plain integer string -- real paging
+        # (not the old single-page-only "more" sentinel, which never
+        # advanced) so `list_message_ids(max_total=...)` can be proven
+        # for real against more than one page.
+        page_token = request.url.params.get("pageToken")
+        start = int(page_token) if page_token else 0
         all_messages = self._gmail_messages.get(access_token, [])
-        page = all_messages[:max_results]
+        page = all_messages[start : start + max_results]
         body: dict[str, Any] = {"messages": page}
-        if len(all_messages) > max_results:
-            body["nextPageToken"] = "more"
+        next_start = start + max_results
+        if next_start < len(all_messages):
+            body["nextPageToken"] = str(next_start)
         return httpx.Response(200, json=body)
+
+    def _handle_send_as(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        entries = self._send_as.get(access_token, [])
+        return httpx.Response(200, json={"sendAs": entries})
 
     def _handle_gmail_get(self, request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("authorization", "")

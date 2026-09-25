@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from atlas.db.google_models import (
     GoogleAccountRow,
+    GoogleAccountStyleRow,
     GoogleCalendarRow,
     GoogleOAuthClientRow,
     GoogleOAuthStateRow,
@@ -24,6 +25,7 @@ from atlas.db.google_models import (
 from atlas.db.google_repository import (
     CALENDAR_ACCESS,
     GoogleAccount,
+    GoogleAccountStyle,
     GoogleCalendar,
     GoogleOAuthClient,
     GoogleOAuthState,
@@ -78,6 +80,34 @@ def _oauth_state_from_mapping(row: Mapping) -> GoogleOAuthState:
         created_at=_to_aware_utc(row["created_at"]),
         expires_at=_to_aware_utc(row["expires_at"]),
         used_at=_to_aware_utc(row["used_at"]) if row["used_at"] is not None else None,
+    )
+
+
+def _style_from_row(row: GoogleAccountStyleRow) -> GoogleAccountStyle:
+    return GoogleAccountStyle(
+        account_id=row.account_id,
+        profile=row.profile,
+        samples=tuple(row.samples or []),
+        signature_html=row.signature_html,
+        signature_text=row.signature_text,
+        status=row.status,
+        status_detail=row.status_detail,
+        messages_scanned=row.messages_scanned,
+        learned_at=_to_aware_utc(row.learned_at) if row.learned_at is not None else None,
+    )
+
+
+def _not_learned_style(account_id: int) -> GoogleAccountStyle:
+    return GoogleAccountStyle(
+        account_id=account_id,
+        profile="",
+        samples=(),
+        signature_html=None,
+        signature_text=None,
+        status="not_learned",
+        status_detail=None,
+        messages_scanned=0,
+        learned_at=None,
     )
 
 
@@ -447,4 +477,112 @@ class PostgresGoogleAccountRepository:
                 if new_name is not None and new_name != row.name:
                     row.name = new_name
                     row.updated_at = naive_at
+            await session.commit()
+
+    # --- Plan 09-09: style learning and drafting -----------------------
+
+    async def get_style(self, account_id: int) -> GoogleAccountStyle:
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountStyleRow, account_id)
+            return _style_from_row(row) if row is not None else _not_learned_style(account_id)
+
+    async def get_style_by_label(self, label: str) -> "GoogleAccountStyle | None":
+        async with self._sessionmaker() as session:
+            account_row = (
+                await session.execute(select(GoogleAccountRow).where(GoogleAccountRow.label == label))
+            ).scalar_one_or_none()
+            if account_row is None:
+                return None
+            row = await session.get(GoogleAccountStyleRow, account_row.id)
+            return _style_from_row(row) if row is not None else _not_learned_style(account_row.id)
+
+    async def set_style_status(
+        self, account_id: int, status: str, detail: "str | None", at: datetime
+    ) -> None:
+        naive_at = _to_naive_utc(at)
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountStyleRow, account_id)
+            if row is None:
+                row = GoogleAccountStyleRow(
+                    account_id=account_id,
+                    profile="",
+                    samples=[],
+                    signature_html=None,
+                    signature_text=None,
+                    status=status,
+                    status_detail=detail,
+                    messages_scanned=0,
+                    learned_at=None,
+                    updated_at=naive_at,
+                )
+                session.add(row)
+            else:
+                row.status = status
+                row.status_detail = detail
+                row.updated_at = naive_at
+            await session.commit()
+
+    async def save_learned_style(
+        self,
+        account_id: int,
+        *,
+        profile: str,
+        samples: Sequence[str],
+        signature_html: "str | None",
+        signature_text: "str | None",
+        messages_scanned: int,
+        learned_at: datetime,
+    ) -> GoogleAccountStyle:
+        naive_learned_at = _to_naive_utc(learned_at)
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountStyleRow, account_id)
+            if row is None:
+                row = GoogleAccountStyleRow(
+                    account_id=account_id,
+                    profile=profile,
+                    samples=list(samples),
+                    signature_html=signature_html,
+                    signature_text=signature_text,
+                    status="ready",
+                    status_detail=None,
+                    messages_scanned=messages_scanned,
+                    learned_at=naive_learned_at,
+                    updated_at=naive_learned_at,
+                )
+                session.add(row)
+            else:
+                row.profile = profile
+                row.samples = list(samples)
+                row.signature_html = signature_html
+                row.signature_text = signature_text
+                row.status = "ready"
+                row.status_detail = None
+                row.messages_scanned = messages_scanned
+                row.learned_at = naive_learned_at
+                row.updated_at = naive_learned_at
+            await session.commit()
+            await session.refresh(row)
+            return _style_from_row(row)
+
+    async def update_style_profile(self, account_id: int, profile: str, at: datetime) -> None:
+        naive_at = _to_naive_utc(at)
+        async with self._sessionmaker() as session:
+            row = await session.get(GoogleAccountStyleRow, account_id)
+            if row is None:
+                row = GoogleAccountStyleRow(
+                    account_id=account_id,
+                    profile=profile,
+                    samples=[],
+                    signature_html=None,
+                    signature_text=None,
+                    status="not_learned",
+                    status_detail=None,
+                    messages_scanned=0,
+                    learned_at=None,
+                    updated_at=naive_at,
+                )
+                session.add(row)
+            else:
+                row.profile = profile
+                row.updated_at = naive_at
             await session.commit()

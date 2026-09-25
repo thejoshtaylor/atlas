@@ -14,6 +14,7 @@ from typing import Mapping, Sequence
 from atlas.db.google_repository import (
     CALENDAR_ACCESS,
     GoogleAccount,
+    GoogleAccountStyle,
     GoogleCalendar,
     GoogleOAuthClient,
     GoogleOAuthState,
@@ -35,6 +36,11 @@ class FakeGoogleAccountRepository:
         self._next_calendar_id = 1
         self._oauth_states: dict[int, GoogleOAuthState] = {}
         self._next_oauth_state_id = 1
+        # Plan 09-09: one style value object per account id -- absent
+        # entirely until the first `set_style_status`/`save_learned_style`/
+        # `update_style_profile` call, matching
+        # `PostgresGoogleAccountRepository`'s own "no row yet" case.
+        self._styles: dict[int, GoogleAccountStyle] = {}
 
     async def get_oauth_client(self) -> "GoogleOAuthClient | None":
         return self._oauth_client
@@ -292,3 +298,62 @@ class FakeGoogleAccountRepository:
             new_name = names.get(calendar.google_calendar_id)
             if new_name is not None and new_name != calendar.name:
                 self._calendars[cid] = replace(calendar, name=new_name)
+
+    # --- Plan 09-09: style learning and drafting -----------------------
+
+    def _not_learned_style(self, account_id: int) -> GoogleAccountStyle:
+        return GoogleAccountStyle(
+            account_id=account_id,
+            profile="",
+            samples=(),
+            signature_html=None,
+            signature_text=None,
+            status="not_learned",
+            status_detail=None,
+            messages_scanned=0,
+            learned_at=None,
+        )
+
+    async def get_style(self, account_id: int) -> GoogleAccountStyle:
+        return self._styles.get(account_id) or self._not_learned_style(account_id)
+
+    async def get_style_by_label(self, label: str) -> "GoogleAccountStyle | None":
+        account = next((a for a in self._accounts.values() if a.label == label), None)
+        if account is None:
+            return None
+        return await self.get_style(account.id)
+
+    async def set_style_status(
+        self, account_id: int, status: str, detail: "str | None", at: datetime
+    ) -> None:
+        current = await self.get_style(account_id)
+        self._styles[account_id] = replace(current, status=status, status_detail=detail)
+
+    async def save_learned_style(
+        self,
+        account_id: int,
+        *,
+        profile: str,
+        samples: Sequence[str],
+        signature_html: "str | None",
+        signature_text: "str | None",
+        messages_scanned: int,
+        learned_at: datetime,
+    ) -> GoogleAccountStyle:
+        style = GoogleAccountStyle(
+            account_id=account_id,
+            profile=profile,
+            samples=tuple(samples),
+            signature_html=signature_html,
+            signature_text=signature_text,
+            status="ready",
+            status_detail=None,
+            messages_scanned=messages_scanned,
+            learned_at=learned_at,
+        )
+        self._styles[account_id] = style
+        return style
+
+    async def update_style_profile(self, account_id: int, profile: str, at: datetime) -> None:
+        current = await self.get_style(account_id)
+        self._styles[account_id] = replace(current, profile=profile)

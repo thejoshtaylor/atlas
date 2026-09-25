@@ -59,24 +59,61 @@ def _raise_for_status(response: httpx.Response) -> None:
 
 
 async def list_message_ids(
-    client: httpx.AsyncClient, *, access_token: str, query: str, max_results: int = 25
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+    query: str,
+    max_results: int = 25,
+    max_total: "int | None" = None,
 ) -> "tuple[list[dict[str, Any]], bool]":
-    """`{"id", "threadId"}` for up to `max_results` messages matching
-    `query` (Gmail's own search grammar, sent exactly as given) -- newest
-    first, Gmail's own default order. The second return value is True
-    when Gmail reports more results exist beyond this page
-    (`nextPageToken` present) -- this function never fetches a second
-    page itself (D-14, `has_more` names it to the caller instead)."""
+    """`{"id", "threadId"}` for messages matching `query` (Gmail's own
+    search grammar, sent exactly as given) -- newest first, Gmail's own
+    default order.
+
+    `max_total=None` (the default, and every pre-09-09 caller's own
+    behavior, D-14): up to `max_results` messages, one request, never
+    paged by this function itself -- the second return value is True when
+    Gmail reports more results exist beyond this one page
+    (`nextPageToken` present), naming that to the caller instead of
+    following it.
+
+    `max_total` given (plan 09-09's own `learn_style`, `SENT_MESSAGES_TO_SCAN`):
+    follows `nextPageToken`, `max_results` messages per page, until at
+    least `max_total` messages are collected or Gmail reports no further
+    page -- returns at most `max_total` messages, and the second value is
+    True only when Gmail still reports more beyond that cut."""
+    messages: "list[dict[str, Any]]" = []
+    page_token: str | None = None
+    while True:
+        params: dict[str, Any] = {"q": query, "maxResults": max_results}
+        if page_token:
+            params["pageToken"] = page_token
+        response = await client.get(
+            f"{GMAIL_BASE}/users/me/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params=params,
+        )
+        _raise_for_status(response)
+        body = response.json()
+        messages.extend(body.get("messages") or [])
+        page_token = body.get("nextPageToken")
+        if max_total is None:
+            return messages, bool(page_token)
+        if not page_token or len(messages) >= max_total:
+            return messages[:max_total], bool(page_token) and len(messages) > max_total
+
+
+async def list_send_as(client: httpx.AsyncClient, *, access_token: str) -> "list[dict[str, Any]]":
+    """Every send-as identity this account carries (`users.settings.sendAs.list`)
+    -- plan 09-09's own source for the default send-as entry's Gmail
+    signature (D-22), the one field this module otherwise never reads."""
     response = await client.get(
-        f"{GMAIL_BASE}/users/me/messages",
+        f"{GMAIL_BASE}/users/me/settings/sendAs",
         headers={"Authorization": f"Bearer {access_token}"},
-        params={"q": query, "maxResults": max_results},
     )
     _raise_for_status(response)
     body = response.json()
-    messages = list(body.get("messages") or [])
-    has_more = bool(body.get("nextPageToken"))
-    return messages, has_more
+    return list(body.get("sendAs") or [])
 
 
 async def get_message_metadata(

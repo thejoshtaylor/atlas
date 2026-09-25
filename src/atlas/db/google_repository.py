@@ -28,6 +28,14 @@ CALENDAR_ACCESS: tuple[str, ...] = ("off", "read_only", "read_write")
 # 09-01 Task 3) is what ever writes `"needs_relink"`/`"unreachable"`.
 ACCOUNT_STATUSES: tuple[str, ...] = ("ok", "needs_relink", "unreachable")
 
+# Plan 09-09 (D-19, D-20): one account's own learned-style status. A row
+# with no style learned yet answers `"not_learned"` (never a missing row --
+# `get_style`/`get_style_by_label` synthesize this value object rather
+# than returning `None` for an account that simply has not been learned
+# yet); `"learning"` is set synchronously by the route that schedules
+# `learn_style`, before the background task itself ever runs.
+STYLE_STATUSES: tuple[str, ...] = ("not_learned", "learning", "ready", "failed")
+
 
 @dataclass(frozen=True)
 class GoogleOAuthClient:
@@ -100,6 +108,31 @@ class GoogleAccount:
     refresh_token_expires_at: datetime | None
     linked_at: datetime
     calendars: tuple[GoogleCalendar, ...]
+
+
+@dataclass(frozen=True)
+class GoogleAccountStyle:
+    """One account's own learned writing style (D-19, D-20) and Gmail
+    signature (D-22) -- a plain-text value object, never Fernet
+    ciphertext: the profile, samples, and signature are not credentials,
+    the admin must be able to read and edit the profile (D-19), and
+    Postgres is already their trust boundary (`google_account_style`'s own
+    docstring in `db/google_models.py`).
+
+    `get_style`/`get_style_by_label` synthesize this with `status="not_learned"`
+    for an account with no style row yet -- never `None` for a known
+    account, so a caller never has to special-case "no row" separately
+    from "learned, but empty"."""
+
+    account_id: int
+    profile: str
+    samples: tuple[str, ...]
+    signature_html: "str | None"
+    signature_text: "str | None"
+    status: str
+    status_detail: "str | None"
+    messages_scanned: int
+    learned_at: "datetime | None"
 
 
 class GoogleAccountRepository(Protocol):
@@ -290,4 +323,53 @@ class GoogleAccountRepository(Protocol):
         never touches `access`, and never touches a calendar `names` does
         not mention (`POST .../calendars/refresh`'s own "leaves every
         stored access value untouched")."""
+        ...
+
+    # --- Plan 09-09: style learning and drafting ----------------------
+
+    async def get_style(self, account_id: int) -> GoogleAccountStyle:
+        """`account_id`'s own learned style -- `status="not_learned"` and
+        an empty profile/samples/signature when no style row exists yet
+        (an account never learned, or one this plan's own migration
+        created no row for at link time), never `None`."""
+        ...
+
+    async def get_style_by_label(self, label: str) -> "GoogleAccountStyle | None":
+        """The same value `get_style` would return, found by the
+        account's own label rather than its id -- `None` only when no
+        account carries `label` at all (an unlearned account with that
+        label still answers `status="not_learned"`, exactly like
+        `get_style`)."""
+        ...
+
+    async def set_style_status(
+        self, account_id: int, status: str, detail: "str | None", at: datetime
+    ) -> None:
+        """Record `account_id`'s own style `status` (one of
+        `STYLE_STATUSES`) and `detail` -- the route that schedules
+        `learn_style` calls this with `"learning"` synchronously, before
+        the background task itself ever runs; `learn_style` calls this
+        with `"failed"` on any failure, never raising instead."""
+        ...
+
+    async def save_learned_style(
+        self,
+        account_id: int,
+        *,
+        profile: str,
+        samples: "Sequence[str]",
+        signature_html: "str | None",
+        signature_text: "str | None",
+        messages_scanned: int,
+        learned_at: datetime,
+    ) -> GoogleAccountStyle:
+        """Store a successful `learn_style` result -- sets `status="ready"`
+        and clears `status_detail`, upserting the one row this account's
+        style ever has."""
+        ...
+
+    async def update_style_profile(self, account_id: int, profile: str, at: datetime) -> None:
+        """The admin's own edit of `account_id`'s profile (D-19) -- leaves
+        `status`, `samples`, and the signature untouched; the next draft
+        reads this profile back."""
         ...
