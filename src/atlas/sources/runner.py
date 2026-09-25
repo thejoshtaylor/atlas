@@ -100,6 +100,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.output_trace import EmittedAudioTrace
+from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
 
@@ -434,6 +435,52 @@ class PrerollReplayingSource:
         return wrapped_sink_format() if wrapped_sink_format is not None else None
 
 
+class FollowUpSource:
+    """Wraps one `AudioSource`, dropping every frame chunk read before
+    `opens_at` -- the one mechanism that keeps a follow-up turn's own STT
+    from ever hearing the readback's own audio return through the open
+    microphone (T-09-34, D-09, plan 09-06).
+
+    `opens_at` and `clock` share the same domain as `SourceRunner`'s own
+    `self._clock` (real time by default, injectable for tests) -- never
+    `time.monotonic()` called directly, so a scripted clock drives this
+    wrapper exactly as it drives every other timing decision in this
+    module. Every other method delegates straight through to `wrapped`,
+    the same "no tap beyond the one stated purpose" discipline
+    `PrerollReplayingSource` above already follows for its own single tap.
+    """
+
+    def __init__(self, wrapped: Any, opens_at: float, clock: Callable[[], float]) -> None:
+        self._wrapped = wrapped
+        self._opens_at = opens_at
+        self._clock = clock
+
+    async def frames(self) -> AsyncIterator[bytes]:
+        async for chunk in self._wrapped.frames():
+            if self._clock() < self._opens_at:
+                continue
+            yield chunk
+
+    async def send_audio(self, chunk: bytes) -> None:
+        await self._wrapped.send_audio(chunk)
+
+    async def send_event(self, event: dict[str, Any]) -> None:
+        wrapped_send_event = getattr(self._wrapped, "send_event", None)
+        if wrapped_send_event is not None:
+            await wrapped_send_event(event)
+
+    def source_format(self) -> Any:
+        return self._wrapped.source_format()
+
+    def sink_format(self) -> "SinkFormat | None":
+        """Forwarded conditionally, the same reason and the same shape
+        `PrerollReplayingSource.sink_format` above already uses -- without
+        this, a follow-up turn on the camera would lose its own sink the
+        instant a chained window wraps it here."""
+        wrapped_sink_format = getattr(self._wrapped, "sink_format", None)
+        return wrapped_sink_format() if wrapped_sink_format is not None else None
+
+
 class SourceRunner:
     """Ties one named source to one wake detector and one `run_turn` caller."""
 
@@ -453,6 +500,8 @@ class SourceRunner:
         preroll: PrerollBuffer | None = None,
         calibration: EchoCalibration | None = None,
         wake_event_repo: WakeEventRepository | None = None,
+        follow_up_window_s: Callable[[], float] | None = None,
+        follow_up_echo_tail_s: float = 0.8,
     ) -> None:
         self._name = name
         self._source = source
@@ -461,6 +510,16 @@ class SourceRunner:
         self._run_turn_fn = run_turn_fn
         self._clock = clock
         self._preroll = preroll
+        # Plan 09-06 (D-06, D-09): `None` (every test and every caller that
+        # predates this plan) attaches no `FollowUpChannel` at all and
+        # behaves exactly as before -- a `SourceRunner` built with no
+        # follow-up window opts nothing in. `follow_up_window_s` is a
+        # callable, not a plain float, so a live setting change reaches
+        # the very next turn without rebuilding this runner (the same
+        # "resolved live, not just at construction" shape `wake_threshold`
+        # already gives an operator for the wake gate).
+        self._follow_up_window_s = follow_up_window_s
+        self._follow_up_echo_tail_s = follow_up_echo_tail_s
         # Plan 08-03 (D-13, D-14): `None` (every test and tracer
         # construction that predates this plan) means "record nothing" --
         # the same absent-configuration discipline the gate and the
@@ -646,18 +705,53 @@ class SourceRunner:
             if preroll_chunks:
                 turn_source = PrerollReplayingSource(self._source, preroll_chunks)
 
-        # D-18: correlation is only ever wired up when this source's own
-        # resolved policy asks for it *and* a calibration is actually on
-        # hand -- `app.py`'s startup refusal is what guarantees the second
-        # half of that whenever the first half is true (Task 3), so this
-        # constructor-time check is a second, cheap confirmation, never the
-        # only one. A fresh `EmittedAudioTrace` every turn, sized from the
-        # speaker's own sink format (260923-pyj, D5): the trace records the
-        # chunks `_speak` writes to the speaker, so it must be sized from
-        # the format those bytes are actually in. `source_format()` is only
-        # a fallback, for a source (a test double) that declares no sink at
-        # all -- it mirrors `PrerollBuffer`'s own per-source-format
-        # construction just above for that reason alone.
+        monitor = self._new_barge_in_monitor()
+        # Duck-typed, the same way `turn/controller.py`'s own
+        # `_emit_event` already reaches for `send_event` -- `run_turn`
+        # and `_speak` read this back with `getattr(source, "barge_in",
+        # None)` rather than a positional `run_turn_fn` never had.
+        turn_source.barge_in = monitor
+
+        # Plan 09-06 (D-06): `None` (every caller that predates this plan)
+        # attaches no channel at all -- `getattr(source, "follow_up",
+        # None)` in `turn/controller.py` then finds nothing, and every
+        # proposal on this source keeps speaking
+        # `CONFIRMATION_UNAVAILABLE_REPLY`, byte-identical to before this
+        # plan. Given a `follow_up_window_s`, a fresh, empty channel (no
+        # `incoming` -- this is the wake turn itself, never answering a
+        # prior request) is attached next to `barge_in`, and
+        # `_run_follow_ups` below is what actually opens a window once
+        # this turn's own `run_turn_fn` leaves something on it.
+        follow_up_channel: "FollowUpChannel | None" = None
+        if self._follow_up_window_s is not None:
+            follow_up_channel = FollowUpChannel()
+            turn_source.follow_up = follow_up_channel
+
+        await self._run_one_turn(turn_source, monitor)
+
+        if follow_up_channel is not None:
+            await self._run_follow_ups(follow_up_channel)
+
+    def _new_barge_in_monitor(self) -> "BargeInMonitor":
+        """Build a fresh `BargeInMonitor`, with correlation wired up
+        exactly the way `_process_chunk` always has (D-18) -- shared by
+        the wake turn and by every follow-up turn in a chain
+        (`_run_follow_ups` below), so neither duplicates the other's own
+        correlation-wiring logic.
+
+        D-18: correlation is only ever wired up when this source's own
+        resolved policy asks for it *and* a calibration is actually on
+        hand -- `app.py`'s startup refusal is what guarantees the second
+        half of that whenever the first half is true (Task 3), so this
+        constructor-time check is a second, cheap confirmation, never the
+        only one. A fresh `EmittedAudioTrace` every turn, sized from the
+        speaker's own sink format (260923-pyj, D5): the trace records the
+        chunks `_speak` writes to the speaker, so it must be sized from
+        the format those bytes are actually in. `source_format()` is only
+        a fallback, for a source (a test double) that declares no sink at
+        all -- it mirrors `PrerollBuffer`'s own per-source-format
+        construction the same way `_process_chunk` always has.
+        """
         correlation_active = self._barge_in_config.correlation_enabled and self._calibration is not None
         trace: EmittedAudioTrace | None = None
         if correlation_active:
@@ -668,7 +762,7 @@ class SourceRunner:
             else:
                 source_format = self._source.source_format()
                 trace = EmittedAudioTrace(encoding=source_format.encoding, sample_rate=source_format.sample_rate)
-        monitor = BargeInMonitor(
+        return BargeInMonitor(
             floor=self._barge_in_config.energy_floor,
             min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,
             guard_window_s=self._barge_in_config.post_playback_guard_ms / 1000.0,
@@ -678,13 +772,50 @@ class SourceRunner:
             correlation_tolerance=self._barge_in_config.correlation_tolerance,
             tracking_adaptation_rate=self._barge_in_config.tracking_adaptation_rate,
         )
-        # Duck-typed, the same way `turn/controller.py`'s own
-        # `_emit_event` already reaches for `send_event` -- `run_turn`
-        # and `_speak` read this back with `getattr(source, "barge_in",
-        # None)` rather than a positional `run_turn_fn` never had.
-        turn_source.barge_in = monitor
 
-        await self._run_one_turn(turn_source, monitor)
+    async def _run_follow_ups(self, channel: "FollowUpChannel") -> None:
+        """After the wake turn (or the previous follow-up turn) left a
+        request on `channel.requested`, open one more no-wake-word window
+        per request in the chain -- stopping the instant a turn leaves no
+        request at all, or a request's own `chain_depth` exceeds
+        `MAX_CHAINED_FOLLOW_UPS` (T-09-37) -- after which this simply
+        returns, and `run()`'s own loop resumes listening for the wake
+        word (D-06).
+
+        `dispatch_handoff` (`turn/handoff.py`) already refuses to request
+        a follow-up past `MAX_CHAINED_FOLLOW_UPS` on its own, so the
+        `chain_depth` check here is a second, redundant guard against the
+        same DoS shape (T-09-37) -- never the only one, the same
+        two-independent-controls posture T-09-27 already established for
+        a different guarantee in this same phase.
+
+        The echo tail added on top of the readback's own estimated
+        playback end is the larger of the configured
+        `follow_up_echo_tail_s` and a real echo-path calibration's own
+        measured delay plus a fixed 0.2 s margin (D-09) -- a calibration,
+        when one exists, is a measured acoustic fact and must never be
+        overridden by a smaller configured constant.
+        """
+        while channel.requested is not None and channel.requested.chain_depth <= MAX_CHAINED_FOLLOW_UPS:
+            requested = channel.requested
+            tail_s = self._follow_up_echo_tail_s
+            if self._calibration is not None:
+                tail_s = max(tail_s, self._calibration.delay_s + 0.2)
+            opens_at = (
+                requested.playback_ends_at if requested.playback_ends_at is not None else self._clock()
+            ) + tail_s
+
+            follow_up_source = FollowUpSource(self._source, opens_at, self._clock)
+            monitor = self._new_barge_in_monitor()
+            follow_up_source.barge_in = monitor
+            new_channel = FollowUpChannel(
+                incoming=requested, window_opens_at=opens_at, window_s=self._follow_up_window_s()
+            )
+            follow_up_source.follow_up = new_channel
+
+            await self._run_one_turn(follow_up_source, monitor)
+
+            channel = new_channel
 
     async def _run_one_turn(self, turn_source: Any, monitor: "BargeInMonitor") -> None:
         """Run one turn, plus its own barge-in listener -- see the module
@@ -881,6 +1012,8 @@ class SourceRunnerSpec:
     preroll: PrerollBuffer | None = None
     calibration: EchoCalibration | None = None
     wake_event_repo: WakeEventRepository | None = None
+    follow_up_window_s: Callable[[], float] | None = None
+    follow_up_echo_tail_s: float = 0.8
 
 
 def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[SourceRunner]:
@@ -914,6 +1047,8 @@ def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[Sourc
             preroll=spec.preroll,
             calibration=spec.calibration,
             wake_event_repo=spec.wake_event_repo,
+            follow_up_window_s=spec.follow_up_window_s,
+            follow_up_echo_tail_s=spec.follow_up_echo_tail_s,
         )
         for name, spec in specs.items()
     ]

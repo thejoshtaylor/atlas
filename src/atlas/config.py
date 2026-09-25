@@ -1643,6 +1643,50 @@ class PluginsConfig:
 
 
 @dataclass(frozen=True)
+class FollowUpConfig:
+    """The `follow_up:` block: how long a calendar confirmation's open
+    microphone stays listening with no wake word, and the echo tail added
+    on top of the readback's own estimated playback end before that
+    window opens (D-06, D-09, plan 09-06).
+
+    `window_s` is deliberately bounded well below an ordinary turn's own
+    silence timeout: a window this short is what makes "the microphone
+    is briefly open with no wake word" an acceptable, bounded risk (D-11)
+    rather than an open-ended one. `echo_tail_ms` exists because the
+    estimated playback end is exactly that -- an estimate, from bytes
+    written and a sink's own sample rate, not a measured acoustic fact --
+    and `sources/runner.py`'s own `_run_follow_ups` takes the larger of
+    this value and a real echo-path calibration's own measured delay plus
+    a fixed margin, never this value alone, when a calibration exists.
+    """
+
+    window_s: float = 6.0
+    echo_tail_ms: int = 800
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "FollowUpConfig":
+        raw = raw or {}
+        window_s = raw.get("window_s", cls.window_s)
+        if isinstance(window_s, bool) or not isinstance(window_s, (int, float)) or not (3 <= window_s <= 15):
+            raise ConfigError(
+                f"follow_up.window_s must be a number between 3 and 15 (seconds), got "
+                f"{window_s!r} -- shorter leaves too little time for a real answer, longer "
+                "widens the bounded no-wake-word listening window past what D-11 accepted"
+            )
+        echo_tail_ms = raw.get("echo_tail_ms", cls.echo_tail_ms)
+        if (
+            isinstance(echo_tail_ms, bool)
+            or not isinstance(echo_tail_ms, (int, float))
+            or not (0 <= echo_tail_ms <= 5000)
+        ):
+            raise ConfigError(
+                f"follow_up.echo_tail_ms must be a number between 0 and 5000 (milliseconds), "
+                f"got {echo_tail_ms!r}"
+            )
+        return cls(window_s=float(window_s), echo_tail_ms=int(echo_tail_ms))
+
+
+@dataclass(frozen=True)
 class Config:
     """The top-level configuration: one section per subsystem.
 
@@ -1709,6 +1753,7 @@ class Config:
     security: SecurityConfig
     workflow: WorkflowConfig
     plugins: PluginsConfig
+    follow_up: FollowUpConfig
 
     @classmethod
     def from_config(
@@ -1745,6 +1790,7 @@ class Config:
             security=SecurityConfig.from_config(raw.get("security")),
             workflow=WorkflowConfig.from_config(raw.get("workflow")),
             plugins=PluginsConfig.from_config(raw.get("plugins")),
+            follow_up=FollowUpConfig.from_config(raw.get("follow_up")),
         )
 
 

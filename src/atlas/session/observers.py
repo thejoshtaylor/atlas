@@ -196,3 +196,18 @@ class ObserverPublishingSource:
         # underneath it -- and always falls through to `0` for every real
         # camera turn (CR-01).
         return getattr(self._wrapped, "preroll_bytes", 0)
+
+    @property
+    def follow_up(self) -> Any:
+        # Plan 09-06: forwarded exactly the way `barge_in` above already
+        # is -- `sources/runner.py` attaches a `FollowUpChannel` to the
+        # *unwrapped* source before this wrapper is ever constructed
+        # around it, and `turn/controller.py::run_turn` reads
+        # `source.follow_up` off whatever it was handed. A wrapper that
+        # swallowed this attribute would silently disable the follow-up
+        # window on every real camera and browser-listener turn.
+        return getattr(self._wrapped, "follow_up", None)
+
+    @follow_up.setter
+    def follow_up(self, value: Any) -> None:
+        self._wrapped.follow_up = value

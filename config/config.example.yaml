@@ -609,6 +609,9 @@ tts:
     - "done"
     - "sorry, i didn't catch that"
     - "i can't do that one"
+    - "cancelled, nothing was changed"
+    - "done, it's on your calendar"
+    - "done, it's deleted"
 
   # The local text-to-speech option (D-09, D-10): Piper, selected in the
   # /providers screen rather than here -- these two keys only take effect
@@ -621,6 +624,21 @@ tts:
   # redistributing a build that includes it.
   piper_voice_path: "/models/piper/en_US-lessac-medium.onnx"
   piper_config_path: "/models/piper/en_US-lessac-medium.onnx.json"
+
+# D-06, D-09: after a calendar readback, the microphone stays open briefly
+# with no wake word so the operator can answer "yes" without saying the
+# wake word again. The window opens only after the readback's own audio
+# has finished playing, plus an echo tail, so the assistant can never hear
+# its own readback as the answer -- the camera has no echo cancellation.
+follow_up:
+  # How long the window stays open once it opens, in seconds (3 to 15).
+  window_s: 6.0
+  # Added on top of the readback's own estimated playback end before the
+  # window opens, in milliseconds (0 to 5000) -- the larger of this value
+  # and a real echo-path calibration's own measured delay plus a fixed
+  # margin is what `sources/runner.py` actually uses when a calibration
+  # exists.
+  echo_tail_ms: 800
 
 # macros: -- retired (D-09). This file shipped a macros: block before this
 # comment existed, so an operator upgrading from before Phase 4 still has

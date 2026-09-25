@@ -1618,6 +1618,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         preroll=preroll,
         calibration=camera_calibration,
         wake_event_repo=wake_event_repo,
+        # Plan 09-06 (D-06, D-09): a callable, not a plain float, so a
+        # later live change to `config.follow_up.window_s` (were one ever
+        # added) reaches the very next follow-up window with no restart.
+        follow_up_window_s=lambda: config.follow_up.window_s,
+        follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
     )
     if resolved_wake_threshold is not None:
         # Applied by calling `set_wake_threshold` immediately after
@@ -2303,6 +2308,10 @@ async def listen_ws(websocket: WebSocket) -> None:
         # ponytail: reuses the camera's pre-roll length, add a listener key if they ever need to differ.
         preroll=PrerollBuffer(source.source_format(), config.camera.preroll_ms),
         wake_event_repo=getattr(app_.state, "wake_event_repo", None),
+        # Plan 09-06: the browser listener gets the identical follow-up
+        # window the camera does -- both run through `SourceRunner`.
+        follow_up_window_s=lambda: config.follow_up.window_s,
+        follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
     )
     camera_runners = getattr(app_.state, "source_runners", None) or []
     if camera_runners:

@@ -779,6 +779,9 @@ def test_example_config_loads_end_to_end(monkeypatch):
         "done",
         "sorry, i didn't catch that",
         "i can't do that one",
+        "cancelled, nothing was changed",
+        "done, it's on your calendar",
+        "done, it's deleted",
     )
 
     # Phase 2's six new sections: the example file and the parser drifting
