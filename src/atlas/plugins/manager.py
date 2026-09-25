@@ -340,6 +340,26 @@ class PluginManager:
                 return running.host
         return None
 
+    def offered_tool_names_for_module(self, module: str, bare_names: "frozenset[str]") -> "frozenset[str]":
+        """The exact offered names of every tool in `bare_names` that the
+        running (stdio) plugin whose args name `module` publishes -- found
+        by module, never by slug, like `tool_host_for_module` below, and
+        read from the same naming pre-pass result the schema was built
+        from (`NamingResult.offered_names_owned_by`). `frozenset()` when no
+        such plugin is running. The proposal-restricted turn uses this as
+        its allowlist (R2-WR-04)."""
+        names: frozenset[str] = frozenset()
+        for running in self._plugins.values():
+            if running.plugin.transport != "stdio" or running.host is None:
+                continue
+            try:
+                plugin_module = module_for_stdio_args(running.plugin.slug, running.plugin.args)
+            except RuntimeError:
+                continue
+            if plugin_module == module:
+                names |= self._naming_result.offered_names_owned_by(running.plugin.slug, bare_names)
+        return names
+
     def tool_host_for_module(self, module: str) -> McpToolHost | None:
         """The running host of the (stdio) plugin whose args name
         `module` (`plugins.host.module_for_stdio_args`), or `None` if no

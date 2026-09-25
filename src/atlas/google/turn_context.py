@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
+
 from atlas.turn.email_memory import EmailListMemory
 from atlas.turn.handoff import HandoffContext
 
@@ -36,6 +38,14 @@ def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
     tolerant of. Every later call reuses the same instance, matching
     `EmailListMemory`'s own "per application" contract (D-16, SRC-03).
     """
+    # R2-WR-04: the exact names the running Google plugin's own proposal
+    # tools are offered under -- the only names a proposal-restricted turn
+    # may call. No plugin manager means no Google plugin, so nothing.
+    plugin_manager = getattr(app.state, "plugin_manager", None)
+    offered_names = getattr(plugin_manager, "offered_tool_names_for_module", None)
+    proposal_tool_names = (
+        offered_names(GOOGLE_PLUGIN_MODULE, CALENDAR_PROPOSAL_TOOL_NAMES) if offered_names is not None else frozenset()
+    )
     email_memory = getattr(app.state, "email_list_memory", None)
     if email_memory is None:
         email_memory = EmailListMemory()
@@ -50,4 +60,5 @@ def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
         # `handle_email_draft` reads a drafting round's own profile,
         # samples, and signature through it.
         style_repo=getattr(app.state, "google_account_repo", None),
+        proposal_tool_names=proposal_tool_names,
     )

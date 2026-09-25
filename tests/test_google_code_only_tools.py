@@ -166,3 +166,29 @@ async def test_a_collision_prefixed_code_only_tool_call_is_never_dispatched(
 
     assert tool_host.calls == []
     assert tts.received_text == [CODE_ONLY_REFUSAL]
+
+
+async def test_the_manager_reports_the_google_plugins_offered_proposal_names(fake_plugin_repository):
+    """R2-WR-04: the restricted turn's allowlist comes from the running
+    Google plugin's own offered names, found by module, never by slug."""
+    from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES
+
+    repo = fake_plugin_repository(plugins=[_google_plugin()], config_values={1: []})
+    manager = PluginManager(
+        repo,
+        mcp_root=_MCP_ROOT,
+        security=SecurityConfig(),
+        safety_block_provider=_no_policy,
+        custom_env_builders={GOOGLE_PLUGIN_MODULE: _empty_google_env},
+        hidden_tools_by_module={GOOGLE_PLUGIN_MODULE: CODE_ONLY_TOOL_NAMES},
+    )
+    assert manager.offered_tool_names_for_module(GOOGLE_PLUGIN_MODULE, CALENDAR_PROPOSAL_TOOL_NAMES) == frozenset()
+    try:
+        await manager.start_all()
+        assert (
+            manager.offered_tool_names_for_module(GOOGLE_PLUGIN_MODULE, CALENDAR_PROPOSAL_TOOL_NAMES)
+            == CALENDAR_PROPOSAL_TOOL_NAMES
+        )
+        assert manager.offered_tool_names_for_module("atlas_mcp.other", CALENDAR_PROPOSAL_TOOL_NAMES) == frozenset()
+    finally:
+        await manager.stop_all()

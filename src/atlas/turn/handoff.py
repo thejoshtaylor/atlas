@@ -70,25 +70,14 @@ def is_code_only_tool(name: str) -> bool:
 
 
 # A-CR-02: the fixed refusal `_run_tool_rounds` (turn/controller.py) speaks
-# in place of dispatching a tool that is not a calendar proposal, on the one
-# turn that continues an `amended` confirmation reply -- the open-mic
-# window's own no-wake-word turn (D-06, D-08, D-09). This is the structural
-# backstop, not the tool schema that turn is offered: a model coerced into
-# naming a tool outside `CALENDAR_PROPOSAL_TOOL_NAMES` still never reaches
-# `tool_host.call_tool` for it.
+# in place of dispatching a tool outside `HandoffContext.proposal_tool_names`
+# on a proposal-restricted turn -- the open-mic window's own no-wake-word
+# turn (D-06, D-08, D-09). This is the structural backstop, not the tool
+# schema that turn is offered: a model coerced into naming any other tool
+# still never reaches `tool_host.call_tool` for it.
 AMENDED_CONTINUATION_REFUSAL = (
     "that's more than i can change from a reply -- say the wake word and ask again"
 )
-
-
-def is_calendar_proposal_tool(name: str) -> bool:
-    """True when `name` -- bare or collision-prefixed, the same shape
-    `is_code_only_tool` above already unwraps -- names one of
-    `atlas_mcp.google_tools.CALENDAR_PROPOSAL_TOOL_NAMES`: a call that can
-    only ever build a fresh `pending_action` handoff, never execute
-    anything directly (A-CR-02)."""
-    bare = name.rsplit("__", 1)[-1] if "__" in name else name
-    return name in CALENDAR_PROPOSAL_TOOL_NAMES or bare in CALENDAR_PROPOSAL_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -176,6 +165,12 @@ class HandoffContext:
     # with the same "no Google repository configured" tolerance every
     # other Google-only field on this dataclass already has.
     style_repo: "Any | None" = None
+    # R2-WR-04: the exact offered names a proposal-restricted turn may
+    # call -- the running Google plugin's own proposal tools, resolved by
+    # ownership (`PluginManager.offered_tool_names_for_module`), never by a
+    # name suffix. `build_handoff_context` always sets it. The default, the
+    # bare names matched exactly, serves a context built by hand.
+    proposal_tool_names: frozenset[str] = CALENDAR_PROPOSAL_TOOL_NAMES
 
 
 @dataclass(frozen=True)

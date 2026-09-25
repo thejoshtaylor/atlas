@@ -123,6 +123,16 @@ class NamingResult:
         `None` when no plugin in this result offers that name at all."""
         return self._owner_of_offered_name.get(offered_name)
 
+    def offered_names_owned_by(self, slug: str, bare_names: "frozenset[str]") -> "frozenset[str]":
+        """The exact names `slug`'s own tools are offered under, for every
+        tool `slug` advertised with a bare name in `bare_names` -- bare
+        when uncontested, `{slug}__{name}` when prefixed. Ownership decides
+        membership, never the shape of a name: another plugin's
+        `{other}__{name}`, or a tool literally named `x__{name}`, is never
+        in the result (R2-WR-04). `frozenset()` for a slug this result was
+        never built over."""
+        return frozenset(tool.offered_name for tool in self._by_plugin.get(slug, ()) if tool.bare_name in bare_names)
+
     def owners_of_bare_name(self, bare_name: str) -> "tuple[str, ...]":
         """Every plugin slug that publishes `bare_name`, regardless of
         whether the pre-pass ended up prefixing it -- a length of 2 or

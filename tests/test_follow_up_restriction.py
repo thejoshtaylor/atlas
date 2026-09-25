@@ -280,3 +280,128 @@ async def test_an_unrestricted_clarification_stays_unrestricted(fake_audio_sourc
     await _turn(incoming, "the desk lamp", brain, tool_host, ctx, fakes=fakes)
 
     assert {entry["function"]["name"] for entry in brain.calls[0].tools} == {e["function"]["name"] for e in _SCHEMA}
+
+
+# --- R2-WR-04: the allowlist is the Google plugin's own offered names --------
+
+
+class _RecordingToolHost:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name, arguments):
+        from types import SimpleNamespace
+
+        self.calls.append((name, arguments))
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+
+def _restricted_clarification() -> FollowUpRequest:
+    return FollowUpRequest(
+        kind="clarification",
+        chain_depth=2,
+        original_transcript="no, make it 4",
+        question="which account -- home or work?",
+        proposals_only=True,
+    )
+
+
+async def test_another_plugins_same_named_proposal_tool_is_never_offered_or_dispatched(
+    fake_audio_source, fake_stt, fake_tts
+):
+    """Two plugins publish `calendar_propose_event`, so the naming pre-pass
+    prefixes both. Only the Google plugin's own offered name passes -- a
+    suffix match would let the other plugin's tool through."""
+    fakes = (fake_audio_source, fake_stt, fake_tts)
+    tool_host = _RecordingToolHost()
+    ctx = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=FakePendingActionRepository(),
+        brain=None,
+        now=tpa._NOW,
+        proposal_tool_names=frozenset({"google__calendar_propose_event", "google__calendar_propose_delete"}),
+    )
+    schema = [
+        {"type": "function", "function": {"name": "google__calendar_propose_event"}},
+        {"type": "function", "function": {"name": "other__calendar_propose_event"}},
+        {"type": "function", "function": {"name": "x__calendar_propose_delete"}},
+    ]
+    brain = RecordingFakeBrain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(name="other__calendar_propose_event", arguments={}),
+                    ToolCall(name="x__calendar_propose_delete", arguments={}),
+                ]
+            ),
+            BrainReply(text="sorry"),
+        ]
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=_restricted_clarification())
+
+    await run_turn(
+        source,
+        fake_stt(events=[FinalTranscript(text="home")]),
+        brain,
+        fake_tts(chunks=[b"\x01"]),
+        tool_host,
+        tools_schema=schema,
+        system_prompt="s",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        handoff_context=ctx,
+    )
+
+    assert {entry["function"]["name"] for entry in brain.calls[0].tools} == {"google__calendar_propose_event"}
+    assert tool_host.calls == []
+
+
+def test_naming_result_lists_only_the_owning_plugins_offered_names():
+    from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES
+
+    from atlas.plugins.naming import PluginTool, PluginTools, rename_collisions
+
+    result = rename_collisions(
+        [
+            PluginTools(
+                slug="google",
+                display_name="Google",
+                tools=(PluginTool("calendar_propose_event", ""), PluginTool("calendar_propose_delete", "")),
+            ),
+            PluginTools(
+                slug="other",
+                display_name="Other",
+                tools=(PluginTool("calendar_propose_event", ""), PluginTool("x__calendar_propose_delete", "")),
+            ),
+        ]
+    )
+
+    assert result.offered_names_owned_by("google", CALENDAR_PROPOSAL_TOOL_NAMES) == frozenset(
+        {"google__calendar_propose_event", "calendar_propose_delete"}
+    )
+    assert result.offered_names_owned_by("missing", CALENDAR_PROPOSAL_TOOL_NAMES) == frozenset()
+
+
+def test_build_handoff_context_reads_the_google_plugins_offered_names():
+    from types import SimpleNamespace as NS
+
+    from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
+
+    from atlas.google.turn_context import build_handoff_context
+
+    asked: list[tuple[str, frozenset[str]]] = []
+
+    def offered(module, bare_names):
+        asked.append((module, bare_names))
+        return frozenset({"google__calendar_propose_event"})
+
+    app = NS(state=NS(plugin_manager=NS(offered_tool_names_for_module=offered)))
+    ctx = build_handoff_context(app, "camera")
+
+    assert ctx.proposal_tool_names == frozenset({"google__calendar_propose_event"})
+    assert asked[0][0] == GOOGLE_PLUGIN_MODULE
+    assert CALENDAR_PROPOSAL_TOOL_NAMES <= asked[0][1]
+    # No plugin manager: nothing is allowed on a restricted turn.
+    assert build_handoff_context(NS(state=NS()), "camera").proposal_tool_names == frozenset()
