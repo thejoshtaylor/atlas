@@ -31,11 +31,14 @@ from atlas.turn.pending_action import (
     execution_arguments,
 )
 
-# The two kinds of handoff a tool result may carry today -- an account/Gmail
-# read handoff (plan 09-08) and a workflow handoff (already-shipped
-# `atlas_handoff` uses elsewhere) are deliberately out of this frozenset:
-# widening it is a later plan's own decision, not implied by this one.
-HANDOFF_KINDS: frozenset[str] = frozenset({"pending_action", "needs_clarification"})
+# Plan 09-08 adds "email_list" and "email_read" -- every Gmail read hands
+# off to code the same way a calendar write proposal does (D-08, D-14). A
+# workflow handoff (already-shipped `atlas_handoff` uses elsewhere) stays
+# deliberately out of this frozenset: widening it further is a later
+# plan's own decision, not implied by this one.
+HANDOFF_KINDS: frozenset[str] = frozenset(
+    {"pending_action", "needs_clarification", "email_list", "email_read"}
+)
 
 # T-09-27: the fixed refusal `_run_tool_rounds` (turn/controller.py) speaks
 # in place of dispatching a code-only tool a model named anyway -- the
@@ -129,6 +132,15 @@ class HandoffContext:
     brain: Any
     now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     pending_ttl_s: float = 60.0
+    # Plan 09-08: this source's own last-spoken-email-list memory
+    # (D-16) -- `None` for every app with no Google plugin configured,
+    # the same tolerant-`getattr` default `build_handoff_context` already
+    # gives `tool_host`/`pending_actions`/`brain`.
+    email_memory: "Any | None" = None
+    # How long a quarantine round (`turn/quarantine.py`) may take before
+    # `handle_email_list`/`handle_email_read` fall back to
+    # "i couldn't summarize that one" for that one message.
+    quarantine_timeout_s: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -168,6 +180,11 @@ async def dispatch_handoff(
         candidates = tuple(handoff.payload.get("candidates", ()))
         question = _compose_clarifying_question(candidates, {})
         return HandoffOutcome(reply_text=question, turn_outcome="needs_clarification")
+
+    if handoff.kind == "email_list":
+        from atlas.turn.email_handoff import handle_email_list
+
+        return await handle_email_list(handoff, ctx)
 
     # kind == "pending_action"
     if not follow_up_available or ctx is None or ctx.pending_actions is None:
