@@ -327,6 +327,76 @@ async def handle_calendar_propose_event(
     }
 
 
+async def handle_calendar_propose_delete(
+    accounts: "tuple[AccountGrant, ...]",
+    client: httpx.AsyncClient,
+    zone: ZoneInfo,
+    *,
+    account: str,
+    calendar_id: str,
+    event_id: str,
+) -> dict[str, Any]:
+    """Build a `pending_action` (`calendar_delete`) handoff for deleting
+    one calendar event -- fetches the event once, to read its title,
+    time, and whether it is one instance of a recurring series, but makes
+    no DELETE request, ever (D-08). `event_id` is the model's own choice,
+    always found first through `calendar_list_events` (this tool's own
+    description says so) -- `account`/`calendar_id` are therefore already
+    exact, never ambiguous the way `calendar_propose_event`'s own
+    ``resolve_write_target`` has to be.
+
+    `require_writable` gates this call exactly the way it gates the
+    executing insert/delete handlers -- an unknown account, an
+    unreachable one, a calendar this env does not carry, or a read-only
+    calendar all refuse with a spoken reason before any request exists.
+    A cancelled or already-gone event (Google answers 404/410, or the
+    fetched event's own `status` is `"cancelled"`) raises `Denied("i
+    can't find that event any more")`.
+    """
+    if not accounts:
+        raise Denied("no google account is linked -- link one in the admin webapp under google accounts")
+    account_grant, calendar_grant = require_writable(accounts, account, calendar_id)
+    try:
+        raw_event = await get_event(
+            client,
+            access_token=account_grant.access_token,
+            calendar_id=calendar_id,
+            event_id=event_id,
+            time_zone=str(zone),
+        )
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        if exc.status in (404, 410):
+            raise Denied("i can't find that event any more") from exc
+        raise Denied(f"google calendar couldn't look up that event: {exc.message}") from exc
+
+    if raw_event.get("status") == "cancelled":
+        raise Denied("i can't find that event any more")
+
+    start = raw_event.get("start", {})
+    end = raw_event.get("end", {})
+    all_day = "date" in start
+
+    return {
+        HANDOFF_KEY: {
+            "kind": "pending_action",
+            "action": "calendar_delete",
+            "account": account_grant.label,
+            "calendar_id": calendar_grant.calendar_id,
+            "calendar_name": calendar_grant.name,
+            "calendar_primary": calendar_grant.primary,
+            "title": raw_event.get("summary", "(no title)"),
+            "start": start.get("date") or start.get("dateTime"),
+            "end": end.get("date") or end.get("dateTime"),
+            "all_day": all_day,
+            "time_zone": str(zone),
+            "event_id": raw_event.get("id") or event_id,
+            "recurring_instance": bool(raw_event.get("recurringEventId")),
+        }
+    }
+
+
 async def handle_calendar_insert_event(
     accounts: "tuple[AccountGrant, ...]",
     client: httpx.AsyncClient,
@@ -467,6 +537,25 @@ async def calendar_propose_event(
             all_day=all_day,
             account=account,
             calendar=calendar,
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def calendar_propose_delete(account: str, calendar_id: str, event_id: str) -> dict[str, Any]:
+    """Propose deleting one calendar event -- found first with
+    `calendar_list_events`, whose own results carry each event's
+    `account`, `calendar_id`, and `event_id`. This does NOT delete the
+    event -- the operator hears a spoken readback and must confirm it
+    before anything changes in Google Calendar. One event per call: if
+    the operator asks to delete several events, say that bulk changes are
+    made directly in Google Calendar, and do not call this more than once
+    in the same turn."""
+    assert _http_client is not None, "calendar_propose_delete invoked before startup"
+    try:
+        return await handle_calendar_propose_delete(
+            _accounts, _http_client, _zone, account=account, calendar_id=calendar_id, event_id=event_id
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc

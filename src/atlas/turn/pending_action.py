@@ -35,6 +35,17 @@ EXECUTING_TOOL_BY_ACTION: dict[str, str] = {
 # drift between two call sites that both mean "read this proposal back".
 _CREATE_READBACK_CARRIER = "add {title} to {calendar_phrase}, {when}, {duration}?"
 
+# Plan 09-05, Task 3 (D-07, D-10): the two carriers `compose_readback`
+# below chooses between for a `calendar_delete` proposal -- a plain
+# single occurrence, and one instance of a recurring event, which speaks
+# a different sentence naming that the rest of the series is untouched
+# (the operator must never read "delete Standup" and reasonably wonder
+# whether the whole series just vanished).
+_DELETE_READBACK_CARRIER = "delete {title} from {calendar_phrase}, {when}?"
+_DELETE_OCCURRENCE_READBACK_CARRIER = (
+    "delete only this one: {title} on {when}, from {calendar_phrase}? the rest of the series stays."
+)
+
 # Fixed, spoken-word-for-word replies -- never composed by a model (D-07,
 # D-14), the same "a second inference pass could reword this" doctrine
 # `turn/controller.py`'s own fixed replies already follow.
@@ -72,6 +83,13 @@ class PendingProposal(BaseModel):
     all_day: bool
     time_zone: str
     event_id: "str | None" = None
+    # Plan 09-05, Task 3: True when the event being deleted is one instance
+    # of a recurring series (Google's own `recurringEventId` was present on
+    # the fetched event) -- decides which of the two carriers
+    # `compose_readback` below speaks, and never re-derived from anything
+    # but the stored proposal itself (D-07). Meaningless, and always
+    # `False`, on a `calendar_create` proposal.
+    recurring_instance: bool = False
 
     @model_validator(mode="after")
     def _validate(self) -> "PendingProposal":
@@ -86,6 +104,8 @@ class PendingProposal(BaseModel):
             raise ValueError("a pending proposal must carry a non-empty title")
         if self.action == "calendar_create" and self.event_id is not None:
             raise ValueError("a calendar_create proposal must not carry an event id")
+        if self.action == "calendar_delete" and self.event_id is None:
+            raise ValueError("a calendar_delete proposal must carry the event's own id")
         return self
 
 
@@ -181,6 +201,11 @@ def compose_readback(proposal: PendingProposal, *, now: datetime) -> str:
     from `proposal`'s own fields (D-07) -- a primary calendar is named by
     its account's label alone ("the home calendar"); any other calendar
     names itself and its account ("the Team Offsite calendar in work").
+
+    A `calendar_delete` proposal speaks one of two carriers: the plain one
+    for a standalone event, and `_DELETE_OCCURRENCE_READBACK_CARRIER` --
+    naming that the rest of the series stays untouched -- when
+    `proposal.recurring_instance` is True (plan 09-05, Task 3, D-07).
     """
     if proposal.calendar_primary:
         calendar_phrase = f"the {proposal.account} calendar"
@@ -188,6 +213,13 @@ def compose_readback(proposal: PendingProposal, *, now: datetime) -> str:
         calendar_phrase = f"the {proposal.calendar_name} calendar in {proposal.account}"
 
     when = spoken_when(proposal.start, all_day=proposal.all_day, now=now)
+
+    if proposal.action == "calendar_delete":
+        if proposal.recurring_instance:
+            return _DELETE_OCCURRENCE_READBACK_CARRIER.format(
+                title=proposal.title, when=when, calendar_phrase=calendar_phrase
+            )
+        return _DELETE_READBACK_CARRIER.format(title=proposal.title, calendar_phrase=calendar_phrase, when=when)
 
     if proposal.all_day:
         return f"add {proposal.title} to {calendar_phrase}, {when}?"

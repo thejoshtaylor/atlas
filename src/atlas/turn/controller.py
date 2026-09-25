@@ -78,10 +78,13 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time as _time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
+
+from atlas_mcp.google_tools import UNREACHABLE_KEY
 
 from atlas.config import MacroConfig
 from atlas.providers.base import BrainError
@@ -173,6 +176,14 @@ _ACTION_DID_NOT_COMPLETE_CLAUSE = "the call itself did not complete"
 # discipline `_compose_mixed_outcome_reply` already applies to a mixed
 # tool-round summary.
 _CLARIFYING_QUESTION_CARRIER = "i'm not sure which one you mean --"
+
+# GOOG-12, plan 09-05 Task 3: appended, by code, to an ordinary answer for
+# every account this turn's own tool round could not reach (`handoff_slot.
+# unreachable_accounts`) that the answer does not already name -- an
+# unreachable account must never be silently left out of a spoken calendar
+# answer. Fixed and asserted-on, the same "never model-composed" discipline
+# `_CLARIFYING_QUESTION_CARRIER` already follows; only `label` varies.
+_UNREACHABLE_ACCOUNT_NOTE = " i can't reach your {label} account right now."
 
 # How often the silence-timeout guard rechecks its deadline while waiting on
 # an STT event that may never arrive. Real events short-circuit this --
@@ -1063,10 +1074,30 @@ async def run_turn(
         # this task's own two live-house recordings. `.strip()` catches a
         # whitespace-only answer the same way, not just a bare `""`.
         answer_text = winner.answer
+        # GOOG-12, plan 09-05 Task 3: an account this turn's tool round
+        # could not reach is never silently left out of a spoken calendar
+        # answer -- appended here, by code, for every label the model's
+        # own answer does not already name as a whole word (case
+        # insensitive: "Home" already names "home"). This runs on the
+        # ordinary answer path only (never a macro reply, a local-intent
+        # "done", a clarifying question, or a handoff readback, none of
+        # which speak this turn's own tool-round results back), and always
+        # speaks through the live `tts` -- an answer with an appended note
+        # is never the exact phrase a precached entry holds.
+        appended_unreachable_note = False
+        if answer_text.strip() and handoff_slot.unreachable_accounts:
+            for label in handoff_slot.unreachable_accounts:
+                if re.search(rf"\b{re.escape(label)}\b", answer_text, re.IGNORECASE):
+                    continue
+                answer_text = f"{answer_text}{_UNREACHABLE_ACCOUNT_NOTE.format(label=label)}"
+                appended_unreachable_note = True
         if not answer_text.strip():
             timings.turn_outcome = "empty_answer"
             reply_text = _CANNOT_DO_REPLY
             speaking_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
+        elif appended_unreachable_note:
+            reply_text = answer_text
+            speaking_tts = tts
         else:
             # 260924-4iu (b): reply_text becomes the cached phrase, not the
             # model's own text, because reply_text is what the `reply.text`
@@ -1597,6 +1628,32 @@ async def _run_tool_rounds(
                 results[index] = SimpleNamespace(
                     isError=True, content=[SimpleNamespace(text=CODE_ONLY_REFUSAL)]
                 )
+
+        # GOOG-12, plan 09-05 Task 3: every account this round's results
+        # named unreachable (`atlas_mcp.google_tools.UNREACHABLE_KEY`,
+        # e.g. `calendar_list_events`'s own `unreachable_accounts` list)
+        # collected into `handoff_slot.unreachable_accounts`, deduplicated
+        # in first-seen order -- read for every successful, non-error
+        # result in every round, never only the round a handoff came from,
+        # since an ordinary read is exactly where this matters most.
+        # `run_turn`'s own ordinary-answer branch appends a fixed note for
+        # each label the model's answer does not already name.
+        if handoff_slot is not None:
+            for result in results:
+                if isinstance(result, BaseException) or _is_error(result):
+                    continue
+                payload = _result_payload(result)
+                if not isinstance(payload, dict):
+                    continue
+                unreachable_entries = payload.get(UNREACHABLE_KEY)
+                if not isinstance(unreachable_entries, list):
+                    continue
+                for entry in unreachable_entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    label = entry.get("account")
+                    if isinstance(label, str) and label not in handoff_slot.unreachable_accounts:
+                        handoff_slot.unreachable_accounts.append(label)
 
         # Plan 09-04 (D-08, D-10): detect any handoff among this round's
         # results before the existing mixed-outcome check below -- a

@@ -124,7 +124,7 @@ def test_a_read_write_calendar_is_read_normally():
 # --- Task 1: require_writable / handle_calendar_insert_event / handle_calendar_delete_event
 
 
-def _write_account(*, calendars=None, access_token: "str | None" = "at-work") -> AccountGrant:
+def _write_account(*, calendars=None, access_token: str | None = "at-work") -> AccountGrant:
     return AccountGrant(
         label="work",
         email="work@example.com",
