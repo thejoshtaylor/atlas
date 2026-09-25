@@ -1151,7 +1151,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # The real migration runner `lifespan` calls -- not a fake, not a
         # second reimplementation of it (the plan's own key link).
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0015"
+        assert get_current_revision(migration_url) == "0016"
 
         async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
             reread_rules = {r.id: r for r in await policy_repo.list_rules()}
@@ -1182,7 +1182,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # A second run at head: no-op. The stamped revision is unchanged
         # and nothing is added, removed, or rewritten -- old data or new.
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0015"
+        assert get_current_revision(migration_url) == "0016"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
 
         # A downgrade of this phase's own migration, and a re-upgrade,
@@ -1195,7 +1195,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         assert get_current_revision(migration_url) == "0010"
 
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0015"
+        assert get_current_revision(migration_url) == "0016"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
     finally:
         await engine.dispose()
@@ -1266,3 +1266,90 @@ async def test_migration_0015_creates_every_google_table_and_is_idempotent(monke
         await engine.dispose()
     assert second_table_names == table_names
     assert second_constraint_names == constraint_names
+
+
+async def test_migration_0016_enforces_at_most_one_default_google_account(monkeypatch):
+    """Migration 0016 (B1-WR-04, 09-REVIEW.md):
+    `uq_google_accounts_single_default` -- a partial unique index on
+    `google_accounts.is_default` where true -- refuses a second row with
+    `is_default = true` at the database level, backing up the application
+    code's own "clear every other row, then set this one" discipline
+    (`google_repository.py::update_account`) with a real constraint.
+    Upgrading over an already-violated table (two rows both default) must
+    also succeed, clearing every default but the most recently updated
+    one -- the same "resolve any existing duplicate before adding the
+    constraint" discipline `0010_plugin_config_value_uniqueness.py`
+    already established."""
+    from sqlalchemy.exc import IntegrityError
+
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    # Stop at 0015, before this migration's own index exists, and seed two
+    # rows already violating the invariant the index is about to add --
+    # proving the upgrade heals a pre-existing violation rather than
+    # merely refusing a *new* one.
+    _run_upgrade_to("0015")
+    engine = create_async_engine(_TEST_DB_URL)
+    insert_account = text(
+        "INSERT INTO google_accounts "
+        "(label, email, refresh_token_ciphertext, key_version, granted_scopes, "
+        " is_default, linked_at, updated_at) "
+        "VALUES (:label, :email, :ct, 1, 'scope', true, now(), :updated_at) RETURNING id"
+    )
+    from datetime import datetime
+
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                insert_account,
+                {"label": "home", "email": "home@example.com", "ct": b"x", "updated_at": datetime(2026, 1, 1)},
+            )
+            await conn.execute(
+                insert_account,
+                {"label": "work", "email": "work@example.com", "ct": b"y", "updated_at": datetime(2026, 2, 1)},
+            )
+    finally:
+        await engine.dispose()
+
+    _run_upgrade_head()
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            defaults = (
+                await conn.execute(text("SELECT label FROM google_accounts WHERE is_default = true"))
+            ).scalars().all()
+    finally:
+        await engine.dispose()
+    # Only the most recently updated row (work) is still default -- the
+    # pre-existing violation was healed, not merely left for the index
+    # creation to fail on.
+    assert defaults == ["work"]
+
+    # The index itself now refuses a second concurrent default.
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE google_accounts SET is_default = true WHERE label = 'home'"
+                    )
+                )
+    finally:
+        await engine.dispose()
+
+    # Idempotent: a second upgrade to the same head must not error.
+    _run_upgrade_head()
