@@ -93,7 +93,11 @@ function stubGoogle(
   }))
 }
 
-function renderRoute(GoogleAccountsRoute: React.ComponentType, queryClient: QueryClient, initialEntry = "/google") {
+function renderRoute(
+  GoogleAccountsRoute: React.ComponentType,
+  queryClient: QueryClient,
+  initialEntry: string | { pathname: string; state: unknown } = "/google",
+) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[initialEntry]}>
@@ -319,4 +323,21 @@ test("with a configured client and zero linked accounts, shows the empty state i
   expect(
     screen.getByText("Set up your OAuth client above, then link your first Google account."),
   ).toBeTruthy()
+})
+
+test("R2-WR-09: a notice handed over by the account page's unlink is shown above the list", async () => {
+  stubLocation()
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleClient: async () => sampleClient({ configured: true, client_id: "my-client-id" }),
+    fetchGoogleAccounts: async () => [],
+  })
+  const { GoogleAccountsRoute } = await import("./GoogleAccountsRoute")
+
+  renderRoute(GoogleAccountsRoute, queryClient, {
+    pathname: "/google",
+    state: { notice: "Unlinked work. The Google tools stopped and did not start again." },
+  })
+
+  expect(await screen.findByText("Unlinked work. The Google tools stopped and did not start again.")).toBeTruthy()
 })

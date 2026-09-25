@@ -9,7 +9,7 @@
 import { afterEach, expect, mock, test } from "bun:test"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
-import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 
 // Imported statically, before any `mock.module` call in this file runs, so
 // the mock factory below can re-export the module's full, real surface
@@ -468,13 +468,13 @@ test("C-WR-01: a calendar-access radio group is disabled while its own mutation 
   await waitFor(() => expect((screen.getByRole("radio", { name: "Read and write" }) as HTMLInputElement).disabled).toBe(false))
 })
 
-test("a failed unlink shows the server's error text (C-CR-01: AlertDialogAction closes the dialog before the catch runs)", async () => {
+test("a failed unlink shows the server's error text verbatim (C-CR-01, R2-WR-09)", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, {
     fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
     unlinkGoogleAccount: async () => {
       const { ApiError } = await import("@/lib/api")
-      throw new ApiError(503, "the running google tools could not be stopped -- retry this action")
+      throw new ApiError(500, "the database could not be reached")
     },
   })
   const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
@@ -485,12 +485,56 @@ test("a failed unlink shows the server's error text (C-CR-01: AlertDialogAction 
   const dialogUnlinkButtons = screen.getAllByRole("button", { name: "Unlink work" })
   fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
 
-  // `handleUnlink`'s catch block content (generic vs. verbatim `ApiError`
-  // text) is C-WR-02's concern, not C-CR-01's -- this test only proves the
-  // error, whatever its text, survives `AlertDialogAction` closing the
-  // dialog and is actually rendered to the operator.
-  expect(await screen.findByText("Couldn't unlink this account. Try again.")).toBeTruthy()
+  // The error survives `AlertDialogAction` closing the dialog (C-CR-01),
+  // and it is the server's own text, not a generic sentence (R2-WR-09).
+  expect(await screen.findByText("the database could not be reached")).toBeTruthy()
 })
+
+test("R2-WR-09: a 503 from unlink means the account is already gone -- the page leaves it and never offers a retry", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    unlinkGoogleAccount: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(
+        503,
+        "the setting was saved, but the running google tools could not be updated to match and were stopped -- retry this action to bring them back",
+      )
+    },
+  })
+  queryClient.setQueryData(["google", "accounts"], [sampleAccount({ id: 7, label: "work" })])
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/google/accounts/7"]}>
+        <Routes>
+          <Route path="/google/accounts/:id" element={<GoogleAccountRoute />} />
+          <Route path="/google" element={<NoticeProbe />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+
+  fireEvent.click(await screen.findByRole("button", { name: "Unlink" }))
+  const dialogUnlinkButtons = screen.getAllByRole("button", { name: "Unlink work" })
+  fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
+
+  expect(
+    await screen.findByText(
+      "Unlinked work. The Google tools stopped and did not start again. They start again after the next account change or token refresh.",
+    ),
+  ).toBeTruthy()
+  expect(screen.queryByText(/retry this action/)).toBeNull()
+  expect(queryClient.getQueryState(["google", "accounts", 7])).toBeUndefined()
+  expect(queryClient.getQueryState(["google", "accounts"])?.isInvalidated).toBe(true)
+})
+
+function NoticeProbe() {
+  const location = useLocation()
+  const notice = (location.state as { notice?: unknown } | null)?.notice
+  return <div>{typeof notice === "string" ? notice : "google accounts list"}</div>
+}
 
 test("an unknown id shows the not-found state with no Retry button", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })

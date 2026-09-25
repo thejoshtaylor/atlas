@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useMutation, useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   AlertDialog,
@@ -22,6 +22,7 @@ import { SkeletonList } from "@/components/state/SkeletonList"
 import { SubmitButton } from "@/components/state/SubmitButton"
 import { ApiError } from "@/lib/api"
 import {
+  GOOGLE_ACCOUNTS_QUERY_KEY,
   fetchGoogleAccount,
   googleAccountQueryKey,
   refreshCalendarsMutationOptions,
@@ -50,6 +51,16 @@ import { WritingStyleSection } from "./WritingStyleSection"
 
 const LINKED_BANNER = "Linked. Every calendar starts off -- choose what ATLAS may see below."
 const UNLINK_BODY = "ATLAS loses access to this account's calendars and mail. Drafts already in Gmail stay there."
+
+// R2-WR-09: `DELETE /api/google/accounts/:id` deletes the row BEFORE it
+// reconciles the running Google tools. A 503 therefore means the unlink
+// happened and only the reconcile failed -- the server stopped the tools
+// (a narrowing change, D-05). The server's own text says "retry this
+// action", but a retry of this DELETE can only 404, so this page says what
+// is true instead and hands the sentence to the list page.
+function unlinkedToolsStoppedNotice(label: string): string {
+  return `Unlinked ${label}. The Google tools stopped and did not start again. They start again after the next account change or token refresh.`
+}
 
 function CalendarRow({ accountId, calendar }: { accountId: number; calendar: GoogleCalendar }) {
   const setAccess = useMutation(setCalendarAccessMutationOptions)
@@ -97,6 +108,7 @@ function CalendarRow({ accountId, calendar }: { accountId: number; calendar: Goo
 
 function AccountDetail({ account }: { account: GoogleAccount }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const linked = searchParams.get("linked") === "1"
   const status = accountStatusDisplay(account.status)
@@ -168,8 +180,17 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
       await unlink.mutateAsync({ accountId: account.id })
       setUnlinkOpen(false)
       navigate("/google")
-    } catch {
-      setUnlinkError("Couldn't unlink this account. Try again.")
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) {
+        // R2-WR-09: the account is already gone -- the mutation's own
+        // `onSuccess` never ran, so do its cache work here, then leave.
+        queryClient.removeQueries({ queryKey: googleAccountQueryKey(account.id) })
+        void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, exact: true })
+        setUnlinkOpen(false)
+        navigate("/google", { state: { notice: unlinkedToolsStoppedNotice(account.label) } })
+        return
+      }
+      setUnlinkError(err instanceof ApiError ? err.message : "Couldn't unlink this account. Try again.")
     }
   }
 

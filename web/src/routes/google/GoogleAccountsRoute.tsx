@@ -1,6 +1,6 @@
 import * as React from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { Link, useSearchParams } from "react-router-dom"
+import { Link, useLocation, useSearchParams } from "react-router-dom"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -171,6 +171,12 @@ function AccountCard({ account }: { account: GoogleAccount }) {
 export function GoogleAccountsRoute() {
   const [searchParams] = useSearchParams()
   const linkError = searchParams.get("link_error")
+  // R2-WR-09: a sentence the account page hands over through router
+  // state when an unlink landed but the Google tools stopped. Router state
+  // never comes from the URL, and React escapes it as text.
+  const location = useLocation()
+  const handedNotice = (location.state as { notice?: unknown } | null)?.notice
+  const notice = typeof handedNotice === "string" ? handedNotice : null
 
   const clientQuery = useQuery({ queryKey: GOOGLE_CLIENT_QUERY_KEY, queryFn: fetchGoogleClient })
   const accountsQuery = useQuery({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, queryFn: fetchGoogleAccounts })
@@ -197,6 +203,8 @@ export function GoogleAccountsRoute() {
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-display font-semibold">Google accounts</h1>
+
+      {notice ? <p className="text-body text-foreground">{notice}</p> : null}
 
       {screen.kind === "loading" ? <SkeletonList rows={3} /> : null}
 
