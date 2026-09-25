@@ -53,6 +53,14 @@ class FollowUpRequest:
     question: str
     pending_action_id: "int | None" = None
     playback_ends_at: "float | None" = None
+    # Plan 09-07 (D-06): every earlier exchange this follow-up chain
+    # already carries, oldest first -- empty for the first link in a
+    # chain. `turn/controller.py`'s own continuation-message helper
+    # prepends this ahead of `original_transcript`/`question` themselves,
+    # so a third link in a chain (a clarification answered with another
+    # clarification, or an amendment on top of an amendment) still shows
+    # a tier the whole conversation, not just the last hop.
+    prior_messages: tuple[dict, ...] = ()
 
 
 @dataclass

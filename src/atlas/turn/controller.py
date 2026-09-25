@@ -56,10 +56,16 @@ guessing. `run_turn`'s post-race branch speaks a question composed in code
 from `winner.candidates`, preferring a friendly name from this turn's own
 injected state fetch over the bare entity id, and returns -- no macro
 follow-up, no further tool round, and nothing that holds the audio source
-open past the question (D-08; the operator answers by waking the assistant
-again, and VOICE-21 is deliberately out of scope). `turn_outcome` gains its
-own `"needs_clarification"` value, distinct from an ordinary answer, an
-empty reply, and a round cap.
+open past the question. `turn_outcome` gains its own `"needs_clarification"`
+value, distinct from an ordinary answer, an empty reply, and a round cap.
+
+Plan 09-07 (D-06) replaces phase 4's own D-08 for this question on a
+source that has a follow-up channel attached: the operator now answers
+inside the same brief no-wake-word window a calendar confirmation opens
+(plan 09-06), and the answer continues the original request through the
+ordinary pipeline rather than requiring a fresh wake. A source with no
+channel attached is unchanged -- the operator still answers by waking the
+assistant again, and VOICE-21 is deliberately out of scope there.
 
 Plan 06-05 (D-11) extends `winner.candidates` to a third kind of value:
 two plugins' own display names, when a spoken command could reach either
@@ -97,7 +103,7 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
-from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest, estimate_playback_end
+from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest, estimate_playback_end
 from atlas.turn.handoff import (
     CODE_ONLY_REFUSAL,
     HandoffContext,
@@ -108,7 +114,12 @@ from atlas.turn.handoff import (
 )
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
-from atlas.turn.pending_action import BULK_REFUSAL_REPLY, HANDOFF_NOT_ALONE_REPLY, handle_confirmation_reply
+from atlas.turn.pending_action import (
+    BULK_REFUSAL_REPLY,
+    CANCELLED_REPLY,
+    HANDOFF_NOT_ALONE_REPLY,
+    handle_confirmation_reply,
+)
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.wake_echo import is_wake_only
 
@@ -318,6 +329,25 @@ class TurnController:
             timings,
             self.max_utterance_s,
         )
+
+
+def _continuation_messages(incoming: FollowUpRequest) -> "list[dict[str, Any]]":
+    """The messages a continuation turn -- an amendment's own reply, or a
+    clarification's own answer -- runs with, ahead of its own new user
+    message (plan 09-07, D-06): every earlier exchange this follow-up
+    chain already carries (`incoming.prior_messages`, empty for the first
+    link), then the original request and the question it was asked.
+    Inserted before the new user message (`run_turn`'s own message-
+    building section below), so a tier sees
+    catalog/state/prior-exchange/user in that order -- the same shape
+    plan 09-06 already established for an amendment, extended here to a
+    clarification's own answer and to a chain of more than one link.
+    """
+    return [
+        *incoming.prior_messages,
+        {"role": "user", "content": incoming.original_transcript},
+        {"role": "assistant", "content": incoming.question},
+    ]
 
 
 async def run_turn(
@@ -654,12 +684,10 @@ async def run_turn(
         # stored confirmation -- this entirely replaces the ordinary
         # empty-transcript branch below for this turn (silence speaks
         # `CANCELLED_REPLY`, never `_NO_SPEECH_REPLY`), and never reaches
-        # a macro or the local on/off matcher. `incoming.kind` is checked
-        # defensively even though `dispatch_handoff` only ever builds a
-        # `"confirmation"` request today (`turn/follow_up.py`'s own
-        # docstring reserves `"clarification"` for a later plan) -- an
-        # `incoming` of any other kind falls through and is treated as an
-        # ordinary turn, exactly as if no follow-up channel existed.
+        # a macro or the local on/off matcher. Plan 09-07 adds a sibling
+        # branch immediately below for `incoming.kind == "clarification"`
+        # -- an `incoming` of any other kind falls through and is treated
+        # as an ordinary turn, exactly as if no follow-up channel existed.
         if incoming is not None and incoming.kind == "confirmation":
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
@@ -686,15 +714,45 @@ async def run_turn(
                 return
             # D-08: an amendment supersedes the stored action (already
             # resolved `superseded` by `handle_confirmation_reply` above)
-            # and runs the ordinary pipeline once more, with the original
-            # exchange inserted ahead of the operator's own amendment --
-            # never a second call to `handle_confirmation_reply`, and
-            # never the macro or local-intent blocks below (an amendment
-            # is never a macro phrase or an on/off command).
-            prior_exchange: "list[dict[str, Any]] | None" = [
-                {"role": "user", "content": incoming.original_transcript},
-                {"role": "assistant", "content": incoming.question},
-            ]
+            # and runs the ordinary pipeline once more, with every
+            # earlier exchange this chain already carries inserted ahead
+            # of the operator's own amendment -- never a second call to
+            # `handle_confirmation_reply`, and never the macro or
+            # local-intent blocks below (an amendment is never a macro
+            # phrase or an on/off command).
+            prior_exchange: "list[dict[str, Any]] | None" = _continuation_messages(incoming)
+        elif incoming is not None and incoming.kind == "clarification":
+            # Plan 09-07 (D-06): a clarification's own answer -- "home"
+            # to "which account -- home, work?" -- runs the ordinary
+            # pipeline once, the same way an amendment does immediately
+            # above, with the whole chain inserted ahead of the answer
+            # itself, skipping the macro and local-intent blocks below.
+            # There is no stored pending action to resolve here (a
+            # clarification is never a `pending_action` handoff), so
+            # silence or an unreadable reply is handled directly, right
+            # here, rather than through `handle_confirmation_reply` --
+            # the same `CANCELLED_REPLY`/`"follow_up_silence"` shape a
+            # stored confirmation's own silence already uses (D-09), and
+            # nothing is stored either way.
+            if not final_text or is_no_command(final_text, wake_phrase):
+                await _cancel_state_task(state_task)
+                await _cancel_state_task(pending_runs_task)
+                timings.turn_outcome = "follow_up_silence"
+                cancelled_tts = _tts_for_precached_fallback(filler_cache, sink, CANCELLED_REPLY, tts)
+                await _speak(
+                    source,
+                    cancelled_tts,
+                    timings,
+                    CANCELLED_REPLY,
+                    kind="answer",
+                    barge_in=barge_in,
+                    speech_lock=speech_lock,
+                    sink=sink,
+                )
+                await _emit_event(source, timings.to_event())
+                timings.log()
+                return
+            prior_exchange = _continuation_messages(incoming)
         else:
             prior_exchange = None
 
@@ -706,10 +764,11 @@ async def run_turn(
         # true for a second wake-only reply: without this guard, that
         # second drain's own transcript was never checked, and a repeated
         # wake phrase or a bare "It's" fell straight through to the brain.
-        # Plan 09-06: `prior_exchange is not None` means this turn is an
-        # amendment continuing past the branch above, which already
-        # proved `final_text` is real content -- this check is therefore
-        # always False on that path and never revisits it.
+        # Plan 09-06/09-07: `prior_exchange is not None` means this turn
+        # is an amendment or a clarification's own answer continuing past
+        # the branches above, both of which already proved `final_text`
+        # is real content -- this check is therefore always False on
+        # that path and never revisits it.
         if prior_exchange is None and (not final_text or is_no_command(final_text, wake_phrase)):
             # VOICE-08's two cases end the turn the same way, with no language
             # model call: `final is None` is RESEARCH.md Pitfall 3's second
@@ -756,10 +815,10 @@ async def run_turn(
         # behavioral test still passed. `match_macro` on an empty `macros` tuple
         # (the default) always returns `None`, so a caller that predates this
         # plan reaches the tier race exactly as before, at no observable cost.
-        # Plan 09-06: `prior_exchange is not None` means this is an
-        # amendment continuing past the confirmation branch above -- it
-        # never matches a macro (Task 1's own `<behavior>`: "a follow-up
-        # turn never matches a macro or the local on/off intent").
+        # Plan 09-06/09-07: `prior_exchange is not None` means this is an
+        # amendment or a clarification's own answer continuing past the
+        # branches above -- it never matches a macro (09-07's own
+        # `<behavior>`: "skipping macros and the local on/off intent").
         matched_macro = match_macro(macros, final_text) if prior_exchange is None else None
         if matched_macro is not None:
             # A macro turn never builds the message list and never consumes the
@@ -825,9 +884,9 @@ async def run_turn(
         state_read = False
         state_result: Any = _UNAVAILABLE
 
-        # Plan 09-06: skipped on the amendment path for the identical
-        # reason the macro check above is -- an amendment is never an
-        # on/off command.
+        # Plan 09-06/09-07: skipped on the amendment or clarification-
+        # answer path for the identical reason the macro check above is
+        # -- neither is ever an on/off command.
         if prior_exchange is None and local_intents and tool_host is not None:
             entities: list[dict[str, Any]] = []
             if state_task is not None:
@@ -976,12 +1035,15 @@ async def run_turn(
                     "content": _state_message(states_or_none, pending_runs_or_none, domains=state_domains),
                 }
             )
-        # Plan 09-06 (D-08): an amendment's own prior exchange -- the
-        # original request and the readback it is amending -- inserted
-        # here, just before the user message carrying the amendment
-        # itself, so a tier sees catalog/state/prior-exchange/user in that
-        # order. `None` (every turn that is not an amendment) adds
-        # nothing, byte-identical to before this plan.
+        # Plan 09-06/09-07 (D-06, D-08): a continuation turn's own prior
+        # exchange -- an amendment's original request and the readback it
+        # is amending, or a clarification's original request and the
+        # question it answers, including every earlier link in a longer
+        # chain (`_continuation_messages`) -- inserted here, just before
+        # the user message carrying the amendment or answer itself, so a
+        # tier sees catalog/state/prior-exchange/user in that order.
+        # `None` (every turn that is not a continuation) adds nothing,
+        # byte-identical to before plan 09-06.
         if prior_exchange:
             messages.extend(prior_exchange)
         messages.append({"role": "user", "content": final_text})
@@ -1134,10 +1196,21 @@ async def run_turn(
                 # constant -- so `SourceRunner._run_follow_ups` can open
                 # the next turn's microphone only after the readback's own
                 # audio has actually finished playing, plus an echo tail.
+                # Plan 09-07 (D-06): `prior_messages` carries this turn's
+                # own continuation messages forward -- non-empty only when
+                # this turn was itself answering an earlier follow-up
+                # (`prior_exchange`, built above, covers both an amendment
+                # and a clarification's own answer); `()` for an ordinary
+                # wake turn's first proposal or clarification, so a chain
+                # of exactly one link adds nothing new here.
                 # `outcome.follow_up` is frozen (`FollowUpRequest`), so
                 # this is a new instance, not a mutation of the original.
                 follow_up.request(
-                    replace(outcome.follow_up, playback_ends_at=estimate_playback_end(speech_result, sink))
+                    replace(
+                        outcome.follow_up,
+                        playback_ends_at=estimate_playback_end(speech_result, sink),
+                        prior_messages=tuple(prior_exchange) if prior_exchange else (),
+                    )
                 )
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -1157,14 +1230,35 @@ async def run_turn(
             # created) and no further tool round: this turn ends exactly the
             # way an ordinary answered turn does, through the same `_speak`/
             # `_emit_event`/`timings.log()` sequence, so nothing here keeps
-            # the audio source open. D-08: the operator answers by waking the
-            # assistant again -- VOICE-21 (holding the microphone open) is
-            # out of scope and deliberately not built by this branch.
+            # the audio source open past the question itself.
+            #
+            # Plan 09-07 (D-06): on a source with a follow-up channel
+            # attached, the same brief no-wake-word window a calendar
+            # confirmation opens (plan 09-06) opens after this question
+            # too -- requested below, respecting the identical
+            # `MAX_CHAINED_FOLLOW_UPS` cap `dispatch_handoff`'s own
+            # pending-action path already enforces. A source with no
+            # channel (`follow_up is None`) is unchanged: the operator
+            # answers by waking the assistant again, and VOICE-21
+            # (holding the microphone open) stays out of scope there.
             timings.turn_outcome = "needs_clarification"
             question = _compose_clarifying_question(winner.candidates, friendly_names)
-            await _speak(
+            clarification_speech = await _speak(
                 source, tts, timings, question, kind="answer", barge_in=barge_in, speech_lock=speech_lock, sink=sink
             )
+            if follow_up is not None:
+                clarification_chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
+                if clarification_chain_depth <= MAX_CHAINED_FOLLOW_UPS:
+                    follow_up.request(
+                        FollowUpRequest(
+                            kind="clarification",
+                            chain_depth=clarification_chain_depth,
+                            original_transcript=final_text,
+                            question=question,
+                            prior_messages=tuple(prior_exchange) if prior_exchange else (),
+                            playback_ends_at=estimate_playback_end(clarification_speech, sink),
+                        )
+                    )
             await _emit_event(source, timings.to_event())
             timings.log()
             return

@@ -175,9 +175,14 @@ async def dispatch_handoff(
     `chain_depth` beyond `MAX_CHAINED_FOLLOW_UPS` ends the exchange rather
     than looping (D-06's own "never left waiting forever" extended to a
     chain of clarifications). A `needs_clarification` handoff never stores
-    anything and never requests a follow-up -- the operator answers by
-    waking the assistant again, exactly like the existing entity/plugin/run
-    disambiguation path (`turn/controller.py::_compose_clarifying_question`).
+    anything -- there is no pending action here to store -- but, on a
+    source with a follow-up channel attached (`follow_up_available`), it
+    now requests the same kind of open-microphone follow-up a stored
+    confirmation does (plan 09-07, D-06 replacing phase 4's own D-08 for
+    this question): the operator answers inside a brief window rather
+    than waking the assistant again. A source with no channel is
+    unchanged, exactly like the existing entity/plugin/run disambiguation
+    path (`turn/controller.py::_compose_clarifying_question`).
     """
     if chain_depth > MAX_CHAINED_FOLLOW_UPS:
         return HandoffOutcome(reply_text=FOLLOW_UP_LIMIT_REPLY, turn_outcome="follow_up_limit")
@@ -187,7 +192,23 @@ async def dispatch_handoff(
 
         candidates = tuple(handoff.payload.get("candidates", ()))
         question = _compose_clarifying_question(candidates, {})
-        return HandoffOutcome(reply_text=question, turn_outcome="needs_clarification")
+        # Plan 09-07 (D-06): `playback_ends_at`/`prior_messages` are left
+        # at their defaults here and filled in by `run_turn`'s own call
+        # site -- that is the one place that knows this turn's own
+        # `SpeechResult` and whether it was itself answering an earlier
+        # follow-up (`replace(outcome.follow_up, ...)`, mirroring the
+        # `pending_action` branch below).
+        follow_up = (
+            FollowUpRequest(
+                kind="clarification",
+                chain_depth=chain_depth,
+                original_transcript=transcript,
+                question=question,
+            )
+            if follow_up_available
+            else None
+        )
+        return HandoffOutcome(reply_text=question, turn_outcome="needs_clarification", follow_up=follow_up)
 
     if handoff.kind == "email_list":
         from atlas.turn.email_handoff import handle_email_list
