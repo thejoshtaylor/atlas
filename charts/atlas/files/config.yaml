@@ -164,6 +164,61 @@ camera:
   # as the safety net for a transcript that turns out to be wake-word-only.
   preroll_ms: 300
 
+edge:
+  # The Pi + Seeed reSpeaker XVF3800 audio source (Phase 10). This block
+  # becomes the room microphone when Edge microphone is chosen in the
+  # setup wizard's audio-source step (D-15) -- the camera microphone stays
+  # off in that case, though the camera speaker code and this file's own
+  # `camera:`/`speaker:` blocks above stay, since a stranger with no Pi
+  # still depends on them.
+  #
+  # The XVF3800 firmware v2.0.6 (USB 2886:001a) captures exactly 2
+  # channels at 16 kHz, S16_LE -- measured on the operator's own array
+  # (10-SPIKE.md), not assumed independently of it.
+  sample_rate: 16000
+  channels: 2
+
+  # Which capture channel speech-to-text reads (D-09). Measured, not
+  # guessed: 10-SPIKE.md's Q1 SNR verdict already preferred channel 0
+  # (margins +1.26/+2.85/-3.58 dB across three talker positions), and the
+  # operator's D-19 amendment settled it directly by word error rate --
+  # faster-whisper small.en measured channel 0 at 4% mean WER against
+  # channel 1's 7% (10-SPIKE-Q1-WER.md). The other channel is still
+  # recorded on every turn (D-09) and kept for Phase 11/Phase 12 analysis.
+  # This is this array's own USB firmware mapping, not the vendor's
+  # I2S-firmware wiki channel labeling, which this array does not run.
+  asr_channel: 0
+
+  # The audio the Pi sends before Silero opens a segment, set from the
+  # measured onset lag (D-08) -- not camera.preroll_ms above, which is
+  # this server's own replay of its wake-detector report lag, a different
+  # measurement of a different delay. 10-SPIKE.md's Q5:
+  # derive_pre_roll_ms(onset_delays_ms) over 20 measured utterances =
+  # ceil((max_onset_ms + 100) / 50) * 50 = ceil((974.0 + 100) / 50) * 50 =
+  # 1100. The Silero onset delay measured p50 275.0 ms, p95 856.2 ms, max
+  # 974.0 ms; three outliers (660/850/974 ms) drive this worst case on
+  # purpose -- the derive rule takes the max, not the p95.
+  pre_roll_ms: 1100
+
+  # The audio the Pi keeps sending after Silero closes a segment, for the
+  # same reason as pre_roll_ms above (D-08). 10-SPIKE.md's Q5:
+  # derive_tail_ms(offset_lags_ms, endpointing_ms=200) =
+  # ceil((200 + 100 - min_offset_lag_ms) / 50) * 50 =
+  # ceil((200 + 100 - (-960.0)) / 50) * 50 = 1300. The Silero offset lag
+  # measured p50 677.0 ms, p95 1174.9 ms, max 1192.0 ms, min -960.0 ms;
+  # three negative offsets (-244/-864/-960 ms) drive this worst case.
+  tail_ms: 1300
+
+  # This server finalizes speech-to-text the moment the Pi reports end of
+  # speech (D-10, D-11) -- 0 here means exactly that, with no added wait.
+  # Raise this only if recorded sessions show real sentences cut at a
+  # pause; it is not a value to tune preemptively.
+  end_of_speech_hangover_ms: 0
+
+  # The WebSocket keepalive interval the Pi answers with a pong -- used to
+  # measure this stream's own added delay (10-07-PLAN.md), not a timeout.
+  ping_interval_s: 5.0
+
 speaker:
   # go2rtc | tapo_talk | tcp
   #
@@ -412,8 +467,18 @@ barge_in:
   # from a real interruption. Flip this to true only after a real
   # calibration exists and correlation_enabled above is also true -- see
   # the comment on correlation_enabled for the two steps.
+  #
+  # The edge (Pi + XVF3800) source overrides the global default the same
+  # way, but for a different reason (D-16): its own chip's on-chip AEC is
+  # what would have to make a VAD start during playback a safe interrupt
+  # signal, and 10-SPIKE.md's Q3 measured `aec: not_proven` -- playback
+  # alone opened VAD segments, an AEC-failure signature. `false` here
+  # matches `atlas.config.EDGE_BARGE_IN_PROVEN`; flip both together only
+  # once a later spike measures `aec: proven` on the real array.
   sources:
     camera:
+      enabled: false
+    edge:
       enabled: false
 
 stt:

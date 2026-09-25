@@ -1658,3 +1658,67 @@ def test_an_empty_cookie_secure_variable_is_refused_by_the_real_loader(tmp_path,
     with pytest.raises(ConfigError) as exc:
         load_config(config_path)
     assert "cookie_secure" in str(exc.value)
+
+
+# --- Plan 10-10: the spike's measurements become the shipped edge defaults -
+
+
+def test_edge_source_config_defaults_are_the_spikes_measured_values():
+    """10-SPIKE.md's Q1/Q5 values, not a guess -- and `require_measured()`
+    passes on the defaults with no override needed (D-08, D-09)."""
+    from atlas.config import EdgeSourceConfig
+
+    config = EdgeSourceConfig()
+    assert config.asr_channel == 0
+    assert config.pre_roll_ms == 1100
+    assert config.tail_ms == 1300
+    config.require_measured()  # must not raise
+
+
+def test_edge_source_config_explicit_null_still_means_not_measured():
+    """An explicit `asr_channel: null` overrides the measured default --
+    a different array's operator can still say "not measured for mine,"
+    and `require_measured()` still refuses it by name."""
+    from atlas.config import ConfigError, EdgeSourceConfig
+
+    config = EdgeSourceConfig.from_config({"asr_channel": None})
+    assert config.asr_channel is None
+    with pytest.raises(ConfigError) as exc:
+        config.require_measured()
+    assert "asr_channel" in str(exc.value)
+
+
+def test_edge_barge_in_proven_matches_the_spikes_aec_verdict():
+    """10-SPIKE.md's Q3 measured `aec: not_proven` -- barge-in for the
+    edge source must default off, exactly like the camera (D-16)."""
+    from atlas.config import EDGE_BARGE_IN_PROVEN
+
+    assert EDGE_BARGE_IN_PROVEN is False
+
+
+def test_shipped_config_example_edge_values_match_the_dataclass_defaults(monkeypatch):
+    """`Config.from_config` over the real, shipped `config/config.example.yaml`
+    gives the same `edge.*` values `EdgeSourceConfig()`'s own dataclass
+    defaults do, and `end_of_speech_hangover_ms` is 0 -- the shipped file
+    and the code's own fallback must never disagree (D-08, D-11)."""
+    from pathlib import Path
+
+    from atlas.config import EdgeSourceConfig, load_config
+
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://camera.invalid/stream")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "http://go2rtc.invalid/ensure")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+
+    example_path = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
+    config = load_config(example_path)
+
+    defaults = EdgeSourceConfig()
+    assert config.edge.asr_channel == defaults.asr_channel
+    assert config.edge.pre_roll_ms == defaults.pre_roll_ms
+    assert config.edge.tail_ms == defaults.tail_ms
+    assert config.edge.end_of_speech_hangover_ms == 0

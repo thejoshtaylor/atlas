@@ -576,14 +576,43 @@ class EdgeSourceConfig:
     firmware v2.0.6 capturing exactly 2 channels at 16 kHz, S16_LE. Neither
     is something this file assumes independently of that measurement.
 
-    `asr_channel`, `pre_roll_ms`, and `tail_ms` each default to `None`
-    rather than a guessed number: the D-18 spike (10-CONTEXT.md) measures
-    which capture channel carries the ASR beam and how long the Pi's
-    Silero VAD onset lags the start of speech, and plan 10-10 writes the
-    measured defaults once that spike has run. `require_measured()` is
-    the refusal this absence exists to produce -- a source built before
-    the spike's numbers are configured must stop by name, not run with a
-    channel index or a pre-roll window nobody measured.
+    `asr_channel`, `pre_roll_ms`, and `tail_ms` each defaulted to `None`
+    until plan 10-10, rather than a guessed number: the D-18 spike
+    (10-CONTEXT.md, `10-SPIKE.md`) measured which capture channel carries
+    the ASR beam and how long the Pi's Silero VAD onset and offset lag the
+    start and end of speech, on the operator's own Pi 4 + Seeed reSpeaker
+    XVF3800 (USB `2886:001a`, firmware v2.0.6, 2ch/16kHz/S16_LE). Plan
+    10-10 writes those measured numbers here as the shipped defaults, each
+    still overridable by `edge.asr_channel`/`edge.pre_roll_ms`/
+    `edge.tail_ms` in configuration -- and an explicit `null` there still
+    means "not measured" (`require_measured()` below), for a different
+    array this codebase's own defaults do not describe.
+
+    `asr_channel: int | None = 0` -- 10-SPIKE.md's Q1. The SNR verdict
+    already preferred channel 0 (margins +1.26/+2.85/-3.58 dB across three
+    talker positions, 2 of 3 agreeing by at least 1 dB), and the
+    operator's D-19 amendment settled the question directly by word error
+    rate instead: faster-whisper `small.en` measured channel 0 at 4% mean
+    WER against channel 1's 7% (`10-SPIKE-Q1-WER.md`) -- lower WER wins.
+    This is a measurement of *this* array's USB firmware, not the
+    vendor's I2S-firmware wiki channel labeling, which this array does not
+    run.
+
+    `pre_roll_ms: int | None = 1100` -- 10-SPIKE.md's Q5.
+    `derive_pre_roll_ms(onset_delays_ms)` over 20 measured utterances is
+    `ceil((max_onset_ms + 100) / 50) * 50 = ceil((974.0 + 100) / 50) * 50 =
+    1100`. The Silero onset delay measured p50 275.0 ms, p95 856.2 ms, max
+    974.0 ms (three outliers at 660/850/974 ms drive this worst case on
+    purpose -- the derive rule takes the max, not the p95).
+
+    `tail_ms: int | None = 1300` -- 10-SPIKE.md's Q5.
+    `derive_tail_ms(offset_lags_ms, endpointing_ms=200)` is
+    `ceil((200 + 100 - min_offset_lag_ms) / 50) * 50 =
+    ceil((200 + 100 - (-960.0)) / 50) * 50 = 1300`. The Silero offset lag
+    measured p50 677.0 ms, p95 1174.9 ms, max 1192.0 ms, min -960.0 ms
+    (three negative offsets at -244/-864/-960 ms drive this worst case).
+    `endpointing_ms: 200` is read live from `config/config.example.yaml`'s
+    own `stt.endpointing_ms` at spike time, not assumed.
 
     `end_of_speech_hangover_ms: int = 0` (D-11): the server-side knob an
     operator raises only if recorded sessions show sentences cut at a
@@ -593,9 +622,9 @@ class EdgeSourceConfig:
 
     sample_rate: int = 16000
     channels: int = 2
-    asr_channel: int | None = None
-    pre_roll_ms: int | None = None
-    tail_ms: int | None = None
+    asr_channel: int | None = 0
+    pre_roll_ms: int | None = 1100
+    tail_ms: int | None = 1300
     end_of_speech_hangover_ms: int = 0
     ping_interval_s: float = 5.0
 
@@ -686,6 +715,19 @@ class EdgeSourceConfig:
                 "run -- these are measured by the Phase 10 spike (10-CONTEXT.md D-18) and "
                 "written by plan 10-10, not guessed at"
             )
+
+
+# D-16, Q3 (`10-SPIKE.md`): the spike's `aec_verdict` returned
+# `not_proven` -- playback-only opened 2 VAD segments on the array (the
+# chip's own echo triggering VAD, an AEC-failure signature) and doubletalk
+# opened none (inconclusive on top of that). Barge-in for the edge source
+# stays off by default, exactly like the camera, until a later spike
+# proves the array's on-chip AEC actually suppresses its own played-back
+# reply well enough to gate a VAD-triggered interrupt safely. `app.py`'s
+# edge runner reads this constant only when `barge_in.sources.edge` sets
+# no explicit `enabled` override of its own (D-16) -- the camera-era
+# global `barge_in.enabled` never reaches this source by accident.
+EDGE_BARGE_IN_PROVEN: bool = False
 
 
 @dataclass(frozen=True)
