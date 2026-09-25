@@ -1,0 +1,48 @@
+# The atlas-edge Pi service (D-04): captures the XVF3800, gates and
+# streams speech to the server, plays replies back through the array,
+# and reports DoA and send delay. Restarts forever -- there is no
+# container on the Pi, and no other topology is supported (D-04).
+#
+# Install: copy to /etc/systemd/system/atlas-edge.service, then
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-edge
+# See docs/runbooks/edge-microphone.md for the full provisioning steps
+# this unit assumes have already run (the atlas-edge user, the udev
+# rule, the venv at /opt/atlas-edge/edge/.venv, and the config file).
+
+[Unit]
+Description=ATLAS edge microphone (XVF3800 capture, VAD, and reply playback)
+After=network-online.target sound.target
+Wants=network-online.target
+# Restart=always must never give up, no matter how many times this
+# service has already restarted in a row (D-04) -- a Pi that loses power
+# or Wi-Fi for an hour must still be reconnecting when it comes back.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=atlas-edge
+Group=atlas-edge
+# T-10-29: audio for the XVF3800's ALSA device, plugdev for the udev
+# rule this project's own 99-atlas-edge-xvf3800.rules grants (T-10-30).
+SupplementaryGroups=audio plugdev
+WorkingDirectory=/opt/atlas-edge/edge
+Environment=PYTHONPATH=/opt/atlas-edge/edge/src
+ExecStart=/opt/atlas-edge/edge/.venv/bin/python -m atlas_edge --config /etc/atlas-edge/config.toml
+Restart=always
+RestartSec=2
+
+# T-10-29 sandboxing -- a dedicated unprivileged user plus these
+# directives, so a compromise of this network client (it holds a bearer
+# token and USB access) cannot reach the rest of this Pi.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ReadOnlyPaths=/etc/atlas-edge
+
+[Install]
+WantedBy=multi-user.target

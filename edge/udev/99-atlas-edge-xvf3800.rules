@@ -1,0 +1,6 @@
+# Grants group `plugdev` access to the Seeed reSpeaker XVF3800 (USB
+# 2886:001a) only -- nothing else (T-10-30). Install to
+# /etc/udev/rules.d/99-atlas-edge-xvf3800.rules, then:
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", MODE="0660", GROUP="plugdev"
