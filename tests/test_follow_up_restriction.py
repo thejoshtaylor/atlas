@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from atlas_mcp.google_tools import PROPOSAL_TURN_TOOL_NAMES
 from atlas_mcp.safety import Policy
 
 from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
@@ -69,12 +70,18 @@ def _two_accounts_no_default():
 
 
 def _context(tool_host, pending_actions, brain) -> HandoffContext:
+    # R3-IN-03: `HandoffContext.proposal_tool_names` now defaults to
+    # `frozenset()` (fail closed). These tests exercise a restricted round
+    # that must actually be able to propose a calendar event or delete, so
+    # they pass the bare names explicitly -- the same names a real running
+    # Google plugin's own `offered_tool_names_for_module` would resolve to.
     return HandoffContext(
         source_name="camera",
         tool_host=tool_host,
         pending_actions=pending_actions,
         brain=brain,
         now=tpa._NOW + timedelta(seconds=5),
+        proposal_tool_names=PROPOSAL_TURN_TOOL_NAMES,
     )
 
 
@@ -382,6 +389,17 @@ def test_naming_result_lists_only_the_owning_plugins_offered_names():
         {"google__calendar_propose_event", "calendar_propose_delete"}
     )
     assert result.offered_names_owned_by("missing", CALENDAR_PROPOSAL_TOOL_NAMES) == frozenset()
+
+
+def test_handoff_context_proposal_tool_names_defaults_to_empty():
+    """R3-IN-03: a construction site that forgets `proposal_tool_names`
+    must fail closed, not fall back to the bare names matched exactly --
+    the exact R2-WR-04 case this field exists to prevent. Only
+    `build_handoff_context` (tested below) is trusted to fill in the real
+    set; every other caller gets nothing offered on a restricted turn."""
+    ctx = HandoffContext(source_name="camera", tool_host=None, pending_actions=None, brain=None)
+
+    assert ctx.proposal_tool_names == frozenset()
 
 
 def test_build_handoff_context_reads_the_google_plugins_offered_names():

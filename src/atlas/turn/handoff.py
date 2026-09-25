@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, HANDOFF_KEY, PROPOSAL_TURN_TOOL_NAMES
+from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, HANDOFF_KEY
 
 from atlas.db.pending_action_repository import PendingActionRepository
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
@@ -169,9 +169,17 @@ class HandoffContext:
     # call -- the running Google plugin's own `PROPOSAL_TURN_TOOL_NAMES`
     # (R2-WR-05), resolved by ownership
     # (`PluginManager.offered_tool_names_for_module`), never by a name
-    # suffix. `build_handoff_context` always sets it. The default, the bare
-    # names matched exactly, serves a context built by hand.
-    proposal_tool_names: frozenset[str] = PROPOSAL_TURN_TOOL_NAMES
+    # suffix. `build_handoff_context` always sets it explicitly.
+    #
+    # R3-IN-03: the default is `frozenset()`, not the bare names, so a
+    # future construction site that forgets this field fails closed --
+    # exactly the R2-WR-04 case this field exists to prevent, rather than
+    # silently offering any plugin's uncontested bare
+    # `calendar_propose_event` on a restricted turn. `controller.py`'s own
+    # "no context" branch already reads `frozenset()`; this only makes a
+    # context that forgot the field behave the same way. Tests that need
+    # the bare names pass them explicitly.
+    proposal_tool_names: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

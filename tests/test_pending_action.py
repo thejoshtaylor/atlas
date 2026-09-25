@@ -27,6 +27,7 @@ from atlas_mcp.google import (
     handle_calendar_propose_event,
 )
 from atlas_mcp.google_boundary import AccountGrant, CalendarGrant, Clarification, resolve_write_target
+from atlas_mcp.google_tools import PROPOSAL_TURN_TOOL_NAMES
 from atlas_mcp.ha import handle_call_service
 from atlas_mcp.safety import Denied, Policy
 
@@ -1731,6 +1732,10 @@ async def test_an_amendment_supersedes_and_produces_a_new_readback_with_deeper_c
         pending_actions=pending_actions,
         brain=confirmation_brain,
         now=_NOW + timedelta(seconds=5),
+        # R3-IN-03: the default is now `frozenset()` (fail closed) -- the
+        # amended continuation below re-proposes through the restricted
+        # round, which needs the bare proposal-tool names to be offered.
+        proposal_tool_names=PROPOSAL_TURN_TOOL_NAMES,
     )
     incoming = FollowUpRequest(
         kind="confirmation",
@@ -1837,6 +1842,10 @@ async def test_an_amended_continuation_offering_ha_call_service_never_executes_i
         pending_actions=pending_actions,
         brain=confirmation_brain,
         now=_NOW + timedelta(seconds=5),
+        # R3-IN-03: the default is now `frozenset()` (fail closed) -- this
+        # test asserts the ordinary tier is offered exactly the two bare
+        # proposal-tool names, which requires the real set here.
+        proposal_tool_names=PROPOSAL_TURN_TOOL_NAMES,
     )
     incoming = FollowUpRequest(
         kind="confirmation",
