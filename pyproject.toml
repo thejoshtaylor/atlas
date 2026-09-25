@@ -73,6 +73,13 @@ dependencies = [
     # media-session auth this camera's firmware now requires -- go2rtc's
     # built-in tapo:// client cannot satisfy it.
     "pytapo>=3.4,<4",
+    # Human-approved 2026-09-24 (09-02-PLAN.md Task 1, gate="blocking-human",
+    # never auto-approved). 09-RESEARCH.md recommended `talon`, but the only
+    # `talon` on PyPI is 1.4.4, a 2017-08-24 source-only build pulling
+    # cchardet/scipy/scikit-learn -- not a safe bet on this project's Python
+    # 3.14. The replacement ships a py3-none-any wheel, no runtime
+    # dependencies, MIT licensed, active releases through 2025-12-01.
+    "mail-parser-reply>=1.36,<2",
 ]
 
 [project.optional-dependencies]
