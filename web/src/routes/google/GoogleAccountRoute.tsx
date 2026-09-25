@@ -53,11 +53,12 @@ const LINKED_BANNER = "Linked. Every calendar starts off -- choose what ATLAS ma
 const UNLINK_BODY = "ATLAS loses access to this account's calendars and mail. Drafts already in Gmail stay there."
 
 // R2-WR-09: `DELETE /api/google/accounts/:id` deletes the row BEFORE it
-// reconciles the running Google tools. A 503 therefore means the unlink
-// happened and only the reconcile failed -- the server stopped the tools
-// (a narrowing change, D-05). The server's own text says "retry this
-// action", but a retry of this DELETE can only 404, so this page says what
-// is true instead and hands the sentence to the list page.
+// reconciles the running Google tools, so a 503 from THAT route -- one
+// that actually reached it -- means the unlink happened and only the
+// reconcile failed; the server stopped the tools (a narrowing change,
+// D-05). The server's own text says "retry this action", but a retry of
+// this DELETE can only 404, so this page says what is true instead and
+// hands the sentence to the list page.
 function unlinkedToolsStoppedNotice(label: string): string {
   return `Unlinked ${label}. The Google tools stopped and did not start again. They start again after the next account change or token refresh.`
 }
@@ -182,12 +183,37 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
       navigate("/google")
     } catch (err) {
       if (err instanceof ApiError && err.status === 503) {
-        // R2-WR-09: the account is already gone -- the mutation's own
-        // `onSuccess` never ran, so do its cache work here, then leave.
-        queryClient.removeQueries({ queryKey: googleAccountQueryKey(account.id) })
-        void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, exact: true })
-        setUnlinkOpen(false)
-        navigate("/google", { state: { notice: unlinkedToolsStoppedNotice(account.label) } })
+        // R3-WR-02: `apiFetch` turns EVERY 503 into this same `ApiError`
+        // shape, whether or not the DELETE ever reached the route above --
+        // k3s's default Traefik ingress (or any reverse proxy in front of
+        // the Compose deployment) returns its own plain-text 503 when the
+        // pod has no ready endpoint, during a rollout or a restart. Ask the
+        // server what actually happened rather than guessing from the
+        // status code alone: refetch the account, and treat it as gone
+        // only when that refetch itself 404s -- the one shape
+        // `_unknown_account_error` always raises once the row is truly
+        // deleted, whatever wording the DELETE route's own 503 detail
+        // carried this time.
+        let confirmedGone = false
+        try {
+          await fetchGoogleAccount(account.id)
+        } catch (refetchErr) {
+          confirmedGone = refetchErr instanceof ApiError && refetchErr.status === 404
+        }
+        if (confirmedGone) {
+          // The mutation's own `onSuccess` never ran (the DELETE 503'd
+          // too), so do its cache work here, then leave.
+          queryClient.removeQueries({ queryKey: googleAccountQueryKey(account.id) })
+          void queryClient.invalidateQueries({ queryKey: GOOGLE_ACCOUNTS_QUERY_KEY, exact: true })
+          setUnlinkOpen(false)
+          navigate("/google", { state: { notice: unlinkedToolsStoppedNotice(account.label) } })
+          return
+        }
+        // The account still exists (or the refetch itself failed some
+        // other way, e.g. the same proxy again) -- the DELETE never
+        // completed. Show what the server said and stay on the page; a
+        // retry is exactly what the operator needs, not a false "gone".
+        setUnlinkError(err.message)
         return
       }
       setUnlinkError(err instanceof ApiError ? err.message : "Couldn't unlink this account. Try again.")

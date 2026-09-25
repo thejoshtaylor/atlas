@@ -490,10 +490,20 @@ test("a failed unlink shows the server's error text verbatim (C-CR-01, R2-WR-09)
   expect(await screen.findByText("the database could not be reached")).toBeTruthy()
 })
 
-test("R2-WR-09: a 503 from unlink means the account is already gone -- the page leaves it and never offers a retry", async () => {
+test("R3-WR-02: a 503 from the delete route whose refetch 404s means the account is really gone -- the page leaves it and never offers a retry", async () => {
+  // R2-WR-09's own case, told the R3-WR-02 way: the fixed status code (503)
+  // is no longer trusted alone -- a refetch of the account is, and it 404s
+  // here because the DELETE really did commit before the route's own
+  // reconcile-failed 503.
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let fetchCalls = 0
   stubGoogle(queryClient, {
-    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    fetchGoogleAccount: async () => {
+      fetchCalls += 1
+      if (fetchCalls === 1) return sampleAccount({ id: 7, label: "work" })
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(404, "no google account with id 7")
+    },
     unlinkGoogleAccount: async () => {
       const { ApiError } = await import("@/lib/api")
       throw new ApiError(
@@ -528,6 +538,49 @@ test("R2-WR-09: a 503 from unlink means the account is already gone -- the page 
   expect(screen.queryByText(/retry this action/)).toBeNull()
   expect(queryClient.getQueryState(["google", "accounts", 7])).toBeUndefined()
   expect(queryClient.getQueryState(["google", "accounts"])?.isInvalidated).toBe(true)
+})
+
+test("R3-WR-02: a 503 from a proxy that never reached the server shows an error and stays on the page", async () => {
+  // The DELETE never reached the backend (a plain-text 503 from an
+  // ingress/reverse proxy with no ready endpoint has no `detail` field at
+  // all, unlike the route's own JSON error). The account still exists --
+  // the refetch below proves it by succeeding, not 404ing -- so the page
+  // must show the error and must never claim the account is gone.
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    unlinkGoogleAccount: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(503, "The server is unavailable.")
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/google/accounts/7"]}>
+        <Routes>
+          <Route path="/google/accounts/:id" element={<GoogleAccountRoute />} />
+          <Route path="/google" element={<NoticeProbe />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+
+  fireEvent.click(await screen.findByRole("button", { name: "Unlink" }))
+  const dialogUnlinkButtons = screen.getAllByRole("button", { name: "Unlink work" })
+  fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
+
+  // The error is shown, and it is the server's own text -- not the
+  // "Unlinked..." notice, which would be a false claim here.
+  expect(await screen.findByText("The server is unavailable.")).toBeTruthy()
+  expect(screen.queryByText(/^Unlinked work\./)).toBeNull()
+
+  // The page never left, and the account's own cache entry is untouched --
+  // the next list fetch would still show this account, which is correct,
+  // because it is still linked.
+  expect(screen.getByText("work")).toBeTruthy()
+  expect(queryClient.getQueryState(["google", "accounts", 7])).toBeDefined()
 })
 
 function NoticeProbe() {
