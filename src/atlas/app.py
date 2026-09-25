@@ -91,6 +91,7 @@ from atlas.providers.tier_reply import FILLER_TEXT
 from atlas.providers.tts_cache import CachedTts, precache_all
 from atlas.providers.tts_xai import SinkFormat
 from atlas.routes import register_routers
+from atlas.routes.follow_up_settings import FOLLOW_UP_WINDOW_SETTING_KEY
 from atlas.routes.wake import WAKE_THRESHOLD_SETTING_KEY
 from atlas.routes.wizard import resolve_audio_source, resolve_timezone
 from atlas.session.observers import ObserverPublishingSource, ObserverRegistry
@@ -651,6 +652,35 @@ async def _resolve_wake_threshold(settings_repo: SettingsRepository) -> "tuple[f
     return None, "config"
 
 
+async def _resolve_follow_up_window_s(
+    settings_repo: SettingsRepository, config_default: float
+) -> "tuple[float, str]":
+    """`(window_s, resolved_from)` for the follow-up window's own length
+    (`FOLLOW_UP_WINDOW_SETTING_KEY`), mirroring `_resolve_wake_threshold`'s
+    own database-then-configuration precedence immediately above. Unlike
+    the wake threshold, a stored value outside `PUT /api/settings/
+    follow-up-window`'s own 3-15 second range never refuses the boot
+    (T-09-41): that route already enforces this exact range on the way
+    in, so an out-of-range row can only have arrived some other way, and
+    a boot must never refuse over a setting a route already validated --
+    logged and the configured default used instead, the same "a boot
+    never refuses over a setting the route already validated" doctrine
+    `routes/follow_up_settings.py`'s own module docstring states.
+    """
+    setting = await settings_repo.get_setting(FOLLOW_UP_WINDOW_SETTING_KEY)
+    if setting is not None and isinstance(setting.value, (int, float)) and not isinstance(setting.value, bool):
+        value = float(setting.value)
+        if 3.0 <= value <= 15.0:
+            return value, "database"
+        logger.warning(
+            "stored follow-up window %r is outside [3, 15] -- falling back to the "
+            "configured value %r",
+            value,
+            config_default,
+        )
+    return config_default, "config"
+
+
 async def _open_speaker_writer(writer: FifoWriter) -> None:
     """Open `writer` in the background, never inline in `lifespan`.
 
@@ -1092,6 +1122,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "itself, so refusing to boot on a setting this process cannot honestly interpret"
         )
     logger.info("wake threshold resolved from %s", wake_threshold_resolved_from)
+
+    # Plan 09-07 (D-09, T-09-41): the follow-up window's own length,
+    # stored on `app.state` (a plain float, not a callable) so both
+    # `SourceRunner` constructions below can read it live through their
+    # own `follow_up_window_s=lambda: app.state.follow_up_window_s` --
+    # `PUT /api/settings/follow-up-window` writes this same attribute
+    # directly, with no restart needed for the very next window to see it.
+    resolved_follow_up_window_s, follow_up_window_resolved_from = await _resolve_follow_up_window_s(
+        settings_repo, config.follow_up.window_s
+    )
+    app.state.follow_up_window_s = resolved_follow_up_window_s
+    logger.info("follow-up window resolved from %s", follow_up_window_resolved_from)
 
     # D-01 (phase 4), extended by the 260924-h2f quick task (issue #1):
     # resolve the house's own time zone -- the one process-wide reading
@@ -1618,10 +1660,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         preroll=preroll,
         calibration=camera_calibration,
         wake_event_repo=wake_event_repo,
-        # Plan 09-06 (D-06, D-09): a callable, not a plain float, so a
-        # later live change to `config.follow_up.window_s` (were one ever
-        # added) reaches the very next follow-up window with no restart.
-        follow_up_window_s=lambda: config.follow_up.window_s,
+        # Plan 09-06/09-07 (D-06, D-09, T-09-41): a callable, not a plain
+        # float, reading `app.state.follow_up_window_s` -- resolved once
+        # at boot above, and the exact attribute `PUT /api/settings/
+        # follow-up-window` overwrites live -- so a later change reaches
+        # the very next follow-up window with no restart.
+        follow_up_window_s=lambda: app.state.follow_up_window_s,
         follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
     )
     if resolved_wake_threshold is not None:
@@ -2308,9 +2352,12 @@ async def listen_ws(websocket: WebSocket) -> None:
         # ponytail: reuses the camera's pre-roll length, add a listener key if they ever need to differ.
         preroll=PrerollBuffer(source.source_format(), config.camera.preroll_ms),
         wake_event_repo=getattr(app_.state, "wake_event_repo", None),
-        # Plan 09-06: the browser listener gets the identical follow-up
-        # window the camera does -- both run through `SourceRunner`.
-        follow_up_window_s=lambda: config.follow_up.window_s,
+        # Plan 09-06/09-07: the browser listener gets the identical
+        # follow-up window the camera does -- both run through
+        # `SourceRunner`, both reading the same live `app.state.
+        # follow_up_window_s` (resolved once at boot, overwritten by
+        # `PUT /api/settings/follow-up-window`).
+        follow_up_window_s=lambda: websocket.app.state.follow_up_window_s,
         follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
     )
     camera_runners = getattr(app_.state, "source_runners", None) or []

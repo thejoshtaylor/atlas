@@ -18,6 +18,7 @@ import {
 import { PROVIDERS_QUERY_KEY, fetchProviders } from "@/lib/providers"
 import { needsRestart } from "@/routes/providers/deriveProvidersScreenState"
 import { TimezoneField } from "@/routes/wizard/TimezoneField"
+import { FollowUpWindowField } from "@/routes/settings/FollowUpWindowField"
 
 // 03-UI-SPEC.md's Focal Point row: "the section headings and their Live
 // / Needs-restart badges -- the badge is the information the screen
@@ -134,6 +135,8 @@ export function SettingsRoute() {
       </div>
 
       <TimezoneField />
+
+      <FollowUpWindowField />
 
       {query.status === "pending" ? <SkeletonList rows={2} /> : null}
 
