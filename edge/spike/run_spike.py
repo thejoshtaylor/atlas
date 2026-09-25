@@ -220,6 +220,11 @@ def cmd_aec(args: argparse.Namespace) -> int:
     print(f"Volume check: {args.volume_note}")
     print("Recording 20 seconds of you reading -- this becomes the playback reference.")
     reference = _capture(sd, 20.0, sample_rate)[:, [args.asr_channel]]
+    # A distant-mic recording sits near -34 dBFS RMS -- far quieter than a TTS
+    # reply. Scale its peak to -3 dBFS so the playback matches reply loudness.
+    peak = int(np.abs(reference.astype(np.int32)).max())
+    if peak:
+        reference = (reference.astype(np.float64) * (0.707 * 32767 / peak)).astype(np.int16)
     _write_wav(RESULTS_DIR / f"aec-reference-{_timestamp()}.wav", reference, sample_rate)
 
     def _run(label: str) -> int:
@@ -284,21 +289,84 @@ def cmd_multibeam(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vad_detect_times_ms(
+    samples: np.ndarray, sample_rate: int, vad_model_path: str
+) -> tuple[float, float] | None:
+    """When Silero first flags speech, and when it closes that segment, in ms
+    from the buffer start -- the moments a live segmenter would act on.
+    `samples`: mono float32 in [-1, 1]. None when either never happens."""
+    import sherpa_onnx
+
+    config = sherpa_onnx.VadModelConfig()
+    config.silero_vad.model = vad_model_path
+    config.sample_rate = sample_rate
+    vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
+
+    window = max(1, int(round(sample_rate * _VAD_WINDOW_S)))
+    onset_ms: float | None = None
+    for start in range(0, len(samples) - window + 1, window):
+        vad.accept_waveform(samples[start : start + window])
+        fed_ms = (start + window) * 1000.0 / sample_rate
+        if onset_ms is None and vad.is_speech_detected():
+            onset_ms = fed_ms
+        if not vad.empty():
+            return (onset_ms if onset_ms is not None else fed_ms), fed_ms
+    return None
+
+
 def cmd_onset(args: argparse.Namespace) -> int:
-    """Q5: the Silero onset delay, for the pre_roll_ms default."""
+    """Q5: the Silero onset delay against the start of the wake phrase (D-08),
+    for the pre_roll_ms and tail_ms defaults."""
     sd = _array_sounddevice()
 
     sample_rate = 16000
+    quiet_s, after_prompt_s = 1.0, 3.0
     onset_delays_ms: list[float] = []
     offset_lags_ms: list[float] = []
-    for i in range(args.count):
-        print(f"[{i + 1}/{args.count}] stay quiet for 1 second...")
-        time.sleep(1.0)
-        print(f"[{i + 1}/{args.count}] now say the wake phrase...")
-        buffer = _capture(sd, 2.0, sample_rate)
-        samples = buffer[:, args.asr_channel].astype(np.float64)
-        onset_delays_ms.append(analysis.energy_onset_ms(samples, sample_rate))
-        offset_lags_ms.append(analysis.energy_offset_ms(samples, sample_rate))
+    skipped: list[str] = []
+    attempt = 0
+    while len(onset_delays_ms) < args.count and attempt < args.count + 10:
+        attempt += 1
+        tag = f"[{len(onset_delays_ms) + 1}/{args.count}]"
+        print(f"{tag} stay quiet...")
+        # One continuous capture: the quiet second is the noise floor the
+        # energy onset is measured against. Silence plays so the XVF3800
+        # delivers capture frames (see _capture).
+        silence = np.zeros((int((quiet_s + after_prompt_s) * sample_rate), 2), dtype=np.int16)
+        buffer = sd.playrec(silence, samplerate=sample_rate, channels=2, dtype="int16")
+        time.sleep(quiet_s)
+        print(f"{tag} now say the wake phrase...")
+        sd.wait()
+        mono = buffer[:, args.asr_channel]
+        try:
+            energy_on = analysis.energy_onset_ms(mono.astype(np.float64), sample_rate)
+            energy_off = analysis.energy_offset_ms(mono.astype(np.float64), sample_rate)
+        except ValueError as exc:
+            skipped.append(f"attempt {attempt}: {exc}")
+            print(f"{tag} no clear phrase ({exc}) -- again")
+            continue
+        vad_times = _vad_detect_times_ms(
+            mono.astype(np.float32) / 32768.0, sample_rate, args.vad_model
+        )
+        if vad_times is None:
+            skipped.append(f"attempt {attempt}: Silero never opened and closed a segment")
+            print(f"{tag} Silero missed it -- again")
+            continue
+        vad_on, vad_off = vad_times
+        onset_delays_ms.append(vad_on - energy_on)
+        offset_lags_ms.append(vad_off - energy_off)
+        print(f"{tag} onset delay {vad_on - energy_on:.0f} ms, offset lag {vad_off - energy_off:.0f} ms")
+
+    if len(onset_delays_ms) < args.count:
+        result_fail: dict[str, Any] = {
+            "command": "onset",
+            "error": f"only {len(onset_delays_ms)} of {args.count} utterances measured",
+            "onset_delays_ms": onset_delays_ms,
+            "offset_lags_ms": offset_lags_ms,
+            "skipped": skipped,
+        }
+        _write_result("onset", result_fail)
+        return 1
 
     pre_roll_ms = analysis.derive_pre_roll_ms(onset_delays_ms)
     tail_ms = analysis.derive_tail_ms(offset_lags_ms, args.endpointing_ms)
@@ -308,6 +376,8 @@ def cmd_onset(args: argparse.Namespace) -> int:
         "onset_delays_ms": onset_delays_ms,
         "offset_lags_ms": offset_lags_ms,
         "endpointing_ms": args.endpointing_ms,
+        "asr_channel": args.asr_channel,
+        "skipped": skipped,
         "derived_pre_roll_ms": pre_roll_ms,
         "derived_tail_ms": tail_ms,
     }

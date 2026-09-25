@@ -9,6 +9,12 @@ dependencies = [
     # -- source reaches github.com/k2-fsa/sherpa-onnx, 28 releases since
     # 2023-11-21, cp311 manylinux2014_aarch64 wheel present.
     "sherpa-onnx==1.13.8",
+    # Human-approved 2026-09-25 during the 10-03 spike (operator: "approved").
+    # The aarch64 sherpa-onnx wheel requires sherpa-onnx-core (it ships
+    # libonnxruntime.so), but the universal lock resolved sherpa-onnx from
+    # another platform's metadata and dropped it. Same project
+    # (github.com/k2-fsa/sherpa-onnx), same version, 55 releases.
+    "sherpa-onnx-core==1.13.8",
     # Human-approved 2026-09-25 (10-01-PLAN.md Task 1, gate=blocking-human,
     # never auto-approved). Operator confirmed pypi.org/project/sounddevice/
     # -- source reaches github.com/spatialaudio/python-sounddevice, 36
