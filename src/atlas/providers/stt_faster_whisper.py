@@ -17,6 +17,7 @@ megabytes from the internet is exactly what D-11 exists to forbid.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import Any, AsyncIterator, Callable
 
@@ -137,13 +138,63 @@ class FasterWhisperStt:
             ) from exc
 
     async def stream(
-        self, frames: AsyncIterator[bytes], source_format: SourceFormat
+        self,
+        frames: AsyncIterator[bytes],
+        source_format: SourceFormat,
+        *,
+        finalize: "asyncio.Event | None" = None,
     ) -> AsyncIterator[PartialTranscript | FinalTranscript]:
-        """Buffer the whole turn, decode/resample to 16 kHz PCM16 when the
-        source is A-law, and transcribe once. See the module docstring for
-        why this is segment-level, not truly incremental.
+        """Buffer the turn, decode/resample to 16 kHz PCM16 when the source
+        is A-law, and transcribe once. See the module docstring for why
+        this is segment-level, not truly incremental.
+
+        `finalize` (D-12), when given, ends the segment at once: a reader
+        task appends `frames` to a list while this method races it against
+        `finalize.wait()`. Whichever finishes first wins -- the reader
+        cancelled and transcription run on whatever it collected so far, or
+        `frames` genuinely exhausted first (unreachable on a live source
+        that never ends on its own, see below). With no `finalize`, this is
+        byte-for-byte the drain-everything path this method always had.
+
+        This is the only way this provider ever ends a turn early on a live
+        source: a room-facing `AudioSource`'s `frames()` never ends on its
+        own (a live mic keeps streaming until the operator's own start/stop
+        toggle, `stt_xai.py`'s own `sender()` docstring states the same
+        fact for the cloud provider), so with no `finalize` this method
+        would otherwise buffer forever on such a source.
         """
-        chunks = [chunk async for chunk in frames]
+        if source_format.channels != 1:
+            raise SttError(
+                f"local speech-to-text requires a single-channel source, got "
+                f"{source_format.channels} channels"
+            )
+
+        if finalize is None:
+            chunks = [chunk async for chunk in frames]
+        else:
+            collected: list[bytes] = []
+
+            async def _reader() -> None:
+                async for chunk in frames:
+                    collected.append(chunk)
+
+            reader_task = asyncio.create_task(_reader())
+            finalize_task = asyncio.create_task(finalize.wait())
+            try:
+                await asyncio.wait(
+                    {reader_task, finalize_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+            finally:
+                if not reader_task.done():
+                    reader_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await reader_task
+                if not finalize_task.done():
+                    finalize_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await finalize_task
+            chunks = collected
+
         raw = b"".join(chunks)
 
         # IN-05 (code review): both branches resample. The `pcm` branch

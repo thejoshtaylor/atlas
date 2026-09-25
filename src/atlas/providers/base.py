@@ -10,10 +10,13 @@ caller cannot silently continue past a failed provider call.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 import httpx
+
+from atlas.transports.base import SourceFormat
 
 # 260924-4iv (item d): httpx's own default `keepalive_expiry` is 5 s. A
 # wake-time warm call opens a connection this many seconds before a
@@ -79,8 +82,29 @@ class TtsError(Exception):
 
 
 class SttProvider(Protocol):
-    def stream(self, frames: AsyncIterator[bytes]) -> AsyncIterator[PartialTranscript | FinalTranscript]:
-        """Stream transcript events for one turn's worth of audio frames."""
+    def stream(
+        self,
+        frames: AsyncIterator[bytes],
+        source_format: SourceFormat,
+        *,
+        finalize: "asyncio.Event | None" = None,
+    ) -> AsyncIterator[PartialTranscript | FinalTranscript]:
+        """Stream transcript events for one turn's worth of audio frames.
+
+        `source_format` is restated here to match every real implementation
+        (`XaiStt.stream`, `FasterWhisperStt.stream`), which already take it --
+        the Protocol had lagged one argument behind them.
+
+        `finalize` (D-12), when given and set, ends the current utterance at
+        once instead of waiting for this provider's own endpointing or for
+        `frames` to exhaust. `None` (the default, and every caller that
+        predates this plan) is today's behavior, unchanged. The event is per
+        *stream call*, never state held on the provider instance: one
+        provider instance serves every source (SRC-03), and a method on the
+        instance instead (`async def finalize(self)`, 10-PATTERNS.md's
+        original sketch) would let one source's VAD end finalize a different
+        source's concurrent turn.
+        """
         ...
 
 

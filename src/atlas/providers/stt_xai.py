@@ -32,6 +32,15 @@ from atlas.config import SttConfig
 from atlas.providers.base import FinalTranscript, PartialTranscript, SttError
 from atlas.transports.base import SourceFormat
 
+# 10-05-PLAN.md D-12: the wire message that ends the current utterance at
+# once, on request, instead of waiting for xAI's own endpointing or for the
+# mic to stop streaming. xAI's own documentation spells this "Finalize";
+# D-12 wrote lowercase "finalize" -- neither has been checked against the
+# live socket. Task 3's `scripts/verify_xai_finalize.py` is that check; this
+# constant is what its result updates, with the date and measured times
+# recorded in the comment above it once run.
+FINALIZE_MESSAGE = {"type": "Finalize"}
+
 
 class XaiStt:
     """Streaming speech-to-text over xAI's WebSocket endpoint."""
@@ -50,7 +59,18 @@ class XaiStt:
         values for both encodings this repository produces are `"pcm"` and
         `"alaw"`, matching `SourceFormat.encoding` exactly -- no translation
         table entry exists for an encoding no source here produces.
+
+        Phase 10 (D-09): a two-channel edge source must never reach this
+        socket as if it were mono -- `turn/controller.py::_drain_to_final_
+        transcript` always hands this provider a one-channel view via
+        `stt_view`, so `channels != 1` here means a caller skipped that
+        seam, not a legitimate multi-channel request.
         """
+        if source_format.channels != 1:
+            raise SttError(
+                f"xAI speech-to-text requires a single-channel source, got "
+                f"{source_format.channels} channels"
+            )
         params = {
             "encoding": source_format.encoding,
             "sample_rate": source_format.sample_rate,
@@ -67,12 +87,24 @@ class XaiStt:
         return f"{self._config.url}?{query}"
 
     async def stream(
-        self, frames: AsyncIterator[bytes], source_format: SourceFormat
+        self,
+        frames: AsyncIterator[bytes],
+        source_format: SourceFormat,
+        *,
+        finalize: "asyncio.Event | None" = None,
     ) -> AsyncIterator[PartialTranscript | FinalTranscript]:
         """Open the socket, stream `frames`, and yield transcript events.
 
         Opened the instant the turn starts (mic toggle pressed, or the wake
         word firing on the camera path), not at end of speech.
+
+        `finalize` (D-12), when given, ends the utterance at once: a
+        `finalizer` task waits for the event and sends `FINALIZE_MESSAGE`
+        once, cancelled in the same `finally` as `sender()`'s own
+        `send_task`. xAI's own endpointing (`transcript.partial` carrying
+        `speech_final`) keeps running exactly as it does today -- whichever
+        of the two fires first ends the turn (D-13), so a lost VAD event on
+        the caller's side never hangs this stream.
         """
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
         async with websockets.connect(self.build_url(source_format), additional_headers=headers) as ws:
@@ -85,7 +117,15 @@ class XaiStt:
                     await ws.send(chunk)
                 await ws.send(json.dumps({"type": "audio.done"}))
 
+            async def finalizer() -> None:
+                # `finalize` is per stream call, never provider state
+                # (base.py's `SttProvider.stream` docstring, SRC-03) -- this
+                # closure captures the one event this call was given.
+                await finalize.wait()
+                await ws.send(json.dumps(FINALIZE_MESSAGE))
+
             send_task = asyncio.create_task(sender())
+            finalize_task = asyncio.create_task(finalizer()) if finalize is not None else None
             try:
                 saw_final = False
                 async for raw in ws:
@@ -137,3 +177,7 @@ class XaiStt:
                 send_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await send_task
+                if finalize_task is not None:
+                    finalize_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await finalize_task
