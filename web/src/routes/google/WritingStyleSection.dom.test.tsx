@@ -193,3 +193,114 @@ test("a 409 from re-learn shows the server's text verbatim", async () => {
 
   expect(await screen.findByText("a re-learn is already running for this account")).toBeTruthy()
 })
+
+test("the profile textarea holds the stored text; Save is disabled until it changes, and shows a live character count", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, { fetchGoogleStyle: async () => sampleStyle({ profile: "Direct and friendly." }) })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const textarea = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  expect(textarea.value).toBe("Direct and friendly.")
+  expect(screen.getByText(`${"Direct and friendly.".length} / 4,000`, { exact: false })).toBeTruthy()
+
+  const saveButton = screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement
+  expect(saveButton.disabled).toBe(true)
+
+  fireEvent.change(textarea, { target: { value: "Direct and friendly, with short sentences." } })
+  expect(saveButton.disabled).toBe(false)
+  expect(
+    screen.getByText(`${"Direct and friendly, with short sentences.".length} / 4,000`, { exact: false }),
+  ).toBeTruthy()
+})
+
+test("saving sends one PUT with {profile} and the section shows the saved text afterwards; a 400 shows the server's text verbatim", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const putCalls: unknown[] = []
+  stubGoogle(queryClient, {
+    fetchGoogleStyle: async () => sampleStyle({ profile: "Direct and friendly." }),
+    saveGoogleStyle: async (input) => {
+      putCalls.push(input)
+      return sampleStyle({ profile: "Warm and concise." })
+    },
+  })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const textarea = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  fireEvent.change(textarea, { target: { value: "Warm and concise." } })
+  fireEvent.click(screen.getByRole("button", { name: "Save profile" }))
+
+  await waitFor(() => expect(putCalls).toEqual([{ accountId: 7, profile: "Warm and concise." }]))
+  await waitFor(() => expect((screen.getByLabelText("Style profile") as HTMLTextAreaElement).value).toBe("Warm and concise."))
+
+  cleanup()
+
+  const queryClient2 = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient2, {
+    fetchGoogleStyle: async () => sampleStyle({ profile: "Direct and friendly." }),
+    saveGoogleStyle: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(400, "profile must be 4,000 characters or fewer")
+    },
+  })
+  const { WritingStyleSection: WritingStyleSection2 } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection2, queryClient2)
+
+  const textarea2 = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  fireEvent.change(textarea2, { target: { value: "x".repeat(5000) } })
+  fireEvent.click(screen.getByRole("button", { name: "Save profile" }))
+
+  expect(await screen.findByText("profile must be 4,000 characters or fewer")).toBeTruthy()
+})
+
+test("Show samples expands a read-only list of the stored samples; with no samples it is absent", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleStyle: async () => sampleStyle({ samples: ["Sounds good, talk soon.", "Thanks -- appreciate it!"] }),
+  })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const toggle = await screen.findByRole("button", { name: "Show samples (2)" })
+  expect(screen.queryByText("Sounds good, talk soon.")).toBeNull()
+
+  fireEvent.click(toggle)
+  expect(screen.getByText("Sounds good, talk soon.")).toBeTruthy()
+  expect(screen.getByText("Thanks -- appreciate it!")).toBeTruthy()
+
+  cleanup()
+
+  const queryClient2 = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient2, { fetchGoogleStyle: async () => sampleStyle({ samples: [] }) })
+  const { WritingStyleSection: WritingStyleSection2 } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection2, queryClient2)
+  await screen.findByLabelText("Style profile")
+  expect(screen.queryByRole("button", { name: /Show samples/ })).toBeNull()
+})
+
+test("the signature shows under 'Signature from Gmail', read-only; with none it says 'No Gmail signature.'", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, { fetchGoogleStyle: async () => sampleStyle({ signature_text: "Jane Doe\nATLAS household" }) })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  expect(await screen.findByText("Signature from Gmail")).toBeTruthy()
+  expect(screen.getByText("Jane Doe", { exact: false })).toBeTruthy()
+
+  cleanup()
+
+  const queryClient2 = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient2, { fetchGoogleStyle: async () => sampleStyle({ signature_text: null }) })
+  const { WritingStyleSection: WritingStyleSection2 } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection2, queryClient2)
+
+  expect(await screen.findByText("No Gmail signature.")).toBeTruthy()
+})
