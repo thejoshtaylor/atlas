@@ -22,7 +22,6 @@ from pydantic import BaseModel, model_validator
 
 from atlas.providers.base import BrainError
 from atlas.turn.follow_up import FollowUpRequest
-from atlas.turn.transcript_guard import is_no_command
 
 logger = logging.getLogger("atlas.turn.pending_action")
 
@@ -532,18 +531,24 @@ async def handle_confirmation_reply(
     terminal status or leaves it exactly as claimed, never both undone and
     left dangling.
 
-    Silence, an empty transcript, or a transcript `is_no_command` reads as
-    filler-only never reaches the confirmation round at all -- there is
-    nothing here to ask a model about, and the row is resolved `expired`
-    rather than `cancelled` so a later reader of the row can tell "nobody
-    answered" apart from "the operator said no" (`turn_outcome`
+    Silence -- no transcript, or a transcript that is empty after trimming
+    -- never reaches the confirmation round at all. There is nothing here
+    to ask a model about, and the row is resolved `expired` rather than
+    `cancelled` so a later reader of the row can tell "nobody answered"
+    apart from "the operator said no" (`turn_outcome`
     `"follow_up_silence"`, D-09).
+
+    R2-WR-02: this is deliberately not `is_no_command`. Its filler list was
+    built for wake turns and holds "yeah", "okay", and "ok" -- the most
+    common spoken answers to a yes/no question. Every non-empty reply goes
+    to the restricted round, which cancels anything it cannot read as a
+    clear confirm.
     """
     now = ctx.now if ctx is not None else datetime.now(timezone.utc)
     pending_actions = ctx.pending_actions if ctx is not None else None
     action_id = incoming.pending_action_id
 
-    if not transcript or is_no_command(transcript):
+    if not transcript or not transcript.strip():
         if pending_actions is not None and action_id is not None:
             await pending_actions.resolve(action_id, "expired", None, now)
         return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="follow_up_silence")
