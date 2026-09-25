@@ -63,9 +63,9 @@ CODE_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
 
 ALL_TOOL_NAMES: frozenset[str] = MODEL_TOOL_NAMES | CODE_ONLY_TOOL_NAMES
 
-# A-CR-02 fix: the only tools a continuation turn born from an `amended`
-# confirmation reply (`turn/controller.py`'s own `restrict_tools_to_proposals`)
-# may ever call. Both members only ever build a fresh `pending_action`
+# A-CR-02 fix: the only tools a proposal-restricted turn
+# (`turn/controller.py`'s own `restrict_tools_to_proposals`) may call that
+# lead to a change. Both members only ever build a fresh `pending_action`
 # handoff (D-08) -- neither one executes anything directly -- so any change
 # the operator describes in that no-wake-word window ("yes, but make it 4")
 # can only ever become a new proposal with its own readback and confirm,
@@ -73,6 +73,14 @@ ALL_TOOL_NAMES: frozenset[str] = MODEL_TOOL_NAMES | CODE_ONLY_TOOL_NAMES
 CALENDAR_PROPOSAL_TOOL_NAMES: frozenset[str] = frozenset(
     {"calendar_propose_event", "calendar_propose_delete"}
 )
+
+# R2-WR-05: every tool a proposal-restricted turn may call -- the two
+# proposal tools, plus the read-only `calendar_list_events`. A delete
+# proposal needs an event id, and the continuation messages carry no
+# earlier tool results. Without the list tool, "no, the one on tuesday"
+# could never become a new delete proposal. The list tool changes nothing
+# in Google Calendar, and D-18 restricts only email bodies.
+PROPOSAL_TURN_TOOL_NAMES: frozenset[str] = CALENDAR_PROPOSAL_TOOL_NAMES | frozenset({"calendar_list_events"})
 
 # D-03: one consent per account covers both the Calendar and Gmail scopes
 # this whole phase needs -- named here so the OAuth authorize-url builder

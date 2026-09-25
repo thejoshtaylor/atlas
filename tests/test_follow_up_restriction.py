@@ -405,3 +405,98 @@ def test_build_handoff_context_reads_the_google_plugins_offered_names():
     assert CALENDAR_PROPOSAL_TOOL_NAMES <= asked[0][1]
     # No plugin manager: nothing is allowed on a restricted turn.
     assert build_handoff_context(NS(state=NS()), "camera").proposal_tool_names == frozenset()
+
+
+# --- R2-WR-05: an amended delete can look up the event it re-proposes -------
+
+
+async def test_an_amended_delete_can_list_events_and_propose_the_right_one(fake_audio_source, fake_stt, fake_tts):
+    """"no, the one on tuesday" needs an event id the continuation does not
+    carry. The read-only `calendar_list_events` is allowed on a restricted
+    turn, so the model can find it and re-propose -- a NEW pending action
+    with its own readback (D-08)."""
+    fakes = (fake_audio_source, fake_stt, fake_tts)
+    fake_google = FakeGoogle()
+    for event_id, day in (("evt-mon", "05"), ("evt-tue", "06")):
+        fake_google.add_event(
+            "at-work",
+            "cal-work",
+            {
+                "id": event_id,
+                "summary": "Standup",
+                "start": {"dateTime": f"2026-10-{day}T09:00:00-04:00"},
+                "end": {"dateTime": f"2026-10-{day}T09:15:00-04:00"},
+            },
+        )
+    tool_host = tpa._GoogleToolHost((tpa._work_account(),), google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_delete",
+        tool_name="calendar_delete_event",
+        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-mon"},
+        readback="delete Standup from the work calendar, monday october 5th at 9 am?",
+        created_at=tpa._NOW,
+        expires_at=tpa._NOW + timedelta(seconds=60),
+    )
+    ctx = _context(tool_host, pending_actions, tpa._RecordingConfirmationBrain("cancel", amended=True))
+    schema = [
+        {"type": "function", "function": {"name": "calendar_list_events"}},
+        {"type": "function", "function": {"name": "calendar_propose_delete"}},
+        {"type": "function", "function": {"name": "gmail_search"}},
+    ]
+    brain = RecordingFakeBrain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_list_events",
+                        arguments={"start": "2026-10-06T00:00:00-04:00", "end": "2026-10-07T00:00:00-04:00"},
+                    )
+                ]
+            ),
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_delete",
+                        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-tue"},
+                    )
+                ]
+            ),
+        ]
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="delete standup",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    tts = fake_tts(chunks=[b"\x01"])
+
+    await run_turn(
+        source,
+        fake_stt(events=[FinalTranscript(text="no, the one on tuesday")]),
+        brain,
+        tts,
+        tool_host,
+        tools_schema=schema,
+        system_prompt="s",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        handoff_context=ctx,
+    )
+
+    assert {entry["function"]["name"] for entry in brain.calls[0].tools} == {
+        "calendar_list_events",
+        "calendar_propose_delete",
+    }
+    assert (await pending_actions.get(created.id)).status == "superseded"
+    new_rows = [row for row in pending_actions._rows.values() if row.id != created.id]
+    assert len(new_rows) == 1 and new_rows[0].arguments["event_id"] == "evt-tue"
+    requested = source.follow_up.requested
+    assert requested is not None and requested.kind == "confirmation" and requested.proposals_only is True
+    assert tts.received_text == ["delete Standup from the work calendar, tuesday october 6th at 9 am?"]
+    assert fake_google.deleted_event_ids == []

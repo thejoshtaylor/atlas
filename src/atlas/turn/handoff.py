@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES, CODE_ONLY_TOOL_NAMES, HANDOFF_KEY
+from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, HANDOFF_KEY, PROPOSAL_TURN_TOOL_NAMES
 
 from atlas.db.pending_action_repository import PendingActionRepository
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
@@ -166,11 +166,12 @@ class HandoffContext:
     # other Google-only field on this dataclass already has.
     style_repo: "Any | None" = None
     # R2-WR-04: the exact offered names a proposal-restricted turn may
-    # call -- the running Google plugin's own proposal tools, resolved by
-    # ownership (`PluginManager.offered_tool_names_for_module`), never by a
-    # name suffix. `build_handoff_context` always sets it. The default, the
-    # bare names matched exactly, serves a context built by hand.
-    proposal_tool_names: frozenset[str] = CALENDAR_PROPOSAL_TOOL_NAMES
+    # call -- the running Google plugin's own `PROPOSAL_TURN_TOOL_NAMES`
+    # (R2-WR-05), resolved by ownership
+    # (`PluginManager.offered_tool_names_for_module`), never by a name
+    # suffix. `build_handoff_context` always sets it. The default, the bare
+    # names matched exactly, serves a context built by hand.
+    proposal_tool_names: frozenset[str] = PROPOSAL_TURN_TOOL_NAMES
 
 
 @dataclass(frozen=True)
