@@ -47,6 +47,7 @@ from atlas.config import (
     load_raw_config,
 )
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
+from atlas.db.edge_postgres import PostgresEdgeDeviceRepository
 from atlas.db.edge_repository import EdgeDevice
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
 from atlas.db.google_postgres import PostgresGoogleAccountRepository
@@ -635,6 +636,11 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # boots unchanged; `atlas.google.turn_context.build_handoff_context`
         # reads this same key with an identical tolerant `getattr`.
         "pending_action_repo": PostgresPendingActionRepository(sessionmaker),
+        # Plan 10-04 (D-03): the edge device token store -- read with
+        # `.get(...)` at the call site below, the same tolerant lookup
+        # `wake_event_repo`/`google_account_repo` already use, so a test's
+        # own fake repository dict that predates this key boots unchanged.
+        "edge_device_repo": PostgresEdgeDeviceRepository(sessionmaker),
     }
 
 
@@ -2485,6 +2491,18 @@ async def edge_ws(websocket: WebSocket, device: EdgeDevice = Depends(require_edg
     if edge_source is None:
         await websocket.close(code=CLOSE_NOT_CONFIGURED)
         return
+
+    # Plan 10-04 (D-03): record the connect for the admin device list's
+    # own `last_connected_at` column. A store error is logged by device
+    # id only (T-10-02: never token material) and never ends the
+    # connection -- a store that is down must not stop a house listening.
+    edge_device_repo = getattr(websocket.app.state, "edge_device_repo", None)
+    if edge_device_repo is not None:
+        try:
+            await edge_device_repo.mark_connected(device.id, at=datetime.now(timezone.utc))
+        except Exception:
+            logger.exception("edge device %s: mark_connected failed", device.id)
+
     await edge_source.serve(websocket, device)
 
 

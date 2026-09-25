@@ -492,6 +492,24 @@ class EdgeAudioSource:
                 self._connected_device_id = None
                 self._active_task = None
 
+    async def disconnect_device(self, device_id: int, *, code: int, reason: str) -> None:
+        """Close the live connection for `device_id` at once, if one is
+        active -- a no-op for any other device or when nothing is
+        connected (plan 10-04, D-03: revoking a device must not merely
+        refuse its *next* reconnect, T-10-12).
+
+        Cancels the same `_active_task` the supersede path in `serve()`
+        cancels, so the closed connection's own `finally` block runs
+        exactly once, the same "still the active connection at cleanup
+        time" guard that path already relies on."""
+        if self._connected_device_id != device_id or self._websocket is None:
+            return
+        websocket = self._websocket
+        active_task = self._active_task
+        await websocket.close(code=code, reason=reason)
+        if active_task is not None:
+            active_task.cancel()
+
     async def close(self) -> None:
         """End `frames()` for good -- the `None` sentinel this class ever
         queues, matching `CameraAudioSource.close`'s own "exactly once, at

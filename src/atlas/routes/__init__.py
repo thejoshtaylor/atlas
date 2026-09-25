@@ -21,6 +21,7 @@ from atlas.routes.accounts import router as accounts_router
 from atlas.routes.auth import router as auth_router
 from atlas.routes.auth import setup_router
 from atlas.routes.credentials import router as credentials_router
+from atlas.routes.edge_devices import router as edge_devices_router
 from atlas.routes.follow_up_settings import router as follow_up_settings_router
 from atlas.routes.google_accounts import router as google_accounts_router
 from atlas.routes.macros import router as macros_router
@@ -70,4 +71,5 @@ def register_routers(app: FastAPI) -> None:
     gated.include_router(wake_router)
     gated.include_router(follow_up_settings_router)
     gated.include_router(google_accounts_router)
+    gated.include_router(edge_devices_router)
     app.include_router(gated)
