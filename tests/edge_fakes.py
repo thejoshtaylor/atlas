@@ -14,6 +14,7 @@ leaked credential.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,19 +27,67 @@ class FakeEdgeDeviceRepository:
     `Fake*Repository` in `tests/conftest.py`. Keyed by token hash;
     `get_active_by_token_hash` returns `None` for both an unknown hash and
     a revoked device (T-10-01) -- the caller never learns which.
+
+    Plan 10-04 extends this to the full Protocol: `create_device`/
+    `list_devices`/`revoke_device`/`mark_connected`, keyed additionally by
+    id (an admin route or `/ws/edge`'s `mark_connected` call has an id, not
+    a token hash). `add` stays for `tests/test_edge_tracer.py`'s own
+    pre-existing call shape.
     """
 
     def __init__(self) -> None:
         self._by_hash: dict[str, EdgeDevice] = {}
+        self._by_id: dict[int, EdgeDevice] = {}
+        self._next_id = 1
 
     def add(self, token_hash: str, device: EdgeDevice) -> None:
         self._by_hash[token_hash] = device
+        self._by_id[device.id] = device
 
     async def get_active_by_token_hash(self, token_hash: str) -> "EdgeDevice | None":
         device = self._by_hash.get(token_hash)
         if device is None or device.revoked_at is not None:
             return None
         return device
+
+    async def create_device(
+        self, *, name: str, token_hash: str, created_by_user_id: "int | None", created_at: datetime
+    ) -> EdgeDevice:
+        if token_hash in self._by_hash:
+            raise ValueError(f"duplicate token_hash {token_hash!r} -- the real Postgres table's own unique constraint")
+        device = EdgeDevice(
+            id=self._next_id,
+            name=name,
+            created_at=created_at,
+            created_by_user_id=created_by_user_id,
+            revoked_at=None,
+            last_connected_at=None,
+        )
+        self._next_id += 1
+        self.add(token_hash, device)
+        return device
+
+    async def list_devices(self) -> "list[EdgeDevice]":
+        return sorted(self._by_id.values(), key=lambda d: (d.created_at, d.id))
+
+    async def revoke_device(self, device_id: int, *, revoked_at: datetime) -> bool:
+        device = self._by_id.get(device_id)
+        if device is None or device.revoked_at is not None:
+            return False
+        self._replace(device_id, replace(device, revoked_at=revoked_at))
+        return True
+
+    async def mark_connected(self, device_id: int, *, at: datetime) -> None:
+        device = self._by_id.get(device_id)
+        if device is None:
+            return
+        self._replace(device_id, replace(device, last_connected_at=at))
+
+    def _replace(self, device_id: int, updated: EdgeDevice) -> None:
+        self._by_id[device_id] = updated
+        for token_hash, existing in list(self._by_hash.items()):
+            if existing.id == device_id:
+                self._by_hash[token_hash] = updated
 
 
 def fake_edge_device(

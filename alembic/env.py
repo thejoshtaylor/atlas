@@ -20,6 +20,9 @@ from atlas.db.models import Base
 # this import is what makes the six Google tables visible to Alembic.
 from atlas.db import google_models  # noqa: F401
 
+# Phase 10 (plan 10-04): same reasoning -- makes `edge_devices` visible.
+from atlas.db import edge_models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
