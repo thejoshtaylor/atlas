@@ -324,7 +324,17 @@ async def handle_calendar_propose_event(
         raise Denied("i need a title for that event")
 
     if all_day:
-        start_date = date.fromisoformat(start)
+        # B1-WR-01: routed through the same guarded parse every other
+        # date/time value in this module gets (`_parse_boundary`'s own
+        # `try/except ValueError`) -- `start` is a model-supplied string
+        # with nothing upstream constraining its shape, and an unguarded
+        # `date.fromisoformat` here raised a bare `ValueError`, not
+        # `Denied`, so it skipped `calendar_propose_event`'s own
+        # `except Denied` handling entirely.
+        try:
+            start_date = date.fromisoformat(start)
+        except ValueError as exc:
+            raise Denied(f"i couldn't understand the date or time {start!r}") from exc
         end_date = start_date + timedelta(days=1)
         start_out = start_date.isoformat()
         end_out = end_date.isoformat()

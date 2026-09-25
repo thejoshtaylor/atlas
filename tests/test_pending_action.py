@@ -489,6 +489,29 @@ async def test_handle_calendar_propose_event_makes_no_http_call_and_defaults_to_
     assert body["end"] == "2026-10-02T16:00:00-04:00"
 
 
+async def test_handle_calendar_propose_event_all_day_accepts_a_bare_date():
+    accounts = (_home_account(),)
+    payload = await handle_calendar_propose_event(
+        accounts, _ZONE, title="Dentist", start="2026-10-02", account="home", all_day=True
+    )
+    body = payload["atlas_handoff"]
+    assert body["all_day"] is True
+    assert body["start"] == "2026-10-02"
+    assert body["end"] == "2026-10-03"
+
+
+async def test_handle_calendar_propose_event_all_day_denies_a_malformed_date_instead_of_crashing():
+    """B1-WR-01 regression: the all-day branch must raise `Denied` (routed
+    through `except Denied` at the tool boundary, a spoken refusal) on a
+    malformed date, the same way every other date/time value this module
+    parses already does -- never a bare, unhandled `ValueError`."""
+    accounts = (_home_account(),)
+    with pytest.raises(Denied):
+        await handle_calendar_propose_event(
+            accounts, _ZONE, title="Dentist", start="not-a-date", account="home", all_day=True
+        )
+
+
 # --- Task 2: the right account when none is named ---------------------------
 
 
