@@ -186,6 +186,11 @@ async def dispatch_handoff(
 
         return await handle_email_list(handoff, ctx)
 
+    if handoff.kind == "email_read":
+        from atlas.turn.email_handoff import handle_email_read
+
+        return await handle_email_read(handoff, ctx)
+
     # kind == "pending_action"
     if not follow_up_available or ctx is None or ctx.pending_actions is None:
         return HandoffOutcome(

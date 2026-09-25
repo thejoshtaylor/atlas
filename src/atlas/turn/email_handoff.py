@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
-from atlas.turn.email_memory import EmailListItem
+from atlas_mcp.mail_clean import cap_text
+
+from atlas.turn.email_memory import EmailListItem, ResolveMiss
 from atlas.turn.quarantine import SUMMARY_INSTRUCTION, QuarantineError, quarantine_round
 
 if TYPE_CHECKING:
@@ -37,6 +39,23 @@ _SUMMARY_FAILED_REPLY = "i couldn't summarize that one"
 # D-15: two or fewer unread/found messages get a summary each; more than
 # that get the count and the senders, grouped by account then sender.
 _SUMMARIZE_UP_TO = 2
+
+# Task 3 (D-16, GOOG-08): the fixed replies `handle_email_read` speaks for
+# every way "read the second one" / "read Dana's" can fail to resolve, and
+# for a message with nothing left to read once cleaned.
+_NO_RECENT_LIST_REPLY = "i don't have a recent email list -- ask me what's new first."
+_OUT_OF_RANGE_CARRIER = "there were only {count} in the last list."
+_NO_SENDER_MATCH_CARRIER = "i don't see an email from {sender} in the last list."
+_EMPTY_BODY_REPLY = "that email has no text i can read."
+_FETCH_UNAVAILABLE_REPLY = "i can't check email right now"
+
+# D-17: a word-for-word read uses the child's own cleaned text directly --
+# `mail_clean.clean_body`'s quote/signature/footer removal already applied
+# to it in `handle_gmail_fetch_body` -- capped at `VERBATIM_READ_CAP`
+# characters, distinct from (and much smaller than) `mail_clean.MODEL_INPUT_CAP`.
+VERBATIM_READ_CAP = 1500
+_VERBATIM_CARRIER = "{sender} wrote: {text}"
+_VERBATIM_TRUNCATED_SUFFIX = " ... that's where i stop reading."
 
 
 def _sender_display(item: EmailListItem) -> str:
@@ -239,3 +258,88 @@ async def handle_email_list(handoff: "Handoff", ctx: "HandoffContext | None") ->
         positioned, source_kind=source_kind, has_more=list(has_more), unreachable=list(unreachable), summaries=summaries
     )
     return HandoffOutcome(reply_text=reply, turn_outcome="email_list")
+
+
+async def handle_email_read(handoff: "Handoff", ctx: "HandoffContext | None") -> "HandoffOutcome":
+    """Resolve one `email_read` handoff -- "read the second one" or "read
+    Dana's" -- against `ctx.email_memory`'s own last-spoken list for this
+    source (D-16, GOOG-08). Makes no Gmail search of its own: the handoff
+    carries only `position`/`sender`/`word_for_word` (`mcp/atlas_mcp/google.py::handle_gmail_read`
+    made no request at all), so resolving "the second one" is entirely
+    this function's own job.
+
+    `turn_outcome` is `"email_read"` for every reply that actually names
+    or reads a message (including the "no text" and resolve-miss
+    fallbacks, which are correct answers, not failures) and
+    `"email_read_failed"` only when the body fetch itself errored -- that
+    one case speaks the failing tool's own error text verbatim (never
+    "done", the same doctrine `pending_action.py::ExecutionResult`
+    already follows for a failed calendar write).
+    """
+    from atlas.turn.handoff import HandoffOutcome
+
+    payload = handoff.payload
+    position = payload.get("position")
+    sender = payload.get("sender")
+    word_for_word = bool(payload.get("word_for_word", False))
+
+    if ctx is None or ctx.email_memory is None:
+        return HandoffOutcome(reply_text=_NO_RECENT_LIST_REPLY, turn_outcome="email_read")
+
+    resolved = ctx.email_memory.resolve(ctx.source_name, position=position, sender=sender)
+    if isinstance(resolved, ResolveMiss):
+        if resolved.reason == "no_list":
+            return HandoffOutcome(reply_text=_NO_RECENT_LIST_REPLY, turn_outcome="email_read")
+        if resolved.reason == "out_of_range":
+            return HandoffOutcome(
+                reply_text=_OUT_OF_RANGE_CARRIER.format(count=resolved.count), turn_outcome="email_read"
+            )
+        # "no_sender" -- `sender` is the model's own tool argument, derived
+        # from the transcript, not email content, so speaking it back is
+        # safe (the plan's own action text).
+        return HandoffOutcome(
+            reply_text=_NO_SENDER_MATCH_CARRIER.format(sender=sender), turn_outcome="email_read"
+        )
+
+    item = resolved
+    if ctx.tool_host is None:
+        return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_read_failed")
+
+    from atlas.turn.controller import _is_error, _result_payload, _result_text
+
+    try:
+        result = await ctx.tool_host.call_tool(
+            "gmail_fetch_body", {"account": item.account, "message_id": item.message_id}
+        )
+    except Exception as exc:
+        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_read_failed")
+
+    if _is_error(result):
+        return HandoffOutcome(reply_text=_result_text(result), turn_outcome="email_read_failed")
+
+    body_payload = _result_payload(result)
+    body_text = str(body_payload.get("body", "")) if isinstance(body_payload, dict) else ""
+    sender_display = _sender_display(item)
+
+    if not body_text.strip():
+        return HandoffOutcome(reply_text=_EMPTY_BODY_REPLY, turn_outcome="email_read")
+
+    if word_for_word:
+        capped, truncated = cap_text(body_text, VERBATIM_READ_CAP)
+        text = capped + (_VERBATIM_TRUNCATED_SUFFIX if truncated else "")
+        reply = _VERBATIM_CARRIER.format(sender=sender_display, text=text)
+        return HandoffOutcome(reply_text=reply, turn_outcome="email_read")
+
+    if ctx.brain is None:
+        return HandoffOutcome(
+            reply_text=f"{item.account}: {sender_display}: {_SUMMARY_FAILED_REPLY}", turn_outcome="email_read"
+        )
+    try:
+        summary = await quarantine_round(
+            ctx.brain, instruction=SUMMARY_INSTRUCTION, content=body_text, timeout_s=ctx.quarantine_timeout_s
+        )
+    except QuarantineError:
+        summary = _SUMMARY_FAILED_REPLY
+
+    reply = f"{item.account}: {sender_display}: {summary}"
+    return HandoffOutcome(reply_text=reply, turn_outcome="email_read")
