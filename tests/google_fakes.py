@@ -77,6 +77,11 @@ class FakeGoogle:
         # Plan 09-09: `users.settings.sendAs.list` -- each access token's
         # own raw `sendAs` entry list, seeded via `add_send_as`.
         self._send_as: dict[str, list[dict[str, Any]]] = {}
+        # Plan 09-09 Task 3: every `drafts.create` this fake ever answered,
+        # in call order -- `{"access_token", "raw", "thread_id"}`, so a
+        # test can decode `raw` and assert on the real MIME bytes that
+        # were about to be sent, never a canned response.
+        self.drafts: list[dict[str, Any]] = []
         self._transport = httpx.MockTransport(self._handle)
 
     @property
@@ -188,16 +193,20 @@ class FakeGoogle:
         *,
         headers: dict[str, str],
         internal_date: "str | None" = None,
+        thread_id: "str | None" = None,
     ) -> None:
         """Seed one message's `format=metadata` response -- `headers` is
         `{name: value}` (already RFC 2047 encoded when a test wants to
         prove decoding); `internal_date` is Gmail's own epoch-millisecond
         string, defaulted to `"0"` (the epoch) so every seeded message
         sorts deterministically even when a test does not care about
-        ordering."""
+        ordering. `thread_id` defaults to `message_id` (every pre-09-09
+        caller's own assumption); plan 09-09 gives it its own value so a
+        test can prove `drafts.create`'s own `threadId` came from here,
+        not from the message id it happens to equal by default."""
         self._gmail_metadata[(access_token, message_id)] = {
             "id": message_id,
-            "threadId": message_id,
+            "threadId": thread_id if thread_id is not None else message_id,
             "internalDate": internal_date if internal_date is not None else "0",
             "payload": {"headers": [{"name": name, "value": value} for name, value in headers.items()]},
         }
@@ -266,6 +275,12 @@ class FakeGoogle:
             return self._handle_profile(request)
         if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/settings/sendAs"):
             return self._handle_send_as(request)
+        if (
+            str(request.url).startswith(GMAIL_BASE)
+            and request.url.path.endswith("/drafts")
+            and request.method == "POST"
+        ):
+            return self._handle_create_draft(request)
         if str(request.url).startswith(GMAIL_BASE) and request.url.path.endswith("/messages"):
             return self._handle_gmail_list(request)
         if str(request.url).startswith(GMAIL_BASE) and "/messages/" in request.url.path:
@@ -353,6 +368,23 @@ class FakeGoogle:
         access_token = auth.removeprefix("Bearer ")
         entries = self._send_as.get(access_token, [])
         return httpx.Response(200, json={"sendAs": entries})
+
+    def _handle_create_draft(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        access_token = auth.removeprefix("Bearer ")
+        body = json.loads(request.content.decode("utf-8"))
+        message = body.get("message") or {}
+        draft_id = f"draft-{len(self.drafts) + 1}"
+        self.drafts.append(
+            {
+                "access_token": access_token,
+                "raw": message.get("raw", ""),
+                "thread_id": message.get("threadId"),
+            }
+        )
+        return httpx.Response(
+            200, json={"id": draft_id, "message": {"id": f"msg-{draft_id}", "threadId": message.get("threadId")}}
+        )
 
     def _handle_gmail_get(self, request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("authorization", "")
