@@ -39,6 +39,7 @@ import {
   calendarAccessOptions,
   deriveGoogleAccountState,
 } from "./deriveGoogleAccountState"
+import { WritingStyleSection } from "./WritingStyleSection"
 
 // GOOG-01, GOOG-02, 09-CONTEXT.md D-03/D-04/D-05/GOOG-12: one linked
 // account's own page -- its label, whether it is the default, each
@@ -227,6 +228,8 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
           {relinkError ? <p className="text-body text-destructive">{relinkError}</p> : null}
         </div>
       ) : null}
+
+      <WritingStyleSection accountId={account.id} />
 
       <div className="flex flex-col gap-2 border-t border-border pt-4">
         <AlertDialog open={unlinkOpen} onOpenChange={setUnlinkOpen}>

@@ -170,6 +170,59 @@ export const unlinkGoogleAccountMutationOptions: UseMutationOptions<void, unknow
   },
 }
 
+/** `StyleResponse.status`'s exact four values (09-09-SUMMARY.md). */
+export type GoogleStyleStatus = "not_learned" | "learning" | "ready" | "failed"
+
+/** `StyleResponse`'s exact shape -- `signature_html` is never returned
+ * over HTTP (09-09-SUMMARY.md), so it has no field here. */
+export interface GoogleStyle {
+  status: GoogleStyleStatus
+  status_detail: string | null
+  profile: string
+  samples: string[]
+  signature_text: string | null
+  messages_scanned: number
+  learned_at: string | null
+}
+
+export function googleStyleQueryKey(accountId: number) {
+  return ["google", "accounts", accountId, "style"] as const
+}
+
+export function fetchGoogleStyle(accountId: number): Promise<GoogleStyle> {
+  return apiFetch<GoogleStyle>(`/api/google/accounts/${accountId}/style`)
+}
+
+/** `StyleUpdateRequest`'s exact shape, plus the id the URL carries --
+ * same `{ accountId, ...body }` shape `UpdateGoogleAccountInput` uses. */
+export interface SaveGoogleStyleInput {
+  accountId: number
+  profile: string
+}
+
+export const saveGoogleStyleMutationOptions: UseMutationOptions<GoogleStyle, unknown, SaveGoogleStyleInput> = {
+  mutationFn: ({ accountId, profile }) =>
+    apiFetch<GoogleStyle>(`/api/google/accounts/${accountId}/style`, { method: "PUT", body: { profile } }),
+  onSuccess: (style, { accountId }) => {
+    queryClient.setQueryData(googleStyleQueryKey(accountId), style)
+  },
+}
+
+export interface RelearnGoogleStyleInput {
+  accountId: number
+}
+
+/** `POST .../style/relearn` answers 202 with a `StyleResponse` whose
+ * `status` is `"learning"` (09-09-SUMMARY.md) -- `apiFetch` treats any
+ * 2xx the same way, so the resolved value is that response body. */
+export const relearnGoogleStyleMutationOptions: UseMutationOptions<GoogleStyle, unknown, RelearnGoogleStyleInput> = {
+  mutationFn: ({ accountId }) =>
+    apiFetch<GoogleStyle>(`/api/google/accounts/${accountId}/style/relearn`, { method: "POST" }),
+  onSuccess: (style, { accountId }) => {
+    queryClient.setQueryData(googleStyleQueryKey(accountId), style)
+  },
+}
+
 /** The closed set of `?link_error=<code>` values the OAuth callback
  * redirect can carry (`LINK_ERROR_CODES`, `src/atlas/google/linking.py`). */
 export type LinkErrorCode =
