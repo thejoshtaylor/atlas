@@ -11,10 +11,15 @@ file later.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from atlas_mcp.google import handle_calendar_list_events
 from atlas_mcp.google_boundary import parse_accounts_env
+
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.timing import TurnTimings
+from atlas.turn.controller import run_turn
 
 from google_fakes import FakeGoogle
 
@@ -68,3 +73,128 @@ async def test_revoked_account_is_named_by_the_child():
     assert {e["account"] for e in result["events"]} == {"work"}
     assert result["unreachable_accounts"] == [{"account": "revoked", "reason": "needs_relink"}]
     assert fake_google.requests == fake_google.requests_by_bearer("at-work")
+
+
+_ACCOUNTS_ENV = json.dumps(
+    {
+        "accounts": [
+            {
+                "label": "work",
+                "email": "work@example.com",
+                "is_default": True,
+                "access_token": "at-work",
+                "unreachable_reason": None,
+                "calendars": [
+                    {"calendar_id": "cal-work", "name": "Team", "primary": True, "access": "read_only"}
+                ],
+            },
+            {
+                "label": "home",
+                "email": "home@example.com",
+                "is_default": False,
+                "access_token": None,
+                "unreachable_reason": "needs_relink",
+                "calendars": [
+                    {"calendar_id": "cal-home", "name": "Personal", "primary": True, "access": "read_only"}
+                ],
+            },
+        ]
+    }
+)
+
+
+class _ListEventsToolHost:
+    def __init__(self, accounts, client) -> None:
+        self._accounts = accounts
+        self._client = client
+        self.calls: list[tuple[str, dict]] = []
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append((name, arguments))
+        result = await handle_calendar_list_events(self._accounts, self._client, _ZONE, **arguments)
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text=json.dumps(result))])
+
+
+async def test_revoked_account_named_not_crashed(fake_audio_source, fake_stt, fake_brain, fake_tts):
+    """GOOG-12, plan 09-05 Task 3: an answer that names only the reachable
+    account still gets the unreachable one appended, by code, never left
+    silently out."""
+    accounts = parse_accounts_env(_ACCOUNTS_ENV)
+    fake_google = FakeGoogle()
+    fake_google.add_events(
+        "at-work",
+        "cal-work",
+        [{"id": "e1", "summary": "Standup", "start": {"dateTime": "2026-10-02T09:00:00Z"}, "end": {"dateTime": "2026-10-02T09:15:00Z"}}],
+    )
+    tool_host = _ListEventsToolHost(accounts, fake_google.client)
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(name="calendar_list_events", arguments={"start": "2026-10-02", "end": "2026-10-03"})
+                ]
+            ),
+            BrainReply(text="you have standup on your work calendar"),
+        ]
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what's on my calendar")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_text == [
+        "you have standup on your work calendar i can't reach your home account right now."
+    ]
+
+
+async def test_an_answer_already_naming_the_unreachable_account_gets_no_duplicate_note(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = parse_accounts_env(_ACCOUNTS_ENV)
+    fake_google = FakeGoogle()
+    fake_google.add_events(
+        "at-work",
+        "cal-work",
+        [{"id": "e1", "summary": "Standup", "start": {"dateTime": "2026-10-02T09:00:00Z"}, "end": {"dateTime": "2026-10-02T09:15:00Z"}}],
+    )
+    tool_host = _ListEventsToolHost(accounts, fake_google.client)
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(name="calendar_list_events", arguments={"start": "2026-10-02", "end": "2026-10-03"})
+                ]
+            ),
+            BrainReply(text="i couldn't reach your home account, but work has a standup"),
+        ]
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="what's on my calendar")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+
+    assert tts.received_text == ["i couldn't reach your home account, but work has a standup"]

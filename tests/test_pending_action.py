@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
-from atlas_mcp.google import handle_calendar_propose_event
+from atlas_mcp.google import handle_calendar_list_events, handle_calendar_propose_delete, handle_calendar_propose_event
 from atlas_mcp.google_boundary import AccountGrant, CalendarGrant, Clarification, resolve_write_target
 from atlas_mcp.ha import handle_call_service
 from atlas_mcp.safety import Denied, Policy
@@ -38,6 +38,7 @@ from atlas.turn.pending_action import (
     spoken_when,
 )
 
+from google_fakes import FakeGoogle
 from pending_action_fakes import FakePendingActionRepository
 
 _ZONE = ZoneInfo("America/New_York")
@@ -64,11 +65,20 @@ class _GoogleToolHost:
     `atlas_mcp.ha`, extended to also reach `calendar_propose_event`.
     """
 
-    def __init__(self, accounts, *, ha=None, policy: "Policy | None" = None, zone: ZoneInfo = _ZONE) -> None:
+    def __init__(
+        self,
+        accounts,
+        *,
+        ha=None,
+        policy: "Policy | None" = None,
+        zone: ZoneInfo = _ZONE,
+        google_client: "httpx.AsyncClient | None" = None,
+    ) -> None:
         self._accounts = accounts
         self._zone = zone
         self._ha = ha
         self._policy = policy
+        self._google_client = google_client
         self.calls: list[tuple[str, dict]] = []
 
     async def call_tool(self, name: str, arguments: dict):
@@ -76,6 +86,14 @@ class _GoogleToolHost:
         try:
             if name == "calendar_propose_event":
                 result = await handle_calendar_propose_event(self._accounts, self._zone, **arguments)
+            elif name == "calendar_propose_delete":
+                result = await handle_calendar_propose_delete(
+                    self._accounts, self._google_client, self._zone, **arguments
+                )
+            elif name == "calendar_list_events":
+                result = await handle_calendar_list_events(
+                    self._accounts, self._google_client, self._zone, **arguments
+                )
             elif name == "ha_call_service" and self._ha is not None:
                 result = await handle_call_service(
                     self._policy, self._ha.client, "http://ha.invalid", "test-token", **arguments
@@ -597,3 +615,213 @@ async def test_a_proposal_with_a_repository_free_context_speaks_confirmation_una
 
     assert tts.received_text == [CONFIRMATION_UNAVAILABLE_REPLY]
     assert timings.turn_outcome == "confirmation_unavailable"
+
+
+# --- Task 3: delete proposals -------------------------------------------------
+
+
+def _work_account(*, calendars=None) -> AccountGrant:
+    return AccountGrant(
+        label="work",
+        email="work@example.com",
+        is_default=True,
+        access_token="at-work",
+        unreachable_reason=None,
+        calendars=calendars
+        if calendars is not None
+        else (CalendarGrant(calendar_id="cal-work", name="Team", primary=True, access="read_write"),),
+    )
+
+
+async def test_a_single_occurrence_delete_is_read_back_and_stored_with_its_own_instance_id(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_work_account(),)
+    fake_google = FakeGoogle()
+    fake_google.add_event(
+        "at-work",
+        "cal-work",
+        {
+            "id": "evt-1",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-10-06T09:00:00-04:00"},
+            "end": {"dateTime": "2026-10-06T09:15:00-04:00"},
+        },
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_delete",
+                        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-1"},
+                    )
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    stt = fake_stt(events=[FinalTranscript(text="delete tuesday's standup")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    pending_actions = FakePendingActionRepository()
+    handoff_context = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=pending_actions, brain=brain, now=_NOW
+    )
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["delete Standup from the work calendar, tuesday october 6th at 9 am?"]
+    assert timings.turn_outcome == "needs_confirmation"
+    rows = list(pending_actions._rows.values())
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.tool_name == "calendar_delete_event"
+    assert row.arguments["event_id"] == "evt-1"
+
+
+async def test_a_recurring_occurrence_delete_speaks_the_series_stays_carrier_and_stores_the_instance_id(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_work_account(),)
+    fake_google = FakeGoogle()
+    fake_google.add_event(
+        "at-work",
+        "cal-work",
+        {
+            "id": "evt-1_20261006T090000Z",
+            "recurringEventId": "evt-1",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-10-06T09:00:00-04:00"},
+            "end": {"dateTime": "2026-10-06T09:15:00-04:00"},
+        },
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_delete",
+                        arguments={
+                            "account": "work",
+                            "calendar_id": "cal-work",
+                            "event_id": "evt-1_20261006T090000Z",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    stt = fake_stt(events=[FinalTranscript(text="delete tuesday's standup")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    pending_actions = FakePendingActionRepository()
+    handoff_context = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=pending_actions, brain=brain, now=_NOW
+    )
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == [
+        "delete only this one: Standup on tuesday october 6th at 9 am, from the work calendar? "
+        "the rest of the series stays."
+    ]
+    row = list(pending_actions._rows.values())[0]
+    assert row.arguments["event_id"] == "evt-1_20261006T090000Z"
+    assert row.arguments["event_id"] != "evt-1"
+
+
+async def test_bulk_delete_refused_by_voice(fake_audio_source, fake_stt, fake_brain, fake_tts):
+    accounts = (_work_account(),)
+    fake_google = FakeGoogle()
+    fake_google.add_event(
+        "at-work",
+        "cal-work",
+        {
+            "id": "evt-1",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-10-06T09:00:00-04:00"},
+            "end": {"dateTime": "2026-10-06T09:15:00-04:00"},
+        },
+    )
+    fake_google.add_event(
+        "at-work",
+        "cal-work",
+        {
+            "id": "evt-2",
+            "summary": "Vet",
+            "start": {"dateTime": "2026-10-07T09:00:00-04:00"},
+            "end": {"dateTime": "2026-10-07T09:15:00-04:00"},
+        },
+    )
+    brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_delete",
+                        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-1"},
+                    ),
+                    ToolCall(
+                        name="calendar_propose_delete",
+                        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-2"},
+                    ),
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    stt = fake_stt(events=[FinalTranscript(text="delete standup and vet")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    pending_actions = FakePendingActionRepository()
+    handoff_context = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=pending_actions, brain=brain, now=_NOW
+    )
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == [BULK_REFUSAL_REPLY]
+    assert timings.turn_outcome == "bulk_refused"
+    assert pending_actions._rows == {}
+    assert fake_google.deleted_event_ids == []
