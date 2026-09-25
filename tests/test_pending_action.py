@@ -1013,38 +1013,32 @@ async def test_calendar_create_requires_confirmation_round(
     assert row.status == "executed"
 
 
-async def test_run_confirmation_round_never_trusts_a_confirm_call_alone():
-    """A-CR-01 regression: `decision_from_reply` reads only the model's
-    own tool call -- `run_confirmation_round`'s code-level backstop must
-    still reject a `confirm` when the operator's own transcript does not
-    itself sound like agreement (a system-role instruction the model was
-    somehow persuaded to follow, or an ordinary misclassification, must
-    never be the only thing standing between an open-mic transcript and
-    an executed action)."""
-    confirmation_brain = _RecordingConfirmationBrain("confirm")
-
+@pytest.mark.parametrize("transcript", ["okay", "OK.", "sounds good", "absolutely", "that works", "uh-huh"])
+async def test_run_confirmation_round_follows_the_model_confirm_for_common_agreement(transcript):
+    """R2-WR-01, D-08: the operator chose model interpretation over a fixed
+    yes-word list. A `confirm` call is the decision -- no word list in code
+    can veto a real "okay" or "sounds good"."""
     decision = await run_confirmation_round(
-        confirmation_brain,
+        _RecordingConfirmationBrain("confirm"),
         readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
-        transcript="the weather looks nice today",
+        transcript=transcript,
+        timeout_s=5.0,
+    )
+
+    assert decision.decision == "confirm"
+
+
+@pytest.mark.parametrize("transcript", ["no, don't do that", "not right now", "please cancel it", "no, go back"])
+async def test_run_confirmation_round_follows_the_model_cancel_for_a_negated_reply(transcript):
+    decision = await run_confirmation_round(
+        _RecordingConfirmationBrain("cancel"),
+        readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+        transcript=transcript,
         timeout_s=5.0,
     )
 
     assert decision.decision == "cancel"
     assert decision.amended is False
-
-
-async def test_run_confirmation_round_trusts_a_confirm_call_when_the_reply_is_affirmative():
-    confirmation_brain = _RecordingConfirmationBrain("confirm")
-
-    decision = await run_confirmation_round(
-        confirmation_brain,
-        readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
-        transcript="yep that's right",
-        timeout_s=5.0,
-    )
-
-    assert decision.decision == "confirm"
 
 
 # --- A-WR-01: exception handling on the pending-action/email-draft paths ----
