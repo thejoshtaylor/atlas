@@ -445,9 +445,11 @@ def test_delete_account_revokes_deletes_and_respawns(
 def test_delete_account_unlinks_even_when_revoke_fails(
     monkeypatch, fake_account_repository, fake_plugin_repository
 ):
-    """A revoke failure must never block the unlink -- `revoke_token`
-    itself never raises, so this proves the route never gates the delete
-    on the revoke response at all."""
+    """B2-WR-01 fix: a revoke failure must never block the unlink.
+    `revoke_token` itself swallows `httpx.HTTPError`, so this proves the
+    route never gates the delete on the revoke response at all -- with a
+    real failure actually injected (`fail_revoke`), not merely a scenario
+    where revoke happens to succeed."""
     monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
     security = SecurityConfig()
     account_repo = fake_account_repository()
@@ -455,6 +457,7 @@ def test_delete_account_unlinks_even_when_revoke_fails(
     plugin_repo = fake_plugin_repository()
     manager = _FakePluginManagerForGoogle()
     fake_google = FakeGoogle()
+    fake_google.fail_revoke(raise_connect_error=True)
     _seed_client(google_repo, security)
     account = _seed_account(google_repo, security, refresh_token="rt-1")
 
@@ -464,6 +467,7 @@ def test_delete_account_unlinks_even_when_revoke_fails(
     response = client.delete(f"/api/google/accounts/{account.id}")
     assert response.status_code == 204
     assert google_repo._accounts == {}
+    assert fake_google.revoked == [], "the failed revoke call must never have been recorded as succeeded"
 
 
 def test_delete_account_unlinks_even_when_the_stored_ciphertext_cannot_be_decrypted(

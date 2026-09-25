@@ -52,6 +52,12 @@ class FakeGoogle:
         self._profiles: dict[str, str] = {}
         self._calendar_lists: dict[str, list[dict[str, Any]]] = {}
         self.revoked: list[str] = []
+        # B2-WR-01: unlike `_event_failures`/`_gmail_list_failures`, this is
+        # a single flag, not a per-token dict -- `revoke_token`
+        # (`google_account_api.py`) takes only the token being revoked, and
+        # a real revoke failure (network error, Google already considers
+        # the token gone) is not selective about which token it happens to.
+        self._revoke_failure = False
         # Plan 09-05, Task 1: `events.get`/`events.insert`/`events.delete` --
         # `inserted` records every insert's own body (for a test to assert
         # what was actually posted), `deleted_event_ids` every id this fake
@@ -259,6 +265,14 @@ class FakeGoogle:
         equivalent of `fail_events` above."""
         self._gmail_list_failures[access_token] = (status, raise_connect_error)
 
+    def fail_revoke(self, *, raise_connect_error: bool = True) -> None:
+        """Make every future revoke call fail -- `raise_connect_error=True`
+        (the default, and the only shape that actually exercises anything:
+        `revoke_token`'s own `try/except httpx.HTTPError` never even looks
+        at the response status, since it never calls `raise_for_status`)
+        raises `httpx.ConnectError` before this fake ever answers."""
+        self._revoke_failure = raise_connect_error
+
     def add_send_as(self, access_token: str, entries: list[dict[str, Any]]) -> None:
         """Seed `access_token`'s own `users.settings.sendAs.list` result --
         each entry a raw send-as shape (`sendAsEmail`, `isDefault`,
@@ -332,6 +346,8 @@ class FakeGoogle:
         )
 
     def _handle_revoke(self, request: httpx.Request) -> httpx.Response:
+        if self._revoke_failure:
+            raise httpx.ConnectError("connection refused", request=request)
         token = request.url.params.get("token")
         if token:
             self.revoked.append(token)
