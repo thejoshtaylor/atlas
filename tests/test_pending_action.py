@@ -569,6 +569,29 @@ def test_resolve_write_target_denies_a_named_account_with_no_access_token():
         resolve_write_target((home,), "home", None)
 
 
+def test_resolve_write_target_unnamed_skips_an_unreachable_sole_candidate():
+    """B1-WR-02 regression: an unreachable account (GOOG-12, `access_token
+    is None`) with a previously-enabled read-write calendar must never
+    become the unnamed path's sole candidate -- it would otherwise be
+    resolved, read back, and only refused after the operator confirms it
+    (`require_writable`'s own execute-time check), a misleading readback
+    rather than a clean, up-front refusal."""
+    home = _account("home", access_token=None)
+    with pytest.raises(Denied):
+        resolve_write_target((home,), None, None)
+
+
+def test_resolve_write_target_unnamed_skips_an_unreachable_default_candidate():
+    """The same gap, for the default-account branch: an unreachable
+    account must never be picked by default just because it is marked
+    `is_default` -- the one remaining reachable, writable candidate must
+    be picked instead."""
+    home = _account("home", is_default=True, access_token=None)
+    work = _account("work", is_default=False)
+    result = resolve_write_target((home, work), None, None)
+    assert result == (work, work.calendars[0])
+
+
 async def test_no_account_named_and_several_candidates_asks_which_one_and_stores_nothing(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):

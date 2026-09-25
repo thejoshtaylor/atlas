@@ -218,17 +218,27 @@ def _resolve_unnamed_write_target(
     `Clarification(about="account")` over every candidate account's label
     (sorted, so the same ambiguity always asks the same question).
 
-    A candidate is any linked account carrying at least one read-write
-    calendar -- an account with no writable calendar at all is never a
-    candidate, the same way it is never reachable by name either
+    A candidate is any linked, REACHABLE account carrying at least one
+    read-write calendar -- an account with no writable calendar at all is
+    never a candidate, the same way it is never reachable by name either
     (`_resolve_calendar_for_account`'s own "turn on a calendar for read and
-    write" refusal). Once exactly one account is settled on (by either
-    rule), its own calendar is resolved the identical way a named account's
-    would be (`_resolve_calendar_for_account` with no calendar named) --
-    there is no second calendar-selection mechanism for the unnamed path.
+    write" refusal). B1-WR-02: an account with `access_token is None`
+    (GOOG-12, a token `GoogleTokenService` could not refresh) is never a
+    candidate either, even when it carries a previously-enabled read-write
+    calendar -- the named path (`resolve_write_target` below) already
+    refuses such an account before ever resolving its calendar; the
+    unnamed path must refuse it just as early, not let it become the sole
+    or default candidate and only fail once the operator confirms it
+    (`require_writable`'s own reachability check, at execute time). Once
+    exactly one account is settled on (by either rule), its own calendar
+    is resolved the identical way a named account's would be
+    (`_resolve_calendar_for_account` with no calendar named) -- there is
+    no second calendar-selection mechanism for the unnamed path.
     """
     candidates = [
-        account for account in accounts if any(c.access == "read_write" for c in account.calendars)
+        account
+        for account in accounts
+        if account.access_token is not None and any(c.access == "read_write" for c in account.calendars)
     ]
     if not candidates:
         raise Denied(
