@@ -24,7 +24,7 @@ def _accounts_env(*accounts: dict) -> str:
     return json.dumps({"accounts": list(accounts)})
 
 
-def _account(label: str, access_token: "str | None", calendar_id: str = "cal-on") -> dict:
+def _account(label: str, access_token: str | None, calendar_id: str = "cal-on") -> dict:
     return {
         "label": label,
         "email": f"{label}@example.com",
