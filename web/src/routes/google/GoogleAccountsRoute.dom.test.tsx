@@ -252,3 +252,24 @@ test("each account card shows its label, address, badges, link-expires date, and
   const workLink = screen.getByText("work").closest("a")
   expect(workLink?.getAttribute("href")).toBe("/google/accounts/1")
 })
+
+// Orchestrator-directed correction (09-UI-SPEC.md's Read This First /
+// UI Considerations table, ⚠ unresolved row): zero linked accounts must
+// show `EmptyState`, matching this project's own Macros/Sessions/
+// Wake-Tuning precedent -- not a silently empty `<ul>`.
+test("with a configured client and zero linked accounts, shows the empty state instead of a bare list", async () => {
+  stubLocation()
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleClient: async () => sampleClient({ configured: true, client_id: "abc" }),
+    fetchGoogleAccounts: async () => [],
+  })
+  const { GoogleAccountsRoute } = await import("./GoogleAccountsRoute")
+
+  renderRoute(GoogleAccountsRoute, queryClient)
+
+  expect(await screen.findByText("No accounts linked yet.")).toBeTruthy()
+  expect(
+    screen.getByText("Set up your OAuth client above, then link your first Google account."),
+  ).toBeTruthy()
+})
