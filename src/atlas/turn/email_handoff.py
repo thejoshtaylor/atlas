@@ -419,9 +419,19 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
 
     from atlas.turn.controller import _is_error, _result_payload, _result_text
 
+    # A-WR-01: every other `tool_host`/repository call in this function is
+    # already guarded (`gmail_fetch_body`, `gmail_create_draft` immediately
+    # below) -- this one was not, though the docstring above already
+    # promises "never a failure" for a missing repository or an unlearned
+    # style. A raised exception here (not "no style yet", a real failure
+    # reaching the repository) matches the same sibling pattern: the
+    # exception's own text, verbatim, never a silent abort.
     style = None
     if ctx.style_repo is not None:
-        style = await ctx.style_repo.get_style_by_label(item.account)
+        try:
+            style = await ctx.style_repo.get_style_by_label(item.account)
+        except Exception as exc:
+            return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
     style_profile = style.profile if style is not None else ""
     style_samples = style.samples if style is not None else ()
     signature_text = style.signature_text if style is not None else None

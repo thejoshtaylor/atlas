@@ -34,14 +34,22 @@ from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
 from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest
-from atlas.turn.handoff import AMENDED_CONTINUATION_REFUSAL, HandoffContext
+from atlas.turn.handoff import (
+    AMENDED_CONTINUATION_REFUSAL,
+    Handoff,
+    HandoffContext,
+    dispatch_handoff,
+)
 from atlas.turn.pending_action import (
     BULK_REFUSAL_REPLY,
     CONFIRM_CANCEL_TOOLS,
     CONFIRMATION_UNAVAILABLE_REPLY,
     CONFIRMED_CREATE_REPLY,
+    EXECUTION_DID_NOT_COMPLETE_REPLY,
+    PROPOSAL_STORE_FAILED_REPLY,
     PendingProposal,
     compose_readback,
+    execute_pending_action,
     run_confirmation_round,
     spoken_duration,
     spoken_when,
@@ -991,6 +999,158 @@ async def test_run_confirmation_round_trusts_a_confirm_call_when_the_reply_is_af
     )
 
     assert decision.decision == "confirm"
+
+
+# --- A-WR-01: exception handling on the pending-action/email-draft paths ----
+
+
+async def test_dispatch_handoff_speaks_a_fixed_reply_when_pending_actions_create_raises():
+    """A-WR-01 regression: `dispatch_handoff`'s pending-action branch must
+    never abort the turn silently before the readback is ever spoken."""
+
+    class _RaisingPendingActions:
+        async def create(self, **kwargs: Any) -> Any:
+            raise RuntimeError("db unavailable")
+
+    handoff = Handoff(
+        kind="pending_action",
+        payload={
+            "kind": "pending_action",
+            "action": "calendar_create",
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "calendar_name": "Home",
+            "calendar_primary": True,
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+    )
+    ctx = HandoffContext(
+        source_name="camera",
+        tool_host=None,
+        pending_actions=_RaisingPendingActions(),
+        brain=None,
+        now=_NOW,
+    )
+
+    outcome = await dispatch_handoff(
+        handoff, ctx, transcript="add dentist on friday at 3", follow_up_available=True, chain_depth=1
+    )
+
+    assert outcome.turn_outcome == "proposal_store_failed"
+    assert outcome.reply_text == PROPOSAL_STORE_FAILED_REPLY
+    assert outcome.follow_up is None
+
+
+async def test_execute_pending_action_speaks_a_fixed_reply_when_the_tool_host_raises():
+    """A-WR-01 regression: `execute_pending_action`'s own `tool_host.call_tool`
+    raising must produce a failed, not-succeeded `ExecutionResult` -- never
+    propagate and leave the caller (`handle_confirmation_reply`) with a row
+    already claimed `confirmed` and no terminal status to resolve it to."""
+
+    class _RaisingToolHost:
+        async def call_tool(self, name: str, arguments: dict) -> Any:
+            raise RuntimeError("stdio child died mid-call")
+
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    claimed = await pending_actions.claim_for_confirmation(created.id, _NOW)
+    assert claimed is not None
+
+    result = await execute_pending_action(claimed, _RaisingToolHost())
+
+    assert result.succeeded is False
+    assert result.reply_text == EXECUTION_DID_NOT_COMPLETE_REPLY
+
+
+async def test_a_raised_tool_host_exception_during_confirm_resolves_the_row_to_failed_not_stuck(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    """A-WR-01 regression, end to end: a `tool_host.call_tool` raise on the
+    confirm path must resolve the row to a terminal `failed` status --
+    never leave it stuck at `confirmed` forever -- and the operator must
+    hear something, not silence."""
+
+    class _RaisingToolHost:
+        async def call_tool(self, name: str, arguments: dict) -> Any:
+            raise RuntimeError("stdio child died mid-call")
+
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=_RaisingToolHost(),
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert timings.turn_outcome == "confirm_failed"
+    assert tts.received_text == [EXECUTION_DID_NOT_COMPLETE_REPLY]
+    row = await pending_actions.get(created.id)
+    assert row.status == "failed"
 
 
 async def test_a_stored_delete_confirms_and_the_fake_google_records_one_delete(

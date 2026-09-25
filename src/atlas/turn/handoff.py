@@ -13,6 +13,7 @@ would deadlock the two modules' load order.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -26,10 +27,13 @@ from atlas.turn.pending_action import (
     EXECUTING_TOOL_BY_ACTION,
     FOLLOW_UP_LIMIT_REPLY,
     PROPOSAL_INVALID_REPLY,
+    PROPOSAL_STORE_FAILED_REPLY,
     PendingProposal,
     compose_readback,
     execution_arguments,
 )
+
+logger = logging.getLogger("atlas.turn.handoff")
 
 # Plan 09-08 adds "email_list" and "email_read" -- every Gmail read hands
 # off to code the same way a calendar write proposal does (D-08, D-14).
@@ -264,15 +268,26 @@ async def dispatch_handoff(
     readback = compose_readback(proposal, now=ctx.now)
     expires_at = ctx.now + timedelta(seconds=ctx.pending_ttl_s)
 
-    action_row = await ctx.pending_actions.create(
-        source=ctx.source_name,
-        action=proposal.action,
-        tool_name=tool_name,
-        arguments=arguments,
-        readback=readback,
-        created_at=ctx.now,
-        expires_at=expires_at,
-    )
+    # A-WR-01: unguarded, a raise here would abort the turn silently
+    # before the readback is ever spoken -- the operator would hear
+    # nothing at all rather than a refusal, exactly the "cannot tell a
+    # refusal from a crash" failure this project's own doctrine names
+    # elsewhere. `proposal` itself is never stored or acted on when this
+    # raises; there is nothing to resolve to a terminal status (no row
+    # exists yet).
+    try:
+        action_row = await ctx.pending_actions.create(
+            source=ctx.source_name,
+            action=proposal.action,
+            tool_name=tool_name,
+            arguments=arguments,
+            readback=readback,
+            created_at=ctx.now,
+            expires_at=expires_at,
+        )
+    except Exception:
+        logger.exception("pending_actions.create raised while storing a %r proposal", proposal.action)
+        return HandoffOutcome(reply_text=PROPOSAL_STORE_FAILED_REPLY, turn_outcome="proposal_store_failed")
 
     follow_up = FollowUpRequest(
         kind="confirmation",

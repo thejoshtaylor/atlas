@@ -13,6 +13,7 @@ turn-ending sentences.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,8 @@ from pydantic import BaseModel, model_validator
 from atlas.providers.base import BrainError
 from atlas.turn.follow_up import FollowUpRequest
 from atlas.turn.transcript_guard import is_no_command
+
+logger = logging.getLogger("atlas.turn.pending_action")
 
 if TYPE_CHECKING:
     # Annotation-only: `atlas.turn.handoff` imports this module at load
@@ -72,6 +75,12 @@ BULK_REFUSAL_REPLY = "i can only add or delete one event at a time -- make bulk 
 HANDOFF_NOT_ALONE_REPLY = "ask me for that on its own"
 FOLLOW_UP_LIMIT_REPLY = "let's start over -- say the wake word and ask again"
 PROPOSAL_INVALID_REPLY = "i couldn't work out how to add that -- try asking again"
+# A-WR-01: distinct from `PROPOSAL_INVALID_REPLY` on purpose -- a proposal
+# that failed to validate and a proposal that raised while being stored
+# are different facts, and `dispatch_handoff` (turn/handoff.py) speaks
+# this one only for the latter, so a future reader of the log or a
+# transcript can tell which one actually happened.
+PROPOSAL_STORE_FAILED_REPLY = "i couldn't save that -- try asking again"
 
 # Plan 09-06 (D-08, D-09): the fixed replies the confirmation round and its
 # executor speak. `CANCELLED_REPLY` covers every non-confirm outcome
@@ -83,6 +92,15 @@ PROPOSAL_INVALID_REPLY = "i couldn't work out how to add that -- try asking agai
 CANCELLED_REPLY = "cancelled, nothing was changed"
 CONFIRMED_CREATE_REPLY = "done, it's on your calendar"
 CONFIRMED_DELETE_REPLY = "done, it's deleted"
+
+# A-WR-01: what the operator hears when `execute_pending_action`'s own
+# `tool_host.call_tool` raises instead of returning a result -- honest
+# about not knowing whether the underlying write went through, never
+# `CANCELLED_REPLY` ("nothing was changed" would be a guess, not a fact,
+# the exact "an operator who cannot tell a refusal from a crash will stop
+# trusting the refusals" failure this project's own doctrine names
+# elsewhere).
+EXECUTION_DID_NOT_COMPLETE_REPLY = "something went wrong and i'm not sure it went through -- check your calendar"
 
 # The two, and only two, tool schemas the confirmation round is ever
 # offered (D-08): `confirm` takes no parameters -- there is nothing left
@@ -493,7 +511,26 @@ async def execute_pending_action(pending: "PendingAction", tool_host: Any) -> Ex
     # `_compose_clarifying_question`.
     from atlas.turn.controller import _is_error, _result_text
 
-    result = await tool_host.call_tool(pending.tool_name, pending.arguments)
+    # A-WR-01: every other tool-host call on this plan's own paths is
+    # defended against a raised exception (`_run_tool_rounds`'s own
+    # `asyncio.gather(..., return_exceptions=True)`, the local-intent
+    # path's `try/except` in `turn/controller.py`) -- this call was not.
+    # Left unguarded, a raise here propagates out of `handle_confirmation_reply`
+    # and `run_turn` entirely, after `claim_for_confirmation` has already
+    # flipped the row to `confirmed`: the row would be stuck there forever
+    # (never `executed` or `failed`) and the operator would hear silence,
+    # since `_speak` is never reached on that path.
+    try:
+        result = await tool_host.call_tool(pending.tool_name, pending.arguments)
+    except Exception:
+        logger.exception(
+            "tool_host.call_tool raised while executing pending action %s (%s)",
+            pending.id,
+            pending.tool_name,
+        )
+        return ExecutionResult(
+            succeeded=False, reply_text=EXECUTION_DID_NOT_COMPLETE_REPLY, detail=EXECUTION_DID_NOT_COMPLETE_REPLY
+        )
     if _is_error(result):
         text = _result_text(result)
         return ExecutionResult(succeeded=False, reply_text=text or CANCELLED_REPLY, detail=text or None)

@@ -405,6 +405,35 @@ async def test_a_failed_create_speaks_the_tools_own_error_text():
     assert outcome.turn_outcome == "email_draft_failed"
 
 
+async def test_a_raising_style_repo_speaks_the_exceptions_own_text_not_a_crash():
+    """A-WR-01 regression: `ctx.style_repo.get_style_by_label` raising must
+    never abort the turn silently -- caught the same way every other
+    tool-host call in this function already is."""
+    memory = EmailListMemory()
+    memory.store("camera", (_DANA,))
+    tool_host = _StubToolHost(
+        fetch_body={"body": "running behind.", "truncated": False, "from_name": "Dana", "from_address": "dana@example.com", "subject": "Lunch"},
+        draft={"draft": {"draft_id": "draft-1", "to_name": "Dana", "to_address": "dana@example.com", "account": "work"}},
+    )
+    brain = RecordingFakeBrain(replies=[BrainReply(text="GIST: late.\nBODY: running late, sorry!")])
+
+    class _RaisingStyleRepo:
+        async def get_style_by_label(self, label: str):
+            raise RuntimeError("style repository unavailable")
+
+    ctx = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=None, brain=brain, email_memory=memory,
+        style_repo=_RaisingStyleRepo(),
+    )
+
+    outcome = await handle_email_draft(_handoff(position=1), ctx)
+
+    assert outcome.turn_outcome == "email_draft_failed"
+    assert outcome.reply_text == "style repository unavailable"
+    assert brain.calls == []
+    assert tool_host.calls == []
+
+
 async def test_style_profile_and_samples_reach_the_drafting_round():
     memory = EmailListMemory()
     memory.store("camera", (_DANA,))
