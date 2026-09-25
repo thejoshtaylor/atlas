@@ -14,6 +14,8 @@ eight-plus character quoted value, and a mistake here is permanent.
 from __future__ import annotations
 
 import urllib.parse
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -278,6 +280,29 @@ def test_callback_with_a_reused_state_redirects_state_invalid(
     second = client.get("/api/google/oauth/callback", params={"code": "code-1", "state": raw_state})
     assert second.status_code == 303
     assert second.headers["location"] == "/google?link_error=state_invalid"
+
+
+def test_callback_completed_by_a_different_admin_than_started_it_redirects_state_invalid(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    """B2-WR-02 regression: `oauth_callback`'s own CSRF defense for a
+    multi-admin household -- the state row must also have been created by
+    the same admin completing the callback, not merely exist and be
+    unused. A regression that dropped or inverted
+    `consumed.created_by_user_id != admin.id` (it sits on the same line
+    as the `is None` check) would not be caught without this test."""
+    _sec, account_repo, _repo, _plugins, _mgr, fake_google, app, client_a = _linked_scenario(
+        monkeypatch, fake_account_repository, fake_plugin_repository
+    )
+    raw_state = _start_link(client_a, fake_google)
+    fake_google.add_code("code-1", access_token="at-1", refresh_token="rt-1")
+
+    client_b = _client_as(app, _sec, account_repo, role="admin")
+    response = client_b.get(
+        "/api/google/oauth/callback", params={"code": "code-1", "state": raw_state}
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/google?link_error=state_invalid"
 
 
 def test_callback_with_access_denied_redirects_denied(
