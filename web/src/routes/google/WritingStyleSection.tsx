@@ -11,11 +11,16 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
+import { Label } from "@/components/ui/label"
+import { SubmitButton } from "@/components/state/SubmitButton"
+import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api"
 import {
   fetchGoogleStyle,
   googleStyleQueryKey,
   relearnGoogleStyleMutationOptions,
+  saveGoogleStyleMutationOptions,
+  type GoogleStyle,
 } from "@/lib/google"
 import { deriveWritingStyleState, shouldPoll } from "./deriveWritingStyleState"
 
@@ -32,6 +37,91 @@ const RELEARN_BODY =
 // `learning` only refreshes THIS account's own status, it never starts a
 // new learn itself.
 const POLL_INTERVAL_MS = 3000
+
+// 09-09's own `StyleUpdateRequest` limit -- shown here as a live count,
+// enforced server-side.
+const MAX_PROFILE_CHARS = 4000
+
+function StyleProfileEditor({ accountId, style }: { accountId: number; style: GoogleStyle }) {
+  // Seeded once from the loaded style at mount, like `AccountDetail`'s own
+  // `labelDraft` -- `StyleProfileEditor` only ever mounts once `style` is
+  // loaded (its caller gates on that), so a lazy initial value is enough;
+  // no effect is needed, and a background poll (while `learning`) never
+  // overwrites text the admin is mid-edit on, since only the initial
+  // render reads this value.
+  const [profileDraft, setProfileDraft] = React.useState(style.profile)
+
+  const effectiveProfile = profileDraft
+  const save = useMutation(saveGoogleStyleMutationOptions)
+  const [saveError, setSaveError] = React.useState<string | null>(null)
+  const [samplesOpen, setSamplesOpen] = React.useState(false)
+
+  const handleSave = async () => {
+    setSaveError(null)
+    try {
+      await save.mutateAsync({ accountId, profile: effectiveProfile })
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't save this profile. Try again.")
+      throw err
+    }
+  }
+
+  return (
+    <>
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="google-style-profile">Style profile</Label>
+        <Textarea
+          id="google-style-profile"
+          rows={6}
+          value={effectiveProfile}
+          onChange={(event) => setProfileDraft(event.target.value)}
+        />
+        <p className="text-label text-muted-foreground">
+          {`${effectiveProfile.length} / ${MAX_PROFILE_CHARS.toLocaleString()} characters`}
+        </p>
+      </div>
+      {saveError ? <p className="text-body text-destructive">{saveError}</p> : null}
+      <SubmitButton onSubmit={handleSave} disabled={effectiveProfile === style.profile}>
+        Save profile
+      </SubmitButton>
+
+      {style.samples.length > 0 ? (
+        <div className="flex flex-col gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="sm:self-start"
+            onClick={() => setSamplesOpen((open) => !open)}
+          >
+            {samplesOpen ? `Hide samples (${style.samples.length})` : `Show samples (${style.samples.length})`}
+          </Button>
+          {samplesOpen ? (
+            <ul className="flex flex-col gap-2">
+              {style.samples.map((sample, index) => (
+                <li
+                  key={index}
+                  className="readout whitespace-pre-wrap rounded-md border border-border bg-muted p-2 text-body text-foreground"
+                >
+                  {sample}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+
+      <div className="flex flex-col gap-1.5">
+        <p className="text-label font-medium text-foreground">Signature from Gmail</p>
+        {style.signature_text ? (
+          <p className="readout whitespace-pre-wrap text-body text-foreground">{style.signature_text}</p>
+        ) : (
+          <p className="text-body text-muted-foreground">No Gmail signature.</p>
+        )}
+      </div>
+    </>
+  )
+}
 
 export function WritingStyleSection({ accountId }: { accountId: number }) {
   const query = useQuery({
@@ -63,6 +153,8 @@ export function WritingStyleSection({ accountId }: { accountId: number }) {
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
       <p className="text-heading font-semibold text-foreground">Writing style</p>
       {style ? <p className="text-body text-muted-foreground">{deriveWritingStyleState(style)}</p> : null}
+
+      {style ? <StyleProfileEditor accountId={accountId} style={style} /> : null}
 
       <AlertDialog open={relearnOpen} onOpenChange={setRelearnOpen}>
         <Button
