@@ -1,0 +1,185 @@
+"""The seam every Google action (and every Gmail read, plan 09-08) passes
+through: a tool result carrying `atlas_handoff` ends the tool round and code
+takes over, instead of the model (D-08).
+
+`parse_handoff`/`_compose_clarifying_question` reach back into
+`turn/controller.py` through a function-body import, deferred past both
+modules' load -- the identical shape `turn/brain_race.py` already uses for
+`_run_tool_rounds`, and for the identical reason: `controller.py` imports
+this module at load time (to dispatch a stored handoff after the tool
+round), so a module-level import here of anything from `controller.py`
+would deadlock the two modules' load order.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from atlas_mcp.google_tools import HANDOFF_KEY
+
+from atlas.db.pending_action_repository import PendingActionRepository
+from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
+from atlas.turn.pending_action import (
+    CONFIRMATION_UNAVAILABLE_REPLY,
+    EXECUTING_TOOL_BY_ACTION,
+    FOLLOW_UP_LIMIT_REPLY,
+    PROPOSAL_INVALID_REPLY,
+    PendingProposal,
+    compose_readback,
+    execution_arguments,
+)
+
+# The two kinds of handoff a tool result may carry today -- an account/Gmail
+# read handoff (plan 09-08) and a workflow handoff (already-shipped
+# `atlas_handoff` uses elsewhere) are deliberately out of this frozenset:
+# widening it is a later plan's own decision, not implied by this one.
+HANDOFF_KINDS: frozenset[str] = frozenset({"pending_action", "needs_clarification"})
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """One parsed handoff -- `kind` is one of `HANDOFF_KINDS`, `payload` is
+    the handoff's own body (everything under the `atlas_handoff` key
+    besides `kind` itself is still present in `payload`, including `kind`,
+    since callers key off `kind` on this object, not by re-reading the
+    dict)."""
+
+    kind: str
+    payload: dict[str, Any]
+
+
+def parse_handoff(result: Any) -> "Handoff | None":
+    """`result`'s parsed payload, when it is a `{HANDOFF_KEY: {"kind": ...}}`
+    shape with a recognized kind -- `None` for every other result,
+    including an error-shaped one (a `Denied` refusal is never a handoff)
+    and an ordinary tool result with no handoff key at all.
+    """
+    from atlas.turn.controller import _is_error, _result_payload
+
+    if _is_error(result):
+        return None
+    payload = _result_payload(result)
+    if not isinstance(payload, dict) or set(payload) != {HANDOFF_KEY}:
+        return None
+    body = payload[HANDOFF_KEY]
+    if not isinstance(body, dict):
+        return None
+    kind = body.get("kind")
+    if kind not in HANDOFF_KINDS:
+        return None
+    return Handoff(kind=kind, payload=body)
+
+
+@dataclass
+class HandoffSlot:
+    """One turn's own mutable landing spot for a handoff its top tier's
+    tool round produced -- mirrors `brain_race.ToolCommitment`'s "one
+    instance per turn, mutated in place, read back after the race" shape.
+
+    `unreachable_accounts` is reserved for a later plan's own use of this
+    slot (a Gmail read's own per-account degrade list, plan 09-08) and is
+    never populated by this plan.
+    """
+
+    handoff: "Handoff | None" = None
+    bulk_refused: bool = False
+    unreachable_accounts: "list[Any]" = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class HandoffContext:
+    """Everything `dispatch_handoff` needs beyond the handoff itself --
+    built once per turn by `atlas.google.turn_context.build_handoff_context`
+    (Task 3), never shared across turns (the same "never shared" discipline
+    `turn/controller.py::_make_run_turn_for_source`'s own `TurnTimings`
+    already follows).
+
+    `pending_actions=None` (every app with no Google repository configured,
+    `tests/test_startup_smoke.py`'s own fake dict included) makes
+    `dispatch_handoff` behave exactly as `follow_up_available=False` would:
+    `CONFIRMATION_UNAVAILABLE_REPLY`, nothing stored.
+    """
+
+    source_name: str
+    tool_host: Any
+    pending_actions: "PendingActionRepository | None"
+    brain: Any
+    now: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    pending_ttl_s: float = 60.0
+
+
+@dataclass(frozen=True)
+class HandoffOutcome:
+    """What `run_turn` speaks, records as `turn_outcome`, and (for a stored
+    pending action) requests on the source's own follow-up channel."""
+
+    reply_text: str
+    turn_outcome: str
+    follow_up: "FollowUpRequest | None" = None
+
+
+async def dispatch_handoff(
+    handoff: Handoff,
+    ctx: "HandoffContext | None",
+    *,
+    transcript: str,
+    follow_up_available: bool,
+    chain_depth: int,
+) -> HandoffOutcome:
+    """Resolve one turn's stored handoff into what to say and, for a
+    pending action, what to store and what follow-up to ask for.
+
+    `chain_depth` beyond `MAX_CHAINED_FOLLOW_UPS` ends the exchange rather
+    than looping (D-06's own "never left waiting forever" extended to a
+    chain of clarifications). A `needs_clarification` handoff never stores
+    anything and never requests a follow-up -- the operator answers by
+    waking the assistant again, exactly like the existing entity/plugin/run
+    disambiguation path (`turn/controller.py::_compose_clarifying_question`).
+    """
+    if chain_depth > MAX_CHAINED_FOLLOW_UPS:
+        return HandoffOutcome(reply_text=FOLLOW_UP_LIMIT_REPLY, turn_outcome="follow_up_limit")
+
+    if handoff.kind == "needs_clarification":
+        from atlas.turn.controller import _compose_clarifying_question
+
+        candidates = tuple(handoff.payload.get("candidates", ()))
+        question = _compose_clarifying_question(candidates, {})
+        return HandoffOutcome(reply_text=question, turn_outcome="needs_clarification")
+
+    # kind == "pending_action"
+    if not follow_up_available or ctx is None or ctx.pending_actions is None:
+        return HandoffOutcome(
+            reply_text=CONFIRMATION_UNAVAILABLE_REPLY, turn_outcome="confirmation_unavailable"
+        )
+
+    body = {key: value for key, value in handoff.payload.items() if key != "kind"}
+    try:
+        proposal = PendingProposal(**body)
+    except Exception:
+        return HandoffOutcome(reply_text=PROPOSAL_INVALID_REPLY, turn_outcome="proposal_invalid")
+
+    tool_name = EXECUTING_TOOL_BY_ACTION[proposal.action]
+    arguments = execution_arguments(proposal)
+    readback = compose_readback(proposal, now=ctx.now)
+    expires_at = ctx.now + timedelta(seconds=ctx.pending_ttl_s)
+
+    action_row = await ctx.pending_actions.create(
+        source=ctx.source_name,
+        action=proposal.action,
+        tool_name=tool_name,
+        arguments=arguments,
+        readback=readback,
+        created_at=ctx.now,
+        expires_at=expires_at,
+    )
+
+    follow_up = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=chain_depth,
+        original_transcript=transcript,
+        question=readback,
+        pending_action_id=action_row.id,
+    )
+    return HandoffOutcome(reply_text=readback, turn_outcome="needs_confirmation", follow_up=follow_up)

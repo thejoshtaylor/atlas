@@ -80,6 +80,7 @@ import json
 import logging
 import time as _time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
 from atlas.config import MacroConfig
@@ -93,8 +94,11 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
+from atlas.turn.follow_up import FollowUpChannel
+from atlas.turn.handoff import HandoffContext, HandoffSlot, dispatch_handoff, parse_handoff
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
+from atlas.turn.pending_action import BULK_REFUSAL_REPLY, HANDOFF_NOT_ALONE_REPLY
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.wake_echo import is_wake_only
 
@@ -328,6 +332,7 @@ async def run_turn(
     local_intents: bool = False,
     state_timeout_ms: float = 500.0,
     state_domains: frozenset[str] | None = None,
+    handoff_context: "HandoffContext | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -486,6 +491,15 @@ async def run_turn(
     # source `SourceRunner` did not attach one to -- `_speak`'s own checks
     # below are then no-ops (`_BargeInMonitor`'s docstring).
     barge_in: _BargeInMonitor | None = getattr(source, "barge_in", None)
+
+    # Plan 09-04 (D-06): read off the *unwrapped* source, the same way and
+    # for the same reason `barge_in` is above -- `_RecordingAudioSource`
+    # forwards no arbitrary attribute. `None` for every source with no
+    # follow-up channel attached (every caller today; `SourceRunner`
+    # attaches one starting plan 09-06), which is what makes
+    # `atlas.turn.pending_action.CONFIRMATION_UNAVAILABLE_REPLY` the honest
+    # answer to every proposal until then.
+    follow_up: "FollowUpChannel | None" = getattr(source, "follow_up", None)
 
     # 260922-cts: captured the same way, and for the same reason, as
     # `barge_in` immediately above -- off the *unwrapped* source, before
@@ -873,13 +887,25 @@ async def run_turn(
         _validate_tiers(tiers)
 
         commitment = brain_race.ToolCommitment()
+        # Plan 09-04: one `HandoffSlot` per turn, mutated in place by
+        # whichever tier's tool round produces a handoff -- only the top
+        # tier ever calls tools, so only `run_top_tier` (below) ever writes
+        # to it, mirroring `commitment`'s own "one instance per turn" shape.
+        handoff_slot = HandoffSlot()
 
         tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
         for tier in tiers:
             tier_messages = list(messages)
             if tier.calls_tools:
                 coro = brain_race.run_top_tier(
-                    tier, tool_host, tools_schema, tier_messages, max_tool_rounds, timings, commitment
+                    tier,
+                    tool_host,
+                    tools_schema,
+                    tier_messages,
+                    max_tool_rounds,
+                    timings,
+                    commitment,
+                    handoff_slot=handoff_slot,
                 )
             else:
                 coro = brain_race.run_triage_tier(tier, tier_messages)
@@ -957,6 +983,48 @@ async def run_turn(
             timings.log()
             return
         timings.mark_tool_rounds_done()
+
+        if handoff_slot.handoff is not None:
+            # Plan 09-04 (D-08): the tool round stored a handoff instead of
+            # ending with an ordinary reply -- code, not the model, decides
+            # what happens next. `follow_up_available` is False whenever
+            # there is no context to store a pending action through or no
+            # channel on this source to ask a confirmation over (D-06);
+            # `chain_depth` extends whatever depth the incoming follow-up
+            # (if this turn is itself answering one) already reached.
+            follow_up_available = follow_up is not None and handoff_context is not None
+            incoming = follow_up.incoming if follow_up is not None else None
+            chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
+            outcome = await dispatch_handoff(
+                handoff_slot.handoff,
+                handoff_context,
+                transcript=final_text,
+                follow_up_available=follow_up_available,
+                chain_depth=chain_depth,
+            )
+            timings.turn_outcome = outcome.turn_outcome
+            await _speak(
+                source,
+                tts,
+                timings,
+                outcome.reply_text,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+            )
+            if outcome.follow_up is not None and follow_up is not None:
+                follow_up.request(outcome.follow_up)
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        if handoff_slot.bulk_refused:
+            # D-10: the tool round already settled on `BULK_REFUSAL_REPLY`
+            # as its own settled text (`_run_tool_rounds` below) -- this
+            # only corrects `turn_outcome` before the ordinary answer path
+            # further down speaks it.
+            timings.turn_outcome = "bulk_refused"
 
         if winner.needs_clarification:
             # CMD-09/D-07: a third, exclusive outcome -- speaks a question
@@ -1422,6 +1490,7 @@ async def _run_tool_rounds(
     max_tool_rounds: int,
     timings: TurnTimings,
     commitment: "brain_race.ToolCommitment | None" = None,
+    handoff_slot: "HandoffSlot | None" = None,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
@@ -1500,6 +1569,46 @@ async def _run_tool_rounds(
             *(tool_host.call_tool(tc.name, tc.arguments) for tc in reply.tool_calls),
             return_exceptions=True,
         )
+
+        # Plan 09-04 (D-08, D-10): detect any handoff among this round's
+        # results before the existing mixed-outcome check below -- a
+        # handoff never reaches a `role: tool` message and never reaches a
+        # second `brain.chat` round.
+        handoffs_present = [
+            (index, handoff) for index, handoff in enumerate(parse_handoff(r) for r in results) if handoff is not None
+        ]
+        pending_action_count = sum(1 for _, h in handoffs_present if h.kind == "pending_action")
+
+        if pending_action_count >= 2:
+            # D-10: two change proposals in one round are a bulk change --
+            # refused outright, nothing stored. `handoff_slot.bulk_refused`
+            # lets `run_turn` correct `turn_outcome`; this function's own
+            # settled-text contract (return the reply text) is unchanged.
+            if handoff_slot is not None:
+                handoff_slot.bulk_refused = True
+            return BULK_REFUSAL_REPLY
+
+        if handoffs_present and len(handoffs_present) == 1 and len(reply.tool_calls) == 1:
+            # D-08: the round's only call produced a handoff -- store it and
+            # end the round at once. No `role: tool` message is appended for
+            # it, so the handoff payload never enters the message list, and
+            # nothing here calls `brain.chat` a second time.
+            if handoff_slot is not None:
+                handoff_slot.handoff = handoffs_present[0][1]
+            return ""
+
+        if handoffs_present:
+            # A handoff sharing its round with other calls is never
+            # honoured (D-08): replace each handoff result with an
+            # error-shaped one carrying the fixed refusal, then fall
+            # through to the existing mixed-outcome composer below, which
+            # already knows how to report one failed call next to any
+            # number of successful ones.
+            results = list(results)
+            for index, _handoff in handoffs_present:
+                results[index] = SimpleNamespace(
+                    isError=True, content=[SimpleNamespace(text=HANDOFF_NOT_ALONE_REPLY)]
+                )
 
         # Collect every result before deciding anything (D-06): a batch
         # containing any error-shaped or raised entry is composed in code,

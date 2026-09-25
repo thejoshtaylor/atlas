@@ -28,11 +28,12 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from atlas_mcp.google_api import GoogleApiError, GoogleAuthError, list_events
-from atlas_mcp.google_boundary import AccountGrant, parse_accounts_env, resolve_accounts
-from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV
+from atlas_mcp.google_boundary import AccountGrant, Clarification, parse_accounts_env, resolve_accounts, resolve_write_target
+from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV, HANDOFF_KEY
 from atlas_mcp.safety import Denied
 
 _MAX_RANGE_DAYS = 31
+_MAX_TITLE_LEN = 120
 
 
 def _parse_boundary(value: str, zone: ZoneInfo) -> datetime:
@@ -227,6 +228,98 @@ async def handle_calendar_list_events(
     }
 
 
+def _sanitize_title(title: str) -> str:
+    """A title with newlines flattened to spaces, stripped, and capped at
+    `_MAX_TITLE_LEN` characters -- what a proposal's own title ends up as,
+    verbatim, in the readback and in the stored pending action (D-07)."""
+    cleaned = title.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").strip()
+    return cleaned[:_MAX_TITLE_LEN]
+
+
+async def handle_calendar_propose_event(
+    accounts: "tuple[AccountGrant, ...]",
+    zone: ZoneInfo,
+    *,
+    title: str,
+    start: str,
+    end: "str | None" = None,
+    duration_minutes: "int | None" = None,
+    all_day: bool = False,
+    account: "str | None" = None,
+    calendar: "str | None" = None,
+) -> dict[str, Any]:
+    """Build a `pending_action` (or `needs_clarification`) handoff payload
+    for adding one calendar event -- makes no HTTP call, ever (D-08). The
+    event is only ever added by the executing tool this handoff's own
+    `atlas.turn.pending_action.EXECUTING_TOOL_BY_ACTION` names, run later by
+    code holding the exact arguments this call resolved, never by this
+    function or by the model that called it.
+
+    `resolve_write_target` (D-04, D-05) is the one gate: a calendar that is
+    off or read-only, or an account this env does not carry, raises `Denied`
+    with a spoken reason before any payload is ever built. An ambiguous
+    target (no account named with more than one candidate, or a named
+    account with more than one writable calendar) returns a
+    `needs_clarification` handoff instead of a proposal.
+
+    `duration_minutes`/`end` default to a 60-minute event when neither is
+    given. `all_day` takes `start` as a bare date (no time) and reports one
+    calendar day, end exclusive. `title` is sanitized by `_sanitize_title`.
+    Every time in the returned payload is ISO 8601 with an offset in `zone`.
+    """
+    if not accounts:
+        raise Denied("no google account is linked -- link one in the admin webapp under google accounts")
+
+    target = resolve_write_target(accounts, account, calendar)
+    if isinstance(target, Clarification):
+        return {
+            HANDOFF_KEY: {
+                "kind": "needs_clarification",
+                "about": target.about,
+                "candidates": list(target.candidates),
+            }
+        }
+    account_grant, calendar_grant = target
+
+    clean_title = _sanitize_title(title)
+    if not clean_title:
+        raise Denied("i need a title for that event")
+
+    if all_day:
+        start_date = date.fromisoformat(start)
+        end_date = start_date + timedelta(days=1)
+        start_out = start_date.isoformat()
+        end_out = end_date.isoformat()
+    else:
+        start_dt = _parse_boundary(start, zone)
+        if end is not None:
+            end_dt = _parse_boundary(end, zone)
+        elif duration_minutes is not None:
+            end_dt = start_dt + timedelta(minutes=duration_minutes)
+        else:
+            end_dt = start_dt + timedelta(minutes=60)
+        if end_dt <= start_dt:
+            raise Denied("the end of that event must be after the start")
+        start_out = start_dt.isoformat()
+        end_out = end_dt.isoformat()
+
+    return {
+        HANDOFF_KEY: {
+            "kind": "pending_action",
+            "action": "calendar_create",
+            "account": account_grant.label,
+            "calendar_id": calendar_grant.calendar_id,
+            "calendar_name": calendar_grant.name,
+            "calendar_primary": calendar_grant.primary,
+            "title": clean_title,
+            "start": start_out,
+            "end": end_out,
+            "all_day": bool(all_day),
+            "time_zone": str(zone),
+        }
+    }
+
+
 mcp_server = MCPServer("atlas-google")
 
 _accounts: tuple[AccountGrant, ...] = ()
@@ -251,6 +344,39 @@ async def calendar_list_events(
     try:
         return await handle_calendar_list_events(
             _accounts, _http_client, _zone, start=start, end=end, account=account, query=query
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def calendar_propose_event(
+    title: str,
+    start: str,
+    end: "str | None" = None,
+    duration_minutes: "int | None" = None,
+    all_day: bool = False,
+    account: "str | None" = None,
+    calendar: "str | None" = None,
+) -> dict[str, Any]:
+    """Propose adding one calendar event. This does NOT add the event --
+    the operator hears a spoken readback of exactly this proposal and must
+    confirm it before anything changes in Google Calendar. Never tell the
+    operator the event was added; it has not been, and only their spoken
+    confirmation makes it so. `start`/`end` are ISO dates or datetimes; a
+    time with no offset is in the house's own time zone. Leave `account`/
+    `calendar` unset unless the operator named one."""
+    try:
+        return await handle_calendar_propose_event(
+            _accounts,
+            _zone,
+            title=title,
+            start=start,
+            end=end,
+            duration_minutes=duration_minutes,
+            all_day=all_day,
+            account=account,
+            calendar=calendar,
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc

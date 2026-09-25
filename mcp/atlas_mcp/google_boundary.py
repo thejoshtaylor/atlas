@@ -153,3 +153,93 @@ def resolve_accounts(
             return (account,)
     linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
     raise Denied(f"i don't have a google account called {label!r} -- linked accounts: {linked}")
+
+
+@dataclass(frozen=True)
+class Clarification:
+    """D-04: what to ask the operator when a write proposal's target is
+    ambiguous -- which account, or (once an account is settled) which of
+    its read-write calendars. `about` names which question this is
+    (`"account"` or `"calendar"`); `candidates` are the labels or calendar
+    names to speak, sorted so the same ambiguity always produces the same
+    question.
+    """
+
+    about: str
+    candidates: tuple[str, ...]
+
+
+def _resolve_calendar_for_account(
+    account: AccountGrant, calendar_name: "str | None"
+) -> "tuple[AccountGrant, CalendarGrant] | Clarification":
+    """D-05: the one calendar a proposal against `account` may target --
+    the calendar named (case-insensitive), else the account's primary
+    calendar when it is writable, else its only writable calendar, else a
+    `Clarification(about="calendar")` over every writable calendar's name.
+
+    A calendar that is off never reaches `account.calendars` at all
+    (`GoogleEnvBuilder`'s own upstream filter) -- this function only ever
+    tells a read-write calendar apart from a read-only one.
+    """
+    if calendar_name is not None:
+        normalized_cal = calendar_name.strip().casefold()
+        match = next((c for c in account.calendars if c.name.casefold() == normalized_cal), None)
+        if match is None:
+            raise Denied(
+                f"the {calendar_name} calendar isn't turned on for {account.label} -- "
+                "turn it on in the google accounts screen"
+            )
+        if match.access == "read_only":
+            raise Denied(
+                f"the {match.name} calendar in {account.label} is read only -- "
+                "change that in the google accounts screen"
+            )
+        return (account, match)
+
+    primary = next((c for c in account.calendars if c.primary), None)
+    if primary is not None and primary.access == "read_write":
+        return (account, primary)
+
+    read_write_calendars = [c for c in account.calendars if c.access == "read_write"]
+    if len(read_write_calendars) == 1:
+        return (account, read_write_calendars[0])
+    if not read_write_calendars:
+        raise Denied(
+            f"turn on a calendar for read and write on {account.label} in the google accounts screen"
+        )
+    return Clarification(about="calendar", candidates=tuple(sorted(c.name for c in read_write_calendars)))
+
+
+def _resolve_unnamed_write_target(
+    accounts: "tuple[AccountGrant, ...]",
+) -> "tuple[AccountGrant, CalendarGrant] | Clarification":
+    """D-04: no account named in the proposal -- the one account with a
+    writable calendar, else the operator's default account, else a
+    `Clarification(about="account")` over every candidate account's label.
+
+    Plan 09-04 Task 2 implements this. No Task 1 behavior ever reaches this
+    branch: every Task 1 case names an account.
+    """
+    raise NotImplementedError("resolve_write_target's unnamed-account path is implemented in Task 2")
+
+
+def resolve_write_target(
+    accounts: "tuple[AccountGrant, ...]", account_label: "str | None", calendar_name: "str | None"
+) -> "tuple[AccountGrant, CalendarGrant] | Clarification":
+    """D-04/D-05: the write target for a calendar proposal -- an exact
+    `(AccountGrant, CalendarGrant)` pair, or a `Clarification` naming what
+    to ask the operator.
+
+    A named account resolves its calendar through `_resolve_calendar_for_account`
+    (Task 1). No account named resolves through `_resolve_unnamed_write_target`
+    (Task 2): the only account with a writable calendar, else the operator's
+    default account, else a clarifying question over the candidates.
+    """
+    if account_label is None:
+        return _resolve_unnamed_write_target(accounts)
+    normalized = account_label.strip().casefold()
+    account = next((a for a in accounts if a.label.casefold() == normalized), None)
+    if account is None:
+        linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
+        raise Denied(f"i don't have a google account called {account_label!r} -- linked accounts: {linked}")
+    return _resolve_calendar_for_account(account, calendar_name)

@@ -208,6 +208,7 @@ async def run_top_tier(
     max_tool_rounds: int,
     timings: Any,
     commitment: ToolCommitment | None = None,
+    handoff_slot: Any | None = None,
 ) -> TierReply:
     """The existing, unmodified tool-calling loop, wrapped locally into a
     `TierReply` -- no envelope call.
@@ -236,7 +237,14 @@ async def run_top_tier(
     from atlas.turn.controller import _run_tool_rounds
 
     settled_text = await _run_tool_rounds(
-        tier.brain, tool_host, tools_schema, messages, max_tool_rounds, timings, commitment=commitment
+        tier.brain,
+        tool_host,
+        tools_schema,
+        messages,
+        max_tool_rounds,
+        timings,
+        commitment=commitment,
+        handoff_slot=handoff_slot,
     )
 
     return TierReply(
