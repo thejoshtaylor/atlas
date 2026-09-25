@@ -368,6 +368,30 @@ test("Unlink opens a dialog naming the account; Cancel sends nothing, confirming
   expect(await screen.findByText("google accounts list")).toBeTruthy()
 })
 
+test("a failed unlink shows the server's error text (C-CR-01: AlertDialogAction closes the dialog before the catch runs)", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work" }),
+    unlinkGoogleAccount: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(503, "the running google tools could not be stopped -- retry this action")
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  fireEvent.click(await screen.findByRole("button", { name: "Unlink" }))
+  const dialogUnlinkButtons = screen.getAllByRole("button", { name: "Unlink work" })
+  fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
+
+  // `handleUnlink`'s catch block content (generic vs. verbatim `ApiError`
+  // text) is C-WR-02's concern, not C-CR-01's -- this test only proves the
+  // error, whatever its text, survives `AlertDialogAction` closing the
+  // dialog and is actually rendered to the operator.
+  expect(await screen.findByText("Couldn't unlink this account. Try again.")).toBeTruthy()
+})
+
 test("an unknown id shows the not-found state with no Retry button", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, {

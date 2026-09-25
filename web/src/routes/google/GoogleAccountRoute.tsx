@@ -241,7 +241,6 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
               <AlertDialogTitle>{`Unlink ${account.label}?`}</AlertDialogTitle>
               <AlertDialogDescription>{UNLINK_BODY}</AlertDialogDescription>
             </AlertDialogHeader>
-            {unlinkError ? <p className="text-body text-destructive">{unlinkError}</p> : null}
             <AlertDialogFooter>
               <AlertDialogCancel onClick={() => setUnlinkOpen(false)}>Cancel</AlertDialogCancel>
               <AlertDialogAction variant="destructive" disabled={unlink.isPending} onClick={() => void handleUnlink()}>
@@ -250,6 +249,7 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+        {unlinkError ? <p className="text-body text-destructive">{unlinkError}</p> : null}
       </div>
     </div>
   )
