@@ -336,8 +336,8 @@ test("R2-WR-09: a notice handed over by the account page's unlink is shown above
 
   renderRoute(GoogleAccountsRoute, queryClient, {
     pathname: "/google",
-    state: { notice: "Unlinked work. The Google tools stopped and did not start again." },
+    state: { notice: "Unlinked work. Google tools restart on the next account change." },
   })
 
-  expect(await screen.findByText("Unlinked work. The Google tools stopped and did not start again.")).toBeTruthy()
+  expect(await screen.findByText("Unlinked work. Google tools restart on the next account change.")).toBeTruthy()
 })

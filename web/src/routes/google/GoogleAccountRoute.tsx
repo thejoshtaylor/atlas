@@ -60,7 +60,7 @@ const UNLINK_BODY = "ATLAS loses access to this account's calendars and mail. Dr
 // this DELETE can only 404, so this page says what is true instead and
 // hands the sentence to the list page.
 function unlinkedToolsStoppedNotice(label: string): string {
-  return `Unlinked ${label}. The Google tools stopped and did not start again. They start again after the next account change or token refresh.`
+  return `Unlinked ${label}. Google tools restart on the next account change.`
 }
 
 function CalendarRow({ accountId, calendar }: { accountId: number; calendar: GoogleCalendar }) {

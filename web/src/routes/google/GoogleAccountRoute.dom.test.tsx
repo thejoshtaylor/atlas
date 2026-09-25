@@ -531,9 +531,7 @@ test("R3-WR-02: a 503 from the delete route whose refetch 404s means the account
   fireEvent.click(dialogUnlinkButtons[dialogUnlinkButtons.length - 1])
 
   expect(
-    await screen.findByText(
-      "Unlinked work. The Google tools stopped and did not start again. They start again after the next account change or token refresh.",
-    ),
+    await screen.findByText("Unlinked work. Google tools restart on the next account change."),
   ).toBeTruthy()
   expect(screen.queryByText(/retry this action/)).toBeNull()
   expect(queryClient.getQueryState(["google", "accounts", 7])).toBeUndefined()
