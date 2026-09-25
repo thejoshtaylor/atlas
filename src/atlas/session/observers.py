@@ -211,3 +211,13 @@ class ObserverPublishingSource:
     @follow_up.setter
     def follow_up(self, value: Any) -> None:
         self._wrapped.follow_up = value
+
+    @property
+    def speech_signals(self) -> Any:
+        # Same forwarding discipline as `barge_in`/`preroll_bytes`/
+        # `follow_up` above (10-05-PLAN.md, D-09 through D-13): without
+        # this, `turn/controller.py::run_turn`'s `getattr(source,
+        # "speech_signals", None)` reads off this wrapper -- never the
+        # `EdgeAudioSource` underneath it -- and always sees `None` for
+        # every real edge turn.
+        return getattr(self._wrapped, "speech_signals", None)

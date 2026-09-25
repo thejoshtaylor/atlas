@@ -89,6 +89,12 @@ class TurnTimings:
     tool_rounds_done_at: float | None = None
     first_audio_at: float | None = None
     answer_audio_at: float | None = None
+    # 10-05-PLAN.md (D-09 through D-13): the arrival time of the Pi's own
+    # `vad.end`, the edge source's headline latency measurement -- deliberately
+    # NOT in `_STAGE_ORDER`/`to_event()` (kept out of the browser timing
+    # contract, since a browser/camera turn never has one) but included in
+    # `log()` so it reaches the structured log line every other stage does.
+    vad_end_at: float | None = None
 
     def mark_turn_started(self) -> None:
         """Record the moment the turn began -- the mic toggle, in Phase 1."""
@@ -135,6 +141,18 @@ class TurnTimings:
     def mark_stt_final(self) -> None:
         """Record the moment the final transcript arrived."""
         self.stt_final_at = time.monotonic()
+
+    def mark_vad_end(self, at: float) -> None:
+        """Record the arrival time of the Pi's own `vad.end` (D-09 through
+        D-13, 10-05-PLAN.md) -- first call wins, matching every other
+        idempotent mark in this class. `at` is the caller's own recorded
+        arrival (`turn/early_finalize.py::wait_for_end_of_speech`'s return
+        value), not a fresh `time.monotonic()` read here, the same
+        already-recorded-arrival discipline `mark_first_partial`'s `at`
+        parameter already established.
+        """
+        if self.vad_end_at is None:
+            self.vad_end_at = at
 
     def mark_brain_first_round(self) -> None:
         """Record the first `chat()` round returning.
@@ -260,6 +278,19 @@ class TurnTimings:
             return None
         return (self.answer_audio_at - self.speech_end_at) * 1000
 
+    @property
+    def vad_end_to_stt_final_ms(self) -> float | None:
+        """The phase's headline latency number (10-05-PLAN.md): how long
+        from the Pi's own `vad.end` to the final transcript arriving, or
+        `None` until both marks exist -- `None` for every non-edge turn,
+        which never sets `vad_end_at` at all. This is the number the
+        2.1-2.6 s end-of-speech-to-final-transcript baseline this plan
+        exists to cut is measured against.
+        """
+        if self.vad_end_at is None or self.stt_final_at is None:
+            return None
+        return (self.stt_final_at - self.vad_end_at) * 1000
+
     def stage_durations_ms(self) -> dict[str, float | None]:
         """Each stage's duration since the previous *reached* stage.
 
@@ -298,11 +329,13 @@ class TurnTimings:
                 "tool_rounds_done_at": self.tool_rounds_done_at,
                 "first_audio_at": self.first_audio_at,
                 "answer_audio_at": self.answer_audio_at,
+                "vad_end_at": self.vad_end_at,
                 "end_of_speech_to_first_audio_ms": self.end_of_speech_to_first_audio_ms,
                 "end_of_speech_to_answer_audio_ms": self.end_of_speech_to_answer_audio_ms,
                 "endpointing_delay_ms": self.endpointing_delay_ms,
                 "speech_end_to_first_audio_ms": self.speech_end_to_first_audio_ms,
                 "speech_end_to_answer_audio_ms": self.speech_end_to_answer_audio_ms,
+                "vad_end_to_stt_final_ms": self.vad_end_to_stt_final_ms,
             },
         )
 

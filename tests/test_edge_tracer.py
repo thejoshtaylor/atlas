@@ -127,7 +127,14 @@ class _ChannelAwareStt:
         self.received_format: "SourceFormat | None" = None
         self._marker_chunk = marker_chunk
 
-    async def stream(self, frames, source_format):
+    async def stream(self, frames, source_format, *, finalize=None):
+        # 10-05-PLAN.md: the edge source's real `SpeechSignals` now reaches
+        # `run_turn` through `speech_signals` forwarding, so
+        # `_drain_to_final_transcript` calls `stream(..., finalize=...)`
+        # here exactly as it would against a real provider -- accepted and
+        # ignored, since this double proves D-09's channel isolation, not
+        # the early-finalize path (10-05-SUMMARY.md's own coverage of that
+        # is `tests/test_early_finalize.py`).
         self.received_format = source_format
         async for chunk in frames:
             self.received_frames.append(chunk)

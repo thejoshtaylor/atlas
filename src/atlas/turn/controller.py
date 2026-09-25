@@ -104,6 +104,7 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
+from atlas.turn.early_finalize import wait_for_end_of_speech
 from atlas.turn.follow_up import (
     HA_CALL_SERVICE_TOOL,
     MAX_CHAINED_FOLLOW_UPS,
@@ -234,7 +235,13 @@ class _AudioSource(Protocol):
 
 
 class _SttProvider(Protocol):
-    def stream(self, frames: AsyncIterator[bytes], source_format: SourceFormat) -> AsyncIterator[Any]: ...
+    def stream(
+        self,
+        frames: AsyncIterator[bytes],
+        source_format: SourceFormat,
+        *,
+        finalize: "asyncio.Event | None" = None,
+    ) -> AsyncIterator[Any]: ...
 
 
 class _BrainProvider(Protocol):
@@ -613,6 +620,18 @@ async def run_turn(
         asyncio.create_task(pending_runs_fetch()) if pending_runs_fetch is not None else None
     )
 
+    # 10-05-PLAN.md (D-09 through D-13): read off the same still-unwrapped
+    # `source` `preroll_bytes` below is read off, and for the same reason --
+    # `_RecordingAudioSource` forwards no arbitrary attribute, so after that
+    # wrap this value would be unreachable. Read unconditionally, not inside
+    # `if session_recorder is not None:` below, so a deployment with session
+    # recording off still finalizes an edge turn's speech-to-text early.
+    # `None` for every source that predates this plan (every browser/camera
+    # source, and every test double that carries no `speech_signals`), in
+    # which case `_drain_to_final_transcript` behaves exactly as it did
+    # before this plan.
+    speech_signals = getattr(source, "speech_signals", None)
+
     if session_recorder is not None:
         # Resolved from the source's own declaration, never assumed (D-13),
         # and wrapped before `_drain_to_final_transcript` is ever awaited
@@ -654,6 +673,14 @@ async def run_turn(
             clock=clock,
             poll_interval_s=poll_interval_s,
             onset_deadline=onset_deadline,
+            speech_signals=speech_signals,
+            # 10-05-PLAN.md: an ordinary wake turn (`incoming is None`)
+            # whose segment already ended before speech-to-text even opened
+            # holds only the wake phrase -- finalizing at once sends it
+            # straight to the wake-only path below. A follow-up turn
+            # (`incoming is not None`) must NOT finalize on that same
+            # already-ended state; it waits for a genuinely new segment.
+            finalize_if_already_ended=incoming is None,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -668,7 +695,18 @@ async def run_turn(
             # hold this turn open past its original deadline.
             remaining_s = max(0.0, turn_deadline - clock())
             final = await _drain_to_final_transcript(
-                source, stt, remaining_s, timings, clock=clock, poll_interval_s=poll_interval_s
+                source,
+                stt,
+                remaining_s,
+                timings,
+                clock=clock,
+                poll_interval_s=poll_interval_s,
+                speech_signals=speech_signals,
+                # 10-05-PLAN.md: the command is still coming -- this second
+                # drain must wait for the NEXT segment's own vad.end, never
+                # finalize immediately on the already-ended state the first
+                # drain's wake-only segment left behind.
+                finalize_if_already_ended=False,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -1646,8 +1684,33 @@ async def _drain_to_final_transcript(
     clock: Callable[[], float],
     poll_interval_s: float,
     onset_deadline: "float | None" = None,
+    speech_signals: "Any | None" = None,
+    finalize_if_already_ended: bool = False,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
+
+    `speech_signals` (10-05-PLAN.md, D-09 through D-13), when not `None`,
+    is the edge source's own `SpeechSignals` -- `run_turn` reads it off the
+    still-unwrapped source next to the `preroll_bytes` read, before
+    `_RecordingAudioSource` ever wraps it. When given, this function starts
+    a watch task alongside the drain that awaits
+    `turn.early_finalize.wait_for_end_of_speech`, marks `timings.vad_end_at`,
+    and sets a per-call `asyncio.Event` passed to `stt.stream(...,
+    finalize=...)` -- ending the utterance the instant the Pi reports the
+    end of speech, rather than waiting for this provider's own endpointing
+    or for `max_utterance_s` to elapse. The watch task is cancelled and
+    awaited on every return path below, so it never outlives this call.
+    `speech_signals=None` (the default, and every caller that predates this
+    plan) makes `stt.stream` called with exactly today's two positional
+    arguments -- no `finalize` keyword at all -- so every source and every
+    STT double that carries no `speech_signals` is unaffected byte for
+    byte.
+
+    `finalize_if_already_ended` governs what "speech already ended before
+    this call started watching" means to the watch above -- see
+    `wait_for_end_of_speech`'s own docstring for the full rule; `run_turn`
+    passes `incoming is None` for an ordinary wake turn's first drain and
+    `False` for the 260922-woc second drain.
 
     `onset_deadline` (plan 09-06, in `clock()`'s own domain) is a second,
     independent deadline from `max_utterance_s`'s own `deadline` below --
@@ -1696,7 +1759,35 @@ async def _drain_to_final_transcript(
     # with no second reader of `source.frames()`'s own queue. A one-channel
     # format (every source before Phase 10) is unchanged by `stt_view`.
     frames, fmt = stt_view(source.frames(), source.source_format())
-    stream = stt.stream(frames, fmt)
+
+    finalize_event: "asyncio.Event | None" = None
+    watch_task: "asyncio.Task[None] | None" = None
+    if speech_signals is not None:
+        finalize_event = asyncio.Event()
+
+        async def _watch_end_of_speech() -> None:
+            at = await wait_for_end_of_speech(
+                speech_signals,
+                hangover_s=speech_signals.hangover_s,
+                already_ended_counts=finalize_if_already_ended,
+            )
+            timings.mark_vad_end(at)
+            finalize_event.set()
+
+        watch_task = asyncio.create_task(_watch_end_of_speech())
+        stream = stt.stream(frames, fmt, finalize=finalize_event)
+    else:
+        stream = stt.stream(frames, fmt)
+
+    async def _stop_watch() -> None:
+        # Cancelled and awaited on every return path below, so a watch
+        # that never saw its own `vad.end` (D-13: xAI's own endpointing or
+        # `max_utterance_s` ended the turn first) never outlives this call.
+        if watch_task is not None:
+            watch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch_task
+
     deadline = clock() + max_utterance_s
     pending: Any | None = None
     pending_arrival: float | None = None
@@ -1713,6 +1804,7 @@ async def _drain_to_final_transcript(
             with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                 await next_event_task
             await stream.aclose()
+            await _stop_watch()
             timings.mark_speech_end(last_word_change_arrival)
             return None
 
@@ -1726,6 +1818,7 @@ async def _drain_to_final_transcript(
             with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                 await next_event_task
             await stream.aclose()
+            await _stop_watch()
             timings.mark_speech_end(last_word_change_arrival)
             return None
 
@@ -1736,6 +1829,7 @@ async def _drain_to_final_transcript(
         try:
             event = next_event_task.result()
         except StopAsyncIteration:
+            await _stop_watch()
             timings.mark_speech_end(last_word_change_arrival)
             return pending
 

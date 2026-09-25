@@ -234,6 +234,10 @@ def _serialize_timings(
     payload["endpointing_delay_ms"] = timings.endpointing_delay_ms
     payload["speech_end_to_first_audio_ms"] = timings.speech_end_to_first_audio_ms
     payload["speech_end_to_answer_audio_ms"] = timings.speech_end_to_answer_audio_ms
+    # 10-05-PLAN.md: the edge source's headline latency number -- None for
+    # every non-edge turn, which never sets vad_end_at (timings.vad_end_at
+    # itself already arrives through dataclasses.asdict above).
+    payload["vad_end_to_stt_final_ms"] = timings.vad_end_to_stt_final_ms
     payload["audio_format"] = audio_format
     payload["preroll_bytes"] = preroll_bytes
     return payload

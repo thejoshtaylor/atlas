@@ -434,6 +434,17 @@ class PrerollReplayingSource:
         wrapped_sink_format = getattr(self._wrapped, "sink_format", None)
         return wrapped_sink_format() if wrapped_sink_format is not None else None
 
+    @property
+    def speech_signals(self) -> Any:
+        """Forwarded the same conditional way `sink_format` above already
+        is (10-05-PLAN.md, D-09 through D-13): `None` when `self._wrapped`
+        has none of its own -- every source but the edge source -- so
+        `turn/controller.py::run_turn`'s `getattr(source, "speech_signals",
+        None)` reads through this wrapper to the edge source's real
+        `SpeechSignals` rather than always seeing an absent attribute.
+        """
+        return getattr(self._wrapped, "speech_signals", None)
+
 
 class FollowUpSource:
     """Wraps one `AudioSource`, dropping every frame chunk read before
@@ -479,6 +490,13 @@ class FollowUpSource:
         instant a chained window wraps it here."""
         wrapped_sink_format = getattr(self._wrapped, "sink_format", None)
         return wrapped_sink_format() if wrapped_sink_format is not None else None
+
+    @property
+    def speech_signals(self) -> Any:
+        """Forwarded conditionally, the same reason and shape
+        `PrerollReplayingSource.speech_signals` above already uses
+        (10-05-PLAN.md)."""
+        return getattr(self._wrapped, "speech_signals", None)
 
 
 class SourceRunner:
