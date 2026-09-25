@@ -225,6 +225,62 @@ def test_a_source_whose_policy_disables_barge_in_never_signals_an_interrupt():
     assert monitor.interrupt_requested is False
 
 
+# --- Plan 10-10 Task 2: process_speech_start (D-16) -------------------------
+
+
+def test_process_speech_start_before_any_playback_started_is_a_no_op():
+    monitor = _monitor()
+    monitor.process_speech_start(now=100.0)
+    assert monitor.interrupt_requested is False
+
+
+def test_process_speech_start_inside_the_guard_window_is_a_no_op():
+    monitor = _monitor()
+    monitor.mark_playback_started(0.0)
+    monitor.process_speech_start(now=_GUARD_S / 2)
+    assert monitor.interrupt_requested is False
+
+
+def test_process_speech_start_at_or_past_the_guard_window_interrupts():
+    monitor = _monitor()
+    monitor.mark_playback_started(0.0)
+    monitor.process_speech_start(now=_GUARD_S)
+    assert monitor.interrupt_requested is True
+
+
+def test_process_speech_start_on_a_disabled_monitor_is_a_no_op():
+    monitor = _monitor(enabled=False)
+    monitor.mark_playback_started(0.0)
+    monitor.process_speech_start(now=_GUARD_S + 1.0)
+    assert monitor.interrupt_requested is False
+
+
+def test_process_speech_start_once_already_interrupted_stays_a_one_way_latch():
+    """D-11's one-way latch applies here too: a second `vad.start` after
+    the first already set the interrupt must never do anything further
+    (there is nothing further for it to do, but this proves the guard is
+    a real early return, not a redundant assignment)."""
+    monitor = _monitor()
+    monitor.mark_playback_started(0.0)
+    monitor.process_speech_start(now=_GUARD_S)
+    assert monitor.interrupt_requested is True
+    monitor.process_speech_start(now=_GUARD_S + 100.0)
+    assert monitor.interrupt_requested is True
+
+
+def test_process_speech_start_never_accumulates_duration_unlike_process_energy():
+    """Distinct from `process_energy`, which needs the floor held for the
+    full `min_duration_s` -- a single `vad.start`, past the guard window,
+    is enough on its own (D-16: this is a stronger signal than energy,
+    not the same one measured a different way)."""
+    monitor = _monitor()
+    monitor.mark_playback_started(0.0)
+    # `_MIN_DURATION_S` would still be required of `process_energy` at
+    # this same `now` -- `process_speech_start` needs none of it.
+    monitor.process_speech_start(now=_GUARD_S)
+    assert monitor.interrupt_requested is True
+
+
 # --- Plan 02-12 Task 1: EmittedAudioTrace, indexed by playback offset -------
 
 

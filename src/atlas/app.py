@@ -15,7 +15,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
@@ -35,9 +35,11 @@ from atlas.auth.tokens import validate_secret_key_strength
 from atlas.calibration.record import EchoCalibration
 from atlas.calibration.runner import find_latest_calibration, run_echo_calibration
 from atlas.config import (
+    EDGE_BARGE_IN_PROVEN,
     MACROS_KEY_REJECTED_ERROR,
     MCP_KEY_REJECTED_ERROR,
     SAFETY_KEY_REJECTED_ERROR,
+    BargeInConfig,
     Config,
     ConfigError,
     DatabaseConfig,
@@ -699,6 +701,32 @@ async def _resolve_follow_up_window_s(
             config_default,
         )
     return config_default, "config"
+
+
+def _resolve_edge_barge_in_config(config: Config) -> BargeInConfig:
+    """The edge source's own resolved barge-in policy (D-16), never the
+    bare global `config.barge_in` handed to the camera runner unchanged.
+
+    An operator's own `barge_in.sources.edge.enabled`
+    (`config/config.example.yaml` ships one, `false`, from 10-SPIKE.md's
+    `aec: not_proven`) wins exactly as `BargeInConfig.resolve` would
+    apply it -- this function changes nothing about `config.barge_in`
+    when an `edge` override already exists. Only a configuration that
+    names no `edge` override at all falls back to `EDGE_BARGE_IN_PROVEN`,
+    added here as a synthetic override rather than assumed by
+    `SourceRunner` itself: the camera-era global `barge_in.enabled`
+    (`true` by default) must never reach this source by accident the way
+    `SourceRunner.__init__`'s own absent-configuration fallback
+    (`BargeInConfig(enabled=False)`) already keeps it from doing for a
+    runner built with no `barge_in_config` at all -- this is that same
+    guarantee, applied to a runner that now always gets one.
+    """
+    if "edge" in config.barge_in.sources:
+        return config.barge_in
+    return replace(
+        config.barge_in,
+        sources={**config.barge_in.sources, "edge": {"enabled": EDGE_BARGE_IN_PROVEN}},
+    )
 
 
 async def _open_speaker_writer(writer: FifoWriter) -> None:
@@ -1719,6 +1747,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         edge_source = EdgeAudioSource(config.edge)
         app.state.edge_source = edge_source
 
+        # Plan 10-10 (D-16): see `_resolve_edge_barge_in_config`'s own
+        # docstring for why this is never the bare global `config.barge_in`
+        # handed to the camera runner unchanged.
+        edge_barge_in_config = _resolve_edge_barge_in_config(config)
+
         active_runner = SourceRunner(
             EDGE_SOURCE_NAME,
             edge_source,
@@ -1731,10 +1764,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             _make_run_turn_for_source(app, config, EDGE_SOURCE_NAME, room_speaker=False),
             wake_config=config.wake,
             gate_config=config.gate,
-            # D-16: no `barge_in_config` at all -- resolves to disabled
-            # (`SourceRunner.__init__`'s own absent-configuration
-            # fallback), which is what D-16 requires until the spike
-            # proves on-chip AEC. Plan 10-10 applies the spike's verdict.
+            barge_in_config=edge_barge_in_config,
             preroll=PrerollBuffer(
                 edge_source.source_format(),
                 # 10-CONTEXT.md: the detector report lag this replay

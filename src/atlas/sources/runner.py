@@ -356,6 +356,36 @@ class BargeInMonitor:
         predicted = level * self.calibration.gain
         return energy <= predicted + self.correlation_tolerance
 
+    def process_speech_start(self, now: float) -> None:
+        """Plan 10-10 (D-16): the interrupt path for a source whose own
+        chip cancels its echo, proven by the D-18 spike (`aec: proven`).
+        A `vad.start` arriving during playback answers "a person started
+        speaking" directly -- there is no floor, no sustained-duration
+        accumulation, and no known-output correlation to run first,
+        because the source's own on-chip AEC is what already separates a
+        real voice from the assistant's own echo before this server ever
+        sees a byte. `process_energy` answers "the room got loud"; this
+        answers a different, stronger question, and only a source with
+        that proof wired (`SourceRunner._watch_barge_in`'s own
+        `speech_signals` branch) ever calls this method at all.
+
+        Same three no-op boundaries as `process_energy`, checked the same
+        way: disabled, no playback yet, and the one-way latch once
+        already interrupted (D-11) -- an interrupt this method already
+        set is never revisited. Unlike `process_energy`, there is a
+        fourth boundary this method alone needs: the guard window still
+        applies (D-16 does not exempt this path from it) -- a `vad.start`
+        arriving before the guard window elapses is exactly the "the
+        assistant's own first syllable, arriving back through the room"
+        shape the window exists to absorb, whichever detection path
+        raised it.
+        """
+        if not self.enabled or self.interrupt_requested or self.playback_started_at is None:
+            return
+        if (now - self.playback_started_at) < self.guard_window_s:
+            return
+        self.interrupt_requested = True
+
 
 class PrerollReplayingSource:
     """Wraps one `AudioSource`, yielding a fixed list of pre-roll chunks
@@ -860,22 +890,64 @@ class SourceRunner:
 
     async def _watch_barge_in(self, monitor: "BargeInMonitor") -> None:
         """Become the sole reader of `self._source.frames()` once it is
-        safe to (module docstring), feeding every chunk's energy into
-        `monitor` until cancelled.
+        safe to (module docstring), feeding every chunk into `monitor`
+        until cancelled -- by energy for most sources, or by `vad.start`
+        for a source that proves it needs no energy floor at all.
 
         A no-op for a disabled policy (D-12's per-source override): this
         never even waits on `transcript_done`, so a source with barge-in
         turned off never opens a second reader of its own queue at all.
 
+        Plan 10-10 (D-16): `getattr(self._source, "speech_signals", None)`
+        is the duck-typed signal that this source carries its own
+        `vad.start`/`vad.end` history (`transports/edge.py`'s
+        `SpeechSignals`) -- every other source (the camera, the browser)
+        has no such attribute and falls through to the energy path
+        unchanged below. For a source that has it, this method subscribes
+        with `replay_segment=False`: only a `vad.start` arriving *while
+        this listener is subscribed* (during this very playback) is ever
+        a candidate interrupt, never a stale event from before the turn
+        started. `monitor.process_speech_start` -- not `process_energy`
+        -- is what a `vad.start` feeds, because D-16 makes this a
+        different, stronger signal than microphone energy for a source
+        whose own chip already cancels its echo. The frame loop itself
+        still runs, still as the sole reader of `self._source.frames()`
+        (module docstring) -- every chunk is drained and discarded, never
+        fed to the energy path, which this source's own chip makes moot.
+        The subscription is torn down in `finally`, so a cancelled
+        listener never leaves a dangling subscriber on `speech_signals`.
+
         Quick task 260924-4is (D2): each chunk's decode and energy
         reading run on `self._detector_executor`, the same single worker
         thread `_process_chunk` uses -- never the loop thread, and never
         beside a wake-detector call for this source (one worker, so the
-        two native calls for one source can never overlap).
+        two native calls for one source can never overlap). Unaffected by
+        the `speech_signals` branch above: that branch never decodes or
+        measures energy at all.
         """
         if not monitor.enabled:
             return
         await monitor.transcript_done.wait()
+        speech_signals = getattr(self._source, "speech_signals", None)
+        if speech_signals is not None:
+            def _on_speech_signal(event: dict) -> None:
+                # "vad.start" mirrors the edge protocol's own stable event
+                # type string (`atlas_edge.protocol.MSG_VAD_START` /
+                # `atlas.transports.edge.MSG_VAD_START`) -- duck-typed
+                # here rather than imported, the same convention this
+                # module's own docstring already uses for `send_event`/
+                # `barge_in`/`follow_up` and `turn/controller.py`'s own
+                # edge-event forwarding (`_EDGE_EVENT_PREFIX`).
+                if event.get("type") == "vad.start":
+                    monitor.process_speech_start(self._clock())
+
+            unsubscribe = speech_signals.subscribe(_on_speech_signal, replay_segment=False)
+            try:
+                async for _chunk in self._source.frames():
+                    pass
+            finally:
+                unsubscribe()
+            return
         loop = asyncio.get_running_loop()
         async for chunk in self._source.frames():
             energy = await loop.run_in_executor(self._detector_executor, self._barge_in_energy, chunk)
