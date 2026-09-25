@@ -320,6 +320,50 @@ test("C-CR-02: the profile draft resyncs when a background learn finishes, inste
   expect(saveButton.disabled).toBe(true)
 })
 
+test("R2-WR-10: while learning, the profile editor and Save are disabled", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, { fetchGoogleStyle: async () => sampleStyle({ status: "learning" }) })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const textarea = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  expect(textarea.disabled).toBe(true)
+  expect((screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement).disabled).toBe(true)
+})
+
+test("R2-WR-10: an unsaved edit survives a learn finishing, with a notice and a way to discard it", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const googleStyleQueryKey = (id: number) => ["google", "accounts", id, "style"]
+  stubGoogle(queryClient, {
+    fetchGoogleStyle: async () => sampleStyle({ status: "ready", profile: "Old profile." }),
+  })
+  const { WritingStyleSection } = await import("./WritingStyleSection")
+
+  renderSection(WritingStyleSection, queryClient)
+
+  const textarea = (await screen.findByLabelText("Style profile")) as HTMLTextAreaElement
+  fireEvent.change(textarea, { target: { value: "My careful edit." } })
+
+  // A learn starts (another tab, or Re-learn), then finishes with a new profile.
+  queryClient.setQueryData(googleStyleQueryKey(7), sampleStyle({ status: "learning", profile: "Old profile." }))
+  await waitFor(() => expect((screen.getByLabelText("Style profile") as HTMLTextAreaElement).disabled).toBe(true))
+  queryClient.setQueryData(googleStyleQueryKey(7), sampleStyle({ status: "ready", profile: "Newly learned." }))
+
+  expect(
+    await screen.findByText("A new profile was learned. Your unsaved edits are still here. Save them to replace it, or discard them."),
+  ).toBeTruthy()
+  expect((screen.getByLabelText("Style profile") as HTMLTextAreaElement).value).toBe("My careful edit.")
+  expect((screen.getByRole("button", { name: "Save profile" }) as HTMLButtonElement).disabled).toBe(false)
+
+  fireEvent.click(screen.getByRole("button", { name: "Discard my edits" }))
+
+  await waitFor(() =>
+    expect((screen.getByLabelText("Style profile") as HTMLTextAreaElement).value).toBe("Newly learned."),
+  )
+  expect(screen.queryByRole("button", { name: "Discard my edits" })).toBeNull()
+})
+
 test("the signature shows under 'Signature from Gmail', read-only; with none it says 'No Gmail signature.'", async () => {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   stubGoogle(queryClient, { fetchGoogleStyle: async () => sampleStyle({ signature_text: "Jane Doe\nATLAS household" }) })

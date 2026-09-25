@@ -42,27 +42,48 @@ const POLL_INTERVAL_MS = 3000
 // enforced server-side.
 const MAX_PROFILE_CHARS = 4000
 
+// R2-WR-10: shown when a learn finished while the admin held an unsaved
+// edit -- the edit is kept, never silently replaced.
+const RELEARNED_UNDER_EDITS =
+  "A new profile was learned. Your unsaved edits are still here. Save them to replace it, or discard them."
+
 function StyleProfileEditor({ accountId, style }: { accountId: number; style: GoogleStyle }) {
   // Seeded once from the loaded style at mount, like `AccountDetail`'s own
   // `labelDraft` -- but `style` is truthy (and this component mounts) the
   // moment the FIRST `GET .../style` resolves, which is routinely while
   // `status === "learning"` (a new account's `learn_style` is scheduled
-  // in the background before the redirect). A background poll must not
-  // overwrite text the admin is mid-edit on, but it MUST resync the draft
-  // the one time `status` actually leaves `learning` -- otherwise the
-  // draft stays frozen at its stale (often empty) mount-time value, "Save
-  // profile" re-enables against the newly-learned server profile, and a
-  // click PUTs the stale draft back over it (C-CR-02).
+  // in the background before the redirect). The draft MUST resync the one
+  // time `status` actually leaves `learning` -- otherwise it stays frozen
+  // at its stale (often empty) mount-time value, and "Save profile" PUTs
+  // it back over the newly-learned server profile (C-CR-02).
+  //
+  // R2-WR-10: that resync must never discard an unsaved edit. The draft
+  // resyncs only when it still equals the profile it was based on (the
+  // server profile just before the learn finished). Otherwise the edit is
+  // kept and `RELEARNED_UNDER_EDITS` offers a discard. The check runs
+  // during render -- React's own "adjust state when a prop changes"
+  // pattern -- so no effect writes state after the paint.
   const [profileDraft, setProfileDraft] = React.useState(style.profile)
-  const wasLearningRef = React.useRef(style.status === "learning")
-  React.useEffect(() => {
-    if (wasLearningRef.current && style.status !== "learning") {
-      setProfileDraft(style.profile)
+  const [seenStatus, setSeenStatus] = React.useState(style.status)
+  const [seenProfile, setSeenProfile] = React.useState(style.profile)
+  const [relearnedUnderEdits, setRelearnedUnderEdits] = React.useState(false)
+  if (seenStatus !== style.status || seenProfile !== style.profile) {
+    if (shouldPoll(seenStatus) && !shouldPoll(style.status)) {
+      if (profileDraft === seenProfile) {
+        setProfileDraft(style.profile)
+      } else if (profileDraft !== style.profile) {
+        setRelearnedUnderEdits(true)
+      }
     }
-    wasLearningRef.current = style.status === "learning"
-  }, [style.status, style.profile])
+    setSeenStatus(style.status)
+    setSeenProfile(style.profile)
+  }
 
+  // R2-WR-10: while a learn runs, the server overwrites the profile when
+  // it finishes -- editing or saving now would be lost, so both wait.
+  const learning = shouldPoll(style.status)
   const effectiveProfile = profileDraft
+  const showRelearnedNotice = relearnedUnderEdits && profileDraft !== style.profile
   const save = useMutation(saveGoogleStyleMutationOptions)
   const [saveError, setSaveError] = React.useState<string | null>(null)
   const [samplesOpen, setSamplesOpen] = React.useState(false)
@@ -71,10 +92,16 @@ function StyleProfileEditor({ accountId, style }: { accountId: number; style: Go
     setSaveError(null)
     try {
       await save.mutateAsync({ accountId, profile: effectiveProfile })
+      setRelearnedUnderEdits(false)
     } catch (err) {
       setSaveError(err instanceof ApiError ? err.message : "Couldn't save this profile. Try again.")
       throw err
     }
+  }
+
+  const handleDiscard = () => {
+    setProfileDraft(style.profile)
+    setRelearnedUnderEdits(false)
   }
 
   return (
@@ -85,14 +112,23 @@ function StyleProfileEditor({ accountId, style }: { accountId: number; style: Go
           id="google-style-profile"
           rows={6}
           value={effectiveProfile}
+          disabled={learning}
           onChange={(event) => setProfileDraft(event.target.value)}
         />
         <p className="text-label text-muted-foreground">
           {`${effectiveProfile.length} / ${MAX_PROFILE_CHARS.toLocaleString()} characters`}
         </p>
       </div>
+      {showRelearnedNotice ? (
+        <div className="flex flex-col gap-2">
+          <p className="text-body text-foreground">{RELEARNED_UNDER_EDITS}</p>
+          <Button type="button" variant="outline" size="sm" className="sm:self-start" onClick={handleDiscard}>
+            Discard my edits
+          </Button>
+        </div>
+      ) : null}
       {saveError ? <p className="text-body text-destructive">{saveError}</p> : null}
-      <SubmitButton onSubmit={handleSave} disabled={effectiveProfile === style.profile}>
+      <SubmitButton onSubmit={handleSave} disabled={learning || effectiveProfile === style.profile}>
         Save profile
       </SubmitButton>
 
