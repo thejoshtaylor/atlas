@@ -9,6 +9,7 @@ before any of it can reach speech.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, Any
 
 from atlas_mcp.mail_clean import cap_text
@@ -54,6 +55,15 @@ _OUT_OF_RANGE_CARRIER = "there were only {count} in the last list."
 _NO_SENDER_MATCH_CARRIER = "i don't see an email from {sender} in the last list."
 _EMPTY_BODY_REPLY = "that email has no text i can read."
 _FETCH_UNAVAILABLE_REPLY = "i can't check email right now"
+# R2-WR-06: what the operator hears when `gmail_create_draft` raises
+# instead of returning a result -- the draft may or may not exist, so this
+# says so, the same posture `turn/pending_action.py`'s own
+# `EXECUTION_DID_NOT_COMPLETE_REPLY` takes for a calendar write. A raised
+# exception's own text is never spoken: it can be empty
+# (`asyncio.TimeoutError`) or internal detail no operator should hear.
+_DRAFT_DID_NOT_COMPLETE_REPLY = "something went wrong and i'm not sure the draft was saved -- check your gmail drafts"
+
+logger = logging.getLogger("atlas.turn.email_handoff")
 
 # D-17: a word-for-word read uses the child's own cleaned text directly --
 # `mail_clean.clean_body`'s quote/signature/footer removal already applied
@@ -323,8 +333,9 @@ async def handle_email_read(handoff: "Handoff", ctx: "HandoffContext | None") ->
         result = await ctx.tool_host.call_tool(
             "gmail_fetch_body", {"account": item.account, "message_id": item.message_id}
         )
-    except Exception as exc:
-        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_read_failed")
+    except Exception:
+        logger.exception("gmail_fetch_body raised for a read of %r", item.message_id)
+        return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_read_failed")
 
     if _is_error(result):
         return HandoffOutcome(reply_text=_result_text(result), turn_outcome="email_read_failed")
@@ -419,19 +430,18 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
 
     from atlas.turn.controller import _is_error, _result_payload, _result_text
 
-    # A-WR-01: every other `tool_host`/repository call in this function is
-    # already guarded (`gmail_fetch_body`, `gmail_create_draft` immediately
-    # below) -- this one was not, though the docstring above already
-    # promises "never a failure" for a missing repository or an unlearned
-    # style. A raised exception here (not "no style yet", a real failure
-    # reaching the repository) matches the same sibling pattern: the
-    # exception's own text, verbatim, never a silent abort.
+    # A-WR-01, R2-WR-06: the docstring above promises "never a failure"
+    # for a missing repository or an unlearned style. A style lookup that
+    # raises is therefore logged, and the draft goes on with no style --
+    # exactly as with no repository at all. The exception's own text (for
+    # a database error, a SQL statement) is never spoken.
     style = None
     if ctx.style_repo is not None:
         try:
             style = await ctx.style_repo.get_style_by_label(item.account)
-        except Exception as exc:
-            return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
+        except Exception:
+            logger.exception("style lookup failed for %r; drafting without a style profile", item.account)
+            style = None
     style_profile = style.profile if style is not None else ""
     style_samples = style.samples if style is not None else ()
     signature_text = style.signature_text if style is not None else None
@@ -441,8 +451,9 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
         fetch_result = await ctx.tool_host.call_tool(
             "gmail_fetch_body", {"account": item.account, "message_id": item.message_id}
         )
-    except Exception as exc:
-        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
+    except Exception:
+        logger.exception("gmail_fetch_body raised for a draft reply to %r", item.message_id)
+        return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_draft_failed")
     if _is_error(fetch_result):
         return HandoffOutcome(reply_text=_result_text(fetch_result), turn_outcome="email_draft_failed")
 
@@ -479,8 +490,9 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
                 "signature_html": signature_html,
             },
         )
-    except Exception as exc:
-        return HandoffOutcome(reply_text=str(exc), turn_outcome="email_draft_failed")
+    except Exception:
+        logger.exception("gmail_create_draft raised for a draft reply to %r", item.message_id)
+        return HandoffOutcome(reply_text=_DRAFT_DID_NOT_COMPLETE_REPLY, turn_outcome="email_draft_failed")
     if _is_error(create_result):
         return HandoffOutcome(reply_text=_result_text(create_result), turn_outcome="email_draft_failed")
 

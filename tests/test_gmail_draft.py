@@ -405,10 +405,11 @@ async def test_a_failed_create_speaks_the_tools_own_error_text():
     assert outcome.turn_outcome == "email_draft_failed"
 
 
-async def test_a_raising_style_repo_speaks_the_exceptions_own_text_not_a_crash():
-    """A-WR-01 regression: `ctx.style_repo.get_style_by_label` raising must
-    never abort the turn silently -- caught the same way every other
-    tool-host call in this function already is."""
+async def test_a_raising_style_repo_drafts_with_no_style_and_logs_it(caplog):
+    """R2-WR-06: a style lookup that raises is logged, and the draft goes
+    on with no style profile -- the same as no repository at all. The
+    exception text (for a database error, a SQL statement) is never
+    spoken."""
     memory = EmailListMemory()
     memory.store("camera", (_DANA,))
     tool_host = _StubToolHost(
@@ -419,19 +420,78 @@ async def test_a_raising_style_repo_speaks_the_exceptions_own_text_not_a_crash()
 
     class _RaisingStyleRepo:
         async def get_style_by_label(self, label: str):
-            raise RuntimeError("style repository unavailable")
+            raise RuntimeError("[SQL: SELECT * FROM google_style_profiles]")
 
     ctx = HandoffContext(
         source_name="camera", tool_host=tool_host, pending_actions=None, brain=brain, email_memory=memory,
         style_repo=_RaisingStyleRepo(),
     )
 
+    with caplog.at_level("ERROR"):
+        outcome = await handle_email_draft(_handoff(position=1), ctx)
+
+    assert outcome.turn_outcome == "email_draft"
+    assert "SQL" not in outcome.reply_text
+    assert [name for name, _ in tool_host.calls] == ["gmail_fetch_body", "gmail_create_draft"]
+    assert any("style lookup failed" in record.getMessage() for record in caplog.records)
+
+
+class _RaisingToolHost(_StubToolHost):
+    def __init__(self, raising_tool: str, exc: BaseException) -> None:
+        super().__init__(
+            fetch_body={"body": "running behind.", "truncated": False, "from_name": "Dana", "from_address": "dana@example.com", "subject": "Lunch"},
+            draft={"draft": {"draft_id": "draft-1", "to_name": "Dana", "to_address": "dana@example.com", "account": "work"}},
+        )
+        self._raising_tool = raising_tool
+        self._exc = exc
+
+    async def call_tool(self, name: str, arguments: dict):
+        if name == self._raising_tool:
+            self.calls.append((name, dict(arguments)))
+            raise self._exc
+        return await super().call_tool(name, arguments)
+
+
+async def test_a_raising_body_fetch_speaks_a_fixed_phrase_not_the_exception_text():
+    """R2-WR-06: `str(asyncio.TimeoutError())` is empty -- speaking it
+    would be silence."""
+    import asyncio
+
+    from atlas.turn.email_handoff import handle_email_read
+
+    memory = EmailListMemory()
+    memory.store("camera", (_DANA,))
+    tool_host = _RaisingToolHost("gmail_fetch_body", asyncio.TimeoutError())
+    brain = RecordingFakeBrain(replies=[])
+    ctx = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=None, brain=brain, email_memory=memory
+    )
+
+    draft_outcome = await handle_email_draft(_handoff(position=1), ctx)
+    read_outcome = await handle_email_read(
+        Handoff(kind="email_read", payload={"position": 1, "sender": None, "word_for_word": False}), ctx
+    )
+
+    assert draft_outcome.turn_outcome == "email_draft_failed"
+    assert draft_outcome.reply_text.strip()
+    assert read_outcome.turn_outcome == "email_read_failed"
+    assert read_outcome.reply_text.strip()
+
+
+async def test_a_raising_create_draft_speaks_a_fixed_phrase_not_the_exception_text():
+    memory = EmailListMemory()
+    memory.store("camera", (_DANA,))
+    tool_host = _RaisingToolHost("gmail_create_draft", RuntimeError("secret internal detail"))
+    brain = RecordingFakeBrain(replies=[BrainReply(text="GIST: late.\nBODY: running late, sorry!")])
+    ctx = HandoffContext(
+        source_name="camera", tool_host=tool_host, pending_actions=None, brain=brain, email_memory=memory
+    )
+
     outcome = await handle_email_draft(_handoff(position=1), ctx)
 
     assert outcome.turn_outcome == "email_draft_failed"
-    assert outcome.reply_text == "style repository unavailable"
-    assert brain.calls == []
-    assert tool_host.calls == []
+    assert outcome.reply_text.strip()
+    assert "secret internal detail" not in outcome.reply_text
 
 
 async def test_style_profile_and_samples_reach_the_drafting_round():
