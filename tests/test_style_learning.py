@@ -397,3 +397,386 @@ async def test_get_style_by_label_for_an_unknown_label_is_none():
     repo, _account = await _repo_with_account(security)
 
     assert await repo.get_style_by_label("nope") is None
+
+
+# =========================================================================
+# Task 2: learned on link, re-learned on request, edited by the admin
+# =========================================================================
+
+
+class _FakePluginManagerForGoogle:
+    """`tests/test_google_account_routes.py::_FakePluginManagerForGoogle`'s
+    own sibling here -- duplicated rather than imported, matching this
+    codebase's own per-test-file fake convention."""
+
+    def __init__(self) -> None:
+        self.states: dict[str, PluginState] = {}
+        self.start_calls: list[int] = []
+        self.stop_calls: list[int] = []
+        self.respawn_calls: list[int] = []
+
+    def state_for(self, slug):
+        return self.states.get(slug)
+
+    async def start_one(self, plugin):
+        self.start_calls.append(plugin.id)
+        self.states[plugin.slug] = PluginState.RUNNING
+
+    async def stop_one(self, plugin):
+        self.stop_calls.append(plugin.id)
+        self.states[plugin.slug] = PluginState.DISABLED
+
+    async def request_respawn(self, plugin_id, safety_block):
+        self.respawn_calls.append(plugin_id)
+
+
+def _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google: FakeGoogle, *, brain=None):
+    app = FastAPI()
+    app.state.config = SimpleNamespace(security=security)
+    app.state.account_repo = account_repo
+    app.state.google_account_repo = google_repo
+    app.state.google_http_client = fake_google.client
+    app.state.google_token_service = GoogleTokenService(google_repo, security, fake_google.client)
+    app.state.plugin_repo = plugin_repo
+    app.state.plugin_manager = _FakePluginManagerForGoogle()
+    app.state.brain = brain
+    # Plan 09-09: the same detached-task keep-alive set `app.py`'s real
+    # `lifespan` builds (`app.state.background_turns`) -- required by
+    # `POST .../style/relearn` and the OAuth callback's own new-account
+    # scheduling.
+    app.state.background_turns = set()
+    app.include_router(google_accounts_router)
+    return app
+
+
+def _client_as_role(app, security, account_repo, *, role: str) -> TestClient:
+    user = asyncio.run(
+        account_repo.create_user(
+            email=f"{role}@example.invalid",
+            display_name=f"A {role.title()}",
+            password_hash="not-checked-by-this-test",
+            role=role,
+        )
+    )
+    token = issue_access_token(user_id=user.id, role=role, security=security)
+    return TestClient(app, cookies={security.cookie_name: token}, follow_redirects=False)
+
+
+def _drain_background(client: TestClient, app: FastAPI) -> None:
+    """Deterministically wait for every task `app.state.background_turns`
+    holds -- `client.portal` is the single event loop every request made
+    through `with TestClient(app) as client:` shares (Starlette's own
+    `_portal_factory` reuses `self.portal` once entered), so running an
+    async waiter on that same portal lets a test wait for a route's own
+    `asyncio.create_task(...)` work without racing it. A plain (not
+    `async def`) function: `client.portal.call(...)` itself runs the
+    coroutine synchronously, so callers -- sync test functions included --
+    never need to `await` this."""
+
+    async def _wait() -> None:
+        tasks = list(app.state.background_turns)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    client.portal.call(_wait)
+
+
+def _seed_style_account(google_repo, security, *, label="work", email="work@example.com"):
+    ciphertext, key_version = encrypt_credential("rt-1", security)
+    return asyncio.run(
+        google_repo.insert_account(
+            label=label,
+            email=email,
+            refresh_token_ciphertext=ciphertext,
+            key_version=key_version,
+            granted_scopes=" ".join(REQUIRED_SCOPES),
+            refresh_token_expires_at=None,
+            linked_by_user_id=None,
+            linked_at=datetime.now(timezone.utc),
+        )
+    )
+
+
+def _seed_style_oauth_client(google_repo, security):
+    ciphertext, key_version = encrypt_credential("cs-1", security)
+    asyncio.run(
+        google_repo.set_oauth_client(
+            client_id="cid-1",
+            client_secret_ciphertext=ciphertext,
+            key_version=key_version,
+            updated_by_user_id=None,
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+
+def test_get_style_before_any_learning_is_not_learned(monkeypatch, fake_account_repository, fake_plugin_repository):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        response = admin.get(f"/api/google/accounts/{account.id}/style")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "not_learned"
+    assert body["profile"] == ""
+    assert body["samples"] == []
+
+
+def test_get_style_for_unknown_account_is_404(monkeypatch, fake_account_repository, fake_plugin_repository):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        response = admin.get("/api/google/accounts/999/style")
+
+    assert response.status_code == 404
+
+
+def test_put_style_stores_the_profile(monkeypatch, fake_account_repository, fake_plugin_repository):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        put_response = admin.put(
+            f"/api/google/accounts/{account.id}/style", json={"profile": "brief and friendly."}
+        )
+        assert put_response.status_code == 200, put_response.text
+        get_response = admin.get(f"/api/google/accounts/{account.id}/style")
+
+    assert get_response.json()["profile"] == "brief and friendly."
+
+
+def test_put_style_refuses_a_profile_over_four_thousand_characters(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        response = admin.put(
+            f"/api/google/accounts/{account.id}/style", json={"profile": "x" * 4001}
+        )
+
+    assert response.status_code == 400
+
+
+def test_relearn_answers_202_learning_then_finishes_ready_in_the_background(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+    fake_google.add_refresh_token("rt-1", "at-1")
+    fake_google.add_gmail_messages("at-1", ["m1"])
+    fake_google.add_gmail_full("at-1", "m1", headers={}, text="a reasonably normal length reply here.")
+    brain = RecordingFakeBrain(replies=[BrainReply(text="a short, friendly style.")])
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=brain)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        relearn_response = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
+        assert relearn_response.status_code == 202, relearn_response.text
+        assert relearn_response.json()["status"] == "learning"
+
+        _drain_background(client, app)
+
+        get_response = admin.get(f"/api/google/accounts/{account.id}/style")
+
+    body = get_response.json()
+    assert body["status"] == "ready"
+    assert body["profile"] == "a short, friendly style."
+    assert body["messages_scanned"] == 1
+
+
+def test_relearn_while_learning_is_refused_with_409(monkeypatch, fake_account_repository, fake_plugin_repository):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+    fake_google.add_refresh_token("rt-1", "at-1")
+    fake_google.add_gmail_messages("at-1", [])
+    brain = RecordingFakeBrain(replies=[BrainReply(text="a"), BrainReply(text="b")])
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=brain)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        first = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
+        assert first.status_code == 202, first.text
+        # The first request already set the row's status to "learning"
+        # synchronously, before its own response returned -- this second
+        # request sees that immediately, with no need to drain anything.
+        second = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
+        _drain_background(client, app)
+
+    assert second.status_code == 409
+
+
+def test_relearn_with_no_language_model_ends_failed_with_a_detail(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+    fake_google.add_refresh_token("rt-1", "at-1")
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=None)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+        admin.post(f"/api/google/accounts/{account.id}/style/relearn")
+        _drain_background(client, app)
+        response = admin.get(f"/api/google/accounts/{account.id}/style")
+
+    body = response.json()
+    assert body["status"] == "failed"
+    assert "language model" in (body["status_detail"] or "")
+
+
+def test_style_routes_are_403_for_viewer_and_operator(monkeypatch, fake_account_repository, fake_plugin_repository):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security)
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google)
+    with TestClient(app) as client:
+        for role in ("viewer", "operator"):
+            non_admin = _client_as_role(app, security, account_repo, role=role)
+            assert non_admin.get(f"/api/google/accounts/{account.id}/style").status_code == 403
+            assert (
+                non_admin.put(f"/api/google/accounts/{account.id}/style", json={"profile": "x"}).status_code
+                == 403
+            )
+            assert non_admin.post(f"/api/google/accounts/{account.id}/style/relearn").status_code == 403
+
+
+def test_a_new_link_schedules_exactly_one_background_learn_style(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    brain = RecordingFakeBrain(replies=[BrainReply(text="a short, friendly style.")])
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=brain)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+
+        start_response = admin.post(
+            "/api/google/oauth/start", json={"label": "work"}, headers={"Origin": "https://atlas.example.com"}
+        )
+        assert start_response.status_code == 200, start_response.text
+        import urllib.parse
+
+        parsed = urllib.parse.urlsplit(start_response.json()["authorization_url"])
+        raw_state = urllib.parse.parse_qs(parsed.query)["state"][0]
+
+        fake_google.add_code("code-1", access_token="at-1", refresh_token="rt-1")
+        fake_google.add_profile("at-1", "work@example.com")
+        fake_google.add_calendar_list("at-1", [])
+        fake_google.add_gmail_messages("at-1", [])
+
+        callback_response = admin.get("/api/google/oauth/callback", params={"code": "code-1", "state": raw_state})
+        assert callback_response.status_code == 303, callback_response.text
+        account_id = int(callback_response.headers["location"].split("/")[-1].split("?")[0])
+
+        _drain_background(client, app)
+        style_response = admin.get(f"/api/google/accounts/{account_id}/style")
+
+    assert style_response.json()["status"] == "ready"
+    assert brain.call_count == 1
+
+
+def test_a_relink_of_an_existing_address_schedules_no_learn_style(
+    monkeypatch, fake_account_repository, fake_plugin_repository
+):
+    monkeypatch.setenv("ATLAS_SECRET_KEY", _TEST_SECRET_KEY)
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    google_repo = FakeGoogleAccountRepository()
+    plugin_repo = fake_plugin_repository()
+    fake_google = FakeGoogle()
+    _seed_style_oauth_client(google_repo, security)
+    account = _seed_style_account(google_repo, security, label="work", email="work@example.com")
+    brain = RecordingFakeBrain()
+
+    app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=brain)
+    with TestClient(app) as client:
+        admin = _client_as_role(app, security, account_repo, role="admin")
+
+        start_response = admin.post(
+            "/api/google/oauth/start",
+            json={"label": "work", "relink_account_id": account.id},
+            headers={"Origin": "https://atlas.example.com"},
+        )
+        assert start_response.status_code == 200, start_response.text
+        import urllib.parse
+
+        parsed = urllib.parse.urlsplit(start_response.json()["authorization_url"])
+        raw_state = urllib.parse.parse_qs(parsed.query)["state"][0]
+
+        fake_google.add_code("code-1", access_token="at-1", refresh_token="rt-1")
+        fake_google.add_profile("at-1", "work@example.com")
+        fake_google.add_calendar_list("at-1", [])
+
+        callback_response = admin.get("/api/google/oauth/callback", params={"code": "code-1", "state": raw_state})
+        assert callback_response.status_code == 303, callback_response.text
+
+        _drain_background(client, app)
+        style_response = admin.get(f"/api/google/accounts/{account.id}/style")
+
+    assert style_response.json()["status"] == "not_learned"
+    assert brain.call_count == 0
