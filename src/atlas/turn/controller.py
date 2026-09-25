@@ -80,7 +80,7 @@ import json
 import logging
 import re
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
@@ -97,7 +97,7 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
-from atlas.turn.follow_up import FollowUpChannel
+from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest, estimate_playback_end
 from atlas.turn.handoff import (
     CODE_ONLY_REFUSAL,
     HandoffContext,
@@ -108,7 +108,7 @@ from atlas.turn.handoff import (
 )
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
-from atlas.turn.pending_action import BULK_REFUSAL_REPLY, HANDOFF_NOT_ALONE_REPLY
+from atlas.turn.pending_action import BULK_REFUSAL_REPLY, HANDOFF_NOT_ALONE_REPLY, handle_confirmation_reply
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.wake_echo import is_wake_only
 
@@ -519,6 +519,15 @@ async def run_turn(
     # answer to every proposal until then.
     follow_up: "FollowUpChannel | None" = getattr(source, "follow_up", None)
 
+    # Plan 09-06 (D-06): the request the *previous* turn left on this
+    # source's own channel for this turn to answer, or `None` for an
+    # ordinary wake turn -- read once, here, and reused for every branch
+    # below that needs to know whether this is a follow-up turn. Never
+    # cleared by this function: `SourceRunner._run_follow_ups` (the only
+    # caller that ever sets it) is also what decides whether to attach
+    # another one for the next turn in the chain.
+    incoming: "FollowUpRequest | None" = follow_up.incoming if follow_up is not None else None
+
     # 260922-cts: captured the same way, and for the same reason, as
     # `barge_in` immediately above -- off the *unwrapped* source, before
     # `_RecordingAudioSource` wraps it below. `sink_format`, when the
@@ -535,7 +544,10 @@ async def run_turn(
 
     # 260922-cue: a chime tells the operator when to speak. Only a source
     # that declares its own sink (the camera) has a speaker to play it on.
-    if wake_cue and sink is not None:
+    # Plan 09-06: skipped for a follow-up turn -- there is no fresh wake
+    # hit to cue, and the window already opened silently after the
+    # readback's own echo tail (D-09).
+    if wake_cue and sink is not None and incoming is None:
         await _play_wake_cue(source, sink, speech_lock)
 
     # D-15: started here, before the drain below is ever awaited, so the
@@ -576,12 +588,30 @@ async def run_turn(
 
     try:
         turn_deadline = clock() + max_utterance_s
+        # Plan 09-06: a follow-up turn's own onset deadline -- how long
+        # `_drain_to_final_transcript` waits for the *first* event before
+        # giving up on the window entirely (D-06, D-09). `None` for an
+        # ordinary wake turn (every caller that predates this plan), and
+        # also `None` for a follow-up turn whose channel carries no window
+        # (a test double, or a source with no timing attached) -- in
+        # which case this behaves exactly like an ordinary turn's own
+        # `max_utterance_s` bound.
+        onset_deadline: float | None = None
+        if incoming is not None and follow_up is not None:
+            if follow_up.window_opens_at is not None and follow_up.window_s is not None:
+                onset_deadline = follow_up.window_opens_at + follow_up.window_s
         final = await _drain_to_final_transcript(
-            source, stt, max_utterance_s, timings, clock=clock, poll_interval_s=poll_interval_s
+            source,
+            stt,
+            max_utterance_s,
+            timings,
+            clock=clock,
+            poll_interval_s=poll_interval_s,
+            onset_deadline=onset_deadline,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
 
-        if wake_phrase and final_text and is_wake_only(final_text, wake_phrase):
+        if incoming is None and wake_phrase and final_text and is_wake_only(final_text, wake_phrase):
             # 260922-woc: the operator paused after the wake phrase, and
             # `stt.endpointing_ms` ended the utterance there -- the command
             # is still coming. Drain again, once (no loop): a second
@@ -620,6 +650,54 @@ async def run_turn(
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
+        # Plan 09-06 (D-08, D-09): a follow-up turn's own reply to a
+        # stored confirmation -- this entirely replaces the ordinary
+        # empty-transcript branch below for this turn (silence speaks
+        # `CANCELLED_REPLY`, never `_NO_SPEECH_REPLY`), and never reaches
+        # a macro or the local on/off matcher. `incoming.kind` is checked
+        # defensively even though `dispatch_handoff` only ever builds a
+        # `"confirmation"` request today (`turn/follow_up.py`'s own
+        # docstring reserves `"clarification"` for a later plan) -- an
+        # `incoming` of any other kind falls through and is treated as an
+        # ordinary turn, exactly as if no follow-up channel existed.
+        if incoming is not None and incoming.kind == "confirmation":
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            confirmation_outcome = await handle_confirmation_reply(
+                handoff_context, incoming, final_text, timeout_s=brain_turn_timeout_s
+            )
+            if not confirmation_outcome.amended:
+                timings.turn_outcome = confirmation_outcome.turn_outcome
+                confirmation_tts = _tts_for_precached_fallback(
+                    filler_cache, sink, confirmation_outcome.reply_text, tts
+                )
+                await _speak(
+                    source,
+                    confirmation_tts,
+                    timings,
+                    confirmation_outcome.reply_text,
+                    kind="answer",
+                    barge_in=barge_in,
+                    speech_lock=speech_lock,
+                    sink=sink,
+                )
+                await _emit_event(source, timings.to_event())
+                timings.log()
+                return
+            # D-08: an amendment supersedes the stored action (already
+            # resolved `superseded` by `handle_confirmation_reply` above)
+            # and runs the ordinary pipeline once more, with the original
+            # exchange inserted ahead of the operator's own amendment --
+            # never a second call to `handle_confirmation_reply`, and
+            # never the macro or local-intent blocks below (an amendment
+            # is never a macro phrase or an on/off command).
+            prior_exchange: "list[dict[str, Any]] | None" = [
+                {"role": "user", "content": incoming.original_transcript},
+                {"role": "assistant", "content": incoming.question},
+            ]
+        else:
+            prior_exchange = None
+
         # 260923-kao: a wake-only or filler-only final transcript ends the
         # turn the same way VOICE-08's empty-transcript case does below --
         # it never reaches a macro, the local on/off matcher, or the tier
@@ -628,7 +706,11 @@ async def run_turn(
         # true for a second wake-only reply: without this guard, that
         # second drain's own transcript was never checked, and a repeated
         # wake phrase or a bare "It's" fell straight through to the brain.
-        if not final_text or is_no_command(final_text, wake_phrase):
+        # Plan 09-06: `prior_exchange is not None` means this turn is an
+        # amendment continuing past the branch above, which already
+        # proved `final_text` is real content -- this check is therefore
+        # always False on that path and never revisits it.
+        if prior_exchange is None and (not final_text or is_no_command(final_text, wake_phrase)):
             # VOICE-08's two cases end the turn the same way, with no language
             # model call: `final is None` is RESEARCH.md Pitfall 3's second
             # case (the provider never sent anything at all, closed here by
@@ -674,7 +756,11 @@ async def run_turn(
         # behavioral test still passed. `match_macro` on an empty `macros` tuple
         # (the default) always returns `None`, so a caller that predates this
         # plan reaches the tier race exactly as before, at no observable cost.
-        matched_macro = match_macro(macros, final_text)
+        # Plan 09-06: `prior_exchange is not None` means this is an
+        # amendment continuing past the confirmation branch above -- it
+        # never matches a macro (Task 1's own `<behavior>`: "a follow-up
+        # turn never matches a macro or the local on/off intent").
+        matched_macro = match_macro(macros, final_text) if prior_exchange is None else None
         if matched_macro is not None:
             # A macro turn never builds the message list and never consumes the
             # state fetch's result -- but the fetch was already started above
@@ -739,7 +825,10 @@ async def run_turn(
         state_read = False
         state_result: Any = _UNAVAILABLE
 
-        if local_intents and tool_host is not None:
+        # Plan 09-06: skipped on the amendment path for the identical
+        # reason the macro check above is -- an amendment is never an
+        # on/off command.
+        if prior_exchange is None and local_intents and tool_host is not None:
             entities: list[dict[str, Any]] = []
             if state_task is not None:
                 state_result = await _read_prefetched(
@@ -887,6 +976,14 @@ async def run_turn(
                     "content": _state_message(states_or_none, pending_runs_or_none, domains=state_domains),
                 }
             )
+        # Plan 09-06 (D-08): an amendment's own prior exchange -- the
+        # original request and the readback it is amending -- inserted
+        # here, just before the user message carrying the amendment
+        # itself, so a tier sees catalog/state/prior-exchange/user in that
+        # order. `None` (every turn that is not an amendment) adds
+        # nothing, byte-identical to before this plan.
+        if prior_exchange:
+            messages.extend(prior_exchange)
         messages.append({"role": "user", "content": final_text})
 
         if tiers is None:
@@ -1021,7 +1118,7 @@ async def run_turn(
                 chain_depth=chain_depth,
             )
             timings.turn_outcome = outcome.turn_outcome
-            await _speak(
+            speech_result = await _speak(
                 source,
                 tts,
                 timings,
@@ -1032,7 +1129,16 @@ async def run_turn(
                 sink=sink,
             )
             if outcome.follow_up is not None and follow_up is not None:
-                follow_up.request(outcome.follow_up)
+                # Plan 09-06 (D-06, D-09): `playback_ends_at` is set from
+                # this readback's own `SpeechResult` -- never a guessed
+                # constant -- so `SourceRunner._run_follow_ups` can open
+                # the next turn's microphone only after the readback's own
+                # audio has actually finished playing, plus an echo tail.
+                # `outcome.follow_up` is frozen (`FollowUpRequest`), so
+                # this is a new instance, not a mutation of the original.
+                follow_up.request(
+                    replace(outcome.follow_up, playback_ends_at=estimate_playback_end(speech_result, sink))
+                )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
@@ -1319,8 +1425,20 @@ async def _drain_to_final_transcript(
     *,
     clock: Callable[[], float],
     poll_interval_s: float,
+    onset_deadline: "float | None" = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
+
+    `onset_deadline` (plan 09-06, in `clock()`'s own domain) is a second,
+    independent deadline from `max_utterance_s`'s own `deadline` below --
+    it bounds only how long this function waits for the *first* event to
+    arrive at all, and it stops applying the instant one does (D-06,
+    D-09): a follow-up turn's open-microphone window must give up and
+    speak "cancelled" if nobody answers by the time the window closes, but
+    once an answer starts arriving, the ordinary `max_utterance_s` bound
+    governs the rest of it exactly as it always has. `None` (the default,
+    and every caller that predates this plan) means there is no such
+    window and this check never fires.
 
     RESEARCH.md Pitfall 3: xAI's STT sends no dedicated no-speech event -- a
     turn where nothing is ever said can otherwise leave this function
@@ -1364,6 +1482,19 @@ async def _drain_to_final_transcript(
                 "stt session exceeded max_utterance_s=%s with no final transcript; closing it",
                 max_utterance_s,
             )
+            next_event_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await next_event_task
+            await stream.aclose()
+            timings.mark_speech_end(last_word_change_arrival)
+            return None
+
+        # 09-06: no event has arrived at all yet, and this window's own
+        # onset deadline has passed -- give up exactly like the
+        # `max_utterance_s` branch above (same cancel/close/mark
+        # sequence), never once `pending is not None` (docstring: the
+        # ordinary bound governs from the first event onward).
+        if onset_deadline is not None and pending is None and clock() >= onset_deadline:
             next_event_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                 await next_event_task
@@ -1736,6 +1867,28 @@ async def _run_tool_rounds(
     return _TOO_MANY_ROUNDS_REPLY
 
 
+@dataclass(frozen=True)
+class SpeechResult:
+    """What `_speak` actually wrote to the speaker for one utterance --
+    plan 09-06's own input to `turn/follow_up.py::estimate_playback_end`,
+    which is how a follow-up window's own open-microphone timing is
+    derived from real playback rather than a guessed constant (D-09).
+
+    `bytes_sent` counts only chunks that actually reached
+    `source.send_audio()` -- a chunk dropped by a barge-in interrupt or a
+    dead speaker is never counted, matching `chunks_sent` inside
+    `_speak`'s own write loop. `first_write_at`/`last_write_at` are
+    `None` only when nothing was ever written at all (an empty synthesis,
+    or every chunk dropped before the first write) -- every existing
+    caller of `_speak` ignores this return value entirely, so nothing
+    about their behavior changes.
+    """
+
+    bytes_sent: int
+    first_write_at: "float | None"
+    last_write_at: "float | None"
+
+
 async def _speak(
     source: _AudioSource,
     tts: _TtsProvider,
@@ -1746,7 +1899,7 @@ async def _speak(
     barge_in: "_BargeInMonitor | None" = None,
     speech_lock: "asyncio.Lock | None" = None,
     sink: "SinkFormat | None" = None,
-) -> None:
+) -> SpeechResult:
     """Speak one utterance, and mark whichever timing(s) `kind` calls for.
 
     `sink=None` -- the default, and every caller that predates 260922-cts
@@ -1821,7 +1974,12 @@ async def _speak(
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
 
+    bytes_sent = 0
+    first_write_at: float | None = None
+    last_write_at: float | None = None
+
     async def _synthesize_and_write() -> None:
+        nonlocal bytes_sent, first_write_at, last_write_at
         first_audio_marked = False
         interrupted = False
         speaker_failed = False
@@ -1860,6 +2018,15 @@ async def _speak(
                 logger.warning("speaker unavailable, dropping %s audio: %s", kind, exc)
                 continue
             chunks_sent += 1
+            # Plan 09-06: counted only for a chunk that actually reached
+            # `source.send_audio()` above -- never one dropped by the
+            # `interrupted`/`speaker_failed` branches, matching
+            # `chunks_sent`'s own accounting exactly.
+            now_write = _time.monotonic()
+            if first_write_at is None:
+                first_write_at = now_write
+            last_write_at = now_write
+            bytes_sent += len(chunk)
             if barge_in is not None and barge_in.enabled:
                 trace = getattr(barge_in, "trace", None)
                 if trace is not None:
@@ -1877,6 +2044,8 @@ async def _speak(
             await _synthesize_and_write()
     else:
         await _synthesize_and_write()
+
+    return SpeechResult(bytes_sent=bytes_sent, first_write_at=first_write_at, last_write_at=last_write_at)
 
 
 async def _play_wake_cue(source: _AudioSource, sink: SinkFormat, speech_lock: asyncio.Lock | None) -> None:

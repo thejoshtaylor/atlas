@@ -12,10 +12,25 @@ turn-ending sentences.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Literal
+import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, model_validator
+
+from atlas.providers.base import BrainError
+from atlas.turn.follow_up import FollowUpRequest
+from atlas.turn.transcript_guard import is_no_command
+
+if TYPE_CHECKING:
+    # Annotation-only: `atlas.turn.handoff` imports this module at load
+    # time (its own module docstring), so an import of `HandoffContext`
+    # here must never run at module load -- only under a type checker's
+    # eyes, the same `TYPE_CHECKING` discipline `turn/macros.py` already
+    # establishes for its own load-order constraint.
+    from atlas.db.pending_action_repository import PendingAction
+    from atlas.turn.handoff import HandoffContext
 
 # D-05, D-08: the executing tool for each pending action `action` value --
 # the model never sees or calls these names (`mcp/atlas_mcp/google_tools.py`
@@ -56,6 +71,76 @@ BULK_REFUSAL_REPLY = "i can only add or delete one event at a time -- make bulk 
 HANDOFF_NOT_ALONE_REPLY = "ask me for that on its own"
 FOLLOW_UP_LIMIT_REPLY = "let's start over -- say the wake word and ask again"
 PROPOSAL_INVALID_REPLY = "i couldn't work out how to add that -- try asking again"
+
+# Plan 09-06 (D-08, D-09): the fixed replies the confirmation round and its
+# executor speak. `CANCELLED_REPLY` covers every non-confirm outcome
+# (an explicit "no", silence until the window closes, an unclear reply, and
+# a confirm that arrived too late) -- one phrase for the operator, however
+# many reasons code has for choosing it. `CONFIRMED_CREATE_REPLY`/
+# `CONFIRMED_DELETE_REPLY` are chosen by `pending.action`, never composed
+# from the tool's own result text.
+CANCELLED_REPLY = "cancelled, nothing was changed"
+CONFIRMED_CREATE_REPLY = "done, it's on your calendar"
+CONFIRMED_DELETE_REPLY = "done, it's deleted"
+
+# The two, and only two, tool schemas the confirmation round is ever
+# offered (D-08): `confirm` takes no parameters -- there is nothing left
+# to say beyond "yes" -- and `cancel` takes one optional boolean, true
+# only when the operator changed a detail rather than simply declining.
+# Hand-authored, in the exact `tools=[...]` shape
+# `mcp_client.py::mcp_tools_to_openai_tools` already builds from a real
+# MCP tool list -- there is no MCP tool behind either of these, so that
+# builder does not apply here.
+CONFIRM_CANCEL_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm",
+            "description": (
+                "Call this only if the operator's reply clearly agrees to exactly the "
+                "question you were just asked -- a plain yes, or a clear restatement of "
+                "agreement. Never call this for anything else."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel",
+            "description": (
+                "Call this for a no, for silence, or for any reply you cannot read as a "
+                "clear confirm -- including a reply that changes a detail rather than "
+                "simply declining, in which case set amended true."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amended": {
+                        "type": "boolean",
+                        "description": (
+                            "True only when the operator changed a detail (a time, a "
+                            "title) rather than simply declining. Omit or leave false "
+                            "for a plain no."
+                        ),
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
+]
+
+# The system message every confirmation round carries, prefixed to the
+# stored readback -- the model sees only this instruction, the readback
+# it is confirming, and the operator's own reply (D-08): never the
+# catalog, never live entity state, never anything else this turn might
+# otherwise have shown a tier.
+_CONFIRMATION_ROUND_INSTRUCTION = (
+    "you asked the operator the question below. call confirm only if the reply clearly "
+    "agrees to exactly that question. call cancel otherwise -- for a no, for anything "
+    "unclear, or for a reply that changes a detail, in which case set amended true."
+)
 
 
 class PendingProposal(BaseModel):
@@ -229,3 +314,193 @@ def compose_readback(proposal: PendingProposal, *, now: datetime) -> str:
     return _CREATE_READBACK_CARRIER.format(
         title=proposal.title, calendar_phrase=calendar_phrase, when=when, duration=duration
     )
+
+
+class ConfirmationDecision(BaseModel):
+    """What one confirmation round settled on: `confirm` runs the stored
+    action exactly as it was proposed; `cancel` runs nothing.
+
+    `amended` means "the operator changed a detail rather than simply
+    declining" -- meaningful only alongside `cancel` (an amendment is
+    never itself confirmed; it supersedes the stored action and starts a
+    fresh proposal, D-08). Impossible-by-construction, the same discipline
+    `providers/tier_reply.py`'s own `TierReply` already applies to its own
+    mutually exclusive fields: a `confirm` decision carrying `amended=True`
+    is unrepresentable, not merely discouraged.
+    """
+
+    decision: Literal["confirm", "cancel"]
+    amended: bool = False
+
+    @model_validator(mode="after")
+    def _amended_only_makes_sense_on_a_cancel(self) -> "ConfirmationDecision":
+        if self.decision == "confirm" and self.amended:
+            raise ValueError(
+                "a confirm decision must not carry amended=True -- amended only means "
+                "something alongside cancel, where it distinguishes a changed detail from "
+                "a plain decline"
+            )
+        return self
+
+
+def decision_from_reply(reply: Any) -> ConfirmationDecision:
+    """The model never supplies a tool name or an argument beyond
+    `cancel`'s own optional `amended` flag here -- this reads exactly one
+    round's `tool_calls` and settles on `confirm` only for the single,
+    unambiguous case (D-08, D-11): exactly one call, named `confirm`.
+    Zero calls, two or more calls, a call named anything else, and a
+    round that raised or timed out (handled by `run_confirmation_round`
+    below, which never reaches this function in that case) all settle on
+    `cancel` -- the bounded, singly-accepted risk that a television's own
+    "yes" could run something is never widened by treating an unclear
+    reply as agreement.
+
+    `amended` is read only off a lone `cancel` call, and only when the
+    argument is a real Python `bool` equal to `True` -- a string `"true"`,
+    a `1`, or a missing key are all treated as `False`, never coerced.
+    """
+    tool_calls = list(getattr(reply, "tool_calls", None) or [])
+    if len(tool_calls) == 1:
+        call = tool_calls[0]
+        if call.name == "confirm":
+            return ConfirmationDecision(decision="confirm")
+        if call.name == "cancel":
+            arguments = call.arguments if isinstance(call.arguments, dict) else {}
+            amended = arguments.get("amended") is True
+            return ConfirmationDecision(decision="cancel", amended=amended)
+    return ConfirmationDecision(decision="cancel")
+
+
+async def run_confirmation_round(
+    brain: Any, *, readback: str, transcript: str, timeout_s: float
+) -> ConfirmationDecision:
+    """One `brain.chat` call, offered only `CONFIRM_CANCEL_TOOLS`, bounded
+    by `timeout_s` -- the restricted round D-08 requires: the model sees
+    the stored readback and the operator's own reply, nothing else this
+    turn might otherwise show a tier (no catalog, no live entity state).
+
+    A timeout or a raised `BrainError` settles on `cancel` (D-08, D-11) --
+    the same posture `decision_from_reply` takes for every reply it
+    cannot read as a clear confirm, extended to cover the round never
+    settling on a reply at all.
+    """
+    messages = [
+        {"role": "system", "content": f"{_CONFIRMATION_ROUND_INSTRUCTION}\n\n{readback}"},
+        {"role": "user", "content": transcript},
+    ]
+    try:
+        reply = await asyncio.wait_for(brain.chat(messages, tools=CONFIRM_CANCEL_TOOLS), timeout=timeout_s)
+    except (asyncio.TimeoutError, BrainError):
+        return ConfirmationDecision(decision="cancel")
+    return decision_from_reply(reply)
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """What running a pending action's own executing tool produced --
+    `reply_text` is what the operator hears either way: the fixed "done"
+    phrase for `pending.action` on success, or the failing tool's own
+    error text verbatim on failure (never "done", D-08)."""
+
+    succeeded: bool
+    reply_text: str
+    detail: "str | None"
+
+
+async def execute_pending_action(pending: "PendingAction", tool_host: Any) -> ExecutionResult:
+    """Run `pending.tool_name` with exactly `pending.arguments` -- both
+    were resolved and stored at proposal time (D-08); nothing here
+    re-parses the operator's reply or the model's own confirmation call
+    into a tool name or an argument. `tool_host.call_tool` is the same
+    call a model-issued tool call already goes through.
+    """
+    # Deferred, not module-level: `turn/controller.py` imports this module
+    # at load time (this module's own docstring, and `turn/handoff.py`'s),
+    # so a module-level import here of anything from `controller.py` would
+    # deadlock the two modules' load order. The same deferred-import shape
+    # `turn/handoff.py::dispatch_handoff` already uses for
+    # `_compose_clarifying_question`.
+    from atlas.turn.controller import _is_error, _result_text
+
+    result = await tool_host.call_tool(pending.tool_name, pending.arguments)
+    if _is_error(result):
+        text = _result_text(result)
+        return ExecutionResult(succeeded=False, reply_text=text or CANCELLED_REPLY, detail=text or None)
+    reply_text = CONFIRMED_CREATE_REPLY if pending.action == "calendar_create" else CONFIRMED_DELETE_REPLY
+    return ExecutionResult(succeeded=True, reply_text=reply_text, detail=None)
+
+
+@dataclass(frozen=True)
+class ConfirmationOutcome:
+    """What `run_turn` speaks and records as `turn_outcome` for a
+    follow-up turn answering a stored confirmation. `amended=True` is the
+    one case `run_turn` does not simply speak and return for (Task 1's own
+    `<action>` text): the turn continues into the ordinary pipeline
+    instead, carrying the operator's amendment as a fresh user message."""
+
+    reply_text: str
+    turn_outcome: str
+    amended: bool = False
+
+
+async def handle_confirmation_reply(
+    ctx: "HandoffContext | None", incoming: FollowUpRequest, transcript: str, *, timeout_s: float
+) -> ConfirmationOutcome:
+    """Resolve one follow-up turn's own reply to a stored confirmation
+    (D-08, D-09) -- silence, an unclear reply, an explicit no, a clear
+    yes, and an amendment each take their own branch below, but every one
+    of them either resolves `incoming.pending_action_id`'s own row to a
+    terminal status or leaves it exactly as claimed, never both undone and
+    left dangling.
+
+    Silence, an empty transcript, or a transcript `is_no_command` reads as
+    filler-only never reaches the confirmation round at all -- there is
+    nothing here to ask a model about, and the row is resolved `expired`
+    rather than `cancelled` so a later reader of the row can tell "nobody
+    answered" apart from "the operator said no" (`turn_outcome`
+    `"follow_up_silence"`, D-09).
+    """
+    now = ctx.now if ctx is not None else datetime.now(timezone.utc)
+    pending_actions = ctx.pending_actions if ctx is not None else None
+    action_id = incoming.pending_action_id
+
+    if not transcript or is_no_command(transcript):
+        if pending_actions is not None and action_id is not None:
+            await pending_actions.resolve(action_id, "expired", None, now)
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="follow_up_silence")
+
+    if ctx is None or pending_actions is None:
+        # No context to confirm against -- `dispatch_handoff`'s own
+        # `follow_up_available` check already keeps a proposal from being
+        # stored (and a follow-up requested) without one in practice;
+        # guarded here defensively rather than assumed, so a missing
+        # context never reaches `run_confirmation_round` with no brain to
+        # call.
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_expired")
+
+    decision = await run_confirmation_round(
+        ctx.brain, readback=incoming.question, transcript=transcript, timeout_s=timeout_s
+    )
+
+    if decision.decision == "cancel":
+        if decision.amended:
+            if pending_actions is not None and action_id is not None:
+                await pending_actions.resolve(action_id, "superseded", None, now)
+            return ConfirmationOutcome(reply_text="", turn_outcome="amended", amended=True)
+        if pending_actions is not None and action_id is not None:
+            await pending_actions.resolve(action_id, "cancelled", None, now)
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="cancelled")
+
+    # decision.decision == "confirm"
+    if pending_actions is None or action_id is None:
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_expired")
+    claimed = await pending_actions.claim_for_confirmation(action_id, now)
+    if claimed is None:
+        return ConfirmationOutcome(reply_text=CANCELLED_REPLY, turn_outcome="confirm_expired")
+
+    result = await execute_pending_action(claimed, ctx.tool_host)
+    if result.succeeded:
+        await pending_actions.resolve(claimed.id, "executed", result.detail, now)
+        return ConfirmationOutcome(reply_text=result.reply_text, turn_outcome="confirmed")
+    await pending_actions.resolve(claimed.id, "failed", result.detail, now)
+    return ConfirmationOutcome(reply_text=result.reply_text, turn_outcome="confirm_failed")

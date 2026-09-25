@@ -15,7 +15,16 @@ listens for a confirmation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    # Annotation-only: `turn/controller.py` imports this module at load
+    # time (its own module docstring), so an import of `SpeechResult` here
+    # must never run at module load -- only under a type checker's eyes,
+    # the same `TYPE_CHECKING` discipline `turn/pending_action.py` already
+    # establishes for `HandoffContext`.
+    from atlas.providers.tts_xai import SinkFormat
+    from atlas.turn.controller import SpeechResult
 
 # D-06: a source that cannot hear an answer must never be left holding a
 # pending action open forever. `chain_depth` above this many chained
@@ -61,6 +70,47 @@ class FollowUpChannel:
 
     incoming: "FollowUpRequest | None" = None
     requested: "FollowUpRequest | None" = None
+    # Plan 09-06: the instant, in `_speak`'s own `time.monotonic()` domain,
+    # after which the next turn's frames may reach its own STT -- set by
+    # `SourceRunner._run_follow_ups` from `estimate_playback_end` below plus
+    # the configured echo tail, never by `run_turn` itself. `window_s` is
+    # this same request's own configured window length
+    # (`FollowUpConfig.window_s`), so `_drain_to_final_transcript`'s
+    # `onset_deadline` can be computed as `window_opens_at + window_s` at
+    # the one call site that needs it, with no second source of the
+    # number.
+    window_opens_at: "float | None" = None
+    window_s: "float | None" = None
 
     def request(self, req: FollowUpRequest) -> None:
         self.requested = req
+
+
+def estimate_playback_end(result: "SpeechResult", sink: "SinkFormat | None") -> "float | None":
+    """When a spoken utterance's own audio actually finished arriving in
+    the room, in the same `time.monotonic()` domain `_speak` already
+    stamps `result.first_write_at`/`result.last_write_at` in.
+
+    `sink is None` (every browser source today, `turn/controller.py`'s own
+    pre-260922-cts default) means there is no format to compute playback
+    duration from -- `result.last_write_at` (the moment the last chunk was
+    *written*) is the best available estimate, and it is what every
+    caller predating this plan implicitly assumed playback finishing meant.
+
+    With a sink, the write-finish time can understate how long the room
+    actually keeps hearing audio -- FIFO buffering plays the last written
+    bytes out over real time, not instantaneously -- so this instead
+    estimates the moment the *last byte written* would finish playing:
+    `first_write_at + bytes_sent / (sample_rate * bytes_per_sample)`,
+    never earlier than `last_write_at` itself (a burst of writes that all
+    land faster than the audio duration they encode must not estimate a
+    playback end in the past). A-law and mu-law are one byte per sample;
+    `pcm` (16-bit signed) is two.
+    """
+    if sink is None:
+        return result.last_write_at
+    if result.first_write_at is None or result.last_write_at is None:
+        return result.last_write_at
+    bytes_per_sample = 2 if sink.codec == "pcm" else 1
+    playback_duration_s = result.bytes_sent / (sink.sample_rate * bytes_per_sample)
+    return max(result.last_write_at, result.first_write_at + playback_duration_s)
