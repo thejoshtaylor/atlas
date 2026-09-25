@@ -75,22 +75,27 @@ def wrap_alaw_as_wav(alaw_bytes: bytes, sample_rate: int) -> bytes:
     )
 
 
-def wrap_pcm16_as_wav(samples: bytes, sample_rate: int) -> bytes:
+def wrap_pcm16_as_wav(samples: bytes, sample_rate: int, channels: int = 1) -> bytes:
     """Wrap raw 16-bit signed PCM samples in a standard PCM WAV container:
-    format tag 1, a 16-byte `fmt ` subchunk, no trailing `cbSize`."""
+    format tag 1, a 16-byte `fmt ` subchunk, no trailing `cbSize`.
+
+    `channels` (10-07-PLAN.md, D-09) defaults to `1` -- every caller that
+    predates this plan passes one channel, byte for byte unchanged.
+    """
     return _build_wav(
         payload=samples,
         sample_rate=sample_rate,
         format_tag=_PCM_FORMAT_TAG,
         bits_per_sample=16,
         include_cb_size=False,
+        num_channels=channels,
     )
 
 
-def wrap_session_audio(encoding: str, sample_rate: int, raw: bytes) -> bytes:
+def wrap_session_audio(encoding: str, sample_rate: int, raw: bytes, channels: int = 1) -> bytes:
     """The one function the audio route calls, taking `timing.json`'s
-    recorded `audio_format.encoding`/`sample_rate` and a session's raw
-    `audio.{encoding}` bytes straight off disk.
+    recorded `audio_format.encoding`/`sample_rate`/`channels` and a
+    session's raw `audio.{encoding}` bytes straight off disk.
 
     For `"alaw"`, dispatches on `DEFAULT_ALAW_WRAPPING`: either the raw
     bytes wrapped as-is via `wrap_alaw_as_wav`, or decoded through
@@ -98,13 +103,23 @@ def wrap_session_audio(encoding: str, sample_rate: int, raw: bytes) -> bytes:
     `wrap_pcm16_as_wav`. For `"pcm"`/`"pcm16"`, wraps `raw` directly as
     PCM16 without touching the A-law table at all. Anything else raises
     `AudioWrapError` naming the encoding it was given.
+
+    `channels` (10-07-PLAN.md, D-09) defaults to `1`, matching every
+    caller that predates this plan. More than one channel of A-law raises
+    `AudioWrapError` -- no source in this codebase records that, and
+    `wrap_alaw_as_wav` has no channel parameter to honor it honestly.
     """
     if encoding in _ALAW_ENCODINGS:
+        if channels != 1:
+            raise AudioWrapError(
+                f"alaw audio with {channels} channels cannot be wrapped -- no source records "
+                "multi-channel A-law"
+            )
         if DEFAULT_ALAW_WRAPPING == "alaw":
             return wrap_alaw_as_wav(raw, sample_rate)
         return wrap_pcm16_as_wav(alaw_to_pcm16(raw), sample_rate)
     if encoding in _PCM_ENCODINGS:
-        return wrap_pcm16_as_wav(raw, sample_rate)
+        return wrap_pcm16_as_wav(raw, sample_rate, channels)
     raise AudioWrapError(
         f"unknown encoding {encoding!r} -- supported values are "
         f"{sorted(_ALAW_ENCODINGS | _PCM_ENCODINGS)!r}"
@@ -118,14 +133,19 @@ def _build_wav(
     format_tag: int,
     bits_per_sample: int,
     include_cb_size: bool,
+    num_channels: int = 1,
 ) -> bytes:
     """Hand-built RIFF/WAVE bytes, per WAVEFORMATEX: `RIFF` + size + `WAVE`,
     then `fmt ` + size + body, then `data` + size + payload, all
     little-endian. Every declared size is the real byte length that
     follows it -- computed from `payload`/`fmt_chunk`, not assumed --
     which holds for a payload of odd length exactly as it does for even.
+
+    `num_channels` (10-07-PLAN.md, D-09) takes the channel count as a
+    parameter, no longer a hard-coded `1` -- `byte_rate` and
+    `block_align` are both derived from it, the same WAVEFORMATEX
+    arithmetic either way.
     """
-    num_channels = 1
     byte_rate = sample_rate * num_channels * bits_per_sample // 8
     block_align = num_channels * bits_per_sample // 8
 

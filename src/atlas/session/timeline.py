@@ -108,11 +108,16 @@ def preroll_offset_s(timing_payload: dict[str, Any]) -> float:
     Returns `0.0` -- never raises, never guesses -- for every payload it
     cannot convert exactly: a missing, non-numeric, or negative
     `preroll_bytes`; a missing `audio_format`; a missing or non-positive
-    `sample_rate`; or an `encoding` outside the closed set `{"pcm",
+    `sample_rate`; a `channels` value that is not an integer of 1 or more
+    (10-07-PLAN.md, D-09); or an `encoding` outside the closed set `{"pcm",
     "alaw"}` this codebase models exactly (`transports/base.py::
     SourceFormat`). `0.0` is the pre-fix behavior, correct for every path
     that never built a pre-roll buffer; a guessed byte rate would
     silently move a recording by the wrong amount (T-08-23).
+
+    `channels` defaults to `1` when the key is absent -- a session
+    recorded before this plan carries no such key, and the one-channel
+    reading is exactly what it was recorded at.
     """
     preroll_bytes = timing_payload.get("preroll_bytes")
     if not isinstance(preroll_bytes, (int, float)) or isinstance(preroll_bytes, bool) or preroll_bytes < 0:
@@ -129,7 +134,11 @@ def preroll_offset_s(timing_payload: dict[str, Any]) -> float:
     if not isinstance(sample_rate, (int, float)) or isinstance(sample_rate, bool) or sample_rate <= 0:
         return 0.0
 
-    byte_rate = bytes_per_ms(SourceFormat(encoding, sample_rate)) * 1000.0
+    channels = audio_format.get("channels", 1)
+    if isinstance(channels, bool) or not isinstance(channels, int) or channels < 1:
+        return 0.0
+
+    byte_rate = bytes_per_ms(SourceFormat(encoding, sample_rate, channels=channels)) * 1000.0
     return preroll_bytes / byte_rate
 
 

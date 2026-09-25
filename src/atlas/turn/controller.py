@@ -638,7 +638,7 @@ async def run_turn(
         # below -- there is no earlier point at which `source.frames()`
         # could be read, so this is the only tap this function opens.
         fmt = source.source_format()
-        session_recorder.set_audio_format(fmt.encoding, fmt.sample_rate)
+        session_recorder.set_audio_format(fmt.encoding, fmt.sample_rate, fmt.channels)
         # Plan 08-11: read off the same still-unwrapped `source` the
         # `barge_in` attachment above already reads off, and for the same
         # reason -- `_RecordingAudioSource` delegates `frames()`/

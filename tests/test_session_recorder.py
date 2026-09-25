@@ -113,6 +113,37 @@ def test_written_audio_bytes_equal_the_bytes_the_turn_drained(tmp_path):
     assert audio_path.read_bytes() == b"".join(drained)
 
 
+def test_set_audio_format_with_two_channels_records_the_channel_count(tmp_path):
+    """10-07-PLAN.md (D-09): a two-channel turn's `audio_format` carries
+    `channels: 2` -- a reader must never have to guess."""
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+    recorder.set_audio_format("pcm", 16000, 2)
+    drained = [b"\x01\x02\x03\x04", b"\x05\x06\x07\x08"]
+    for chunk in drained:
+        recorder.record_audio_chunk(chunk)
+    recorder.close(timings)
+
+    payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+    assert payload["audio_format"] == {"encoding": "pcm", "sample_rate": 16000, "channels": 2}
+    audio_path = recorder.directory / "audio.pcm"
+    assert audio_path.read_bytes() == b"".join(drained)
+
+
+def test_set_audio_format_default_channels_is_one(tmp_path):
+    """`set_audio_format("alaw", 8000)` -- no third argument -- records
+    `channels: 1`, exactly what every pre-Phase-10 caller's format is."""
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+    recorder.set_audio_format("alaw", 8000)
+    recorder.close(timings)
+
+    payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+    assert payload["audio_format"] == {"encoding": "alaw", "sample_rate": 8000, "channels": 1}
+
+
 def test_record_audio_false_omits_the_audio_file_but_keeps_events_and_timing(tmp_path):
     """The record-audio flag omits only the audio -- the events and the
     timing record are the cheap part and stay written either way.
@@ -267,6 +298,45 @@ async def test_a_full_turn_through_run_turn_produces_all_four_artifacts(
     audio_path = recorder.directory / "audio.pcm"
     assert audio_path.exists()
     assert audio_path.read_bytes() == b"\x00\x01\x02\x03"
+
+
+async def test_run_turn_threads_the_sources_own_channel_count_into_the_recorder(
+    fake_audio_source, recording_fake_stt, fake_brain, fake_tts, tmp_path
+):
+    """10-07-PLAN.md (D-09): `run_turn` reads `fmt.channels` off the
+    source's own `source_format()` and passes it to `set_audio_format`,
+    never assuming mono. Both channels, interleaved, land in `audio.pcm`
+    untouched -- only speech-to-text (`stt_view`) ever sees one channel."""
+    from atlas.providers.base import BrainReply, FinalTranscript
+
+    config = _session_config(tmp_path)
+    timings = TurnTimings()
+    recorder = SessionRecorder(config, timings)
+
+    # Two 2-channel PCM16 frames (4 bytes = one sample per channel).
+    frames = [b"\x01\x00\x02\x00", b"\x03\x00\x04\x00"]
+    source = fake_audio_source(frames=frames, channels=2)
+    stt = recording_fake_stt(events=[FinalTranscript(text="turn on the fan")])
+    brain = fake_brain(replies=[BrainReply(text="turned on the fan")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host=None,
+        tools_schema=[],
+        system_prompt="",
+        max_tool_rounds=3,
+        timings=timings,
+        session_recorder=recorder,
+    )
+
+    payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+    assert payload["audio_format"]["channels"] == 2
+    audio_path = recorder.directory / "audio.pcm"
+    assert audio_path.read_bytes() == b"".join(frames)
 
 
 async def test_the_recorded_audio_byte_count_equals_what_the_turn_drained(

@@ -95,13 +95,19 @@ class SessionRecorder:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         return f"{stamp}-{self._turn_id}"
 
-    def set_audio_format(self, encoding: str, sample_rate: int) -> None:
+    def set_audio_format(self, encoding: str, sample_rate: int, channels: int = 1) -> None:
         """Record which format the audio bytes are in, taken from the
         source's own declaration (`AudioSource.source_format()`) -- never
         assumed -- so a reader in Phase 8 can play them back without
         guessing.
+
+        `channels` (10-07-PLAN.md, D-09) is always stored, even when it is
+        the default `1` -- a reader must never have to guess whether an
+        absent key means "one channel" or "this session predates the key
+        existing at all." `timeline.preroll_offset_s` still defaults a
+        *missing* key to `1` for a session recorded before this plan.
         """
-        self._audio_format = {"encoding": encoding, "sample_rate": sample_rate}
+        self._audio_format = {"encoding": encoding, "sample_rate": sample_rate, "channels": channels}
 
     def set_preroll_bytes(self, byte_count: int) -> None:
         """Record how many bytes at the head of the audio this turn is

@@ -252,9 +252,10 @@ class FakeAudioSource:
     through this fake without caring whether WebSocket or WebRTC is live.
     """
 
-    def __init__(self, frames: Sequence[bytes] = ()) -> None:
+    def __init__(self, frames: Sequence[bytes] = (), *, channels: int = 1) -> None:
         self._frames = list(frames)
         self.sent_audio: list[bytes] = []
+        self._channels = channels
 
     async def frames(self) -> AsyncIterator[bytes]:
         for frame in self._frames:
@@ -265,8 +266,11 @@ class FakeAudioSource:
 
     def source_format(self) -> SourceFormat:
         """Every existing test scripts 16 kHz mono PCM16 frames; this fake
-        declares exactly that, matching both real browser transports."""
-        return SourceFormat("pcm", 16000)
+        declares exactly that, matching both real browser transports.
+        `channels` (10-07-PLAN.md, D-09) defaults to `1`, unchanged for
+        every caller that predates this plan; a caller may pass `channels=2`
+        to prove a multi-channel source's format reaches the recorder."""
+        return SourceFormat("pcm", 16000, channels=self._channels)
 
 
 @pytest.fixture

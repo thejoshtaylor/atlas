@@ -564,9 +564,20 @@ async def get_session_audio(
         raise _audio_not_recorded_error(session_id)
 
     encoding = audio_format["encoding"]
+    # 10-07-PLAN.md (D-09): a session recorded before this plan carries no
+    # `channels` key at all -- `1` is that session's own honest reading,
+    # matching `SessionRecorder.set_audio_format`'s own default. A value
+    # that is not an integer of 1 or more is the same "cannot honestly
+    # build a WAV out of this" fact as an unsupported encoding or a
+    # missing sample rate, so it reaches the identical named refusal
+    # rather than falling through to `wrap_session_audio` and surfacing
+    # as an unrelated exception type.
+    channels = audio_format.get("channels", 1)
+    if isinstance(channels, bool) or not isinstance(channels, int) or channels < 1:
+        raise _unplayable_encoding_error(session_id, encoding)
     try:
         raw = (directory / f"audio.{encoding}").read_bytes()
-        wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw)
+        wav_bytes = wrap_session_audio(encoding, audio_format["sample_rate"], raw, channels)
     except (AudioWrapError, KeyError):
         # `KeyError` too: `_has_audio` is satisfied by `encoding` alone, so
         # an `audio_format` carrying no `sample_rate` reaches this line and

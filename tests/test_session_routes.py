@@ -520,6 +520,85 @@ def test_a_recorded_session_returns_a_valid_wav_body_to_an_operator(tmp_path, fa
     assert int(response.headers["content-length"]) == len(body)
 
 
+def test_a_two_channel_session_is_served_as_a_two_channel_wav(tmp_path, fake_account_repository):
+    """10-07-PLAN.md (D-09): `timing.json`'s `audio_format.channels`
+    reaches `wrap_session_audio`, so a two-channel recording plays back
+    as a two-channel WAV, not the mono default."""
+    import wave
+    from io import BytesIO
+
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+
+    timings = TurnTimings(turn_outcome="completed")
+    timings.mark_turn_started()
+    recorder = SessionRecorder(session_config, timings)
+    recorder.set_audio_format("pcm", 16000, 2)
+    recorder.record_audio_chunk(b"\x01\x00\x02\x00\x03\x00\x04\x00")
+    recorder.close(timings)
+    directory = recorder.directory
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 200
+    with wave.open(BytesIO(response.content), "rb") as handle:
+        assert handle.getnchannels() == 2
+
+
+def test_a_session_with_no_channels_key_is_served_as_mono_exactly_as_before(
+    tmp_path, fake_account_repository
+):
+    """A session recorded before this plan carries no `channels` key at
+    all -- it must still play back as mono, byte for byte the pre-plan
+    behavior."""
+    import wave
+    from io import BytesIO
+
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    timing_path = directory / "timing.json"
+    timing = json.loads(timing_path.read_text(encoding="utf-8"))
+    del timing["audio_format"]["channels"]
+    timing_path.write_text(json.dumps(timing), encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 200
+    with wave.open(BytesIO(response.content), "rb") as handle:
+        assert handle.getnchannels() == 1
+
+
+def test_a_malformed_channels_value_is_the_same_named_refusal(tmp_path, fake_account_repository):
+    """A `channels` of 0 (or any non-integer-of-1-or-more) reaches the
+    same named refusal a bad encoding or a missing sample rate already
+    gets, never an unrelated exception."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    timing_path = directory / "timing.json"
+    timing = json.loads(timing_path.read_text(encoding="utf-8"))
+    timing["audio_format"]["channels"] = 0
+    timing_path.write_text(json.dumps(timing), encoding="utf-8")
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    response = client.get(f"/api/sessions/{directory.name}/audio")
+
+    assert response.status_code == 409
+    assert "cannot play back" in response.json()["detail"]
+
+
 def test_a_traversal_attempt_against_the_audio_route_is_refused(tmp_path, fake_account_repository):
     security = SecurityConfig()
     account_repo = fake_account_repository()

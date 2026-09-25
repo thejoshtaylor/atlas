@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import AsyncIterator, Sequence
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -317,6 +318,26 @@ def test_preroll_offset_s_returns_zero_for_every_malformed_or_absent_payload():
     assert preroll_offset_s({"preroll_bytes": "lots", "audio_format": good_format}) == 0.0
     assert preroll_offset_s({"preroll_bytes": 800, "audio_format": {"encoding": "opus", "sample_rate": 8000}}) == 0.0
     assert preroll_offset_s({"preroll_bytes": 800, "audio_format": None}) == 0.0
+
+
+def test_preroll_offset_s_is_channel_aware():
+    """10-07-PLAN.md (D-09): the byte rate includes the channel count, so a
+    two-channel recording's pre-roll offset is half of the one-channel
+    reading of the identical byte count -- and a session with no
+    `channels` key at all reads as one channel, the pre-fix behavior."""
+    two_channel = {"encoding": "pcm", "sample_rate": 16000, "channels": 2}
+    no_channels_key = {"encoding": "pcm", "sample_rate": 16000}
+
+    assert preroll_offset_s({"preroll_bytes": 12800, "audio_format": two_channel}) == 0.2
+    assert preroll_offset_s({"preroll_bytes": 12800, "audio_format": no_channels_key}) == 0.4
+
+
+@pytest.mark.parametrize("bad_channels", [0, -1, 1.5, "2", True])
+def test_preroll_offset_s_rejects_a_malformed_channels_value(bad_channels):
+    """A `channels` of 0, negative, non-integer, or a bool (which `isinstance(x, int)`
+    would otherwise accept) all fall back to `0.0` -- never a guessed byte rate."""
+    audio_format = {"encoding": "pcm", "sample_rate": 16000, "channels": bad_channels}
+    assert preroll_offset_s({"preroll_bytes": 12800, "audio_format": audio_format}) == 0.0
 
 
 # --- Task 2: the paths that must not move --------------------------------

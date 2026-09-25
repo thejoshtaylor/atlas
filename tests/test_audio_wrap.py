@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import wave
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -123,6 +125,34 @@ def test_wrap_session_audio_pcm_variants_never_touch_alaw_table() -> None:
 def test_wrap_session_audio_rejects_unknown_encoding() -> None:
     with pytest.raises(AudioWrapError, match="opus"):
         wrap_session_audio("opus", 8000, b"\x00")
+
+
+def test_wrap_session_audio_two_channel_pcm_opens_with_stdlib_wave() -> None:
+    """10-07-PLAN.md (D-09): a two-channel WAV must be a WAV `wave.open`
+    itself accepts, with the exact channel/rate/width the recorder wrote."""
+    samples = bytes(range(64))  # 16 interleaved int16 samples, 8 per channel
+    wav = wrap_session_audio("pcm", 16000, samples, channels=2)
+
+    with wave.open(BytesIO(wav), "rb") as handle:
+        assert handle.getnchannels() == 2
+        assert handle.getframerate() == 16000
+        assert handle.getsampwidth() == 2
+        assert handle.readframes(handle.getnframes()) == samples
+
+
+def test_wrap_session_audio_rejects_two_channel_alaw() -> None:
+    """No source in this codebase records multi-channel A-law -- honestly
+    refusing beats guessing a format tag `wrap_alaw_as_wav` cannot support."""
+    with pytest.raises(AudioWrapError, match="alaw"):
+        wrap_session_audio("alaw", 8000, b"\x00\x01\x02\x03", channels=2)
+
+
+def test_wrap_pcm16_as_wav_channels_default_is_one() -> None:
+    samples = bytes(range(64))
+    wav = wrap_pcm16_as_wav(samples, 16000)
+
+    with wave.open(BytesIO(wav), "rb") as handle:
+        assert handle.getnchannels() == 1
 
 
 def test_dev_write_sample_wav_script_writes_two_playable_files(tmp_path: Path) -> None:
