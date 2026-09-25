@@ -32,13 +32,13 @@ describe("edgeDevices.ts -- calls the real routes/edge_devices.py paths", () => 
       calledUrl = url
       calledMethod = init?.method
       calledBody = init?.body as string
-      return jsonResponse(201, { id: 1, name: "kitchen", token: "device-token-abc", created_at: "2026-09-25T00:00:00Z" })
+      return jsonResponse(201, { id: 1, name: "kitchen", token: "tok-abc", created_at: "2026-09-25T00:00:00Z" })
     }) as typeof fetch
     const created = await createEdgeDeviceMutationOptions.mutationFn!({ name: "kitchen" }, {} as never)
     expect(calledUrl).toBe("/api/edge-devices")
     expect(calledMethod).toBe("POST")
     expect(JSON.parse(calledBody!)).toEqual({ name: "kitchen" })
-    expect(created.token).toBe("device-token-abc")
+    expect(created.token).toBe("tok-abc")
   })
 
   test("revokeEdgeDeviceMutationOptions DELETEs /api/edge-devices/{id}", async () => {

@@ -74,7 +74,7 @@ test("adding a device shows the token panel with the token and a Copy button; Di
     },
     createEdgeDevice: async (input) => {
       expect(input).toEqual({ name: "test" })
-      return { id: 1, name: "test", token: "device-token-abc", created_at: "2026-09-25T00:00:00Z" }
+      return { id: 1, name: "test", token: "tok-abc", created_at: "2026-09-25T00:00:00Z" }
     },
   })
   const { EdgeDevicesRoute } = await import("./EdgeDevicesRoute")
@@ -85,12 +85,12 @@ test("adding a device shows the token panel with the token and a Copy button; Di
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "test" } })
   fireEvent.click(screen.getByRole("button", { name: "Add device" }))
 
-  expect(await screen.findByText("device-token-abc")).toBeTruthy()
+  expect(await screen.findByText("tok-abc")).toBeTruthy()
   expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy()
   expect(screen.getByText("Device added.")).toBeTruthy()
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }))
-  expect(screen.queryByText("device-token-abc")).toBeNull()
+  expect(screen.queryByText("tok-abc")).toBeNull()
 
   // onSuccess invalidates the list query, which refetches through the
   // same fetchEdgeDevices fake this test controls -- its own return type
