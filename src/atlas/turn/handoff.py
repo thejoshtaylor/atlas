@@ -128,6 +128,9 @@ class HandoffSlot:
     handoff: "Handoff | None" = None
     bulk_refused: bool = False
     unreachable_accounts: "list[Any]" = field(default_factory=list)
+    # R3-IN-05 (D-24): the exact offered name of the tool call whose result
+    # became `handoff`. A clarification's answer is scoped to this tool.
+    tool_name: "str | None" = None
 
 
 @dataclass(frozen=True)

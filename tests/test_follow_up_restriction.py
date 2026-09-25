@@ -270,9 +270,11 @@ async def test_a_proposals_only_clarification_passes_the_restriction_to_its_conf
     assert requested.chain_depth == 3
 
 
-async def test_an_unrestricted_clarification_stays_unrestricted(fake_audio_source, fake_stt, fake_tts):
-    """The restriction never leaks the other way: a wake turn's own
-    clarification still offers the full schema on its answer."""
+async def test_a_clarification_with_no_recorded_scope_offers_no_tools(fake_audio_source, fake_stt, fake_tts):
+    """R3-IN-05 (D-24): a wake turn's own clarification no longer gives its
+    answer the full schema. `run_turn` always records an `answer_scope`
+    (`tests/test_clarification_answer_scope.py`); a request built with none
+    fails closed and offers nothing."""
     fakes = (fake_audio_source, fake_stt, fake_tts)
     tool_host = tpa._GoogleToolHost(_two_accounts_no_default(), google_client=FakeGoogle().client)
     ctx = _context(tool_host, FakePendingActionRepository(), tpa._RecordingConfirmationBrain("confirm"))
@@ -286,7 +288,7 @@ async def test_an_unrestricted_clarification_stays_unrestricted(fake_audio_sourc
 
     await _turn(incoming, "the desk lamp", brain, tool_host, ctx, fakes=fakes)
 
-    assert {entry["function"]["name"] for entry in brain.calls[0].tools} == {e["function"]["name"] for e in _SCHEMA}
+    assert brain.calls[0].tools == []
 
 
 # --- R2-WR-04: the allowlist is the Google plugin's own offered names --------

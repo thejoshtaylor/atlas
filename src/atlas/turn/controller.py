@@ -103,7 +103,14 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
-from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest, estimate_playback_end
+from atlas.turn.follow_up import (
+    HA_CALL_SERVICE_TOOL,
+    MAX_CHAINED_FOLLOW_UPS,
+    AnswerScope,
+    FollowUpChannel,
+    FollowUpRequest,
+    estimate_playback_end,
+)
 from atlas.turn.handoff import (
     AMENDED_CONTINUATION_REFUSAL,
     CODE_ONLY_REFUSAL,
@@ -188,6 +195,13 @@ _ACTION_DID_NOT_COMPLETE_CLAUSE = "the call itself did not complete"
 # discipline `_compose_mixed_outcome_reply` already applies to a mixed
 # tool-round summary.
 _CLARIFYING_QUESTION_CARRIER = "i'm not sure which one you mean --"
+
+# R3-IN-05 (D-24): a Home Assistant entity id, `domain.object_id`. A
+# triage clarification whose candidates all have this shape scopes its
+# answer to those entities (`_triage_clarification_scope`). A plugin
+# display name or a scheduled-run summary never matches: both are spoken
+# words, with capitals or spaces and no dot.
+_ENTITY_ID_SHAPE = re.compile(r"[a-z0-9_]+\.[a-z0-9_]+")
 
 # GOOG-12, plan 09-05 Task 3: appended, by code, to an ordinary answer for
 # every account this turn's own tool round could not reach (`handoff_slot.
@@ -694,6 +708,13 @@ async def run_turn(
         # pending_action, never an action that runs with no confirmation
         # step at all, however many links the chain has.
         restrict_tools_to_proposals = False
+        # R3-IN-05 (D-24): what this turn may reach when it answers a
+        # follow-up -- `None` for an ordinary wake turn, and for an
+        # amendment whose chain began with a wake turn's own proposal.
+        # Narrows both the offered schema and dispatch below, next to
+        # `restrict_tools_to_proposals`, and is copied (narrowed, never
+        # widened) onto every follow-up this turn requests.
+        answer_scope: "AnswerScope | None" = None
 
         # Plan 09-06 (D-08, D-09): a follow-up turn's own reply to a
         # stored confirmation -- this entirely replaces the ordinary
@@ -737,6 +758,7 @@ async def run_turn(
             # phrase or an on/off command).
             prior_exchange: "list[dict[str, Any]] | None" = _continuation_messages(incoming)
             restrict_tools_to_proposals = True
+            answer_scope = incoming.answer_scope
         elif incoming is not None and incoming.kind == "clarification":
             # Plan 09-07 (D-06): a clarification's own answer -- "home"
             # to "which account -- home, work?" -- runs the ordinary
@@ -773,6 +795,13 @@ async def run_turn(
             # that turn's restriction -- the answer is still spoken in a
             # no-wake-word window.
             restrict_tools_to_proposals = incoming.proposals_only
+            # R3-IN-05 (D-24): the answer reaches only what the clarifying
+            # turn asked about. A request with no recorded scope fails
+            # closed (no tool) -- unless `proposals_only` already governs
+            # it, which keeps that chain's own behavior unchanged.
+            answer_scope = incoming.answer_scope
+            if answer_scope is None and not incoming.proposals_only:
+                answer_scope = AnswerScope(tool_names=frozenset())
         else:
             prior_exchange = None
 
@@ -1112,6 +1141,14 @@ async def run_turn(
         restricted_to: "frozenset[str] | None" = None
         if restrict_tools_to_proposals:
             restricted_to = handoff_context.proposal_tool_names if handoff_context is not None else frozenset()
+        # R3-IN-05 (D-24): a scoped answer turn is limited the same two
+        # ways, by the intersection when both limits apply. The scope's
+        # entity check has no schema form; `_run_tool_rounds` applies it
+        # at dispatch only.
+        if answer_scope is not None:
+            restricted_to = (
+                answer_scope.tool_names if restricted_to is None else restricted_to & answer_scope.tool_names
+            )
         turn_tools_schema = (
             [entry for entry in tools_schema if entry.get("function", {}).get("name") in restricted_to]
             if restricted_to is not None
@@ -1132,6 +1169,7 @@ async def run_turn(
                     commitment,
                     handoff_slot=handoff_slot,
                     restricted_to=restricted_to,
+                    answer_scope=answer_scope,
                 )
             else:
                 coro = brain_race.run_triage_tier(tier, tier_messages)
@@ -1254,6 +1292,17 @@ async def run_turn(
                 # of exactly one link adds nothing new here.
                 # `outcome.follow_up` is frozen (`FollowUpRequest`), so
                 # this is a new instance, not a mutation of the original.
+                #
+                # R3-IN-05 (D-24): a tool's own clarification scopes its
+                # answer to that one tool (`handoff_slot.tool_name`, the
+                # exact offered name the model called). A confirmation
+                # keeps this turn's own scope, so a later amendment stays
+                # inside it too. Either way the chain's scope only narrows.
+                if outcome.follow_up.kind == "clarification":
+                    asked_by = frozenset({handoff_slot.tool_name}) if handoff_slot.tool_name else frozenset()
+                    next_scope: "AnswerScope | None" = AnswerScope(tool_names=asked_by).narrowed_by(answer_scope)
+                else:
+                    next_scope = answer_scope
                 follow_up.request(
                     replace(
                         outcome.follow_up,
@@ -1261,6 +1310,7 @@ async def run_turn(
                         prior_messages=tuple(prior_exchange) if prior_exchange else (),
                         # A-CR-02: the restriction belongs to the chain.
                         proposals_only=outcome.follow_up.proposals_only or restrict_tools_to_proposals,
+                        answer_scope=next_scope,
                     )
                 )
             await _emit_event(source, timings.to_event())
@@ -1310,6 +1360,8 @@ async def run_turn(
                             playback_ends_at=estimate_playback_end(clarification_speech, sink),
                             # A-CR-02: the restriction belongs to the chain.
                             proposals_only=restrict_tools_to_proposals,
+                            # R3-IN-05 (D-24): no tool asked this question.
+                            answer_scope=_triage_clarification_scope(winner.candidates).narrowed_by(answer_scope),
                         )
                     )
             await _emit_event(source, timings.to_event())
@@ -1818,6 +1870,24 @@ def _compose_clarifying_question(candidates: "tuple[str, ...]", friendly_names: 
     return f"{_CLARIFYING_QUESTION_CARRIER} {', '.join(named)}?"
 
 
+def _triage_clarification_scope(candidates: "tuple[str, ...]") -> AnswerScope:
+    """R3-IN-05 (D-24): the scope for the answer to a clarification that a
+    triage tier asked. No tool asked this question, so the scope comes from
+    the candidates -- the smallest set that still finishes the request:
+
+    - Every candidate is an entity id: `ha_call_service`, for those entity
+      ids only. "Which light?" can still turn on the light that the answer
+      names, and nothing else.
+    - Otherwise (plugin display names, scheduled-run summaries, or a mix):
+      no tool at all. These routes have no single tool and no target
+      argument to check, so their answer can only be spoken, and an action
+      needs the wake word again.
+    """
+    if candidates and all(_ENTITY_ID_SHAPE.fullmatch(candidate) for candidate in candidates):
+        return AnswerScope(tool_names=frozenset({HA_CALL_SERVICE_TOOL}), entity_ids=frozenset(candidates))
+    return AnswerScope(tool_names=frozenset())
+
+
 async def _run_tool_rounds(
     brain: _BrainProvider,
     tool_host: _ToolHost,
@@ -1828,6 +1898,7 @@ async def _run_tool_rounds(
     commitment: "brain_race.ToolCommitment | None" = None,
     handoff_slot: "HandoffSlot | None" = None,
     restricted_to: "frozenset[str] | None" = None,
+    answer_scope: "AnswerScope | None" = None,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
@@ -1846,6 +1917,10 @@ async def _run_tool_rounds(
     This is the structural backstop the schema restriction alone cannot
     be: a model that names a tool outside the schema it was given still
     never reaches `tool_host.call_tool` for it.
+
+    `answer_scope` (R3-IN-05, D-24, default `None`) adds the scope's own
+    target check at dispatch: a call whose arguments name an entity
+    outside the scope is refused the same way.
 
     `commitment`, when given, is set the instant one round's dispatch begins --
     before `asyncio.gather` is awaited, not after any one call returns (CR-01,
@@ -1928,10 +2003,17 @@ async def _run_tool_rounds(
         # proposal-restricted turn -- any tool call whose exact name is not
         # in it is refused the same way, checked here by name, never
         # trusted from the (already narrowed) schema this round was offered.
+        #
+        # R3-IN-05 (D-24): `answer_scope` adds its target check here too.
+        def _refused(tc: Any) -> bool:
+            if restricted_to is not None and tc.name not in restricted_to:
+                return True
+            return answer_scope is not None and not answer_scope.allows_targets(tc.arguments)
+
         dispatchable = [
             (index, tc)
             for index, tc in enumerate(reply.tool_calls)
-            if not is_code_only_tool(tc.name) and (restricted_to is None or tc.name in restricted_to)
+            if not is_code_only_tool(tc.name) and not _refused(tc)
         ]
         dispatched_results = await asyncio.gather(
             *(tool_host.call_tool(tc.name, tc.arguments) for _, tc in dispatchable),
@@ -1945,7 +2027,7 @@ async def _run_tool_rounds(
                 results[index] = SimpleNamespace(
                     isError=True, content=[SimpleNamespace(text=CODE_ONLY_REFUSAL)]
                 )
-            elif restricted_to is not None and tc.name not in restricted_to:
+            elif _refused(tc):
                 results[index] = SimpleNamespace(
                     isError=True, content=[SimpleNamespace(text=AMENDED_CONTINUATION_REFUSAL)]
                 )
@@ -2001,6 +2083,9 @@ async def _run_tool_rounds(
             # nothing here calls `brain.chat` a second time.
             if handoff_slot is not None:
                 handoff_slot.handoff = handoffs_present[0][1]
+                # R3-IN-05 (D-24): the exact offered name that asked, so a
+                # clarification's answer can be scoped to it.
+                handoff_slot.tool_name = reply.tool_calls[handoffs_present[0][0]].name
             return ""
 
         if handoffs_present:

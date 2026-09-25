@@ -210,6 +210,7 @@ async def run_top_tier(
     commitment: ToolCommitment | None = None,
     handoff_slot: Any | None = None,
     restricted_to: "frozenset[str] | None" = None,
+    answer_scope: Any | None = None,
 ) -> TierReply:
     """The existing, unmodified tool-calling loop, wrapped locally into a
     `TierReply` -- no envelope call.
@@ -231,7 +232,9 @@ async def run_top_tier(
     unchanged to `_run_tool_rounds`: the exact tool names `run_turn`
     allows on a proposal-restricted turn -- the turn that continues an
     `amended` confirmation reply, and every later turn in the same
-    follow-up chain.
+    follow-up chain. `answer_scope` (R3-IN-05, D-24, default `None`) is
+    forwarded the same way: the target check of a turn that answers a
+    clarifying question.
     """
     # Deferred, not module-level: `controller.py` imports this module at
     # load time to dispatch tiers, so a module-level import here of anything
@@ -253,6 +256,7 @@ async def run_top_tier(
         commitment=commitment,
         handoff_slot=handoff_slot,
         restricted_to=restricted_to,
+        answer_scope=answer_scope,
     )
 
     return TierReply(

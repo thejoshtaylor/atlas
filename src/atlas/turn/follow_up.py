@@ -32,6 +32,64 @@ if TYPE_CHECKING:
 # on) ends the exchange with `FOLLOW_UP_LIMIT_REPLY` rather than looping.
 MAX_CHAINED_FOLLOW_UPS = 3
 
+# R3-IN-05 (D-24): the Home Assistant tool a triage tier's clarification
+# between entity ids scopes its answer to -- the exact offered name, the
+# same one `turn/controller.py`'s local on/off path calls. A
+# collision-prefixed name is not matched, so that case offers nothing.
+HA_CALL_SERVICE_TOOL = "ha_call_service"
+
+# The arguments through which a tool call can name a Home Assistant
+# target. `entity_id` must name an entity in scope; the other three expand
+# to entities that the question never named (`atlas_mcp.ha`), so an
+# entity-scoped call that carries any of them is refused.
+_EXPANDING_TARGET_ARGUMENTS = ("area_id", "device_id", "label_id")
+
+
+@dataclass(frozen=True)
+class AnswerScope:
+    """R3-IN-05 (D-24): what the answer to a clarifying question may reach.
+
+    The answer is heard in a no-wake-word window (D-06), so it may only
+    finish the request that the clarifying turn made:
+
+    - `tool_names`: the exact offered tool names the answer turn is offered
+      and may dispatch. Empty means no tool at all.
+    - `entity_ids`: when set, every dispatched call must name its target
+      through `entity_id` only, and only these entity ids. `None` means no
+      target check (a Google tool names an account, not an entity).
+    """
+
+    tool_names: frozenset[str]
+    entity_ids: "frozenset[str] | None" = None
+
+    def narrowed_by(self, other: "AnswerScope | None") -> "AnswerScope":
+        """This scope, limited further by `other`. A chain's scope can only
+        get smaller, never larger: a second clarification never widens
+        what the first one allowed."""
+        if other is None:
+            return self
+        if self.entity_ids is None:
+            entity_ids = other.entity_ids
+        elif other.entity_ids is None:
+            entity_ids = self.entity_ids
+        else:
+            entity_ids = self.entity_ids & other.entity_ids
+        return AnswerScope(tool_names=self.tool_names & other.tool_names, entity_ids=entity_ids)
+
+    def allows_targets(self, arguments: "dict | None") -> bool:
+        """True when a call's own arguments name only entities in scope."""
+        if self.entity_ids is None:
+            return True
+        if not isinstance(arguments, dict):
+            return False
+        if any(arguments.get(key) for key in _EXPANDING_TARGET_ARGUMENTS):
+            return False
+        entity_id = arguments.get("entity_id")
+        named = [entity_id] if isinstance(entity_id, str) else entity_id
+        if not isinstance(named, list) or not named:
+            return False
+        return all(isinstance(item, str) and item in self.entity_ids for item in named)
+
 
 @dataclass(frozen=True)
 class FollowUpRequest:
@@ -74,6 +132,14 @@ class FollowUpRequest:
     # and capped. The confirmation round reads them as JSON data, never as
     # text next to the operator's reply. Empty for a clarification.
     proposal: tuple[tuple[str, str], ...] = ()
+    # R3-IN-05 (D-24): what the answer turn may reach. `run_turn` sets it
+    # on every clarification it requests, and copies it onto every later
+    # follow-up in the same chain, narrowed but never widened. `None` means
+    # no scope was recorded: a clarification with `None` fails closed (its
+    # answer is offered no tool, unless `proposals_only` already governs
+    # it); a confirmation with `None` came from a wake turn and adds no
+    # limit beyond `proposals_only`.
+    answer_scope: "AnswerScope | None" = None
 
 
 @dataclass
