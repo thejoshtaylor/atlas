@@ -4,9 +4,12 @@ import {
   fetchGoogleAccount,
   fetchGoogleAccounts,
   fetchGoogleClient,
+  fetchGoogleStyle,
   linkErrorMessage,
   refreshCalendarsMutationOptions,
+  relearnGoogleStyleMutationOptions,
   saveGoogleClientMutationOptions,
+  saveGoogleStyleMutationOptions,
   setCalendarAccessMutationOptions,
   startGoogleLink,
   unlinkGoogleAccountMutationOptions,
@@ -183,6 +186,75 @@ describe("google.ts -- calls the real routes/google_accounts.py paths", () => {
     await unlinkGoogleAccountMutationOptions.mutationFn!({ accountId: 7 }, {} as never)
     expect(calledUrl).toBe("/api/google/accounts/7")
     expect(calledMethod).toBe("DELETE")
+  })
+
+  test("fetchGoogleStyle calls GET /api/google/accounts/{id}/style", async () => {
+    let calledUrl: string | undefined
+    global.fetch = (async (url: string) => {
+      calledUrl = url
+      return jsonResponse(200, {
+        status: "ready",
+        status_detail: null,
+        profile: "Direct and friendly.",
+        samples: ["Sounds good, talk soon."],
+        signature_text: "Jane Doe",
+        messages_scanned: 187,
+        learned_at: "2026-09-20T00:00:00Z",
+      })
+    }) as typeof fetch
+
+    const result = await fetchGoogleStyle(7)
+    expect(calledUrl).toBe("/api/google/accounts/7/style")
+    expect(result.status).toBe("ready")
+    expect(result.messages_scanned).toBe(187)
+  })
+
+  test("saveGoogleStyleMutationOptions PUTs /api/google/accounts/{id}/style with only {profile}", async () => {
+    let calledUrl: string | undefined
+    let calledMethod: string | undefined
+    let calledBody: string | undefined
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calledUrl = url
+      calledMethod = init?.method
+      calledBody = init?.body as string
+      return jsonResponse(200, {
+        status: "ready",
+        status_detail: null,
+        profile: "Direct and friendly.",
+        samples: [],
+        signature_text: null,
+        messages_scanned: 187,
+        learned_at: "2026-09-20T00:00:00Z",
+      })
+    }) as typeof fetch
+
+    await saveGoogleStyleMutationOptions.mutationFn!({ accountId: 7, profile: "Direct and friendly." }, {} as never)
+    expect(calledUrl).toBe("/api/google/accounts/7/style")
+    expect(calledMethod).toBe("PUT")
+    expect(JSON.parse(calledBody!)).toEqual({ profile: "Direct and friendly." })
+  })
+
+  test("relearnGoogleStyleMutationOptions POSTs /api/google/accounts/{id}/style/relearn", async () => {
+    let calledUrl: string | undefined
+    let calledMethod: string | undefined
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calledUrl = url
+      calledMethod = init?.method
+      return jsonResponse(202, {
+        status: "learning",
+        status_detail: null,
+        profile: "",
+        samples: [],
+        signature_text: null,
+        messages_scanned: 0,
+        learned_at: null,
+      })
+    }) as typeof fetch
+
+    const result = await relearnGoogleStyleMutationOptions.mutationFn!({ accountId: 7 }, {} as never)
+    expect(calledUrl).toBe("/api/google/accounts/7/style/relearn")
+    expect(calledMethod).toBe("POST")
+    expect(result.status).toBe("learning")
   })
 })
 
