@@ -150,6 +150,53 @@ test("saving a client id and secret calls the save mutation once, then shows the
   expect(screen.queryByDisplayValue("shh-pw")).toBeNull()
 })
 
+test("C-WR-02: a failed client save shows the server's own text verbatim, not a generic message", async () => {
+  stubLocation()
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleClient: async () => sampleClient({ configured: false }),
+    fetchGoogleAccounts: async () => [],
+    saveGoogleClient: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(400, "client_id and client_secret must both be non-empty")
+    },
+  })
+  const { GoogleAccountsRoute } = await import("./GoogleAccountsRoute")
+
+  renderRoute(GoogleAccountsRoute, queryClient)
+
+  await screen.findByLabelText("Client ID")
+  fireEvent.change(screen.getByLabelText("Client ID"), { target: { value: "my-client-id" } })
+  fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "shh-pw" } })
+  fireEvent.click(screen.getByRole("button", { name: "Save client" }))
+
+  expect(await screen.findByText("client_id and client_secret must both be non-empty")).toBeTruthy()
+})
+
+test("C-WR-02: a failed Link start shows the server's own text verbatim, not a generic message", async () => {
+  stubLocation({ protocol: "https:", origin: "https://atlas.example" })
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleClient: async () => sampleClient({ configured: true, client_id: "abc" }),
+    fetchGoogleAccounts: async () => [],
+    startGoogleLink: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(409, "Another account already uses that label. Choose a different one.")
+    },
+  })
+  const { GoogleAccountsRoute } = await import("./GoogleAccountsRoute")
+
+  renderRoute(GoogleAccountsRoute, queryClient)
+
+  await screen.findByRole("button", { name: "Link" })
+  fireEvent.change(screen.getByLabelText("Label"), { target: { value: "work" } })
+  fireEvent.click(screen.getByRole("button", { name: "Link" }))
+
+  expect(
+    await screen.findByText("Another account already uses that label. Choose a different one."),
+  ).toBeTruthy()
+})
+
 test("the Link button is disabled on an http: page and enabled on an https: page", async () => {
   stubLocation({ protocol: "http:", origin: "http://atlas.example" })
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })

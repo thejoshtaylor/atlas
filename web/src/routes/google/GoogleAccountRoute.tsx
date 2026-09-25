@@ -154,8 +154,8 @@ function AccountDetail({ account }: { account: GoogleAccount }) {
     try {
       const result = await startLink.mutateAsync({ label: account.label, relink_account_id: account.id })
       window.location.assign(result.authorization_url)
-    } catch {
-      setRelinkError("Couldn't start linking. Try again.")
+    } catch (err) {
+      setRelinkError(err instanceof ApiError ? err.message : "Couldn't start linking. Try again.")
     }
   }
 

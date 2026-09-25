@@ -311,6 +311,26 @@ test("Find new calendars calls the refresh mutation and the list refetches", asy
   expect(await screen.findByText("Errands")).toBeTruthy()
 })
 
+test("C-WR-02: a failed 'Link again' shows the server's own text verbatim, not a generic message", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubGoogle(queryClient, {
+    fetchGoogleAccount: async () => sampleAccount({ id: 7, label: "work", status: "needs_relink" }),
+    startGoogleLink: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(503, "No Google OAuth client is configured. Set one up below, then link again.")
+    },
+  })
+  const { GoogleAccountRoute } = await import("./GoogleAccountRoute")
+
+  renderRoute(GoogleAccountRoute, queryClient, "/google/accounts/7")
+
+  fireEvent.click(await screen.findByRole("button", { name: "Link again" }))
+
+  expect(
+    await screen.findByText("No Google OAuth client is configured. Set one up below, then link again."),
+  ).toBeTruthy()
+})
+
 test("a needs_relink account shows Link again, starting the flow with this account's label and id", async () => {
   const assignCalls: string[] = []
   Object.defineProperty(window, "location", {

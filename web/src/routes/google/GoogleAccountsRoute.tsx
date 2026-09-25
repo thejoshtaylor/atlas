@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/state/EmptyState"
 import { ErrorState } from "@/components/state/ErrorState"
 import { SkeletonList } from "@/components/state/SkeletonList"
 import { SubmitButton } from "@/components/state/SubmitButton"
+import { ApiError } from "@/lib/api"
 import {
   GOOGLE_ACCOUNTS_QUERY_KEY,
   GOOGLE_CLIENT_QUERY_KEY,
@@ -66,8 +67,8 @@ function ClientSetupCard({ client }: { client: GoogleClientStatus }) {
       setSavedClient(result)
       setEditing(false)
       setClientSecret("")
-    } catch {
-      setSaveError("Couldn't save this client. Try again.")
+    } catch (err) {
+      setSaveError(err instanceof ApiError ? err.message : "Couldn't save this client. Try again.")
       throw new Error("save failed")
     }
   }
@@ -185,8 +186,8 @@ export function GoogleAccountsRoute() {
     try {
       const result = await startLink.mutateAsync({ label, relink_account_id: null })
       window.location.assign(result.authorization_url)
-    } catch {
-      setLinkStartError("Couldn't start linking. Try again.")
+    } catch (err) {
+      setLinkStartError(err instanceof ApiError ? err.message : "Couldn't start linking. Try again.")
       throw new Error("link failed")
     }
   }
