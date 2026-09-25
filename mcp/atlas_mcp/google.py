@@ -27,8 +27,15 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from atlas_mcp.google_api import GoogleApiError, GoogleAuthError, list_events
-from atlas_mcp.google_boundary import AccountGrant, Clarification, parse_accounts_env, resolve_accounts, resolve_write_target
+from atlas_mcp.google_api import GoogleApiError, GoogleAuthError, delete_event, get_event, insert_event, list_events
+from atlas_mcp.google_boundary import (
+    AccountGrant,
+    Clarification,
+    parse_accounts_env,
+    require_writable,
+    resolve_accounts,
+    resolve_write_target,
+)
 from atlas_mcp.google_tools import GOOGLE_ACCOUNTS_ENV, HANDOFF_KEY
 from atlas_mcp.safety import Denied
 
@@ -320,6 +327,89 @@ async def handle_calendar_propose_event(
     }
 
 
+async def handle_calendar_insert_event(
+    accounts: "tuple[AccountGrant, ...]",
+    client: httpx.AsyncClient,
+    *,
+    account: str,
+    calendar_id: str,
+    title: str,
+    start: str,
+    end: str,
+    all_day: bool,
+    time_zone: str,
+) -> dict[str, Any]:
+    """The executing half of `calendar_propose_event`'s handoff (D-08) --
+    posts one `events.insert`, with the exact arguments the stored
+    `PendingProposal` resolved. Called by code only, after a spoken
+    confirmation; never by the model, never with an argument this call
+    itself resolves.
+
+    `require_writable` (T-09-28) re-checks THIS moment's env -- an
+    account or calendar the operator narrowed after the readback still
+    refuses here, even though the proposal-time `resolve_write_target`
+    call already passed.
+    """
+    account_grant, calendar_grant = require_writable(accounts, account, calendar_id)
+    if all_day:
+        body: dict[str, Any] = {"summary": title, "start": {"date": start}, "end": {"date": end}}
+    else:
+        zone = ZoneInfo(time_zone)
+        start_dt = _parse_boundary(start, zone)
+        end_dt = _parse_boundary(end, zone)
+        body = {
+            "summary": title,
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": time_zone},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": time_zone},
+        }
+    try:
+        raw_event = await insert_event(
+            client, access_token=account_grant.access_token, calendar_id=calendar_id, body=body
+        )
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        raise Denied(f"google calendar couldn't add that event: {exc.message}") from exc
+    return {
+        "created": {
+            "event_id": raw_event.get("id"),
+            "account": account_grant.label,
+            "calendar": calendar_grant.name,
+        }
+    }
+
+
+async def handle_calendar_delete_event(
+    accounts: "tuple[AccountGrant, ...]",
+    client: httpx.AsyncClient,
+    *,
+    account: str,
+    calendar_id: str,
+    event_id: str,
+) -> dict[str, Any]:
+    """The executing half of `calendar_propose_delete`'s handoff (plan
+    09-05's own delete mechanism, D-08) -- sends one `events.delete` for
+    `event_id`. `require_writable` (T-09-28) re-checks THIS moment's env
+    exactly like the insert handler above.
+
+    A 404 or 410 from Google (the event was already deleted, or a
+    recurring instance already cancelled) is reported as "that event is
+    already gone" -- never as success, and never a bare exception.
+    """
+    account_grant, calendar_grant = require_writable(accounts, account, calendar_id)
+    try:
+        await delete_event(client, access_token=account_grant.access_token, calendar_id=calendar_id, event_id=event_id)
+    except GoogleAuthError as exc:
+        raise Denied(f"i can't reach your {account_grant.label} account right now") from exc
+    except GoogleApiError as exc:
+        if exc.status in (404, 410):
+            raise Denied("that event is already gone") from exc
+        raise Denied(f"google calendar couldn't delete that event: {exc.message}") from exc
+    return {
+        "deleted": {"event_id": event_id, "account": account_grant.label, "calendar": calendar_grant.name}
+    }
+
+
 mcp_server = MCPServer("atlas-google")
 
 _accounts: tuple[AccountGrant, ...] = ()
@@ -377,6 +467,52 @@ async def calendar_propose_event(
             all_day=all_day,
             account=account,
             calendar=calendar,
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def calendar_insert_event(
+    account: str,
+    calendar_id: str,
+    title: str,
+    start: str,
+    end: str,
+    all_day: bool,
+    time_zone: str,
+) -> dict[str, Any]:
+    """Insert one calendar event. Called by the assistant itself right
+    after the operator confirms a proposal out loud -- never call this
+    directly; propose the event with `calendar_propose_event` and let the
+    operator's spoken confirmation drive this call."""
+    assert _http_client is not None, "calendar_insert_event invoked before startup"
+    try:
+        return await handle_calendar_insert_event(
+            _accounts,
+            _http_client,
+            account=account,
+            calendar_id=calendar_id,
+            title=title,
+            start=start,
+            end=end,
+            all_day=all_day,
+            time_zone=time_zone,
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def calendar_delete_event(account: str, calendar_id: str, event_id: str) -> dict[str, Any]:
+    """Delete one calendar event. Called by the assistant itself right
+    after the operator confirms a proposed deletion out loud -- never
+    call this directly; propose the deletion with `calendar_propose_delete`
+    and let the operator's spoken confirmation drive this call."""
+    assert _http_client is not None, "calendar_delete_event invoked before startup"
+    try:
+        return await handle_calendar_delete_event(
+            _accounts, _http_client, account=account, calendar_id=calendar_id, event_id=event_id
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc

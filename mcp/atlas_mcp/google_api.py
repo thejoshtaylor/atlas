@@ -160,3 +160,99 @@ async def list_events(
         raise GoogleApiError(response.status_code, message)
     body = response.json()
     return list(body.get("items", []))
+
+
+async def get_event(
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+    calendar_id: str,
+    event_id: str,
+    time_zone: str,
+) -> dict[str, Any]:
+    """Fetch one event by id -- plan 09-05's own `calendar_propose_delete`
+    reads the event once here before building its handoff, and
+    `handle_calendar_delete_event`'s executing half re-reads through
+    `events.delete` directly rather than this function (delete needs no
+    prior read of its own).
+
+    `calendar_id`/`event_id` are each URL-encoded as their own path
+    segment (`urllib.parse.quote`, `safe=""`) -- a real calendar or event
+    id commonly contains `@` and `#`.
+
+    Raises `GoogleAuthError` on 401/403 and `GoogleApiError` on any other
+    non-2xx, including a 404 (deleted or never existed) or 410 (a
+    recurring instance already cancelled) -- the caller maps those two
+    codes to a spoken "already gone", never treats them as success.
+    """
+    encoded_calendar_id = urllib.parse.quote(calendar_id, safe="")
+    encoded_event_id = urllib.parse.quote(event_id, safe="")
+    response = await client.get(
+        f"{CALENDAR_BASE}/calendars/{encoded_calendar_id}/events/{encoded_event_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"timeZone": time_zone},
+    )
+    if response.status_code // 100 != 2:
+        message = _error_message(response)
+        if response.status_code in (401, 403):
+            raise GoogleAuthError(response.status_code, message)
+        raise GoogleApiError(response.status_code, message)
+    return response.json()
+
+
+async def insert_event(
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+    calendar_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """POST one `events.insert` body, returning Google's own created event
+    (carrying the assigned `id`). `calendar_id` is URL-encoded the same
+    way `list_events`/`get_event` already encode it.
+
+    Raises `GoogleAuthError` on 401/403 and `GoogleApiError` on any other
+    non-2xx.
+    """
+    encoded_calendar_id = urllib.parse.quote(calendar_id, safe="")
+    response = await client.post(
+        f"{CALENDAR_BASE}/calendars/{encoded_calendar_id}/events",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json=body,
+    )
+    if response.status_code // 100 != 2:
+        message = _error_message(response)
+        if response.status_code in (401, 403):
+            raise GoogleAuthError(response.status_code, message)
+        raise GoogleApiError(response.status_code, message)
+    return response.json()
+
+
+async def delete_event(
+    client: httpx.AsyncClient,
+    *,
+    access_token: str,
+    calendar_id: str,
+    event_id: str,
+) -> None:
+    """DELETE one event id -- deleting a recurring occurrence's own
+    instance id cancels only that occurrence, per Google's documented
+    recurring-events behavior (assumption A1, confirmed live in plan
+    09-06's human check).
+
+    Raises `GoogleAuthError` on 401/403 and `GoogleApiError` on any other
+    non-2xx, including 404/410 for an event already gone -- the caller
+    maps those two codes to a spoken "already gone", never treats them as
+    success.
+    """
+    encoded_calendar_id = urllib.parse.quote(calendar_id, safe="")
+    encoded_event_id = urllib.parse.quote(event_id, safe="")
+    response = await client.delete(
+        f"{CALENDAR_BASE}/calendars/{encoded_calendar_id}/events/{encoded_event_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if response.status_code // 100 != 2:
+        message = _error_message(response)
+        if response.status_code in (401, 403):
+            raise GoogleAuthError(response.status_code, message)
+        raise GoogleApiError(response.status_code, message)

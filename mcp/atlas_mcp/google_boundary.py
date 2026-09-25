@@ -244,6 +244,41 @@ def _resolve_unnamed_write_target(
     return Clarification(about="account", candidates=tuple(sorted(a.label for a in candidates)))
 
 
+def require_writable(
+    accounts: "tuple[AccountGrant, ...]", account_label: str, calendar_id: str
+) -> "tuple[AccountGrant, CalendarGrant]":
+    """T-09-28: the one gate every EXECUTING calendar-write tool runs
+    first, re-checked against this env at the moment it actually runs --
+    never trusting a proposal-time `resolve_write_target` call from
+    earlier in the turn, since the operator may have turned the calendar
+    off or made it read-only in the time between the readback and the
+    confirmation.
+
+    Raises `Denied`, with a spoken reason, before any HTTP request exists:
+    an account this env does not carry, an account whose access token
+    could not be refreshed (GOOG-12), a calendar id this account does not
+    carry (turned off, or never existed), and a read-only calendar.
+    """
+    normalized = account_label.strip().casefold()
+    account = next((a for a in accounts if a.label.casefold() == normalized), None)
+    if account is None:
+        linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
+        raise Denied(f"i don't have a google account called {account_label!r} -- linked accounts: {linked}")
+    if account.access_token is None:
+        raise Denied(f"i can't reach your {account.label} account right now")
+    calendar = next((c for c in account.calendars if c.calendar_id == calendar_id), None)
+    if calendar is None:
+        raise Denied(
+            f"that calendar isn't turned on for {account.label} -- turn it on in the google accounts screen"
+        )
+    if calendar.access == "read_only":
+        raise Denied(
+            f"the {calendar.name} calendar in {account.label} is read only -- "
+            "change that in the google accounts screen"
+        )
+    return account, calendar
+
+
 def resolve_write_target(
     accounts: "tuple[AccountGrant, ...]", account_label: "str | None", calendar_name: "str | None"
 ) -> "tuple[AccountGrant, CalendarGrant] | Clarification":
