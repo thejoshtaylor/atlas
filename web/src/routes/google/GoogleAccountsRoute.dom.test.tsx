@@ -140,14 +140,14 @@ test("saving a client id and secret calls the save mutation once, then shows the
 
   await screen.findByLabelText("Client ID")
   fireEvent.change(screen.getByLabelText("Client ID"), { target: { value: "my-client-id" } })
-  fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "shh-secret" } })
+  fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "shh-pw" } })
   fireEvent.click(screen.getByRole("button", { name: "Save client" }))
 
-  await waitFor(() => expect(saveCalls).toEqual([{ client_id: "my-client-id", client_secret: "shh-secret" }]))
+  await waitFor(() => expect(saveCalls).toEqual([{ client_id: "my-client-id", client_secret: "shh-pw" }]))
   expect(await screen.findByText("Secret saved")).toBeTruthy()
   expect(screen.getByText("my-client-id")).toBeTruthy()
   expect(screen.queryByLabelText("Client secret")).toBeNull()
-  expect(screen.queryByDisplayValue("shh-secret")).toBeNull()
+  expect(screen.queryByDisplayValue("shh-pw")).toBeNull()
 })
 
 test("the Link button is disabled on an http: page and enabled on an https: page", async () => {

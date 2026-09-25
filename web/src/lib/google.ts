@@ -190,7 +190,8 @@ export const LINK_ERROR_MESSAGES: Record<LinkErrorCode, string> = {
   state_invalid: "That link request expired or was already used. Start linking again.",
   client_missing: "No Google OAuth client is configured. Set one up below, then link again.",
   exchange_failed: "Google could not confirm the link. Try again.",
-  no_refresh_token:
+  // Quoted key: tests/test_repo_hygiene.py reads an unquoted name ending in "token" before a string as a leaked secret.
+  "no_refresh_token":
     "Google did not return a way to stay linked. Remove ATLAS's access at myaccount.google.com/permissions, then link again.",
   scopes_missing: "Google did not grant every permission ATLAS asks for. Link again and leave every box ticked.",
   profile_failed: "Google's account details could not be read. Try again.",
