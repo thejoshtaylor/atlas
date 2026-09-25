@@ -569,27 +569,48 @@ def test_resolve_write_target_denies_a_named_account_with_no_access_token():
         resolve_write_target((home,), "home", None)
 
 
-def test_resolve_write_target_unnamed_skips_an_unreachable_sole_candidate():
-    """B1-WR-02 regression: an unreachable account (GOOG-12, `access_token
-    is None`) with a previously-enabled read-write calendar must never
-    become the unnamed path's sole candidate -- it would otherwise be
-    resolved, read back, and only refused after the operator confirms it
-    (`require_writable`'s own execute-time check), a misleading readback
-    rather than a clean, up-front refusal."""
+def test_resolve_write_target_unnamed_refuses_an_unreachable_sole_candidate_by_name():
+    """B1-WR-02, R2-WR-08: an unreachable account (GOOG-12, `access_token
+    is None`) with a read-write calendar is refused up front, before any
+    readback. The refusal names the real problem -- the account cannot be
+    reached -- not a calendar that is already turned on."""
     home = _account("home", access_token=None)
-    with pytest.raises(Denied):
+    with pytest.raises(Denied) as excinfo:
         resolve_write_target((home,), None, None)
+    assert str(excinfo.value) == "i can't reach your home account right now"
 
 
-def test_resolve_write_target_unnamed_skips_an_unreachable_default_candidate():
-    """The same gap, for the default-account branch: an unreachable
-    account must never be picked by default just because it is marked
-    `is_default` -- the one remaining reachable, writable candidate must
-    be picked instead."""
+def test_resolve_write_target_unnamed_never_redirects_away_from_an_unreachable_default():
+    """R2-WR-08: D-04 sends a write with no signal to the default account,
+    and GOOG-12 never skips an unreachable account silently. An unreachable
+    default is refused by name -- the write never lands on another
+    account without the operator knowing."""
     home = _account("home", is_default=True, access_token=None)
     work = _account("work", is_default=False)
+    with pytest.raises(Denied) as excinfo:
+        resolve_write_target((home, work), None, None)
+    assert str(excinfo.value) == "i can't reach your home account right now"
+
+
+def test_resolve_write_target_unnamed_asks_over_every_writable_account_when_one_is_unreachable():
+    """No default and two writable accounts, one unreachable: the question
+    names both. Naming the unreachable one then gets the named path's own
+    "i can't reach" refusal, never a silent skip."""
+    home = _account("home", access_token=None)
+    work = _account("work")
     result = resolve_write_target((home, work), None, None)
-    assert result == (work, work.calendars[0])
+    assert isinstance(result, Clarification)
+    assert result.candidates == ("home", "work")
+
+
+def test_resolve_write_target_unnamed_denial_with_no_writable_calendar_names_the_calendar_setting():
+    home = _account(
+        "home",
+        calendars=(CalendarGrant(calendar_id="cal-home", name="Home", primary=True, access="read_only"),),
+    )
+    with pytest.raises(Denied) as excinfo:
+        resolve_write_target((home,), None, None)
+    assert "turn on a calendar for read and write" in str(excinfo.value)
 
 
 async def test_no_account_named_and_several_candidates_asks_which_one_and_stores_nothing(
