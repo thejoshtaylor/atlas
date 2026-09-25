@@ -79,13 +79,15 @@ _PROVIDER_SET_SLOTS: tuple[CredentialSlot, ...] = (
     CredentialSlot.TTS,
 )
 
-# The one always-listening source this application builds today
-# (`app.py`'s `lifespan`: `CameraAudioSource` is the only `SourceRunner`
-# constructed). A closed set, the same reasoning `CredentialSlot` and
-# `PolicyRuleRow.kind` already apply to their own closed sets -- a second
-# source name arrives as a code change, never as a string a route parameter
-# invents.
-VALID_AUDIO_SOURCES: frozenset[str] = frozenset({"camera"})
+# The always-listening sources this application builds
+# (`app.py`'s `lifespan`: `resolved_audio_source` branches between
+# `CameraAudioSource` and `EdgeAudioSource`). A closed set, the same
+# reasoning `CredentialSlot` and `PolicyRuleRow.kind` already apply to
+# their own closed sets -- a source name arrives as a code change, never
+# as a string a route parameter invents. `"edge"` is the second name this
+# comment's own prior revision anticipated (Phase 10, D-15): a Raspberry
+# Pi + XVF3800 array, paired through `/api/edge-devices`.
+VALID_AUDIO_SOURCES: frozenset[str] = frozenset({"camera", "edge"})
 
 AUDIO_SOURCE_SETTING_KEY = "audio_source"
 DEFAULT_AUDIO_SOURCE = "camera"
@@ -457,7 +459,22 @@ async def _audio_source_status(config: Config, settings_repo: SettingsRepository
     return WizardStepStatus(name="audio_source", complete=complete, detail=detail)
 
 
-async def _room_status(config: Config) -> WizardStepStatus:
+async def _room_status(config: Config, settings_repo: SettingsRepository) -> WizardStepStatus:
+    """Complete once the room's own microphone path is proven -- for
+    `"camera"` (or no stored choice), by a real echo-path calibration on
+    file; for `"edge"` (D-16), calibration is never the gate at all. The
+    camera's echo-path calibration feeds only the camera's correlation
+    barge-in gate; the edge source's own barge-in listens for a Pi VAD
+    start during playback instead (D-16), so a stored calibration -- or
+    the lack of one -- says nothing about whether an edge-sourced room is
+    ready.
+    """
+    source, _resolved_from = await resolve_audio_source(config, settings_repo)
+    if source == "edge":
+        return WizardStepStatus(
+            name="room", complete=True, detail={"source": "edge", "calibration": "not_used"}
+        )
+
     calibration = find_latest_calibration(config.calibration.dir)
     if calibration is None:
         return WizardStepStatus(name="room", complete=False, detail=None)
@@ -481,7 +498,7 @@ async def _compute_all_steps(request: Request) -> list[WizardStepStatus]:
         "hub": await _hub_status(setup_repo),
         "provider_set": await _provider_set_status(config, credential_repo),
         "audio_source": await _audio_source_status(config, settings_repo),
-        "room": await _room_status(config),
+        "room": await _room_status(config, settings_repo),
     }
     return [by_name[name] for name in STEP_ORDER]
 

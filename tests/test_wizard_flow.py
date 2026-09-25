@@ -497,6 +497,28 @@ def test_an_unknown_audio_source_is_refused(monkeypatch):
     app, client, *_ = _authed_app(monkeypatch)
     response = client.put("/api/wizard/audio-source", json={"source": "not-a-real-source"})
     assert response.status_code == 400, response.text
+    detail = response.json()["detail"].lower()
+    assert "camera" in detail
+    assert "edge" in detail
+
+
+def test_the_edge_audio_source_is_stored_and_read_back_reporting_a_restart(monkeypatch):
+    """D-15: choosing `edge` stores and reads back exactly like `camera`
+    -- `applies_live` is always `False` (a restart is what turns the
+    camera microphone off and makes the Pi the room's source)."""
+    app, client, *_ = _authed_app(monkeypatch)
+
+    write = client.put("/api/wizard/audio-source", json={"source": "edge"})
+    assert write.status_code == 200, write.text
+    assert write.json()["complete"] is True
+    assert write.json()["detail"]["applies_live"] is False
+    assert write.json()["detail"]["source"] == "edge"
+
+    after = client.get("/api/wizard")
+    source_step = next(s for s in after.json()["steps"] if s["name"] == "audio_source")
+    assert source_step["complete"] is True
+    assert source_step["detail"]["resolved_from"] == "database"
+    assert source_step["detail"]["source"] == "edge"
 
 
 def test_the_room_step_reads_the_stored_calibration_and_never_runs_one(monkeypatch):
@@ -521,6 +543,42 @@ def test_the_room_step_reads_the_stored_calibration_and_never_runs_one(monkeypat
     room_step = next(s for s in after.json()["steps"] if s["name"] == "room")
     assert room_step["complete"] is True
     assert room_step["detail"]["taken_at"] == taken_at.isoformat()
+
+
+def test_with_edge_the_room_step_is_complete_with_no_calibration_and_finish_succeeds(monkeypatch):
+    """D-16: with the stored audio source `edge`, the room step is
+    complete with no calibration on file at all -- the echo-path
+    calibration feeds only the camera's own correlation barge-in gate;
+    the edge source's barge-in listens for a Pi VAD start during playback
+    instead. The wizard finishes on that basis, proving the room gate
+    does not require "no calibration blocks finish" for this source."""
+    monkeypatch.setattr(wizard_module, "find_latest_calibration", lambda _dir: None)
+    app, client, security, admin, credential_repo, *_ = _authed_app(monkeypatch)
+
+    assert client.put("/api/wizard/audio-source", json={"source": "edge"}).status_code == 200
+
+    status = client.get("/api/wizard")
+    room_step = next(s for s in status.json()["steps"] if s["name"] == "room")
+    assert room_step["complete"] is True
+    assert room_step["detail"] == {"source": "edge", "calibration": "not_used"}
+
+    fake_ha = conftest.FakeHomeAssistant()
+    app.state.ha_http_client = fake_ha.client
+    assert client.post("/api/wizard/steps/hub/check").status_code == 200
+    del app.state.ha_http_client
+
+    for slot in (CredentialSlot.STT, CredentialSlot.BRAIN, CredentialSlot.TTS):
+        ciphertext, key_version = encrypt_credential("a-plainly-fictional-value", security)
+        import asyncio
+
+        asyncio.run(
+            credential_repo.upsert_credential(
+                slot.value, ciphertext=ciphertext, key_version=key_version, updated_by_user_id=admin["id"]
+            )
+        )
+
+    finished = client.post("/api/wizard/finish")
+    assert finished.status_code == 200, finished.text
 
 
 def test_finishing_succeeds_and_status_reports_complete_end_to_end(monkeypatch):
