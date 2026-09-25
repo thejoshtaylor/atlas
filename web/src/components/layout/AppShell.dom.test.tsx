@@ -36,7 +36,7 @@ afterEach(() => {
 })
 
 const OPERATOR_LABELS = ["Safety policy", "Macros", "Scheduled", "Developer mic", "Live", "Sessions", "Wake threshold"]
-const ADMIN_LABELS = ["Accounts", "Settings", "Plugins", "Providers"]
+const ADMIN_LABELS = ["Accounts", "Settings", "Plugins", "Providers", "Google accounts"]
 
 function stubSession(role: "viewer" | "operator" | "admin") {
   mock.module("@/hooks/useSession", () => ({
