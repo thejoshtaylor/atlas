@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from atlas.audio.cue import silence
 from atlas.audio.ring import PrerollBuffer
 from atlas.auth.dependencies import Role, require_role, require_setup_complete
+from atlas.auth.edge_tokens import require_edge_device
 from atlas.auth.tokens import validate_secret_key_strength
 from atlas.calibration.record import EchoCalibration
 from atlas.calibration.runner import find_latest_calibration, run_echo_calibration
@@ -46,6 +47,7 @@ from atlas.config import (
     load_raw_config,
 )
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
+from atlas.db.edge_repository import EdgeDevice
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
 from atlas.db.google_postgres import PostgresGoogleAccountRepository
 from atlas.db.pending_action_repository import PostgresPendingActionRepository
@@ -103,6 +105,7 @@ from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
 from atlas.timing import TurnTimings
 from atlas.transports.camera import CameraAudioSource
+from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
@@ -142,10 +145,21 @@ CAMERA_SOURCE_NAME = "camera"
 BROWSER_MIC_SOURCE_NAME = "browser_mic"
 WEBRTC_SOURCE_NAME = "browser_webrtc"
 LISTEN_SOURCE_NAME = "browser_listen"
+# Phase 10 (D-01, D-06, D-07): the Pi + XVF3800 source, behind `/ws/edge`.
+# One of `EDGE_SOURCE_NAME`/`CAMERA_SOURCE_NAME` is ever the resolved
+# `audio_source` at a time (the `resolved_audio_source` branch below) --
+# never both, until a later plan promotes this to a per-device list.
+EDGE_SOURCE_NAME = "edge"
 
 # What `observer.opened` advertises: every name above, in one place, so the
 # opening message cannot drift from the set of paths that actually publish.
-OBSERVED_SOURCE_NAMES = (CAMERA_SOURCE_NAME, BROWSER_MIC_SOURCE_NAME, WEBRTC_SOURCE_NAME, LISTEN_SOURCE_NAME)
+OBSERVED_SOURCE_NAMES = (
+    CAMERA_SOURCE_NAME,
+    BROWSER_MIC_SOURCE_NAME,
+    WEBRTC_SOURCE_NAME,
+    LISTEN_SOURCE_NAME,
+    EDGE_SOURCE_NAME,
+)
 
 CONFIG_PATH = os.environ.get("ATLAS_CONFIG", "config/config.example.yaml")
 # The repository's own `mcp/` directory -- three levels up from this file
@@ -1081,6 +1095,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # configuration discipline the gate and barge-in policy already carry
     # in that constructor).
     wake_event_repo: WakeEventRepository | None = repositories.get("wake_event_repo")
+    # Phase 10 (D-03): same tolerant `.get(...)` -- a deployment (or a
+    # test's own fake repository dict) with no edge device repository at
+    # all boots exactly as it did before this plan. Plan 10-04 adds the
+    # Postgres implementation; until then this is always `None` outside a
+    # test that seeds one.
+    app.state.edge_device_repo = repositories.get("edge_device_repo")
+    # Set now, unconditionally, so `/ws/edge` always finds a defined
+    # attribute -- overwritten below only when `resolved_audio_source ==
+    # EDGE_SOURCE_NAME`. `None` here is what makes the route's own 4003
+    # refusal ("edge is not the configured audio source") correct for
+    # every other value of `resolved_audio_source`.
+    app.state.edge_source = None
     # Phase 9 (09-01, Task 3): same tolerant `.get(...)` -- a deployment
     # (or a test's own fake repository dict) with no Google repository at
     # all boots exactly as it did before this plan; nothing below runs.
@@ -1560,9 +1586,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ffmpeg_supervisor.start()
     app.state.ffmpeg_supervisor = ffmpeg_supervisor
 
-    wake_detector = _build_wake_detector(config.wake.resolve("camera"))
-    app.state.wake_detector = wake_detector
-
     # Plan 05-03 (T-05-18): the room's one speaker, one lock -- created
     # once, here, before the camera source that will write through it
     # exists at all, and shared by every writer this process has: the
@@ -1589,10 +1612,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # this speaker actually plays, and `turn/controller.py`'s `_speak`
     # asks the real xAI/Piper provider for that same format on a cache
     # miss.
+    # Phase 10 (D-06, D-07, D-14, D-15): `camera_source` is built
+    # unconditionally in both branches below -- the scheduled speaker and
+    # the calibration route still read `app.state.camera_source` -- but
+    # `.start()` (the RTSP reconnect supervisor) runs only when the camera
+    # is the resolved audio source. An edge deployment's camera microphone
+    # never opens (D-15); the camera speaker code stays because SRC-02 is
+    # validated and a stranger with no Pi still depends on it.
     camera_source = CameraAudioSource(
         config.camera, speaker_writer, sink=camera_tts_sink, on_reconnect=ffmpeg_supervisor.handle_reconnect
     )
-    camera_source.start()
     app.state.camera_source = camera_source
 
     # Plan 02-11 Task 3: the single in-flight guard the run route below
@@ -1601,82 +1630,137 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # would measure each other (T-02-51).
     app.state.calibration_in_progress = False
 
-    # CR-01 fix (code review): every one of these used to be omitted, which
-    # left `SourceRunner.__init__`'s own "absent configuration" fallbacks in
-    # force for the one runner the application actually builds -- no
-    # refractory window, no gate, no pre-roll replay, and barge-in forced to
-    # `BargeInConfig(enabled=False)` regardless of what `config.example.yaml`
-    # said. `wake_config`/`gate_config`/`barge_in_config` are the *global*
-    # `Config` sections, not pre-resolved -- `SourceRunner.__init__` itself
-    # calls `.resolve("camera")` on each, the same way `wake_detector` above
-    # already resolves `config.wake` for engine selection. `is_media_playing`
-    # is left at its default (`None`, resolving to "nothing is ever playing"
-    # inside `WakeGate`): no real Home-Assistant-backed implementation exists
-    # yet, and `config.example.yaml`'s own `gate.mute_when_playing` ships
-    # empty, so the callable is never actually reached with the shipped
-    # default (`wake/gate.py`'s own short-circuit). Wiring a live one is
-    # future work, not something this fix pass invents untested.
-    preroll = PrerollBuffer(camera_source.source_format(), config.camera.preroll_ms)
+    if resolved_audio_source == CAMERA_SOURCE_NAME:
+        camera_source.start()
 
-    # Plan 02-12 Task 3: the startup refusal CR-02 left as a gap. Turning
-    # `correlation_enabled` on for a source with no valid, non-stale
-    # calibration on file must stop the process by name, never fall back to
-    # the guard-window-plus-floor gate the code review already found
-    # cannot tell the assistant's own voice from the operator's -- that
-    # fallback is exactly the silent failure this refusal exists to
-    # replace with a loud one. `find_latest_calibration` never raises for
-    # "no calibration directory yet" or "directory exists but empty" (its
-    # own docstring): both read as `None` here, the same "missing" case.
-    camera_barge_in = config.barge_in.resolve("camera")
-    camera_calibration: EchoCalibration | None = None
-    if camera_barge_in.correlation_enabled:
-        camera_calibration = find_latest_calibration(config.calibration.dir)
-        if camera_calibration is None:
-            raise ConfigError(
-                "barge_in.sources.camera.correlation_enabled is true, but no echo-path "
-                f"calibration exists at {config.calibration.dir!r} -- run "
-                "scripts/dev-calibrate-echo.sh against the real camera before enabling "
-                "correlation, or the gate would run uncalibrated against real playback"
-            )
-        now = datetime.now(timezone.utc)
-        if camera_calibration.is_stale(now, config.calibration.max_age_days):
-            age_days = (now - camera_calibration.taken_at).total_seconds() / 86400.0
-            raise ConfigError(
-                f"barge_in.sources.camera.correlation_enabled is true, but the stored "
-                f"calibration is {age_days:.1f} days old, past calibration.max_age_days="
-                f"{config.calibration.max_age_days} -- run scripts/dev-calibrate-echo.sh "
-                "again before enabling correlation on a stale measurement"
-            )
+        wake_detector = _build_wake_detector(config.wake.resolve(CAMERA_SOURCE_NAME))
 
-    camera_runner = SourceRunner(
-        "camera",
-        camera_source,
-        wake_detector,
-        camera_source.decode_for_detector,
-        _make_run_turn_for_source(app, config, CAMERA_SOURCE_NAME),
-        wake_config=config.wake,
-        gate_config=config.gate,
-        barge_in_config=config.barge_in,
-        preroll=preroll,
-        calibration=camera_calibration,
-        wake_event_repo=wake_event_repo,
-        # Plan 09-06/09-07 (D-06, D-09, T-09-41): a callable, not a plain
-        # float, reading `app.state.follow_up_window_s` -- resolved once
-        # at boot above, and the exact attribute `PUT /api/settings/
-        # follow-up-window` overwrites live -- so a later change reaches
-        # the very next follow-up window with no restart.
-        follow_up_window_s=lambda: app.state.follow_up_window_s,
-        follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
-    )
+        # CR-01 fix (code review): every one of these used to be omitted,
+        # which left `SourceRunner.__init__`'s own "absent configuration"
+        # fallbacks in force for the one runner the application actually
+        # builds -- no refractory window, no gate, no pre-roll replay, and
+        # barge-in forced to `BargeInConfig(enabled=False)` regardless of
+        # what `config.example.yaml` said. `wake_config`/`gate_config`/
+        # `barge_in_config` are the *global* `Config` sections, not
+        # pre-resolved -- `SourceRunner.__init__` itself calls
+        # `.resolve("camera")` on each, the same way `wake_detector` above
+        # already resolves `config.wake` for engine selection.
+        # `is_media_playing` is left at its default (`None`, resolving to
+        # "nothing is ever playing" inside `WakeGate`): no real
+        # Home-Assistant-backed implementation exists yet, and
+        # `config.example.yaml`'s own `gate.mute_when_playing` ships
+        # empty, so the callable is never actually reached with the
+        # shipped default (`wake/gate.py`'s own short-circuit). Wiring a
+        # live one is future work, not something this fix pass invents
+        # untested.
+        preroll = PrerollBuffer(camera_source.source_format(), config.camera.preroll_ms)
+
+        # Plan 02-12 Task 3: the startup refusal CR-02 left as a gap.
+        # Turning `correlation_enabled` on for a source with no valid,
+        # non-stale calibration on file must stop the process by name,
+        # never fall back to the guard-window-plus-floor gate the code
+        # review already found cannot tell the assistant's own voice from
+        # the operator's -- that fallback is exactly the silent failure
+        # this refusal exists to replace with a loud one.
+        # `find_latest_calibration` never raises for "no calibration
+        # directory yet" or "directory exists but empty" (its own
+        # docstring): both read as `None` here, the same "missing" case.
+        camera_barge_in = config.barge_in.resolve("camera")
+        camera_calibration: EchoCalibration | None = None
+        if camera_barge_in.correlation_enabled:
+            camera_calibration = find_latest_calibration(config.calibration.dir)
+            if camera_calibration is None:
+                raise ConfigError(
+                    "barge_in.sources.camera.correlation_enabled is true, but no echo-path "
+                    f"calibration exists at {config.calibration.dir!r} -- run "
+                    "scripts/dev-calibrate-echo.sh against the real camera before enabling "
+                    "correlation, or the gate would run uncalibrated against real playback"
+                )
+            now = datetime.now(timezone.utc)
+            if camera_calibration.is_stale(now, config.calibration.max_age_days):
+                age_days = (now - camera_calibration.taken_at).total_seconds() / 86400.0
+                raise ConfigError(
+                    f"barge_in.sources.camera.correlation_enabled is true, but the stored "
+                    f"calibration is {age_days:.1f} days old, past calibration.max_age_days="
+                    f"{config.calibration.max_age_days} -- run scripts/dev-calibrate-echo.sh "
+                    "again before enabling correlation on a stale measurement"
+                )
+
+        active_runner = SourceRunner(
+            CAMERA_SOURCE_NAME,
+            camera_source,
+            wake_detector,
+            camera_source.decode_for_detector,
+            _make_run_turn_for_source(app, config, CAMERA_SOURCE_NAME),
+            wake_config=config.wake,
+            gate_config=config.gate,
+            barge_in_config=config.barge_in,
+            preroll=preroll,
+            calibration=camera_calibration,
+            wake_event_repo=wake_event_repo,
+            # Plan 09-06/09-07 (D-06, D-09, T-09-41): a callable, not a
+            # plain float, reading `app.state.follow_up_window_s` --
+            # resolved once at boot above, and the exact attribute
+            # `PUT /api/settings/follow-up-window` overwrites live -- so
+            # a later change reaches the very next follow-up window with
+            # no restart.
+            follow_up_window_s=lambda: app.state.follow_up_window_s,
+            follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
+        )
+    elif resolved_audio_source == EDGE_SOURCE_NAME:
+        wake_detector = _build_wake_detector(config.wake.resolve(EDGE_SOURCE_NAME))
+
+        edge_source = EdgeAudioSource(config.edge)
+        app.state.edge_source = edge_source
+
+        active_runner = SourceRunner(
+            EDGE_SOURCE_NAME,
+            edge_source,
+            wake_detector,
+            edge_source.decode_for_detector,
+            # D-14, D-15: `room_speaker=False` -- the reply plays on the
+            # XVF3800 over the same edge socket (`send_audio`), never on
+            # the camera FIFO, so this turn never waits on
+            # `app.state.speaker_lock`.
+            _make_run_turn_for_source(app, config, EDGE_SOURCE_NAME, room_speaker=False),
+            wake_config=config.wake,
+            gate_config=config.gate,
+            # D-16: no `barge_in_config` at all -- resolves to disabled
+            # (`SourceRunner.__init__`'s own absent-configuration
+            # fallback), which is what D-16 requires until the spike
+            # proves on-chip AEC. Plan 10-10 applies the spike's verdict.
+            preroll=PrerollBuffer(
+                edge_source.source_format(),
+                # 10-CONTEXT.md: the detector report lag this replay
+                # covers belongs to the wake engine (D-07), the same one
+                # the camera uses -- `config.camera.preroll_ms` is reused
+                # deliberately, the same value `/ws/listen` already
+                # reuses for its own server-side wake replay. This is not
+                # the Pi's own `pre_roll_ms` (D-08), which the Pi applies
+                # to its own capture buffer before this server ever sees
+                # a byte.
+                config.camera.preroll_ms,
+            ),
+            wake_event_repo=wake_event_repo,
+            follow_up_window_s=lambda: app.state.follow_up_window_s,
+            follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
+        )
+    else:
+        raise ConfigError(
+            f"audio_source resolved to {resolved_audio_source!r}, which this application "
+            f"has no source for -- expected {CAMERA_SOURCE_NAME!r} or {EDGE_SOURCE_NAME!r}"
+        )
+
+    app.state.wake_detector = wake_detector
     if resolved_wake_threshold is not None:
         # Applied by calling `set_wake_threshold` immediately after
         # construction, never by rewriting `config.wake` itself: the
         # configuration is what the file says and the setting is what the
         # operator later chose, and collapsing the two would lose which
         # is which (D-15).
-        camera_runner.set_wake_threshold(resolved_wake_threshold)
-    app.state.source_runners = [camera_runner]
-    app.state.source_runner_tasks = [asyncio.create_task(camera_runner.run())]
+        active_runner.set_wake_threshold(resolved_wake_threshold)
+    app.state.source_runners = [active_runner]
+    app.state.source_runner_tasks = [asyncio.create_task(active_runner.run())]
 
     # The retention sweep (DBG-06, plan 02-08): runs once at startup and
     # again every `debug.expiry_interval_s`, for the life of the process --
@@ -1824,6 +1908,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     for runner in getattr(app.state, "source_runners", []):
         await runner.drain_pending_wake_events()
     await camera_source.close()
+    # Phase 10: closed only when the edge source was actually built
+    # (`resolved_audio_source == EDGE_SOURCE_NAME`) -- `app.state.
+    # edge_source` defaults to `None` otherwise, and `EdgeAudioSource.
+    # close()` is what a `frames()` reader still waiting on the queue
+    # needs to see the process end, the same reason `camera_source.close()`
+    # runs unconditionally just above.
+    if app.state.edge_source is not None:
+        await app.state.edge_source.close()
     wake_detector.close()
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
@@ -2368,6 +2460,32 @@ async def listen_ws(websocket: WebSocket) -> None:
         await runner.run()
     finally:
         detector.close()
+
+
+@app.websocket(
+    "/ws/edge",
+    dependencies=[Depends(require_setup_complete)],
+)
+async def edge_ws(websocket: WebSocket, device: EdgeDevice = Depends(require_edge_device)) -> None:
+    """The Pi's own connection (D-01, D-02). Authenticated by a hashed
+    edge device token, never a user session -- `require_edge_device`
+    (`auth/edge_tokens.py`) reads the `Authorization` header and refuses
+    an unknown or revoked token before this route ever calls `accept()`
+    (T-10-01). `/ws/edge` is exempt from `require_role` for that reason:
+    a device token authenticates the caller here, not a cookie session
+    (see `tests/test_auth_roles.py`'s `_ROLE_EXEMPT_PATHS` entry).
+
+    When `app.state.edge_source` is `None` -- `audio_source` did not
+    resolve to `edge` at boot -- this accepts and closes at once with
+    4003 (`CLOSE_NOT_CONFIGURED`): a Pi with a valid token but a server
+    still pointed at the camera gets a named refusal, not a silent hang.
+    """
+    edge_source = websocket.app.state.edge_source
+    await websocket.accept()
+    if edge_source is None:
+        await websocket.close(code=CLOSE_NOT_CONFIGURED)
+        return
+    await edge_source.serve(websocket, device)
 
 
 @app.websocket(

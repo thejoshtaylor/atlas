@@ -152,14 +152,22 @@ class FakeWakeDetector:
     handed -- the shape `test_room_tracer.py` wants, so nearly the whole
     fixture stream is left for `RecordingFakeStt` to receive and prove
     byte identity against. `score` is the fixed value every hit reports.
+
+    `chunks` records every chunk `process()` is ever called with, byte-
+    identical, in call order -- `tests/test_edge_tracer.py` (Phase 10)
+    uses this to prove the wake detector saw only the configured ASR
+    channel's own samples (D-09), never the other channel's. Every
+    earlier caller ignores this field.
     """
 
     fire_at_call: int = 0
     score: float = 1.0
     calls: int = field(default=0, init=False)
     closed: bool = field(default=False, init=False)
+    chunks: list[bytes] = field(default_factory=list, init=False)
 
     def process(self, chunk: bytes) -> "FakeWakeHit | None":
+        self.chunks.append(chunk)
         call_index = self.calls
         self.calls += 1
         if call_index != self.fire_at_call:

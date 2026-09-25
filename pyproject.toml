@@ -100,7 +100,11 @@ piper = ["piper-tts>=1.8,<2"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["src", "mcp"]
+# "edge/src" (Phase 10, plan 10-02): lets the server suite import
+# `atlas_edge` directly and drive the real Pi client against the real
+# application, the same way "mcp" already lets it drive the real MCP
+# child modules.
+pythonpath = ["src", "mcp", "edge/src"]
 markers = [
     "integration: needs a reachable Postgres",
 ]

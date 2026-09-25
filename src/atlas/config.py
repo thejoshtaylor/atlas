@@ -567,6 +567,128 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class EdgeSourceConfig:
+    """The `edge:` block: the Pi + XVF3800 audio source (Phase 10, D-01,
+    D-08, D-09, D-11).
+
+    `sample_rate: int = 16000` and `channels: int = 2` come straight from
+    the hardware: GitHub issue #4's own comment measured the XVF3800
+    firmware v2.0.6 capturing exactly 2 channels at 16 kHz, S16_LE. Neither
+    is something this file assumes independently of that measurement.
+
+    `asr_channel`, `pre_roll_ms`, and `tail_ms` each default to `None`
+    rather than a guessed number: the D-18 spike (10-CONTEXT.md) measures
+    which capture channel carries the ASR beam and how long the Pi's
+    Silero VAD onset lags the start of speech, and plan 10-10 writes the
+    measured defaults once that spike has run. `require_measured()` is
+    the refusal this absence exists to produce -- a source built before
+    the spike's numbers are configured must stop by name, not run with a
+    channel index or a pre-roll window nobody measured.
+
+    `end_of_speech_hangover_ms: int = 0` (D-11): the server-side knob an
+    operator raises only if recorded sessions show sentences cut at a
+    pause. `ping_interval_s: float = 5.0` is the WebSocket keepalive the
+    Pi answers with a `pong` (protocol v1, `edge/src/atlas_edge/protocol.py`).
+    """
+
+    sample_rate: int = 16000
+    channels: int = 2
+    asr_channel: int | None = None
+    pre_roll_ms: int | None = None
+    tail_ms: int | None = None
+    end_of_speech_hangover_ms: int = 0
+    ping_interval_s: float = 5.0
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "EdgeSourceConfig":
+        raw = raw or {}
+        known = {
+            "sample_rate",
+            "channels",
+            "asr_channel",
+            "pre_roll_ms",
+            "tail_ms",
+            "end_of_speech_hangover_ms",
+            "ping_interval_s",
+        }
+        for key in raw:
+            if key not in known:
+                raise ConfigError(f"edge.{key} is not a recognized key -- expected one of {sorted(known)!r}")
+
+        sample_rate = raw.get("sample_rate", cls.sample_rate)
+        if isinstance(sample_rate, bool) or not isinstance(sample_rate, int) or sample_rate <= 0:
+            raise ConfigError(f"edge.sample_rate must be a positive integer, got {sample_rate!r}")
+
+        channels = raw.get("channels", cls.channels)
+        if isinstance(channels, bool) or not isinstance(channels, int) or channels < 1:
+            raise ConfigError(f"edge.channels must be a positive integer, got {channels!r}")
+
+        asr_channel = raw.get("asr_channel", cls.asr_channel)
+        if asr_channel is not None:
+            if isinstance(asr_channel, bool) or not isinstance(asr_channel, int) or not (0 <= asr_channel < channels):
+                raise ConfigError(
+                    f"edge.asr_channel must be an integer in [0, {channels}), got {asr_channel!r}"
+                )
+
+        pre_roll_ms = raw.get("pre_roll_ms", cls.pre_roll_ms)
+        if pre_roll_ms is not None:
+            if isinstance(pre_roll_ms, bool) or not isinstance(pre_roll_ms, int) or pre_roll_ms < 0:
+                raise ConfigError(f"edge.pre_roll_ms must be a non-negative integer, got {pre_roll_ms!r}")
+
+        tail_ms = raw.get("tail_ms", cls.tail_ms)
+        if tail_ms is not None:
+            if isinstance(tail_ms, bool) or not isinstance(tail_ms, int) or tail_ms < 0:
+                raise ConfigError(f"edge.tail_ms must be a non-negative integer, got {tail_ms!r}")
+
+        end_of_speech_hangover_ms = raw.get("end_of_speech_hangover_ms", cls.end_of_speech_hangover_ms)
+        if (
+            isinstance(end_of_speech_hangover_ms, bool)
+            or not isinstance(end_of_speech_hangover_ms, int)
+            or end_of_speech_hangover_ms < 0
+        ):
+            raise ConfigError(
+                f"edge.end_of_speech_hangover_ms must be a non-negative integer, got "
+                f"{end_of_speech_hangover_ms!r}"
+            )
+
+        ping_interval_s = raw.get("ping_interval_s", cls.ping_interval_s)
+        if isinstance(ping_interval_s, bool) or not isinstance(ping_interval_s, (int, float)) or ping_interval_s <= 0:
+            raise ConfigError(f"edge.ping_interval_s must be a positive number, got {ping_interval_s!r}")
+
+        return cls(
+            sample_rate=sample_rate,
+            channels=channels,
+            asr_channel=asr_channel,
+            pre_roll_ms=pre_roll_ms,
+            tail_ms=tail_ms,
+            end_of_speech_hangover_ms=int(end_of_speech_hangover_ms),
+            ping_interval_s=float(ping_interval_s),
+        )
+
+    def require_measured(self) -> None:
+        """Raise `ConfigError` naming every field the D-18 spike has not
+        yet measured -- called once, at `EdgeAudioSource.__init__`, so a
+        server that resolves `audio_source: edge` before the spike has run
+        stops by name rather than running with a channel index or a
+        pre-roll window nobody measured (10-CONTEXT.md Pitfall 3)."""
+        missing = [
+            name
+            for name, value in (
+                ("asr_channel", self.asr_channel),
+                ("pre_roll_ms", self.pre_roll_ms),
+                ("tail_ms", self.tail_ms),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ConfigError(
+                f"edge.{', edge.'.join(missing)} must be set before the edge audio source can "
+                "run -- these are measured by the Phase 10 spike (10-CONTEXT.md D-18) and "
+                "written by plan 10-10, not guessed at"
+            )
+
+
+@dataclass(frozen=True)
 class SpeakerConfig:
     """The `speaker:` block: the go2rtc backchannel and the FIFO the
     long-lived ffmpeg supervisor (plan 02-03) reads from.
@@ -1743,6 +1865,7 @@ class Config:
     brain: BrainConfig
     tts: TtsConfig
     camera: CameraConfig
+    edge: EdgeSourceConfig
     speaker: SpeakerConfig
     wake: WakeConfig
     gate: GateConfig
@@ -1780,6 +1903,10 @@ class Config:
             brain=BrainConfig.from_config(raw.get("brain")),
             tts=tts,
             camera=CameraConfig.from_config(raw.get("camera")),
+            # An absent `edge:` block is allowed -- every deployment that
+            # never sets `audio_source: edge` never reads this section at
+            # all (D-08).
+            edge=EdgeSourceConfig.from_config(raw.get("edge")),
             speaker=speaker,
             wake=WakeConfig.from_config(raw.get("wake")),
             gate=GateConfig.from_config(raw.get("gate")),

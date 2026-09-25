@@ -442,7 +442,16 @@ def test_an_operator_receives_the_opening_message_naming_the_wake_phrase_and_sou
             opening = websocket.receive_json()
         assert opening["type"] == "observer.opened"
         assert opening["wake_phrase"] == app_module.app.state.config.wake.phrase
-        assert set(opening["sources"]) == {"camera", "browser_mic", "browser_webrtc", "browser_listen"}
+        # Phase 10 (D-01): a fifth source, "edge", joins the set --
+        # `OBSERVED_SOURCE_NAMES` (app.py) is what this opening message
+        # advertises, and it now names the edge source too.
+        assert set(opening["sources"]) == {
+            "camera",
+            "browser_mic",
+            "browser_webrtc",
+            "browser_listen",
+            "edge",
+        }
     finally:
         client.__exit__(None, None, None)
 
@@ -649,6 +658,10 @@ def test_every_run_turn_call_site_in_app_py_is_wrapped_for_the_observer_feed():
         "browser_mic",
         "browser_webrtc",
         "browser_listen",
+        # Phase 10 (D-01): the edge source reuses `_make_run_turn_for_source`
+        # (the camera/browser_listen closure), so it adds no new `run_turn`
+        # call site -- only a fifth name in this set.
+        "edge",
     }
 
 

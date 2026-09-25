@@ -92,6 +92,7 @@ from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
 from atlas_mcp.google_tools import UNREACHABLE_KEY
 
+from atlas.audio.channels import stt_view
 from atlas.config import MacroConfig
 from atlas.providers.base import BrainError
 from atlas.transports.base import SourceFormat
@@ -1688,7 +1689,14 @@ async def _drain_to_final_transcript(
     words themselves stay in these locals.
     """
     timings.mark_stt_socket_open()
-    stream = stt.stream(source.frames(), source.source_format())
+    # D-09: select the ASR channel here, after the recorder's own tap
+    # (`_RecordingAudioSource` already wraps `source` above, before this
+    # function is ever called) and before speech-to-text -- the only point
+    # where "both channels to the recorder, one to speech-to-text" holds
+    # with no second reader of `source.frames()`'s own queue. A one-channel
+    # format (every source before Phase 10) is unchanged by `stt_view`.
+    frames, fmt = stt_view(source.frames(), source.source_format())
+    stream = stt.stream(frames, fmt)
     deadline = clock() + max_utterance_s
     pending: Any | None = None
     pending_arrival: float | None = None

@@ -34,16 +34,37 @@ from typing import Any, AsyncIterator, Protocol
 
 @dataclass(frozen=True)
 class SourceFormat:
-    """The encoding and sample rate one `AudioSource` actually produces.
+    """The encoding, sample rate, channel count, and ASR channel one
+    `AudioSource` actually produces.
 
     Two encodings exist in this codebase today: `"pcm"` (16 kHz mono PCM16,
     both browser transports) and `"alaw"` (8 kHz mono G.711 A-law, the
     camera). A consumer reads this value rather than hardcoding one, the
     same move `tts_xai.py`'s `SinkFormat` already made for the output side.
+
+    `channels` and `asr_channel` are new as of Phase 10 (D-09): the Pi's
+    XVF3800 array sends both of its capture channels, and speech-to-text
+    must read only the one the spike identifies as the ASR beam while the
+    session recorder keeps both. `channels: int = 1` and `asr_channel: int
+    = 0` default every existing positional construction site unchanged --
+    camera, browser WebSocket, and WebRTC all still declare exactly one
+    channel. `__post_init__` enforces the one invariant every shipped
+    source must hold: `channels >= 1` and `0 <= asr_channel < channels`,
+    so a source cannot declare an ASR channel that does not exist.
     """
 
     encoding: str
     sample_rate: int
+    channels: int = 1
+    asr_channel: int = 0
+
+    def __post_init__(self) -> None:
+        if self.channels < 1:
+            raise ValueError(f"SourceFormat.channels must be >= 1, got {self.channels!r}")
+        if not (0 <= self.asr_channel < self.channels):
+            raise ValueError(
+                f"SourceFormat.asr_channel must be in [0, {self.channels}), got {self.asr_channel!r}"
+            )
 
 
 class AudioSource(Protocol):

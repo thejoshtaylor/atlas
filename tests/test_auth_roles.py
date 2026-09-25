@@ -174,6 +174,12 @@ _ROLE_EXEMPT_PATHS = {
     # never house data, and is not a control surface -- documented in
     # `app.py`'s own route docstring alongside this entry.
     "/transport",
+    # Phase 10 (D-01, T-10-07): a hashed edge device token authenticates
+    # this route, not a user session -- `require_edge_device` refuses an
+    # unknown or revoked token before `accept()` (T-10-01), which is the
+    # role check's own job, done a different way. The route still carries
+    # `require_setup_complete`.
+    "/ws/edge",
 }
 
 # FastAPI's own built-in routes -- not application content, and carry no
