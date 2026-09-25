@@ -42,6 +42,7 @@ from atlas.turn.pending_action import (
     CONFIRMED_CREATE_REPLY,
     PendingProposal,
     compose_readback,
+    run_confirmation_round,
     spoken_duration,
     spoken_when,
 )
@@ -410,6 +411,20 @@ def test_pending_proposal_rejects_an_end_not_after_its_start():
 def test_pending_proposal_rejects_an_empty_title():
     with pytest.raises(ValidationError):
         _proposal(title="   ")
+
+
+def test_pending_proposal_flattens_and_caps_an_oversized_title():
+    """A-CR-01 defense in depth: `calendar_propose_delete`'s own title is
+    Google's own raw event summary, never capped by
+    `mcp/atlas_mcp/google.py::_sanitize_title` the way a create proposal's
+    title already is -- `PendingProposal` itself must never carry an
+    unbounded or multi-line title into a readback or a confirmation-round
+    message, regardless of which handler built the proposal."""
+    proposal = _proposal(title="line one\r\nline two\n" + "x" * 200)
+    assert "\n" not in proposal.title
+    assert "\r" not in proposal.title
+    assert len(proposal.title) == 120
+    assert proposal.title.startswith("line one line two")
 
 
 def test_pending_proposal_rejects_a_create_carrying_an_event_id():
@@ -924,9 +939,14 @@ async def test_calendar_create_requires_confirmation_round(
     assert len(confirmation_brain.calls) == 1
     call = confirmation_brain.calls[0]
     assert call["tools"] == CONFIRM_CANCEL_TOOLS
-    assert [message["role"] for message in call["messages"]] == ["system", "user"]
-    assert created.readback in call["messages"][0]["content"]
-    assert call["messages"][1]["content"] == "yes"
+    # A-CR-01: the readback and the operator's own reply are two separate
+    # user messages -- neither ever occupies the system role, which
+    # carries only the fixed instruction, free of any proposal-derived
+    # text.
+    assert [message["role"] for message in call["messages"]] == ["system", "user", "user"]
+    assert created.readback not in call["messages"][0]["content"]
+    assert created.readback in call["messages"][1]["content"]
+    assert call["messages"][2]["content"] == "the operator's reply: yes"
 
     assert tts.received_text == [CONFIRMED_CREATE_REPLY]
     assert timings.turn_outcome == "confirmed"
@@ -937,6 +957,40 @@ async def test_calendar_create_requires_confirmation_round(
 
     row = await pending_actions.get(created.id)
     assert row.status == "executed"
+
+
+async def test_run_confirmation_round_never_trusts_a_confirm_call_alone():
+    """A-CR-01 regression: `decision_from_reply` reads only the model's
+    own tool call -- `run_confirmation_round`'s code-level backstop must
+    still reject a `confirm` when the operator's own transcript does not
+    itself sound like agreement (a system-role instruction the model was
+    somehow persuaded to follow, or an ordinary misclassification, must
+    never be the only thing standing between an open-mic transcript and
+    an executed action)."""
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+
+    decision = await run_confirmation_round(
+        confirmation_brain,
+        readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+        transcript="the weather looks nice today",
+        timeout_s=5.0,
+    )
+
+    assert decision.decision == "cancel"
+    assert decision.amended is False
+
+
+async def test_run_confirmation_round_trusts_a_confirm_call_when_the_reply_is_affirmative():
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+
+    decision = await run_confirmation_round(
+        confirmation_brain,
+        readback="add dentist to the home calendar, friday at 3 pm, for an hour?",
+        transcript="yep that's right",
+        timeout_s=5.0,
+    )
+
+    assert decision.decision == "confirm"
 
 
 async def test_a_stored_delete_confirms_and_the_fake_google_records_one_delete(
