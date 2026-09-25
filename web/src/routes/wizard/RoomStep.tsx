@@ -1,9 +1,10 @@
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
 import { ErrorState } from "@/components/state/ErrorState"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
-import { WIZARD_STEP_ORDER, finishWizardMutationOptions } from "@/lib/wizard"
+import { WIZARD_STEP_ORDER, finishWizardMutationOptions, wizardStatusQueryOptions } from "@/lib/wizard"
 
 /**
  * The wizard's last step. Mounts plan 03-06's calibration screen --
@@ -23,10 +24,21 @@ import { WIZARD_STEP_ORDER, finishWizardMutationOptions } from "@/lib/wizard"
  * only shows the "Finish setup" control once a result exists (03-06's own
  * `showFinish`), so `onFinish` is never reachable before a calibration is
  * on file.
+ *
+ * D-15/D-16: when the stored audio source is edge, the room step's own
+ * detail reports `{"source": "edge", "calibration": "not_used"}`
+ * (`_room_status`, `routes/wizard.py`) -- the edge source's barge-in
+ * listens for a Pi VAD start, not correlation against the camera echo
+ * path, so there is nothing here for `CalibrationRoute` to measure. This
+ * branch never mounts it, offering "Finish setup" directly instead.
  */
 export function RoomStep() {
   const navigate = useNavigate()
   const finish = useMutation(finishWizardMutationOptions)
+  const wizardStatus = useQuery(wizardStatusQueryOptions)
+
+  const roomStep = wizardStatus.data?.steps.find((s) => s.name === "room")
+  const calibrationNotUsed = roomStep?.detail?.calibration === "not_used"
 
   const handleFinish = async () => {
     try {
@@ -51,7 +63,16 @@ export function RoomStep() {
         Step {WIZARD_STEP_ORDER.indexOf("room") + 1} of {WIZARD_STEP_ORDER.length}
       </p>
       <div className="mx-auto w-full max-w-sm">
-        <CalibrationRoute onFinish={() => void handleFinish()} />
+        {calibrationNotUsed ? (
+          <div className="flex flex-col gap-4">
+            <p className="text-body text-muted-foreground">The edge microphone does not use the speaker test.</p>
+            <Button type="button" variant="outline" onClick={() => void handleFinish()}>
+              Finish setup
+            </Button>
+          </div>
+        ) : (
+          <CalibrationRoute onFinish={() => void handleFinish()} />
+        )}
         {finish.isError ? (
           <div className="mt-4">
             <ErrorState

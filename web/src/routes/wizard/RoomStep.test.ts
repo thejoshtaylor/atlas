@@ -23,3 +23,15 @@ describe("RoomStep -- mounts plan 03-06's calibration screen, never a second imp
     expect(SOURCE).not.toMatch(/(?<![a-zA-Z])fetch\(/)
   })
 })
+
+describe("RoomStep -- D-15/D-16: the edge source's room step never mounts a calibration it does not use", () => {
+  test("branches on the room step's own calibration: not_used detail", () => {
+    expect(SOURCE).toMatch(/detail\?\.calibration === "not_used"/)
+    expect(SOURCE).toMatch(/calibrationNotUsed/)
+  })
+
+  test("the not-used branch names why, and offers Finish setup with no CalibrationRoute", () => {
+    expect(SOURCE).toMatch(/The edge microphone does not use the speaker test\./)
+    expect(SOURCE).toMatch(/calibrationNotUsed \? \(/)
+  })
+})

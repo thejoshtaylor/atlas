@@ -18,3 +18,25 @@ describe("AudioSourceStep -- carries the Needs-restart badge, never implies a li
     expect(SOURCE).toMatch(/setAudioSourceMutationOptions/)
   })
 })
+
+describe("AudioSourceStep -- D-15: a second source, camera and edge", () => {
+  test("offers both camera and edge as radio values", () => {
+    expect(SOURCE).toMatch(/RadioGroupItem value=\{CAMERA_SOURCE\}/)
+    expect(SOURCE).toMatch(/RadioGroupItem value=\{EDGE_SOURCE\}/)
+    expect(SOURCE).toMatch(/CAMERA_SOURCE: AudioSource = "camera"/)
+    expect(SOURCE).toMatch(/EDGE_SOURCE: AudioSource = "edge"/)
+  })
+
+  test("starts on the status query's own stored source, falling back to camera", () => {
+    expect(SOURCE).toMatch(/step\.detail\?\.source/)
+    expect(SOURCE).toMatch(/stored === EDGE_SOURCE \? EDGE_SOURCE : CAMERA_SOURCE/)
+  })
+
+  test("Continue sends the selected source, not a hardcoded one", () => {
+    expect(SOURCE).toMatch(/setSource\.mutateAsync\(\{\s*source\s*\}\)/)
+  })
+
+  test("the edge option carries its own pairing note", () => {
+    expect(SOURCE).toMatch(/Pair the Pi under Edge devices first\. The change applies after a restart\./)
+  })
+})
