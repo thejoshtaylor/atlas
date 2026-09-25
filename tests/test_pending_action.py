@@ -19,7 +19,13 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import ValidationError
 
-from atlas_mcp.google import handle_calendar_list_events, handle_calendar_propose_delete, handle_calendar_propose_event
+from atlas_mcp.google import (
+    handle_calendar_delete_event,
+    handle_calendar_insert_event,
+    handle_calendar_list_events,
+    handle_calendar_propose_delete,
+    handle_calendar_propose_event,
+)
 from atlas_mcp.google_boundary import AccountGrant, CalendarGrant, Clarification, resolve_write_target
 from atlas_mcp.ha import handle_call_service
 from atlas_mcp.safety import Denied, Policy
@@ -27,11 +33,13 @@ from atlas_mcp.safety import Denied, Policy
 from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
-from atlas.turn.follow_up import FollowUpChannel
+from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest
 from atlas.turn.handoff import HandoffContext
 from atlas.turn.pending_action import (
     BULK_REFUSAL_REPLY,
+    CONFIRM_CANCEL_TOOLS,
     CONFIRMATION_UNAVAILABLE_REPLY,
+    CONFIRMED_CREATE_REPLY,
     PendingProposal,
     compose_readback,
     spoken_duration,
@@ -94,6 +102,10 @@ class _GoogleToolHost:
                 result = await handle_calendar_list_events(
                     self._accounts, self._google_client, self._zone, **arguments
                 )
+            elif name == "calendar_insert_event":
+                result = await handle_calendar_insert_event(self._accounts, self._google_client, **arguments)
+            elif name == "calendar_delete_event":
+                result = await handle_calendar_delete_event(self._accounts, self._google_client, **arguments)
             elif name == "ha_call_service" and self._ha is not None:
                 result = await handle_call_service(
                     self._policy, self._ha.client, "http://ha.invalid", "test-token", **arguments
@@ -825,3 +837,605 @@ async def test_bulk_delete_refused_by_voice(fake_audio_source, fake_stt, fake_br
     assert timings.turn_outcome == "bulk_refused"
     assert pending_actions._rows == {}
     assert fake_google.deleted_event_ids == []
+
+
+# --- Plan 09-06 Task 1: the restricted confirmation round --------------------
+
+
+class _RecordingConfirmationBrain:
+    """Records every `chat()` call's own `messages`/`tools`, and answers
+    with exactly one scripted tool call -- `confirm`, or `cancel` (with
+    `amended` when asked) -- the same shape a restricted confirmation
+    round is ever offered."""
+
+    def __init__(self, decision: str, *, amended: bool = False) -> None:
+        self._decision = decision
+        self._amended = amended
+        self.calls: list[dict] = []
+
+    async def chat(self, messages, tools=None):
+        self.calls.append({"messages": messages, "tools": tools})
+        arguments = {"amended": True} if self._decision == "cancel" and self._amended else {}
+        return BrainReply(tool_calls=[ToolCall(name=self._decision, arguments=arguments)])
+
+
+async def test_calendar_create_requires_confirmation_round(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    # Never called: an incoming confirmation bypasses the tier race
+    # entirely (Task 1's own `<behavior>`: "exactly one brain call").
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert len(confirmation_brain.calls) == 1
+    call = confirmation_brain.calls[0]
+    assert call["tools"] == CONFIRM_CANCEL_TOOLS
+    assert [message["role"] for message in call["messages"]] == ["system", "user"]
+    assert created.readback in call["messages"][0]["content"]
+    assert call["messages"][1]["content"] == "yes"
+
+    assert tts.received_text == [CONFIRMED_CREATE_REPLY]
+    assert timings.turn_outcome == "confirmed"
+    assert [name for name, _ in tool_host.calls] == ["calendar_insert_event"]
+    _, insert_arguments = tool_host.calls[0]
+    assert insert_arguments["title"] == "Dentist"
+    assert fake_google.inserted[0]["body"]["summary"] == "Dentist"
+
+    row = await pending_actions.get(created.id)
+    assert row.status == "executed"
+
+
+async def test_a_stored_delete_confirms_and_the_fake_google_records_one_delete(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_work_account(),)
+    fake_google = FakeGoogle()
+    fake_google.add_event(
+        "at-work",
+        "cal-work",
+        {
+            "id": "evt-1",
+            "summary": "Standup",
+            "start": {"dateTime": "2026-10-06T09:00:00-04:00"},
+            "end": {"dateTime": "2026-10-06T09:15:00-04:00"},
+        },
+    )
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_delete",
+        tool_name="calendar_delete_event",
+        arguments={"account": "work", "calendar_id": "cal-work", "event_id": "evt-1"},
+        readback="delete Standup from the work calendar, tuesday october 6th at 9 am?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="delete tuesday's standup",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["done, it's deleted"]
+    assert timings.turn_outcome == "confirmed"
+    assert fake_google.deleted_event_ids == ["evt-1"]
+    row = await pending_actions.get(created.id)
+    assert row.status == "executed"
+
+
+async def test_a_cancel_call_resolves_cancelled_and_speaks_the_cancelled_phrase(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("cancel")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="no")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["cancelled, nothing was changed"]
+    assert timings.turn_outcome == "cancelled"
+    assert fake_google.inserted == []
+    row = await pending_actions.get(created.id)
+    assert row.status == "cancelled"
+
+
+async def test_an_unreadable_reply_cancels_the_same_as_an_explicit_no(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    # A brain that calls neither confirm nor cancel -- `decision_from_reply`
+    # settles this on `cancel` (D-08, D-11), same as an explicit no.
+    class _NoToolCallBrain:
+        async def chat(self, messages, tools=None):
+            return BrainReply(text="i'm not sure what you mean")
+
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=_NoToolCallBrain(),
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="what do you mean")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["cancelled, nothing was changed"]
+    assert timings.turn_outcome == "cancelled"
+    assert fake_google.inserted == []
+    row = await pending_actions.get(created.id)
+    assert row.status == "cancelled"
+
+
+async def test_silence_resolves_the_row_expired_not_cancelled(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    # A brain that would be called if the round ran at all -- it must
+    # not be, since silence never reaches the confirmation round.
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["cancelled, nothing was changed"]
+    assert timings.turn_outcome == "follow_up_silence"
+    assert confirmation_brain.calls == []
+    row = await pending_actions.get(created.id)
+    assert row.status == "expired"
+
+
+async def test_a_confirm_for_an_expired_row_executes_nothing(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        # Already expired by the time the confirm round runs.
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=1),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=30),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert tts.received_text == ["cancelled, nothing was changed"]
+    assert timings.turn_outcome == "confirm_expired"
+    assert fake_google.inserted == []
+    row = await pending_actions.get(created.id)
+    assert row.status == "awaiting"  # untouched -- claim_for_confirmation never succeeded
+
+
+async def test_an_executing_tool_error_speaks_the_error_verbatim_and_resolves_failed(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(calendars=(CalendarGrant(
+        calendar_id="cal-home-primary", name="Home", primary=True, access="read_only"
+    ),)),)
+    fake_google = FakeGoogle()
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("confirm")
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    brain = fake_brain(replies=[])
+
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    assert timings.turn_outcome == "confirm_failed"
+    assert tts.received_text != ["done, it's on your calendar"]
+    assert "read" in tts.received_text[0].lower() or "denied" in tts.received_text[0].lower() or tts.received_text[0]
+    row = await pending_actions.get(created.id)
+    assert row.status == "failed"
+
+
+async def test_an_amendment_supersedes_and_produces_a_new_readback_with_deeper_chain_depth(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("cancel", amended=True)
+
+    # The ordinary pipeline's own brain -- the amendment reaches this one,
+    # not the confirmation round's brain, and proposes a new time.
+    ordinary_brain = fake_brain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="calendar_propose_event",
+                        arguments={"title": "Dentist", "start": "2026-10-02T16:00", "account": "home"},
+                    )
+                ]
+            ),
+        ]
+    )
+    tool_host = _GoogleToolHost(accounts, google_client=fake_google.client)
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes, but make it 4")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        ordinary_brain,
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you manage a calendar",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    # The superseded row is resolved, and exactly one new row exists.
+    original = await pending_actions.get(created.id)
+    assert original.status == "superseded"
+    rows = [row for row in pending_actions._rows.values() if row.id != created.id]
+    assert len(rows) == 1
+    new_row = rows[0]
+    assert new_row.status == "awaiting"
+    assert new_row.arguments["start"] == "2026-10-02T16:00:00-04:00"
+
+    # The ordinary brain's own single call saw the prior exchange ahead
+    # of the amendment -- not the confirmation brain, which was never
+    # asked to phrase a new proposal.
+    assert ordinary_brain.call_count == 1
+
+    # A new follow-up was requested, one chain_depth deeper than the
+    # incoming one.
+    requested = source.follow_up.requested
+    assert requested is not None
+    assert requested.kind == "confirmation"
+    assert requested.chain_depth == 2
