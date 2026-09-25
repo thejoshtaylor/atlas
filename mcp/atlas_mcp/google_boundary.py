@@ -215,12 +215,33 @@ def _resolve_unnamed_write_target(
 ) -> "tuple[AccountGrant, CalendarGrant] | Clarification":
     """D-04: no account named in the proposal -- the one account with a
     writable calendar, else the operator's default account, else a
-    `Clarification(about="account")` over every candidate account's label.
+    `Clarification(about="account")` over every candidate account's label
+    (sorted, so the same ambiguity always asks the same question).
 
-    Plan 09-04 Task 2 implements this. No Task 1 behavior ever reaches this
-    branch: every Task 1 case names an account.
+    A candidate is any linked account carrying at least one read-write
+    calendar -- an account with no writable calendar at all is never a
+    candidate, the same way it is never reachable by name either
+    (`_resolve_calendar_for_account`'s own "turn on a calendar for read and
+    write" refusal). Once exactly one account is settled on (by either
+    rule), its own calendar is resolved the identical way a named account's
+    would be (`_resolve_calendar_for_account` with no calendar named) --
+    there is no second calendar-selection mechanism for the unnamed path.
     """
-    raise NotImplementedError("resolve_write_target's unnamed-account path is implemented in Task 2")
+    candidates = [
+        account for account in accounts if any(c.access == "read_write" for c in account.calendars)
+    ]
+    if not candidates:
+        raise Denied(
+            "turn on a calendar for read and write on a google account in the google accounts screen"
+        )
+    if len(candidates) == 1:
+        return _resolve_calendar_for_account(candidates[0], None)
+
+    default_candidates = [a for a in candidates if a.is_default]
+    if len(default_candidates) == 1:
+        return _resolve_calendar_for_account(default_candidates[0], None)
+
+    return Clarification(about="account", candidates=tuple(sorted(a.label for a in candidates)))
 
 
 def resolve_write_target(
@@ -230,10 +251,12 @@ def resolve_write_target(
     `(AccountGrant, CalendarGrant)` pair, or a `Clarification` naming what
     to ask the operator.
 
-    A named account resolves its calendar through `_resolve_calendar_for_account`
-    (Task 1). No account named resolves through `_resolve_unnamed_write_target`
-    (Task 2): the only account with a writable calendar, else the operator's
-    default account, else a clarifying question over the candidates.
+    A named account resolves its calendar through `_resolve_calendar_for_account`;
+    an account whose token could not be refreshed (`access_token is None`,
+    GOOG-12) is refused with a spoken reason before its calendar is ever
+    resolved. No account named resolves through `_resolve_unnamed_write_target`:
+    the only account with a writable calendar, else the operator's default
+    account, else a clarifying question over the candidates.
     """
     if account_label is None:
         return _resolve_unnamed_write_target(accounts)
@@ -242,4 +265,6 @@ def resolve_write_target(
     if account is None:
         linked = ", ".join(sorted(a.label for a in accounts)) or "none linked"
         raise Denied(f"i don't have a google account called {account_label!r} -- linked accounts: {linked}")
+    if account.access_token is None:
+        raise Denied(f"i can't reach your {account.label} account right now")
     return _resolve_calendar_for_account(account, calendar_name)
