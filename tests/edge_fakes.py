@@ -119,11 +119,16 @@ class FakeEdgeSocket:
     "bytes": ...}` or `{"type": "websocket.disconnect", "code": ...}`).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, raise_on_close: BaseException | None = None) -> None:
         self._inbound: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
         self.sent_text: list[str] = []
         self.sent_bytes: list[bytes] = []
         self.close_calls: list[tuple[int, str | None]] = []
+        # 10-REVIEW.md CR-01/CR-02: a real Starlette `WebSocket.close()`
+        # raises when the underlying socket is already gone (a dead Pi
+        # connection is the ordinary case, not an edge case) -- this lets a
+        # test drive that path without needing a real dropped connection.
+        self._raise_on_close = raise_on_close
 
     def push_bytes(self, data: bytes) -> None:
         self._inbound.put_nowait({"type": "websocket.receive", "bytes": data})
@@ -145,6 +150,8 @@ class FakeEdgeSocket:
 
     async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
         self.close_calls.append((code, reason))
+        if self._raise_on_close is not None:
+            raise self._raise_on_close
 
     def latest_ping(self) -> "dict[str, Any] | None":
         """The most recent `{"type": "ping", ...}` message `send_text`

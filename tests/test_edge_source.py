@@ -72,6 +72,41 @@ async def test_same_device_reconnect_supersedes():
     await asyncio.wait_for(task_b, timeout=2.0)
 
 
+async def test_reconnect_succeeds_when_the_previous_socket_is_already_dead():
+    """10-REVIEW.md CR-02: a previous connection whose socket is already
+    gone (Wi-Fi drop, the Pi's own process restarting) must not block the
+    new connection from taking over -- before the fix, `close()` raising
+    here left `self._websocket` naming the dead connection forever, and
+    every subsequent reconnect attempt hit the same raising `close()` again."""
+    source = EdgeAudioSource(_measured_config())
+    device = fake_edge_device(device_id=1)
+
+    socket_a = FakeEdgeSocket(raise_on_close=RuntimeError("already gone"))
+    task_a = asyncio.create_task(source.serve(socket_a, device))
+    await _wait_until(lambda: socket_a.sent_text != [])
+
+    socket_b = FakeEdgeSocket()
+    task_b = asyncio.create_task(source.serve(socket_b, device))
+    await _wait_until(lambda: socket_b.sent_text != [])
+
+    # The new connection took over despite the old socket's close() raising.
+    assert source.connected_device_id == device.id
+
+    await _wait_until(lambda: socket_a.close_calls != [])
+    assert socket_a.close_calls == [(CLOSE_SUPERSEDED, None)]
+
+    await _wait_until(task_a.done)
+    assert task_a.cancelled()
+
+    socket_b.push_bytes(b"\x00\x01\x00\x02")
+    frames_iter = source.frames()
+    chunk = await asyncio.wait_for(frames_iter.__anext__(), timeout=2.0)
+    assert chunk == b"\x00\x01\x00\x02"
+
+    socket_b.push_disconnect()
+    await asyncio.wait_for(task_b, timeout=2.0)
+
+
 async def test_other_device_is_refused_while_one_is_connected():
     source = EdgeAudioSource(_measured_config())
     device_a = fake_edge_device(device_id=1)

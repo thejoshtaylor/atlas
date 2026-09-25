@@ -447,7 +447,19 @@ class EdgeAudioSource:
             return
 
         if previous_device_id == device.id and previous_websocket is not None:
-            await previous_websocket.close(code=CLOSE_SUPERSEDED)
+            try:
+                await previous_websocket.close(code=CLOSE_SUPERSEDED)
+            except Exception:
+                # CR-02 (10-REVIEW.md): a previous connection whose socket
+                # is already dead (Wi-Fi drop, the Pi's own process
+                # restarting) must never block the new connection from
+                # taking over -- an unhandled close failure here used to
+                # leave `self._websocket`/`_connected_device_id` naming the
+                # old, dead connection forever, wedging every future
+                # reconnect behind a second, guaranteed-to-raise `close()`.
+                logger.info(
+                    "edge source: previous connection for device %s already gone", device.id
+                )
             if previous_task is not None:
                 previous_task.cancel()
 
@@ -570,7 +582,16 @@ class EdgeAudioSource:
             return
         websocket = self._websocket
         active_task = self._active_task
-        await websocket.close(code=code, reason=reason)
+        try:
+            await websocket.close(code=code, reason=reason)
+        except Exception:
+            # CR-01 (10-REVIEW.md): a dead socket (the ordinary case for a
+            # Pi on flaky Wi-Fi) must not suppress the cancellation below --
+            # that cancellation, not the close call, is what actually ends
+            # the connection this method exists to revoke at once.
+            logger.warning(
+                "edge source: close on disconnect for device %s failed (already gone)", device_id
+            )
         if active_task is not None:
             active_task.cancel()
 

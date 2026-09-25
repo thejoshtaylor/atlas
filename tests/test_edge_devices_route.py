@@ -226,6 +226,40 @@ async def test_revoke_closes_a_live_connection(tmp_path, monkeypatch):
             app_module.app.state.edge_source = None
 
 
+async def test_revoke_still_cancels_and_succeeds_when_close_raises(tmp_path, monkeypatch):
+    """10-REVIEW.md CR-01: a dead Pi socket (the ordinary case on flaky
+    Wi-Fi) makes `WebSocket.close()` raise -- the `DELETE` must still
+    succeed (not 500) and the connection's task must still be cancelled,
+    not left running forever behind an already-revoked row."""
+    client, _repo = _boot_with_edge_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        create_response = client.post("/api/edge-devices", json={"name": "kitchen-pi"})
+        device_id = create_response.json()["id"]
+
+        import atlas.app as app_module
+
+        edge_source = EdgeAudioSource(_measured_edge_config())
+        app_module.app.state.edge_source = edge_source
+        try:
+            socket = FakeEdgeSocket(raise_on_close=RuntimeError("already gone"))
+            device = fake_edge_device(device_id=device_id)
+            serve_task = asyncio.create_task(edge_source.serve(socket, device))
+            await _wait_until(lambda: socket.sent_text != [])
+            assert edge_source.connected_device_id == device_id
+
+            delete_response = client.delete(f"/api/edge-devices/{device_id}")
+            assert delete_response.status_code == 204, delete_response.text
+
+            await _wait_until(lambda: socket.close_calls != [])
+            assert socket.close_calls == [(1008, "revoked")]
+
+            await _wait_until(serve_task.done)
+            assert serve_task.cancelled()
+        finally:
+            app_module.app.state.edge_source = None
+
+
 def test_get_reports_connected_only_for_the_edge_sources_own_device(tmp_path, monkeypatch):
     client, _repo = _boot_with_edge_repo(tmp_path, monkeypatch)
     with client:
