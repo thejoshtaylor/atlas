@@ -28,8 +28,14 @@ it.
 
 ## 3. Install uv and clone the repository
 
-1. Install `uv` on the Pi. Follow the installer at
-   [astral.sh/uv](https://astral.sh/uv).
+1. Install `uv` system-wide, so that `sudo` can find it. The default
+   installer puts `uv` in your own home directory, which is not on root's
+   `PATH`:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
+   ```
+
 2. Clone this repository into `/opt/atlas-edge`:
 
    ```bash
@@ -40,8 +46,13 @@ it.
 
    ```bash
    cd /opt/atlas-edge/edge
-   sudo uv sync --frozen
+   sudo env UV_PYTHON_INSTALL_DIR=/opt/atlas-edge/.python uv sync --frozen
    ```
+
+4. The edge package needs Python 3.11. Raspberry Pi OS ships a newer
+   Python, so `uv` downloads 3.11. `UV_PYTHON_INSTALL_DIR` puts that
+   download under `/opt/atlas-edge`. Without it, the interpreter lands in
+   root's home directory, and the `atlas-edge` service user cannot run it.
 
 ## 4. Create the service user
 
