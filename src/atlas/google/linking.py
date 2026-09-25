@@ -12,6 +12,7 @@ exception text.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import httpx
@@ -50,6 +51,19 @@ class LinkError(Exception):
         super().__init__(code)
 
 
+@dataclass(frozen=True)
+class LinkOutcome:
+    """`complete_link`'s own result -- `is_new` is the one signal plan
+    09-09's own callback route needs and `complete_link` is the only
+    place that knows for sure: a re-link (an existing account found by
+    its Google address) never schedules a fresh `learn_style` background
+    task, only a genuinely new account does (D-19, D-20's own "learns its
+    style once")."""
+
+    account: GoogleAccount
+    is_new: bool
+
+
 async def complete_link(
     *,
     repo: GoogleAccountRepository,
@@ -59,7 +73,7 @@ async def complete_link(
     state: GoogleOAuthState,
     code: str,
     now: datetime,
-) -> GoogleAccount:
+) -> LinkOutcome:
     """Exchange `code` (already bound to `state`'s own `redirect_uri`),
     require every `REQUIRED_SCOPES` entry in the granted scope, read the
     linked address, and store the result -- re-linking an existing address
@@ -118,6 +132,7 @@ async def complete_link(
             existing.id, ciphertext, key_version, granted_scope, refresh_token_expires_at, now
         )
         token_service.forget(existing.id)
+        is_new = False
     else:
         accounts = await repo.list_accounts()
         if any(a.label == state.label for a in accounts):
@@ -136,16 +151,17 @@ async def complete_link(
             linked_by_user_id=state.created_by_user_id,
             linked_at=now,
         )
+        is_new = True
 
     try:
         calendars = await list_calendars(http_client, access_token)
     except GoogleApiError as exc:
         logger.warning("calendar discovery failed after linking %r: %s", email, type(exc).__name__)
-        return account
+        return LinkOutcome(account=account, is_new=is_new)
 
     await repo.add_calendars(
         account.id,
         [(c["id"], c["name"], c["primary"], c["can_write"]) for c in calendars],
         discovered_at=now,
     )
-    return account
+    return LinkOutcome(account=account, is_new=is_new)

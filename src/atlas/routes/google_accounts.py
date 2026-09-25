@@ -19,6 +19,7 @@ operator just chose (D-05, T-09-14, `_reconcile_failed_error` below).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 import secrets
@@ -34,9 +35,10 @@ from atlas_mcp.google_api import GoogleApiError
 
 from atlas.auth.dependencies import CurrentUser, Role, require_role
 from atlas.crypto.credentials import decrypt_credential, encrypt_credential
-from atlas.db.google_repository import CALENDAR_ACCESS, GoogleAccount, GoogleAccountRepository
+from atlas.db.google_repository import CALENDAR_ACCESS, GoogleAccount, GoogleAccountRepository, GoogleAccountStyle
 from atlas.google.linking import LinkError, complete_link
 from atlas.google.plugin import find_google_plugin, reconcile_google_plugin
+from atlas.google.style import learn_style
 
 router = APIRouter(tags=["google"])
 
@@ -139,6 +141,25 @@ def _google_unreachable_error(detail: "str | None") -> HTTPException:
     )
 
 
+# Plan 09-09 (D-19): the admin's own profile edit, at most this many
+# characters -- generous for a plain-language style description, small
+# enough to bound both the stored row and every drafting round's own
+# prompt.
+_PROFILE_MAX_LEN = 4000
+
+
+def _style_learning_in_progress_error() -> HTTPException:
+    return HTTPException(
+        status_code=409, detail="this account's style is already being learned -- try again shortly"
+    )
+
+
+def _profile_too_long_error() -> HTTPException:
+    return HTTPException(
+        status_code=400, detail=f"a style profile must be at most {_PROFILE_MAX_LEN} characters"
+    )
+
+
 # --- Request/response models ---------------------------------------------
 
 
@@ -204,6 +225,22 @@ class CalendarAccessRequest(BaseModel):
     access: str
 
 
+class StyleResponse(BaseModel):
+    status: str
+    status_detail: "str | None" = None
+    profile: str
+    samples: list[str] = Field(default_factory=list)
+    signature_text: "str | None" = None
+    messages_scanned: int
+    learned_at: "datetime | None" = None
+
+
+class StyleUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: str
+
+
 # --- Helpers ---------------------------------------------------------
 
 
@@ -263,6 +300,61 @@ async def _reconcile_or_refuse(request: Request, admin: CurrentUser, *, narrowin
         )
     except Exception as exc:  # noqa: BLE001 -- every reconcile failure is reported the same way
         raise _reconcile_failed_error(stopped=narrowing) from exc
+
+
+def _to_style_response(style: GoogleAccountStyle) -> StyleResponse:
+    return StyleResponse(
+        status=style.status,
+        status_detail=style.status_detail,
+        profile=style.profile,
+        samples=list(style.samples),
+        signature_text=style.signature_text,
+        messages_scanned=style.messages_scanned,
+        learned_at=style.learned_at,
+    )
+
+
+async def _schedule_learn_style(request: Request, account: GoogleAccount) -> None:
+    """Mark `account`'s own style row `"learning"` (synchronously -- a
+    `GET` right after this call already reads it) and run `learn_style`
+    as a detached background task, held in
+    `request.app.state.background_turns` until its own done-callback
+    discards it (a task with no strong reference can be garbage collected
+    before it ever runs). The one scheduling path both
+    `POST .../style/relearn` and a new account's own OAuth callback use --
+    there is no periodic job anywhere (D-20)."""
+    repo: GoogleAccountRepository = request.app.state.google_account_repo
+    token_service = request.app.state.google_token_service
+    http_client = request.app.state.google_http_client
+    brain = getattr(request.app.state, "brain", None)
+    now = datetime.now(timezone.utc)
+    await repo.set_style_status(account.id, "learning", None, now)
+
+    async def _run() -> None:
+        await learn_style(
+            account=account,
+            repo=repo,
+            token_service=token_service,
+            http_client=http_client,
+            brain=brain,
+            now=datetime.now(timezone.utc),
+        )
+
+    # `getattr(..., None)` (not a direct attribute read): every real boot
+    # sets `app.state.background_turns` in `app.py`'s own `lifespan`, but
+    # a test app built without it (this module's own pre-09-09 test
+    # fixtures) must not crash a route that otherwise has nothing to do
+    # with those tests' own focus -- the same tolerant-default convention
+    # `atlas.google.turn_context.build_handoff_context` already uses for
+    # `email_list_memory`.
+    background_turns = getattr(request.app.state, "background_turns", None)
+    if background_turns is None:
+        background_turns = set()
+        request.app.state.background_turns = background_turns
+
+    task = asyncio.create_task(_run())
+    background_turns.add(task)
+    task.add_done_callback(background_turns.discard)
 
 
 # --- Routes -----------------------------------------------------------
@@ -378,7 +470,7 @@ async def oauth_callback(
     token_service = request.app.state.google_token_service
 
     try:
-        account = await complete_link(
+        outcome = await complete_link(
             repo=repo,
             security=security,
             http_client=http_client,
@@ -392,7 +484,14 @@ async def oauth_callback(
 
     await _reconcile_or_refuse(request, admin, narrowing=False)
 
-    return RedirectResponse(f"/google/accounts/{account.id}?linked=1", status_code=303)
+    # Plan 09-09 (D-19, D-20): a genuinely new account learns its style
+    # once, in the background, right here -- a re-link of an already-
+    # linked address schedules nothing (its style, if any, stands as it
+    # already was).
+    if outcome.is_new:
+        await _schedule_learn_style(request, outcome.account)
+
+    return RedirectResponse(f"/google/accounts/{outcome.account.id}?linked=1", status_code=303)
 
 
 @router.get("/api/google/accounts")
@@ -540,3 +639,55 @@ async def delete_account(
     token_service.forget(account_id)
 
     await _reconcile_or_refuse(request, admin, narrowing=True)
+
+
+# --- Plan 09-09: style learning and drafting ------------------------------
+
+
+@router.get("/api/google/accounts/{account_id}/style")
+async def get_account_style(
+    account_id: int, request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> StyleResponse:
+    repo: GoogleAccountRepository = request.app.state.google_account_repo
+    account = await repo.get_account(account_id)
+    if account is None:
+        raise _unknown_account_error(account_id)
+    style = await repo.get_style(account_id)
+    return _to_style_response(style)
+
+
+@router.put("/api/google/accounts/{account_id}/style")
+async def update_account_style(
+    account_id: int,
+    payload: StyleUpdateRequest,
+    request: Request,
+    _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> StyleResponse:
+    repo: GoogleAccountRepository = request.app.state.google_account_repo
+    account = await repo.get_account(account_id)
+    if account is None:
+        raise _unknown_account_error(account_id)
+    if len(payload.profile) > _PROFILE_MAX_LEN:
+        raise _profile_too_long_error()
+
+    await repo.update_style_profile(account_id, payload.profile, datetime.now(timezone.utc))
+    style = await repo.get_style(account_id)
+    return _to_style_response(style)
+
+
+@router.post("/api/google/accounts/{account_id}/style/relearn", status_code=202)
+async def relearn_account_style(
+    account_id: int, request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> StyleResponse:
+    repo: GoogleAccountRepository = request.app.state.google_account_repo
+    account = await repo.get_account(account_id)
+    if account is None:
+        raise _unknown_account_error(account_id)
+
+    current = await repo.get_style(account_id)
+    if current.status == "learning":
+        raise _style_learning_in_progress_error()
+
+    await _schedule_learn_style(request, account)
+    style = await repo.get_style(account_id)
+    return _to_style_response(style)

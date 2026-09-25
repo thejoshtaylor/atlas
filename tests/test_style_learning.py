@@ -634,22 +634,20 @@ def test_relearn_while_learning_is_refused_with_409(monkeypatch, fake_account_re
     fake_google = FakeGoogle()
     _seed_style_oauth_client(google_repo, security)
     account = _seed_style_account(google_repo, security)
-    fake_google.add_refresh_token("rt-1", "at-1")
-    fake_google.add_gmail_messages("at-1", [])
-    brain = RecordingFakeBrain(replies=[BrainReply(text="a"), BrainReply(text="b")])
+    # Set the row `"learning"` directly, sidestepping any race with the
+    # background task a first `POST .../relearn` would itself schedule
+    # (its own body could finish before a second request is even issued)
+    # -- this test's own job is the 409 refusal, not the scheduling race.
+    asyncio.run(google_repo.set_style_status(account.id, "learning", None, datetime.now(timezone.utc)))
+    brain = RecordingFakeBrain()
 
     app = _build_style_app(security, account_repo, google_repo, plugin_repo, fake_google, brain=brain)
     with TestClient(app) as client:
         admin = _client_as_role(app, security, account_repo, role="admin")
-        first = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
-        assert first.status_code == 202, first.text
-        # The first request already set the row's status to "learning"
-        # synchronously, before its own response returned -- this second
-        # request sees that immediately, with no need to drain anything.
-        second = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
-        _drain_background(client, app)
+        response = admin.post(f"/api/google/accounts/{account.id}/style/relearn")
 
-    assert second.status_code == 409
+    assert response.status_code == 409
+    assert brain.call_count == 0
 
 
 def test_relearn_with_no_language_model_ends_failed_with_a_detail(
@@ -725,6 +723,11 @@ def test_a_new_link_schedules_exactly_one_background_learn_style(
         raw_state = urllib.parse.parse_qs(parsed.query)["state"][0]
 
         fake_google.add_code("code-1", access_token="at-1", refresh_token="rt-1")
+        # `add_code` seeds the authorization-code exchange only -- the
+        # background `learn_style` task refreshes with the now-stored
+        # refresh token afterwards, over the plain `grant_type=refresh_token`
+        # path `add_refresh_token` seeds.
+        fake_google.add_refresh_token("rt-1", "at-1")
         fake_google.add_profile("at-1", "work@example.com")
         fake_google.add_calendar_list("at-1", [])
         fake_google.add_gmail_messages("at-1", [])
