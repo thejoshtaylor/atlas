@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { EmptyState } from "@/components/state/EmptyState"
 import { ErrorState } from "@/components/state/ErrorState"
 import { SkeletonList } from "@/components/state/SkeletonList"
 import { SubmitButton } from "@/components/state/SubmitButton"
@@ -27,6 +28,12 @@ import { deriveGoogleAccountsScreenState, linkAvailability } from "./deriveGoogl
 // literal, never two independently-typed copies.
 const IN_PRODUCTION_NOTE =
   "Set the app's publishing status to In production. While it is in Testing, Google ends every link after 7 days, and every account would unlink once a week."
+
+// 09-UI-SPEC.md's Copywriting Contract, the flagged empty-state row: zero
+// linked accounts is `EmptyState`, matching Macros/Sessions/Wake-Tuning's
+// own established precedent -- never a silently empty `<ul>`.
+const NO_ACCOUNTS_HEADING = "No accounts linked yet."
+const NO_ACCOUNTS_BODY = "Set up your OAuth client above, then link your first Google account."
 
 // GOOG-01, GOOG-02, 09-CONTEXT.md D-01/D-02/D-03/D-04/GOOG-12: the screen
 // where a stranger who cloned this repository sets up their own Google
@@ -221,11 +228,15 @@ export function GoogleAccountsRoute() {
             </SubmitButton>
           </div>
 
-          <ul className="panel-list">
-            {screen.accounts.map((account) => (
-              <AccountCard key={account.id} account={account} />
-            ))}
-          </ul>
+          {screen.accounts.length === 0 ? (
+            <EmptyState heading={NO_ACCOUNTS_HEADING} body={NO_ACCOUNTS_BODY} />
+          ) : (
+            <ul className="panel-list">
+              {screen.accounts.map((account) => (
+                <AccountCard key={account.id} account={account} />
+              ))}
+            </ul>
+          )}
         </>
       ) : null}
     </div>
