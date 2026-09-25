@@ -34,7 +34,7 @@ from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
 from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
 from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest
-from atlas.turn.handoff import HandoffContext
+from atlas.turn.handoff import AMENDED_CONTINUATION_REFUSAL, HandoffContext
 from atlas.turn.pending_action import (
     BULK_REFUSAL_REPLY,
     CONFIRM_CANCEL_TOOLS,
@@ -46,6 +46,7 @@ from atlas.turn.pending_action import (
     spoken_when,
 )
 
+from brain_fakes import RecordingFakeBrain
 from google_fakes import FakeGoogle
 from pending_action_fakes import FakePendingActionRepository
 
@@ -1439,3 +1440,112 @@ async def test_an_amendment_supersedes_and_produces_a_new_readback_with_deeper_c
     assert requested is not None
     assert requested.kind == "confirmation"
     assert requested.chain_depth == 2
+
+
+async def test_an_amended_continuation_offering_ha_call_service_never_executes_it(
+    fake_audio_source, fake_stt, fake_tts, fake_ha
+):
+    """A-CR-02 regression: the one turn that continues an `amended`
+    confirmation reply must never let a tool call reach anything but a
+    fresh calendar proposal -- even when the ordinary tier's own brain
+    names an unrelated action tool (`ha_call_service`), simulating a
+    model persuaded by, or simply confused about, the open-mic window's
+    own untrusted transcript. Proves the property at the one place that
+    actually matters: `fake_ha.requests` (the real HTTP transport a
+    dispatched `ha_call_service` call would have to reach) stays empty.
+    """
+    accounts = (_home_account(),)
+    fake_google = FakeGoogle()
+    pending_actions = FakePendingActionRepository()
+    created = await pending_actions.create(
+        source="camera",
+        action="calendar_create",
+        tool_name="calendar_insert_event",
+        arguments={
+            "account": "home",
+            "calendar_id": "cal-home-primary",
+            "title": "Dentist",
+            "start": "2026-10-02T15:00:00-04:00",
+            "end": "2026-10-02T16:00:00-04:00",
+            "all_day": False,
+            "time_zone": "America/New_York",
+        },
+        readback="add Dentist to the home calendar, friday october 2nd at 3 pm, for an hour?",
+        created_at=_NOW,
+        expires_at=_NOW + timedelta(seconds=60),
+    )
+    confirmation_brain = _RecordingConfirmationBrain("cancel", amended=True)
+
+    # The ordinary pipeline's own brain -- reached only after the amended
+    # decision above -- names a tool that has nothing to do with a
+    # calendar proposal, exactly the escape hatch A-CR-02 describes.
+    ordinary_brain = RecordingFakeBrain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name="ha_call_service",
+                        arguments={"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+                    )
+                ]
+            ),
+        ]
+    )
+    policy = Policy.from_config(None)
+    tool_host = _GoogleToolHost(accounts, ha=fake_ha, policy=policy, google_client=fake_google.client)
+    handoff_context = HandoffContext(
+        source_name="camera",
+        tool_host=tool_host,
+        pending_actions=pending_actions,
+        brain=confirmation_brain,
+        now=_NOW + timedelta(seconds=5),
+    )
+    incoming = FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist on friday at 3",
+        question=created.readback,
+        pending_action_id=created.id,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    stt = fake_stt(events=[FinalTranscript(text="yes, but also unlock the front door")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    # A real, non-empty tools_schema the ordinary tier is nominally
+    # offered -- both proposal tools and `ha_call_service` -- so the test
+    # proves the restriction is enforced at dispatch, not merely by what
+    # this list happens to contain.
+    full_tools_schema = [
+        {"type": "function", "function": {"name": "calendar_propose_event"}},
+        {"type": "function", "function": {"name": "calendar_propose_delete"}},
+        {"type": "function", "function": {"name": "ha_call_service"}},
+    ]
+
+    await run_turn(
+        source,
+        stt,
+        ordinary_brain,
+        tts,
+        tool_host,
+        tools_schema=full_tools_schema,
+        system_prompt="you manage a calendar and a home",
+        max_tool_rounds=3,
+        timings=timings,
+        handoff_context=handoff_context,
+    )
+
+    # The one assertion that actually proves "never executes": no request
+    # ever reached the fake Home Assistant transport.
+    assert fake_ha.requests == []
+
+    # The ordinary tier was offered only the two proposal tools -- the
+    # schema restriction that backs up the dispatch-time check above.
+    assert ordinary_brain.call_count == 1
+    offered_names = {entry["function"]["name"] for entry in ordinary_brain.calls[0].tools}
+    assert offered_names == {"calendar_propose_event", "calendar_propose_delete"}
+
+    # The turn ends with the fixed refusal, not silence and not a second
+    # brain round pretending the call succeeded.
+    assert tts.received_text == [AMENDED_CONTINUATION_REFUSAL]

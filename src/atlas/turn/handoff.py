@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, HANDOFF_KEY
+from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES, CODE_ONLY_TOOL_NAMES, HANDOFF_KEY
 
 from atlas.db.pending_action_repository import PendingActionRepository
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
@@ -62,6 +62,28 @@ def is_code_only_tool(name: str) -> bool:
     prefixing rule exactly."""
     bare = name.rsplit("__", 1)[-1] if "__" in name else name
     return name in CODE_ONLY_TOOL_NAMES or bare in CODE_ONLY_TOOL_NAMES
+
+
+# A-CR-02: the fixed refusal `_run_tool_rounds` (turn/controller.py) speaks
+# in place of dispatching a tool that is not a calendar proposal, on the one
+# turn that continues an `amended` confirmation reply -- the open-mic
+# window's own no-wake-word turn (D-06, D-08, D-09). This is the structural
+# backstop, not the tool schema that turn is offered: a model coerced into
+# naming a tool outside `CALENDAR_PROPOSAL_TOOL_NAMES` still never reaches
+# `tool_host.call_tool` for it.
+AMENDED_CONTINUATION_REFUSAL = (
+    "that's more than i can change from a reply -- say the wake word and ask again"
+)
+
+
+def is_calendar_proposal_tool(name: str) -> bool:
+    """True when `name` -- bare or collision-prefixed, the same shape
+    `is_code_only_tool` above already unwraps -- names one of
+    `atlas_mcp.google_tools.CALENDAR_PROPOSAL_TOOL_NAMES`: a call that can
+    only ever build a fresh `pending_action` handoff, never execute
+    anything directly (A-CR-02)."""
+    bare = name.rsplit("__", 1)[-1] if "__" in name else name
+    return name in CALENDAR_PROPOSAL_TOOL_NAMES or bare in CALENDAR_PROPOSAL_TOOL_NAMES
 
 
 @dataclass(frozen=True)

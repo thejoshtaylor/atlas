@@ -90,7 +90,7 @@ from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
 
-from atlas_mcp.google_tools import UNREACHABLE_KEY
+from atlas_mcp.google_tools import CALENDAR_PROPOSAL_TOOL_NAMES, UNREACHABLE_KEY
 
 from atlas.config import MacroConfig
 from atlas.providers.base import BrainError
@@ -105,10 +105,12 @@ from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest, estimate_playback_end
 from atlas.turn.handoff import (
+    AMENDED_CONTINUATION_REFUSAL,
     CODE_ONLY_REFUSAL,
     HandoffContext,
     HandoffSlot,
     dispatch_handoff,
+    is_calendar_proposal_tool,
     is_code_only_tool,
     parse_handoff,
 )
@@ -680,6 +682,17 @@ async def run_turn(
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
+        # A-CR-02: True only for the one turn that continues an `amended`
+        # confirmation reply -- set below, never for a clarification's own
+        # answer or an ordinary turn. Read by the tier-dispatch loop
+        # further down to narrow both the offered tool schema and, as the
+        # structural backstop, which tool names `_run_tool_rounds` will
+        # actually dispatch (`is_calendar_proposal_tool`): any change the
+        # operator describes in this no-wake-word window can only ever
+        # become a NEW pending_action, never an action that runs with no
+        # confirmation step at all.
+        restrict_tools_to_proposals = False
+
         # Plan 09-06 (D-08, D-09): a follow-up turn's own reply to a
         # stored confirmation -- this entirely replaces the ordinary
         # empty-transcript branch below for this turn (silence speaks
@@ -721,6 +734,7 @@ async def run_turn(
             # local-intent blocks below (an amendment is never a macro
             # phrase or an on/off command).
             prior_exchange: "list[dict[str, Any]] | None" = _continuation_messages(incoming)
+            restrict_tools_to_proposals = True
         elif incoming is not None and incoming.kind == "clarification":
             # Plan 09-07 (D-06): a clarification's own answer -- "home"
             # to "which account -- home, work?" -- runs the ordinary
@@ -1070,6 +1084,19 @@ async def run_turn(
         # to it, mirroring `commitment`'s own "one instance per turn" shape.
         handoff_slot = HandoffSlot()
 
+        # A-CR-02: the schema itself is narrowed too, not only the dispatch
+        # check `_run_tool_rounds` applies below -- a model offered only the
+        # two proposal tools has nothing else to even attempt to call. This
+        # is the belt; `proposals_only` (threaded into `run_top_tier` below)
+        # is the suspenders, and the one that actually holds: it is checked
+        # by tool name, at dispatch, regardless of what the model was
+        # offered or asked to do.
+        turn_tools_schema = (
+            [entry for entry in tools_schema if entry.get("function", {}).get("name") in CALENDAR_PROPOSAL_TOOL_NAMES]
+            if restrict_tools_to_proposals
+            else tools_schema
+        )
+
         tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
         for tier in tiers:
             tier_messages = list(messages)
@@ -1077,12 +1104,13 @@ async def run_turn(
                 coro = brain_race.run_top_tier(
                     tier,
                     tool_host,
-                    tools_schema,
+                    turn_tools_schema,
                     tier_messages,
                     max_tool_rounds,
                     timings,
                     commitment,
                     handoff_slot=handoff_slot,
+                    proposals_only=restrict_tools_to_proposals,
                 )
             else:
                 coro = brain_race.run_triage_tier(tier, tier_messages)
@@ -1754,6 +1782,7 @@ async def _run_tool_rounds(
     timings: TurnTimings,
     commitment: "brain_race.ToolCommitment | None" = None,
     handoff_slot: "HandoffSlot | None" = None,
+    proposals_only: bool = False,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
@@ -1761,6 +1790,16 @@ async def _run_tool_rounds(
     misunderstanding, not a complex request (per `BrainConfig.max_tool_rounds`'s
     own doctrine) -- the turn ends by saying so, never with a success
     confirmation, per CMD-01's transparency prohibition.
+
+    `proposals_only` (A-CR-02, default `False` -- every caller that
+    predates this fix) is `run_turn`'s own `restrict_tools_to_proposals`,
+    threaded down through `run_top_tier`: when `True`, any tool call whose
+    name is not `is_calendar_proposal_tool` is refused exactly like a
+    code-only tool a model named anyway -- never dispatched to `tool_host`
+    -- regardless of what `tools_schema` this round was actually offered.
+    This is the structural backstop the schema restriction alone cannot
+    be: a model that names a tool outside the schema it was given still
+    never reaches `tool_host.call_tool` for it.
 
     `commitment`, when given, is set the instant one round's dispatch begins --
     before `asyncio.gather` is awaited, not after any one call returns (CR-01,
@@ -1838,8 +1877,16 @@ async def _run_tool_rounds(
         # its own position, so every composer downstream (the mixed-outcome
         # composer, the handoff detector) sees a normal, positionally
         # aligned result list.
+        #
+        # A-CR-02: `proposals_only` applies the identical control for the
+        # one turn that continues an `amended` confirmation reply -- any
+        # tool call that is not `is_calendar_proposal_tool` is refused the
+        # same way, checked here by name, never trusted from the (already
+        # narrowed) schema this round was offered.
         dispatchable = [
-            (index, tc) for index, tc in enumerate(reply.tool_calls) if not is_code_only_tool(tc.name)
+            (index, tc)
+            for index, tc in enumerate(reply.tool_calls)
+            if not is_code_only_tool(tc.name) and (not proposals_only or is_calendar_proposal_tool(tc.name))
         ]
         dispatched_results = await asyncio.gather(
             *(tool_host.call_tool(tc.name, tc.arguments) for _, tc in dispatchable),
@@ -1852,6 +1899,10 @@ async def _run_tool_rounds(
             if is_code_only_tool(tc.name):
                 results[index] = SimpleNamespace(
                     isError=True, content=[SimpleNamespace(text=CODE_ONLY_REFUSAL)]
+                )
+            elif proposals_only and not is_calendar_proposal_tool(tc.name):
+                results[index] = SimpleNamespace(
+                    isError=True, content=[SimpleNamespace(text=AMENDED_CONTINUATION_REFUSAL)]
                 )
 
         # GOOG-12, plan 09-05 Task 3: every account this round's results

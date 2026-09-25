@@ -209,6 +209,7 @@ async def run_top_tier(
     timings: Any,
     commitment: ToolCommitment | None = None,
     handoff_slot: Any | None = None,
+    proposals_only: bool = False,
 ) -> TierReply:
     """The existing, unmodified tool-calling loop, wrapped locally into a
     `TierReply` -- no envelope call.
@@ -225,6 +226,11 @@ async def run_top_tier(
     fallback instead of `TierReply`'s own validator raising on a
     `confident=True` empty answer. This function no longer reads
     `tier.envelope_client` at all -- see `build_tiers` below.
+
+    `proposals_only` (A-CR-02, default `False`) is forwarded unchanged to
+    `_run_tool_rounds`: `run_turn`'s own `restrict_tools_to_proposals`,
+    `True` only for the one turn that continues an `amended` confirmation
+    reply.
     """
     # Deferred, not module-level: `controller.py` imports this module at
     # load time to dispatch tiers, so a module-level import here of anything
@@ -245,6 +251,7 @@ async def run_top_tier(
         timings,
         commitment=commitment,
         handoff_slot=handoff_slot,
+        proposals_only=proposals_only,
     )
 
     return TierReply(
