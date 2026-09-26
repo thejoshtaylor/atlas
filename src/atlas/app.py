@@ -108,7 +108,7 @@ from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
 from atlas.timing import TurnTimings
 from atlas.transports.camera import CameraAudioSource
-from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource
+from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, SegmentBoundedWakeDetector
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
@@ -1769,9 +1769,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
         )
     elif resolved_audio_source == EDGE_SOURCE_NAME:
-        wake_detector = _build_wake_detector(config.wake.resolve(EDGE_SOURCE_NAME))
+        wake_detector = SegmentBoundedWakeDetector(
+            _build_wake_detector(config.wake.resolve(EDGE_SOURCE_NAME))
+        )
 
         edge_source = EdgeAudioSource(config.edge)
+        edge_source.on_segment_start = wake_detector.mark_segment_start
         app.state.edge_source = edge_source
 
         # Plan 10-10 (D-16): see `_resolve_edge_barge_in_config`'s own

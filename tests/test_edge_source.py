@@ -22,6 +22,7 @@ from atlas.transports.edge import (
     MAX_QUEUED_FRAMES,
     MAX_TEXT_FRAME_BYTES,
     EdgeAudioSource,
+    SegmentBoundedWakeDetector,
 )
 
 from tests.edge_fakes import FakeEdgeSocket, fake_edge_device
@@ -233,3 +234,42 @@ async def test_send_audio_with_no_connected_device_drops_the_chunk():
     # Never connected -- send_audio must not raise.
     await source.send_audio(b"reply-bytes")
     assert source.connected_device_id is None
+
+
+class _RecordingDetector:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def process(self, chunk: bytes):
+        self.calls.append("process")
+        return None
+
+    def reset(self) -> None:
+        self.calls.append("reset")
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+
+def test_segment_bounded_detector_resets_once_before_the_next_chunk():
+    inner = _RecordingDetector()
+    detector = SegmentBoundedWakeDetector(inner)
+
+    detector.process(b"\x00\x00")
+    detector.mark_segment_start()
+    detector.process(b"\x00\x00")
+    detector.process(b"\x00\x00")
+
+    assert inner.calls == ["process", "reset", "process", "process"]
+
+
+def test_vad_start_marks_a_segment_start_and_vad_end_does_not():
+    source = EdgeAudioSource(_measured_config())
+    starts: list[int] = []
+    source.on_segment_start = lambda: starts.append(1)
+
+    source._handle_event({"type": "vad.start", "seq": 1})
+    source._handle_event({"type": "vad.end", "seq": 1})
+    source._handle_event({"type": "vad.start", "seq": 2})
+
+    assert starts == [1, 1]

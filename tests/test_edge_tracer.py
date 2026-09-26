@@ -248,7 +248,7 @@ async def test_one_spoken_command_from_a_pi_shaped_client_reaches_a_reply_on_the
 
         # 2. The detector and the speech-to-text double saw only channel
         # 1's samples (-2000/-3000), never channel 0's 1000.
-        wake_detector = app_module.app.state.wake_detector
+        wake_detector = app_module.app.state.wake_detector.inner  # unwrap SegmentBoundedWakeDetector
         assert wake_detector.chunks, "the wake detector never received a chunk"
         assert _only_channel_values(b"".join(wake_detector.chunks)) <= {-2000, -3000}
         assert stt_double.received_frames, "speech-to-text never received a frame"

@@ -328,6 +328,44 @@ class SpeechSignals:
         return _unsubscribe
 
 
+class SegmentBoundedWakeDetector:
+    """Resets the wrapped wake detector at the start of each Pi segment.
+
+    The Pi sends only VAD-gated segments, not continuous audio. Vosk commits
+    a result only after it hears enough silence, so a segment whose tail
+    holds room noise leaves its utterance open, and the next segment's
+    "hey atlas" decodes as "[unk] hey atlas" -- never a wake hit. Each
+    `vad.start` begins a new utterance, so the detector starts clean there.
+
+    `mark_segment_start` runs on the event loop and only sets a flag; the
+    reset itself happens inside `process`, on the runner's detector thread,
+    so the native recognizer is never touched from two threads at once.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._reset_pending = False
+
+    @property
+    def inner(self) -> Any:
+        return self._inner
+
+    def mark_segment_start(self) -> None:
+        self._reset_pending = True
+
+    def process(self, chunk: bytes) -> Any:
+        if self._reset_pending:
+            self._reset_pending = False
+            self._inner.reset()
+        return self._inner.process(chunk)
+
+    def reset(self) -> None:
+        self._inner.reset()
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 class EdgeAudioSource:
     """Satisfies `AudioSource` over one always-on `/ws/edge` connection.
 
@@ -368,6 +406,9 @@ class EdgeAudioSource:
         self._connection_worst_added_delay_ms: float | None = None
         self._connection_last_added_delay_ms: float | None = None
         self._added_delay_over_budget_warned = False
+        # Called on every `vad.start` (app.py wires it to
+        # `SegmentBoundedWakeDetector.mark_segment_start`). None until wired.
+        self.on_segment_start: Callable[[], None] | None = None
 
     @property
     def speech_signals(self) -> SpeechSignals:
@@ -651,6 +692,8 @@ class EdgeAudioSource:
         if msg_type in (MSG_VAD_START, MSG_VAD_END):
             self._last_seq = event["seq"]
             self._speech_signals.publish(event)
+            if msg_type == MSG_VAD_START and self.on_segment_start is not None:
+                self.on_segment_start()
         elif msg_type == MSG_DOA:
             self._speech_signals.publish(event)
         elif msg_type == MSG_LATENCY:
