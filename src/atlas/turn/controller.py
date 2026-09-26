@@ -1798,15 +1798,31 @@ async def _drain_to_final_transcript(
 
     finalize_event: "asyncio.Event | None" = None
     watch_task: "asyncio.Task[None] | None" = None
+    # Set by the first partial that carries words. A `vad.end` before that
+    # finalizes nothing: on the real Pi, the wake cue's echo or a short
+    # noise opened and closed a segment before the operator spoke, and
+    # finalizing there ended every turn with an empty transcript. Until
+    # speech-to-text has heard a word, xAI's own endpointing (D-13) and
+    # the next `vad.end` stay in charge.
+    heard_speech = asyncio.Event()
     if speech_signals is not None:
         finalize_event = asyncio.Event()
 
         async def _watch_end_of_speech() -> None:
-            at = await wait_for_end_of_speech(
-                speech_signals,
-                hangover_s=speech_signals.hangover_s,
-                already_ended_counts=finalize_if_already_ended,
-            )
+            # A segment that had already ended before this drain started
+            # (the wake-only case, 260922-woc) finalizes at once, as before:
+            # the wake detector already heard that speech.
+            ended_before_watch = finalize_if_already_ended and not speech_signals.in_speech
+            already_ended_counts = finalize_if_already_ended
+            while True:
+                at = await wait_for_end_of_speech(
+                    speech_signals,
+                    hangover_s=speech_signals.hangover_s,
+                    already_ended_counts=already_ended_counts,
+                )
+                if ended_before_watch or heard_speech.is_set():
+                    break
+                already_ended_counts = False
             timings.mark_vad_end(at)
             finalize_event.set()
 
@@ -1870,6 +1886,8 @@ async def _drain_to_final_transcript(
             return pending
 
         arrival = _time.monotonic()
+        if brain_race._normalize_for_echo_check(getattr(event, "text", "")):
+            heard_speech.set()
 
         if pending is not None:
             timings.mark_first_partial(at=pending_arrival)

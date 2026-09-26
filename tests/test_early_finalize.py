@@ -11,9 +11,11 @@ second fake reimplementing it.
 from __future__ import annotations
 
 import asyncio
+
+import pytest
 from typing import AsyncIterator
 
-from atlas.providers.base import BrainReply, FinalTranscript
+from atlas.providers.base import BrainReply, FinalTranscript, PartialTranscript
 from atlas.session.recorder import _serialize_timings
 from atlas.transports.base import SourceFormat
 from atlas.transports.edge import SpeechSignals
@@ -140,13 +142,18 @@ class _FinalizeGatedStt:
     scripted text per call, in call order (`test_wake_only_second_drain_
     waits_for_the_next_segment` calls this twice, once per drain)."""
 
-    def __init__(self, texts: "list[str]") -> None:
+    def __init__(self, texts: "list[str]", *, partials: bool = True) -> None:
         self._texts = list(texts)
+        self._partials = partials
         self.call_count = 0
 
     async def stream(self, frames, source_format, *, finalize=None):
         text = self._texts[self.call_count]
         self.call_count += 1
+        if self._partials:
+            # Real xAI streams partials as it hears words; early finalize
+            # only acts once one has carried words.
+            yield PartialTranscript(text=text)
         if finalize is not None:
             await finalize.wait()
         yield FinalTranscript(text=text)
@@ -384,3 +391,39 @@ def test_speech_signals_forwarding_properties():
         is with_signals.speech_signals
     )
     assert ObserverPublishingSource(without_signals, "edge", registry).speech_signals is None
+
+
+async def test_vad_end_before_any_heard_word_does_not_finalize(fake_brain, fake_tts):
+    """The real-Pi failure: the wake cue's echo (or a noise blip) opened and
+    closed a segment before the operator spoke. That `vad.end` must not
+    finalize a turn speech-to-text has not heard a word of."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    signals = SpeechSignals(hangover_s=0.0)
+    signals.publish({"type": "vad.start", "seq": 1})
+    source = _SpeechSignalsSource(signals)
+    stt = _FinalizeGatedStt(["turn on the fan"], partials=False)
+    timings = TurnTimings()
+
+    async def _blip_then_nothing() -> None:
+        await asyncio.sleep(0.02)
+        signals.publish({"type": "vad.end", "seq": 1})
+
+    asyncio.ensure_future(_blip_then_nothing())
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            run_turn(
+                source,
+                stt,
+                fake_brain(replies=[BrainReply(text="x")]),
+                fake_tts(chunks=[b"\x01\x02"]),
+                None,
+                tools_schema=[],
+                system_prompt="you control a home",
+                max_tool_rounds=3,
+                timings=timings,
+            ),
+            timeout=0.5,
+        )
+    assert timings.vad_end_at is None
