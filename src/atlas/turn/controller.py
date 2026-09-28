@@ -1810,9 +1810,10 @@ async def _drain_to_final_transcript(
 
         async def _watch_end_of_speech() -> None:
             # A segment that had already ended before this drain started
-            # (the wake-only case, 260922-woc) finalizes at once, as before:
-            # the wake detector already heard that speech.
-            ended_before_watch = finalize_if_already_ended and not speech_signals.in_speech
+            # finalizes at once only if speech-to-text heard a word in it.
+            # On the Pi, the wake segment has always ended by now, and the
+            # preroll holds only its tail: finalizing there sent "" or
+            # "Hey" to the brain and never heard the command.
             already_ended_counts = finalize_if_already_ended
             while True:
                 at = await wait_for_end_of_speech(
@@ -1820,7 +1821,7 @@ async def _drain_to_final_transcript(
                     hangover_s=speech_signals.hangover_s,
                     already_ended_counts=already_ended_counts,
                 )
-                if ended_before_watch or heard_speech.is_set():
+                if heard_speech.is_set():
                     break
                 already_ended_counts = False
             timings.mark_vad_end(at)

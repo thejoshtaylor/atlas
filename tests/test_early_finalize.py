@@ -287,18 +287,35 @@ async def test_lost_vad_end_never_hangs_the_turn(fake_brain, fake_tts):
     assert timings_b.vad_end_at is None
 
 
+class _EndpointedWakeThenGatedStt:
+    """First stream: xAI's own endpointing ends it on the wake phrase alone,
+    with no `finalize` needed. Second stream: gated on `finalize`, like
+    `_FinalizeGatedStt`."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def stream(self, frames, source_format, *, finalize=None):
+        self.call_count += 1
+        if self.call_count == 1:
+            yield FinalTranscript(text="hey atlas")
+            return
+        yield PartialTranscript(text="turn on the fan")
+        await finalize.wait()
+        yield FinalTranscript(text="turn on the fan")
+
+
 async def test_wake_only_second_drain_waits_for_the_next_segment(fake_brain, fake_tts):
-    """260922-woc: the first drain ends on a wake-only transcript (the
-    segment already ended before speech-to-text even opened, so the first
-    drain's own watch finalizes at once); the second drain must NOT
-    finalize on that same already-ended state -- only a genuinely new
-    segment's own `vad.end`, published after it began, may finalize it."""
+    """260922-woc: the first drain ends on a wake-only transcript (xAI's
+    own endpointing, during the operator's pause); the second drain must
+    NOT finalize on the already-ended state the wake segment left behind --
+    only a genuinely new segment's own `vad.end` may finalize it."""
     from atlas.timing import TurnTimings
     from atlas.turn.controller import run_turn
 
     signals = SpeechSignals(hangover_s=0.0)
     source = _SpeechSignalsSource(signals)
-    stt = _FinalizeGatedStt(["hey atlas", "turn on the fan"])
+    stt = _EndpointedWakeThenGatedStt()
     brain = fake_brain(replies=[BrainReply(text="done")])
     tts = fake_tts(chunks=[b"\x01\x02"])
     timings = TurnTimings()
@@ -326,6 +343,73 @@ async def test_wake_only_second_drain_waits_for_the_next_segment(fake_brain, fak
 
     assert stt.call_count == 2
     assert tts.received_text == ["done"]
+
+
+class _HearsOnlyTheNextSegmentStt:
+    """The Pi's short preroll holds only the wake segment's tail, so no
+    word arrives until the operator's command segment starts."""
+
+    def __init__(self, signals) -> None:
+        self._signals = signals
+        self.call_count = 0
+
+    async def stream(self, frames, source_format, *, finalize=None):
+        self.call_count += 1
+        while not self._signals.in_speech:
+            if finalize.is_set():
+                # Finalized on the preroll alone: nothing was heard.
+                yield FinalTranscript(text="")
+                return
+            await asyncio.sleep(0.005)
+        yield PartialTranscript(text="what time is it")
+        await finalize.wait()
+        yield FinalTranscript(text="what time is it")
+
+
+async def test_already_ended_wake_segment_waits_for_the_command(fake_brain, fake_tts):
+    """Live regression: the wake segment has always ended before the drain
+    starts on the Pi. Finalizing on that state at once sent the preroll's
+    empty transcript to the brain ("sorry, i didn't catch that"). The
+    first drain must wait for the command segment's own `vad.end`."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    signals = SpeechSignals(hangover_s=0.0)
+    signals.publish({"type": "vad.start", "seq": 1})
+    signals.publish({"type": "vad.end", "seq": 1})
+    source = _SpeechSignalsSource(signals)
+    stt = _HearsOnlyTheNextSegmentStt(signals)
+    brain = fake_brain(replies=[BrainReply(text="noon")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    async def _command_segment() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+
+    asyncio.ensure_future(_command_segment())
+
+    await asyncio.wait_for(
+        run_turn(
+            source,
+            stt,
+            brain,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+            wake_phrase="hey atlas",
+        ),
+        timeout=5,
+    )
+
+    assert stt.call_count == 1
+    assert tts.received_text == ["noon"]
+    assert timings.vad_end_at is not None
 
 
 async def test_source_without_speech_signals_is_unchanged(fake_audio_source, fake_stt, fake_brain, fake_tts):
