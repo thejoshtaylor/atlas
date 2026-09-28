@@ -75,6 +75,7 @@ from atlas.db.repository import (
     WakeEventRepository,
     WorkflowRepository,
 )
+from atlas.db.speaker_postgres import PostgresSpeakerRepository
 from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
 
 from atlas.google.env import GoogleEnvBuilder
@@ -676,6 +677,12 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # `wake_event_repo`/`google_account_repo` already use, so a test's
         # own fake repository dict that predates this key boots unchanged.
         "edge_device_repo": PostgresEdgeDeviceRepository(sessionmaker),
+        # Plan 11-03 (D-01, D-03): household members and their enrollment
+        # embeddings -- read with `.get(...)` at the call site below, the
+        # same tolerant lookup `edge_device_repo` already uses, so a
+        # test's own fake repository dict that predates this key boots
+        # unchanged.
+        "speaker_repo": PostgresSpeakerRepository(sessionmaker),
     }
 
 
@@ -1168,6 +1175,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Postgres implementation; until then this is always `None` outside a
     # test that seeds one.
     app.state.edge_device_repo = repositories.get("edge_device_repo")
+    # Plan 11-03 (D-01, D-03): same tolerant `.get(...)` -- a deployment
+    # (or a test's own fake repository dict) with no speaker repository at
+    # all boots exactly as it did before this plan.
+    app.state.speaker_repo = repositories.get("speaker_repo")
     # Set now, unconditionally, so `/ws/edge` always finds a defined
     # attribute -- overwritten below only when `resolved_audio_source ==
     # EDGE_SOURCE_NAME`. `None` here is what makes the route's own 4003
