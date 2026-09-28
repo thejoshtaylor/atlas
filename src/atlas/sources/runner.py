@@ -100,6 +100,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.speaker.output_trace import EmittedAudioTrace
+from atlas.transports.edge import LED_IDLE, LED_LISTENING
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
@@ -747,38 +748,56 @@ class SourceRunner:
         if send_event is not None:
             await send_event({"type": "wake.heard"})
 
-        turn_source = self._source
-        if self._preroll is not None:
-            preroll_chunks = self._preroll.drain()
-            if preroll_chunks:
-                turn_source = PrerollReplayingSource(self._source, preroll_chunks)
+        # A source with an LED ring (the edge Pi) shows the turn state. The
+        # ring stays dark until this point and goes dark again in `finally`.
+        await self._set_led_state(LED_LISTENING)
+        try:
+            turn_source = self._source
+            if self._preroll is not None:
+                preroll_chunks = self._preroll.drain()
+                if preroll_chunks:
+                    turn_source = PrerollReplayingSource(self._source, preroll_chunks)
 
-        monitor = self._new_barge_in_monitor()
-        # Duck-typed, the same way `turn/controller.py`'s own
-        # `_emit_event` already reaches for `send_event` -- `run_turn`
-        # and `_speak` read this back with `getattr(source, "barge_in",
-        # None)` rather than a positional `run_turn_fn` never had.
-        turn_source.barge_in = monitor
+            monitor = self._new_barge_in_monitor()
+            # Duck-typed, the same way `turn/controller.py`'s own
+            # `_emit_event` already reaches for `send_event` -- `run_turn`
+            # and `_speak` read this back with `getattr(source, "barge_in",
+            # None)` rather than a positional `run_turn_fn` never had.
+            turn_source.barge_in = monitor
 
-        # Plan 09-06 (D-06): `None` (every caller that predates this plan)
-        # attaches no channel at all -- `getattr(source, "follow_up",
-        # None)` in `turn/controller.py` then finds nothing, and every
-        # proposal on this source keeps speaking
-        # `CONFIRMATION_UNAVAILABLE_REPLY`, byte-identical to before this
-        # plan. Given a `follow_up_window_s`, a fresh, empty channel (no
-        # `incoming` -- this is the wake turn itself, never answering a
-        # prior request) is attached next to `barge_in`, and
-        # `_run_follow_ups` below is what actually opens a window once
-        # this turn's own `run_turn_fn` leaves something on it.
-        follow_up_channel: "FollowUpChannel | None" = None
-        if self._follow_up_window_s is not None:
-            follow_up_channel = FollowUpChannel()
-            turn_source.follow_up = follow_up_channel
+            # Plan 09-06 (D-06): `None` (every caller that predates this plan)
+            # attaches no channel at all -- `getattr(source, "follow_up",
+            # None)` in `turn/controller.py` then finds nothing, and every
+            # proposal on this source keeps speaking
+            # `CONFIRMATION_UNAVAILABLE_REPLY`, byte-identical to before this
+            # plan. Given a `follow_up_window_s`, a fresh, empty channel (no
+            # `incoming` -- this is the wake turn itself, never answering a
+            # prior request) is attached next to `barge_in`, and
+            # `_run_follow_ups` below is what actually opens a window once
+            # this turn's own `run_turn_fn` leaves something on it.
+            follow_up_channel: "FollowUpChannel | None" = None
+            if self._follow_up_window_s is not None:
+                follow_up_channel = FollowUpChannel()
+                turn_source.follow_up = follow_up_channel
 
-        await self._run_one_turn(turn_source, monitor)
+            await self._run_one_turn(turn_source, monitor)
 
-        if follow_up_channel is not None:
-            await self._run_follow_ups(follow_up_channel)
+            if follow_up_channel is not None:
+                await self._run_follow_ups(follow_up_channel)
+        finally:
+            await self._set_led_state(LED_IDLE)
+
+    async def _set_led_state(self, state: str) -> None:
+        """Tell the source to show `state` on its LED ring. A source with no
+        `set_led_state` (camera, browser, test doubles) is skipped. A
+        failure is logged and never reaches the turn."""
+        set_led_state = getattr(self._source, "set_led_state", None)
+        if set_led_state is None:
+            return
+        try:
+            await set_led_state(state)
+        except Exception:
+            logger.warning("source %r: could not set the led state %r", self._name, state, exc_info=True)
 
     def _new_barge_in_monitor(self) -> "BargeInMonitor":
         """Build a fresh `BargeInMonitor`, with correlation wired up
@@ -861,6 +880,10 @@ class SourceRunner:
             )
             follow_up_source.follow_up = new_channel
 
+            # A follow-up window listens with no wake word. The Pi keeps the
+            # replying color until its reply audio drains, so the listening
+            # color shows after the reply ends.
+            await self._set_led_state(LED_LISTENING)
             await self._run_one_turn(follow_up_source, monitor)
 
             channel = new_channel

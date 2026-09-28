@@ -26,6 +26,7 @@ def test_message_type_constants_match():
     assert server_protocol.MSG_VAD_END == pi_protocol.MSG_VAD_END
     assert server_protocol.MSG_DOA == pi_protocol.MSG_DOA
     assert server_protocol.MSG_LATENCY == pi_protocol.MSG_LATENCY
+    assert server_protocol.MSG_LED == pi_protocol.MSG_LED
 
 
 def test_every_pi_builder_produces_text_the_server_accepts():
@@ -76,3 +77,30 @@ def test_a_server_ping_parses_on_the_pi_side_and_the_pong_it_builds_parses_back(
     pong_text = pi_protocol.pong(parsed_ping.id, parsed_ping.server_t_ms)
     parsed_pong = server_protocol.parse_edge_event(pong_text)
     assert parsed_pong == {"type": server_protocol.MSG_PONG, "id": 3, "server_t_ms": 555}
+
+
+def test_led_states_match_in_value_and_order():
+    assert server_protocol.LED_STATES == pi_protocol.LED_STATES
+    assert server_protocol.LED_STATES == ("idle", "listening", "thinking", "replying")
+
+
+def test_every_server_led_message_parses_on_the_pi_side():
+    for state in server_protocol.LED_STATES:
+        parsed = pi_protocol.parse_server_message(server_protocol.build_led(state))
+        assert parsed == pi_protocol.Led(state)
+
+
+def test_a_bad_led_message_is_refused_on_both_sides():
+    import json
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        server_protocol.build_led("bogus")
+    for raw in (
+        {"type": "led", "state": "bogus"},
+        {"type": "led"},
+        {"type": "led", "state": 3},
+    ):
+        with pytest.raises(pi_protocol.ProtocolError):
+            pi_protocol.parse_server_message(json.dumps(raw))

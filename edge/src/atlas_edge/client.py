@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from atlas_edge.protocol import Hello, Ping, ProtocolError, parse_server_message, pong
+from atlas_edge.protocol import LED_IDLE, Hello, Led, Ping, ProtocolError, parse_server_message, pong
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,19 @@ class LiveFrame:
     captured_at: float
 
 
+async def _notify_led(on_led: "Callable[[str], Awaitable[None] | None] | None", state: str) -> None:
+    """Hand `state` to `on_led`. A bad LED callback never ends the
+    session, so this catches every error and logs it."""
+    if on_led is None:
+        return
+    try:
+        outcome = on_led(state)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        logger.warning("led callback failed for state %r", state, exc_info=True)
+
+
 async def run_session(
     url: str,
     token: str,
@@ -82,6 +95,7 @@ async def run_session(
     stop: "asyncio.Event | None" = None,
     connect: Callable[..., Any] = websockets.connect,
     hello_timeout_s: float = 10.0,
+    on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
 ) -> None:
     """One authenticated connection to `/ws/edge`: waits for the server's
     hello, then runs two concurrent loops -- sending whatever
@@ -92,10 +106,42 @@ async def run_session(
     `make_outbound` may yield `LiveFrame` items (sent as binary, then
     reported once each via `on_live_frame_sent(captured_at, sent_at)`) in
     addition to plain `bytes` and `str`, which are still sent as-is.
+
+    `on_led` receives the state of every `led` message the server sends.
+    It also receives `idle` at every session end (close, stop, error, or a
+    refused handshake), so the ring goes dark when the link ends.
     """
     validate_server_url(url, allow_plaintext)
     stop_event = stop if stop is not None else asyncio.Event()
 
+    try:
+        await _run_connection(
+            url,
+            token,
+            connect=connect,
+            hello_timeout_s=hello_timeout_s,
+            make_outbound=make_outbound,
+            on_reply_audio=on_reply_audio,
+            on_live_frame_sent=on_live_frame_sent,
+            stop_event=stop_event,
+            on_led=on_led,
+        )
+    finally:
+        await _notify_led(on_led, LED_IDLE)
+
+
+async def _run_connection(
+    url: str,
+    token: str,
+    *,
+    connect: Callable[..., Any],
+    hello_timeout_s: float,
+    make_outbound: Callable[[Hello], AsyncIterator["bytes | str | LiveFrame"]],
+    on_reply_audio: Callable[[bytes], "Awaitable[None] | None"],
+    on_live_frame_sent: "Callable[[float, float], Awaitable[None] | None] | None",
+    stop_event: asyncio.Event,
+    on_led: "Callable[[str], Awaitable[None] | None] | None",
+) -> None:
     async with connect(url, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         hello_text = await asyncio.wait_for(ws.recv(), timeout=hello_timeout_s)
         hello = parse_server_message(hello_text)
@@ -123,6 +169,8 @@ async def run_session(
                 parsed = parse_server_message(message)
                 if isinstance(parsed, Ping):
                     await ws.send(pong(parsed.id, parsed.server_t_ms))
+                elif isinstance(parsed, Led):
+                    await _notify_led(on_led, parsed.state)
 
         send_task = asyncio.ensure_future(_send_outbound())
         receive_task = asyncio.ensure_future(_receive_inbound())

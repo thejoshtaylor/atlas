@@ -211,6 +211,7 @@ async def test_one_spoken_command_from_a_pi_shaped_client_reaches_a_reply_on_the
 
         received_hello: list[Hello] = []
         received_reply = bytearray()
+        led_states: list[str] = []
         done = asyncio.Event()
 
         async def _make_outbound(hello: Hello):
@@ -234,6 +235,7 @@ async def test_one_spoken_command_from_a_pi_shaped_client_reaches_a_reply_on_the
                 on_reply_audio=_on_reply_audio,
                 allow_plaintext=True,
                 stop=done,
+                on_led=led_states.append,
             ),
             timeout=15.0,
         )
@@ -259,6 +261,11 @@ async def test_one_spoken_command_from_a_pi_shaped_client_reaches_a_reply_on_the
 
         # 4. The client's reply-audio callback received the FakeTts bytes.
         assert bytes(received_reply) == expected_reply
+
+        # 5. The real turn lit the ring in order, and the session end
+        # turned it off again.
+        assert led_states[:3] == ["listening", "thinking", "replying"]
+        assert led_states[-1] == "idle"
 
         # 6. A second connection with an unknown token fails at the
         # handshake -- `require_edge_device` refuses before `accept()` is

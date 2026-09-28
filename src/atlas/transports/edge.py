@@ -32,6 +32,12 @@ A connection from a *different* device while one is already active is
 refused with `CLOSE_BUSY` (4009) after accept, leaving the first
 connection completely untouched -- refusal is the new connection's own
 `serve()` returning immediately, never a cancellation of anything.
+
+**LED states.** The server sends `{"type": "led", "state": S}` so the Pi
+can light its ring. The ring stays dark until the wake word. `SourceRunner`
+sends `listening` at the wake hit and `idle` at the end of the turn.
+`send_event` sends `thinking` at the final transcript. `send_audio` sends
+`replying` before the first reply chunk. No LED problem ever breaks a turn.
 """
 
 from __future__ import annotations
@@ -64,6 +70,17 @@ MSG_VAD_START = "vad.start"
 MSG_VAD_END = "vad.end"
 MSG_DOA = "doa"
 MSG_LATENCY = "latency"
+# Server to Pi: the turn state the Pi shows on its LED ring.
+MSG_LED = "led"
+
+# The four states of the `led` message, in turn order. The ring is dark at
+# `idle`. `EdgeAudioSource.set_led_state` sends each one. The Pi restates
+# the same values in `edge/src/atlas_edge/protocol.py`.
+LED_IDLE = "idle"
+LED_LISTENING = "listening"
+LED_THINKING = "thinking"
+LED_REPLYING = "replying"
+LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING)
 
 # 16 ms of capture per frame at 16 kHz -- keeps Pi-side buffering well
 # under the project's latency budget and divides the 512-sample Silero
@@ -245,6 +262,14 @@ def parse_edge_event(text: str) -> dict[str, Any]:
     raise EdgeProtocolError(f"unsupported edge event type: {msg_type!r}")
 
 
+def build_led(state: str) -> str:
+    """The `led` message that tells the Pi which state to show on its
+    ring. Raises `ValueError` for a state outside `LED_STATES`."""
+    if state not in LED_STATES:
+        raise ValueError(f"unknown led state: {state!r}")
+    return json.dumps({"type": MSG_LED, "state": state})
+
+
 def build_hello(config: EdgeSourceConfig, device_id: int) -> str:
     """The one `hello` message `EdgeAudioSource.serve` sends once, right
     after accept -- carries the server's own measured `asr_channel`,
@@ -397,6 +422,10 @@ class EdgeAudioSource:
         # own saturation case.
         self._queue_saturation_warned = False
         self._send_audio_warned = False
+        # The last LED state this source recorded. It starts at idle. The
+        # Pi turns its ring off by itself at each connect.
+        self._led_state: str = LED_IDLE
+        self._led_send_warned = False
         # Per-connection ping/added-delay state (10-07-PLAN.md) -- reset at
         # the top of `serve()` every time a connection becomes the active
         # one, so a reconnect never carries a stale outstanding-ping id or
@@ -428,7 +457,13 @@ class EdgeAudioSource:
     async def send_audio(self, chunk: bytes) -> None:
         """Reply audio for an edge turn goes back on the same socket
         (D-14) -- dropped, with one warning per disconnected episode, when
-        no device is connected."""
+        no device is connected.
+
+        The first chunk after `thinking` moves the ring to `replying`,
+        before the bytes go out. The wake cue plays while the state is
+        `listening`, so it does not change the state."""
+        if self._led_state == LED_THINKING:
+            await self.set_led_state(LED_REPLYING)
         if self._websocket is None:
             if not self._send_audio_warned:
                 self._send_audio_warned = True
@@ -437,9 +472,36 @@ class EdgeAudioSource:
         await self._websocket.send_bytes(chunk)
 
     async def send_event(self, event: dict[str, Any]) -> None:
-        """No-op, like the camera's own `send_event` (`transports/
-        camera.py`): a Pi has nowhere to render a partial transcript."""
-        logger.debug("edge source send_event no-op: %s", event.get("type"))
+        """Nothing to render for most events, like the camera's own
+        `send_event` (`transports/camera.py`): a Pi has no screen for a
+        partial transcript. The final transcript is the boundary between
+        hearing and thinking, so it moves the ring to `thinking`."""
+        if event.get("type") == "transcript.final":
+            await self.set_led_state(LED_THINKING)
+        logger.debug("edge source send_event: %s", event.get("type"))
+
+    async def set_led_state(self, state: str) -> None:
+        """Tell the Pi to show `state` on its LED ring. Never raises,
+        except for cancellation. A repeat of the current state sends
+        nothing. With no device connected, the state is recorded and
+        nothing is sent. A send failure logs one warning per connection."""
+        if state not in LED_STATES:
+            logger.warning("edge source: unknown led state %r ignored", state)
+            return
+        if state == self._led_state:
+            return
+        self._led_state = state
+        websocket = self._websocket
+        if websocket is None:
+            return
+        try:
+            await websocket.send_text(build_led(state))
+        except Exception:
+            if not self._led_send_warned:
+                self._led_send_warned = True
+                logger.warning("edge source: could not send led state %r to the device", state, exc_info=True)
+            else:
+                logger.debug("edge source: could not send led state %r", state, exc_info=True)
 
     def source_format(self) -> SourceFormat:
         return SourceFormat(
@@ -508,6 +570,10 @@ class EdgeAudioSource:
         self._websocket = websocket
         self._connected_device_id = device.id
         self._send_audio_warned = False
+        # The Pi turns its ring off by itself at every connect and
+        # disconnect, so each connection starts at idle.
+        self._led_state = LED_IDLE
+        self._led_send_warned = False
         invalid_message_count = 0
         # 10-07-PLAN.md: fresh per connection -- a reconnect never inherits
         # a previous connection's own outstanding ping ids or delay figures.

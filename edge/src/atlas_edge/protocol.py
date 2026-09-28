@@ -22,6 +22,16 @@ MSG_VAD_START = "vad.start"
 MSG_VAD_END = "vad.end"
 MSG_DOA = "doa"
 MSG_LATENCY = "latency"
+# Server to Pi: the turn state to show on the LED ring.
+MSG_LED = "led"
+
+# The four LED states, in turn order. The server restates the same values
+# in `src/atlas/transports/edge.py`.
+LED_IDLE = "idle"
+LED_LISTENING = "listening"
+LED_THINKING = "thinking"
+LED_REPLYING = "replying"
+LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING)
 
 FRAME_SAMPLES = 256
 
@@ -56,9 +66,17 @@ class Ping:
     server_t_ms: int
 
 
-def parse_server_message(text: str) -> "Hello | Ping":
-    """Parse one text frame from the server -- `hello` or `ping`, the only
-    two message types the server ever sends. Raises `ProtocolError` for
+@dataclass(frozen=True)
+class Led:
+    """The turn state the server wants on the LED ring -- one of
+    `LED_STATES`."""
+
+    state: str
+
+
+def parse_server_message(text: str) -> "Hello | Ping | Led":
+    """Parse one text frame from the server -- `hello`, `ping`, or `led`,
+    the only three message types the server ever sends. Raises `ProtocolError` for
     anything else, including a `hello` naming a protocol version other
     than `PROTOCOL_VERSION` -- this Pi must never guess at a wire shape a
     version mismatch might have changed.
@@ -97,6 +115,12 @@ def parse_server_message(text: str) -> "Hello | Ping":
             return Ping(id=int(raw["id"]), server_t_ms=int(raw["server_t_ms"]))
         except (KeyError, TypeError, ValueError) as exc:
             raise ProtocolError(f"server ping is missing or malformed a required field: {raw!r}") from exc
+
+    if msg_type == MSG_LED:
+        state = raw.get("state")
+        if not isinstance(state, str) or state not in LED_STATES:
+            raise ProtocolError(f"server led message names an unknown state: {state!r}")
+        return Led(state=state)
 
     raise ProtocolError(f"unsupported server message type: {msg_type!r}")
 
