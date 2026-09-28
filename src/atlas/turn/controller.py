@@ -667,17 +667,19 @@ async def run_turn(
     # before this plan.
     speech_signals = getattr(source, "speech_signals", None)
 
-    # Plan 11-04 (D-09): opened here, off the *unwrapped* source (before
-    # `_RecordingAudioSource` wraps it below), the same reason `barge_in`/
-    # `follow_up`/`sink` are all read this early. This task only opens a
-    # span for a wake turn (`incoming is None`) -- Task 2 extends this to
-    # a follow-up turn's own window (D-11). `speaker_id is None`, or a
-    # context whose `tracker` is `None` (mode `"off"`), opens nothing:
-    # every camera and browser turn's own call passes no context at all
-    # (D-07).
+    # Plan 11-04 (D-09, D-11): opened here, off the *unwrapped* source
+    # (before `_RecordingAudioSource` wraps it below), the same reason
+    # `barge_in`/`follow_up`/`sink` are all read this early. A wake turn
+    # (`incoming is None`) opens an ordinary span; a follow-up turn passes
+    # `start_after=follow_up.window_opens_at` (D-11), so the readback's own
+    # echo tail never counts toward its speaker measurement. `speaker_id is
+    # None`, or a context whose `tracker` is `None` (mode `"off"`), opens
+    # nothing: every camera and browser turn's own call passes no context
+    # at all (D-07).
     speaker_span: "TurnSpeakerSpan | None" = None
-    if speaker_id is not None and speaker_id.tracker is not None and incoming is None:
-        speaker_span = speaker_id.tracker.open_turn()
+    if speaker_id is not None and speaker_id.tracker is not None:
+        start_after = follow_up.window_opens_at if incoming is not None and follow_up is not None else None
+        speaker_span = speaker_id.tracker.open_turn(start_after=start_after)
 
     # 10-07-PLAN.md (D-17): a Pi's own vad.start/vad.end/doa/latency events
     # land in this turn's session, prefixed `edge.`, for the turn's whole
@@ -801,38 +803,44 @@ async def run_turn(
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
 
-        # Plan 11-04 (D-09, D-13): decided here -- after the final
+        # Plan 11-04 (D-09, D-10, D-13): decided here -- after the final
         # transcript and after `barge_in.mark_transcript_done()`, before
         # any macro, local intent, confirmation branch, or brain call
-        # reads `final_text`. This task skips the whole gate when
-        # `speaker_id` is `None` or carries no tracker (mode `"off"`, or
-        # every camera/browser turn, D-07) -- Task 2 removes this skip so
-        # a mode-off/no-context turn records its own "not gated" result
-        # too.
-        if speaker_id is not None and speaker_id.tracker is not None:
-            speaker_outcome = await evaluate_turn_speaker(speaker_id, speaker_span, timings=timings)
-            if session_recorder is not None:
-                # D-13/D-15: the recorder only, never `_emit_event` -- a
-                # speaker's name never reaches the browser's `turn.timing`
-                # event contract.
-                session_recorder.record_event(speaker_outcome.event)
-            if not speaker_outcome.decision.allowed:
-                timings.turn_outcome = "unknown_speaker"
-                await _cancel_state_task(state_task)
-                await _cancel_state_task(pending_runs_task)
-                # D-15: the id and the score only -- never the name.
-                logger.info(
-                    "turn %s blocked: unknown speaker (score=%s, detail=%s)",
-                    timings.turn_id,
-                    speaker_outcome.event.get("score"),
-                    speaker_outcome.event.get("detail"),
-                )
-                # The first early return in this function with no `_speak`
-                # call at all, on purpose (D-09): no reply, no filler, for
-                # an unenrolled voice in enforce mode.
-                await _emit_event(source, timings.to_event())
-                timings.log()
-                return
+        # reads `final_text`. Called on EVERY turn (Task 2 removed Task 1's
+        # own skip) -- `evaluate_turn_speaker` itself handles `speaker_id
+        # is None` (detail "not_edge_source", D-07) and a context with no
+        # tracker (detail "speaker_id_off"), so a camera/browser turn and a
+        # mode-off turn both still record a `speaker.result` event, never
+        # a blocked outcome. A turn with no span (`speaker_span is None`)
+        # never blocks either way.
+        speaker_outcome = await evaluate_turn_speaker(speaker_id, speaker_span, timings=timings)
+        if session_recorder is not None:
+            # D-13/D-15: the recorder only, never `_emit_event` -- a
+            # speaker's name never reaches the browser's `turn.timing`
+            # event contract.
+            session_recorder.record_event(speaker_outcome.event)
+        if not speaker_outcome.decision.allowed:
+            timings.turn_outcome = "unknown_speaker"
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            # D-15: the id and the score only -- never the name.
+            logger.info(
+                "turn %s blocked: unknown speaker (score=%s, detail=%s)",
+                timings.turn_id,
+                speaker_outcome.event.get("score"),
+                speaker_outcome.event.get("detail"),
+            )
+            # The first early return in this function with no `_speak`
+            # call at all, on purpose (D-09): no reply, no filler, for
+            # an unenrolled voice in enforce mode. A blocked follow-up
+            # (D-11) leaves its stored pending action row exactly as it
+            # is -- this return happens before `handle_confirmation_reply`
+            # is ever reached below, so the row is never claimed, and it
+            # resolves on its own TTL like any other unanswered follow-up
+            # (D-15: the confirm-window code itself takes no speaker input).
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
 
         # A-CR-02: True for the turn that continues an `amended`
         # confirmation reply, and for every later turn in the same

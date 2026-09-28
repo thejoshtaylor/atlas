@@ -52,14 +52,19 @@ class SpeakerTurnOutcome:
     event: "dict[str, Any]"
 
 
-def _detail_for(decision: SpeakerGateDecision, measurement: "SpeakerMeasurement | None") -> "str | None":
+def _detail_for(
+    decision: SpeakerGateDecision, measurement: "SpeakerMeasurement | None", enrolled_count: int
+) -> "str | None":
     """Pick the one `detail` value the `speaker.result` event carries.
-    Checked in this order, first match wins: identified gives `None`, the
-    measurement's own detail (`"no_speech_measured"`/`"decision_timeout"`)
-    comes next, and `"below_threshold"` is the fallback for everything
-    else that was not identified."""
+    Checked in this order, first match wins: identified gives `None`, zero
+    enrolled members gives `"no_members_enrolled"`, the measurement's own
+    detail (`"no_speech_measured"`/`"decision_timeout"`) comes next, and
+    `"below_threshold"` is the fallback for everything else that was not
+    identified."""
     if decision.identified:
         return None
+    if enrolled_count == 0:
+        return "no_members_enrolled"
     if measurement is not None and measurement.detail is not None:
         return measurement.detail
     return "below_threshold"
@@ -99,21 +104,51 @@ def _build_event(
 
 
 async def evaluate_turn_speaker(
-    context: "SpeakerIdTurnContext",
-    span: "TurnSpeakerSpan",
+    context: "SpeakerIdTurnContext | None",
+    span: "TurnSpeakerSpan | None",
     *,
     timings: TurnTimings,
 ) -> SpeakerTurnOutcome:
-    """Decide one turn at `vad_end`, and build its `speaker.result` event.
+    """Decide one turn at `vad_end`, and build its `speaker.result` event --
+    called on EVERY turn (D-13 wants the result recorded even when nothing
+    gated), never only when a tracker exists.
 
-    `end_of_speech_at` prefers `timings.vad_end_at` (the Pi's own real
-    `vad.end`) and falls back to `timings.stt_final_at` for a span that
-    somehow has no `vad_end_at` recorded -- mirroring the same fallback
-    `turn/early_finalize.py` already establishes for a turn with no edge
-    source at all.
+    `context is None` (D-07: a camera or browser turn, which never passes
+    a context at all) and a context whose `tracker` is `None` (mode
+    `"off"`) both allow unconditionally and await nothing -- there is no
+    span to decide in either case. `end_of_speech_at` prefers
+    `timings.vad_end_at` (the Pi's own real `vad.end`) and falls back to
+    `timings.stt_final_at` for a turn that somehow has no `vad_end_at`
+    recorded -- mirroring the same fallback `turn/early_finalize.py`
+    already establishes for a turn with no edge source at all.
     """
+    if context is None:
+        decision = SpeakerGateDecision.allow(effective_mode="off", identified=False)
+        event = _build_event(
+            decision=decision, match=None, mode="off", model_id=None, detail="not_edge_source",
+            speech_ms=None, window_count=None, speaker_id_ms=None,
+        )
+        return SpeakerTurnOutcome(decision=decision, event=event)
+
+    if context.tracker is None:
+        decision = SpeakerGateDecision.allow(effective_mode="off", identified=False)
+        event = _build_event(
+            decision=decision, match=None, mode=context.mode, model_id=context.model_id,
+            detail="speaker_id_off", speech_ms=None, window_count=None, speaker_id_ms=None,
+        )
+        return SpeakerTurnOutcome(decision=decision, event=event)
+
     end_of_speech_at = timings.vad_end_at if timings.vad_end_at is not None else timings.stt_final_at
-    measurement = await span.decide(end_of_speech_at=end_of_speech_at, references=context.references)
+    if span is not None:
+        measurement = await span.decide(end_of_speech_at=end_of_speech_at, references=context.references)
+    else:
+        # A tracker exists but this turn opened no span -- `run_turn`
+        # always opens one whenever `speaker_id.tracker` is not `None`, so
+        # this is defensive, not a path a real turn reaches.
+        measurement = SpeakerMeasurement(
+            match=None, speech_ms=0.0, window_count=0, ready_at=None, speaker_id_ms=None,
+            detail="no_speech_measured",
+        )
 
     enrolled_count = context.references.enrolled_count if context.references is not None else 0
     best_score = measurement.match.best_score if measurement.match is not None else None
@@ -123,7 +158,7 @@ async def evaluate_turn_speaker(
         best_score=best_score,
         threshold=context.threshold,
     )
-    detail = _detail_for(decision, measurement)
+    detail = _detail_for(decision, measurement, enrolled_count)
     event = _build_event(
         decision=decision,
         match=measurement.match,
