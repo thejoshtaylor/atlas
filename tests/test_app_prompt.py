@@ -16,6 +16,8 @@ from datetime import datetime as _real_datetime
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import conftest
 
 import atlas.app as app_module
@@ -256,6 +258,65 @@ def test_catalog_prompt_carries_no_zone_and_no_time_instruction(monkeypatch):
     assert first == second
     assert "Say every time in" not in first
     assert "Europe/Berlin" not in first
+
+
+# --- 260928-lv9: timestamp entity states arrive in the resolved zone -----
+
+
+@pytest.mark.parametrize("raw", ["2026-09-29T14:00:00+00:00", "2026-09-29T14:00:00Z"])
+def test_aware_timestamp_state_is_converted_to_the_resolved_zone(monkeypatch, raw):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+
+    message = _state_message({"sensor.example_next_alarm": raw})
+
+    assert "- sensor.example_next_alarm: 2026-09-29T16:00:00+02:00" in message
+    assert "14:00:00+00:00" not in message
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["on", "42.0", "unavailable", "", "2026-09-29", "20260929", "2026-09-29T14:00:00"],
+)
+def test_other_state_values_pass_through_unchanged(monkeypatch, raw):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+
+    message = _state_message({"sensor.example_value": raw})
+
+    assert f"- sensor.example_value: {raw}\n" in message + "\n"
+
+
+def test_out_of_range_aware_state_stays_as_given_and_does_not_raise(monkeypatch):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+    raw = "0001-01-01T00:00:00+14:00"
+
+    message = _state_message({"sensor.example_edge": raw})
+
+    assert f"- sensor.example_edge: {raw}" in message
+
+
+def test_domain_filtered_state_block_converts_timestamps_too(monkeypatch):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+
+    message = _state_message(
+        {
+            "sensor.example_next_alarm": "2026-09-29T14:00:00+00:00",
+            "light.example_lamp": "on",
+        },
+        domains=frozenset({"sensor"}),
+    )
+
+    assert "- sensor.example_next_alarm: 2026-09-29T16:00:00+02:00" in message
+    assert "light.example_lamp" not in message
+
+
+def test_timestamp_state_converts_to_the_process_zone_when_unconfigured(monkeypatch):
+    monkeypatch.setattr(app_module, "_resolved_timezone", None)
+    raw = "2026-09-29T14:00:00+00:00"
+    expected = _real_datetime.fromisoformat(raw).astimezone(None).isoformat()
+
+    message = _state_message({"sensor.example_next_alarm": raw})
+
+    assert f"- sensor.example_next_alarm: {expected}" in message
 
 
 # --- Task 2 (plan 05-05): the pending-run block, D-09 --------------------
