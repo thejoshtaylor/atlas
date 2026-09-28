@@ -341,6 +341,12 @@ _STATE_UNAVAILABLE_LINE = (
     "current state. Read an entity with a tool before you answer about its "
     "state or act on a command that depends on it."
 )
+_SPEAK_TIMES_IN_ZONE_LINE = (
+    "Say every time in {zone}. When a tool result or a state below gives a "
+    "time in UTC or with a different offset or zone, change it to {zone} "
+    "before you say it. Use a different zone only when the user asks about "
+    "the time in a different place."
+)
 _PENDING_RUNS_UNAVAILABLE_LINE = (
     "Scheduled runs: not available this turn. You cannot see which runs "
     "are scheduled, so do not tell the user that there are none."
@@ -401,11 +407,19 @@ def _state_message(
     entity states here, in the same volatile message -- never the
     cacheable `_catalog_prompt`, for the identical reason live entity
     state never lives there either.
+
+    260928-lv9: the third line tells the model to say every time in the
+    resolved zone. Tool results and Home Assistant states carry UTC times,
+    and the model would read them out as given. The line lives here and not
+    in `_catalog_prompt` because it names the zone, and the zone is set per
+    deployment. The cacheable prefix must stay free of it.
     """
     now = _current_moment()
+    zone_name = _resolved_timezone_name()
     lines = [
         f"Current date: {now:%A, %B %d, %Y}",
-        f"Current time: {now:%H:%M} {_resolved_timezone_name()}",
+        f"Current time: {now:%H:%M} {zone_name}",
+        _SPEAK_TIMES_IN_ZONE_LINE.format(zone=zone_name),
     ]
     if states is None:
         lines.append(_STATE_UNAVAILABLE_LINE)
