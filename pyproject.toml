@@ -80,6 +80,21 @@ dependencies = [
     # 3.14. The replacement ships a py3-none-any wheel, no runtime
     # dependencies, MIT licensed, active releases through 2025-12-01.
     "mail-parser-reply>=1.36,<2",
+    # Human-approved 2026-09-28 (11-01-PLAN.md Task 1, gate=blocking-human,
+    # never auto-approved). Operator confirmed pypi.org/project/sherpa-onnx/1.13.8/
+    # and pypi.org/project/sherpa-onnx-core/1.13.8/ -- source reaches
+    # github.com/k2-fsa/sherpa-onnx, cp312 manylinux2014_x86_64/aarch64 wheels
+    # present for the server image. Licenses: CAM++ (3D-Speaker,
+    # github.com/modelscope/3D-Speaker) Apache-2.0; TitaNet-small (NVIDIA NeMo)
+    # CC-BY-4.0 (attribution required). This is a separate approval from
+    # edge/pyproject.toml's 2026-09-25 approval of the same two packages for the
+    # Pi image -- a different trust context, gated again (D-05).
+    "sherpa-onnx==1.13.8",
+    # sherpa-onnx-core is pinned by name because the Pi lock once dropped it
+    # when resolving from another platform's metadata (edge/pyproject.toml,
+    # 10-03 spike) -- same project, same version, no declared dependencies of
+    # its own.
+    "sherpa-onnx-core==1.13.8",
 ]
 
 [project.optional-dependencies]
