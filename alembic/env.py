@@ -23,6 +23,10 @@ from atlas.db import google_models  # noqa: F401
 # Phase 10 (plan 10-04): same reasoning -- makes `edge_devices` visible.
 from atlas.db import edge_models  # noqa: F401
 
+# Phase 11 (plan 11-03): same reasoning -- makes `speakers` and
+# `speaker_embeddings` visible.
+from atlas.db import speaker_models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
