@@ -270,3 +270,41 @@ async def test_a_hung_connection_refuses_within_the_fetch_timeout_instead_of_blo
         f"get_snapshot() took {elapsed:.2f}s against a 0.05s fetch_timeout_s -- "
         "the timeout is not actually bounding the hung recv()"
     )
+
+
+async def test_run_command_sends_one_command_and_returns_the_id_1_result():
+    ws = _FakeWs(
+        [
+            _AUTH_REQUIRED,
+            _AUTH_OK,
+            {"id": 7, "type": "result", "success": True, "result": "not this one"},
+            {"id": 1, "type": "result", "success": True, "result": {"children": []}},
+        ]
+    )
+    client = HaRegistryClient("ws://ha.invalid/api/websocket", "test-token", connect=_connect_returning(ws))
+
+    result = await client.run_command({"type": "media_player/browse_media", "entity_id": "x"})
+
+    assert result == {"children": []}
+    assert ws.sent[0] == {"type": "auth", "access_token": "test-token"}
+    assert ws.sent[1] == {"id": 1, "type": "media_player/browse_media", "entity_id": "x"}
+    assert len(ws.sent) == 2
+
+
+async def test_run_command_failure_raises_with_home_assistants_message():
+    ws = _FakeWs(
+        [
+            _AUTH_REQUIRED,
+            _AUTH_OK,
+            {
+                "id": 1,
+                "type": "result",
+                "success": False,
+                "error": {"code": "not_supported", "message": "entity does not support browsing"},
+            },
+        ]
+    )
+    client = HaRegistryClient("ws://ha.invalid/api/websocket", "test-token", connect=_connect_returning(ws))
+
+    with pytest.raises(RegistryUnavailableError, match="entity does not support browsing"):
+        await client.run_command({"type": "media_player/browse_media", "entity_id": "x"})

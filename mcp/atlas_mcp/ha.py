@@ -32,6 +32,7 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from atlas_mcp.registry import HaRegistryClient, RegistryError, UnknownRegistryTargetError, expand_target, ws_url_from_http
+from atlas_mcp.ha_spotify import handle_play_spotify_playlist
 from atlas_mcp.safety import Denied, Policy, allow_call, allow_read
 
 # `handle_call_service`'s three target kinds, in the order they are
@@ -316,6 +317,9 @@ async def ha_call_service(
 ) -> dict[str, Any]:
     """Run one Home Assistant service call against an allowed entity.
 
+    This cannot pass media ids, so a request to play a Spotify playlist uses
+    `ha_play_spotify_playlist` instead.
+
     `area_id`, `device_id`, and `label_id` are expanded to entity ids
     against Home Assistant's own area/device/label registry before the
     safety check runs (SAFE-03) -- an area target reaches every entity
@@ -337,10 +341,12 @@ async def ha_call_service(
     text from the caller, replacing it with a generic "Error executing
     tool" message (`mcp.server.mcpserver.tools.base`'s own docstring:
     "the exception's own text stays on the server"). `ToolError` is the
-    SDK's "a failure you anticipated" channel -- its message is exactly
-    what reaches `CallToolResult.content`, which is what makes a `Denied`
-    reason speakable rather than silently swallowed at the process
-    boundary this file's own module docstring describes.
+    SDK's "a failure you anticipated" channel -- its message reaches
+    `CallToolResult.content` behind the SDK's own "Error executing tool
+    <name>: " prefix, which the turn controller's `_spoken_error_text`
+    removes. That is what makes a `Denied` reason speakable rather than
+    silently swallowed at the process boundary this file's own module
+    docstring describes.
 
     The two halves compose, and the composition is the point: expansion
     above raises three *distinguishable* `Denied` reasons, and every one
@@ -365,6 +371,40 @@ async def ha_call_service(
             label_id=label_id,
             registry=_registry_client,
             transition=transition,
+        )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool()
+async def ha_play_spotify_playlist(
+    entity_id: str, name: str, source: str | None = None
+) -> dict[str, Any]:
+    """Play one of the Spotify account's own playlists on a Spotify media
+    player entity, found by its spoken name.
+
+    Use this for every request to play a playlist. `ha_call_service` cannot
+    play by name.
+
+    `name` is the playlist name as heard. It is matched loosely, so leave out
+    words like "playlist".
+
+    `source` is the Spotify speaker to play on. Give it only when the person
+    names one.
+
+    A refusal's reason is spoken to the person as it is written.
+    """
+    assert _http_client is not None, "ha_play_spotify_playlist invoked before startup"
+    try:
+        return await handle_play_spotify_playlist(
+            _policy,
+            _http_client,
+            _base_url,
+            _token,
+            _registry_client,
+            entity_id,
+            name,
+            source=source,
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc

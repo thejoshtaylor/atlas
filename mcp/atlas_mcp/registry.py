@@ -351,6 +351,49 @@ class HaRegistryClient:
             ) from exc
         return RegistrySnapshot.from_raw(raw, fetched_at=self._clock())
 
+    async def run_command(self, command: Mapping[str, Any]) -> Any:
+        """Send one WebSocket command and return its `result`.
+
+        It lives here because it reuses the one authenticated handshake
+        (`_authenticate`) and the injectable `connect` factory. It is
+        one-shot on purpose: it opens a new connection, sends the command
+        as message id 1, and closes. Nothing is cached, because a reply
+        such as a media browse answer goes stale at once. The whole
+        exchange is bounded by `fetch_timeout_s`, with the same exception
+        mapping as `_fetch_snapshot`. A command Home Assistant rejects
+        raises `RegistryUnavailableError` with Home Assistant's message.
+        """
+        command_type = str(command.get("type", ""))
+        try:
+            return await asyncio.wait_for(
+                self._connect_and_run(command), timeout=self._fetch_timeout_s
+            )
+        except RegistryError:
+            raise
+        except TimeoutError as exc:
+            raise RegistryUnavailableError(
+                f"home assistant did not answer {command_type} within "
+                f"{self._fetch_timeout_s:g}s"
+            ) from exc
+        except Exception as exc:
+            raise RegistryUnavailableError(f"could not reach home assistant: {exc}") from exc
+
+    async def _connect_and_run(self, command: Mapping[str, Any]) -> Any:
+        async with self._connect(self._ws_url) as ws:
+            await self._authenticate(ws)
+            await ws.send(json.dumps({"id": 1, **command}))
+            while True:
+                message = json.loads(await ws.recv())
+                if message.get("id") != 1:
+                    continue
+                if not message.get("success", False):
+                    error = message.get("error", {}) or {}
+                    raise RegistryUnavailableError(
+                        f"home assistant rejected {command.get('type')}: "
+                        f"{error.get('message', message)}"
+                    )
+                return message.get("result")
+
     async def _connect_and_fetch(self) -> dict[str, list[dict[str, Any]]]:
         """The connect-authenticate-fetch sequence `_fetch_snapshot` bounds
         with `asyncio.wait_for` (WR-01 fix) -- split out because
