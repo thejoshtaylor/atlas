@@ -1722,3 +1722,217 @@ def test_shipped_config_example_edge_values_match_the_dataclass_defaults(monkeyp
     assert config.edge.pre_roll_ms == defaults.pre_roll_ms
     assert config.edge.tail_ms == defaults.tail_ms
     assert config.edge.end_of_speech_hangover_ms == 0
+
+
+# --- Plan 11-01: the speaker_id: block (D-05, D-10) -----------------------
+
+
+def test_speaker_id_config_absent_block_defaults_to_off_with_every_measured_key_null():
+    """D-10: no `speaker_id:` block at all still gives a usable config,
+    mode "off", and every value the Phase 11 spike measures is null."""
+    from atlas.config import SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config(None)
+    assert config.mode == "off"
+    assert config.model is None
+    assert config.threshold is None
+    assert config.window_ms is None
+    assert config.speech_rms_floor is None
+    assert config.change_similarity_floor is None
+
+
+@pytest.mark.parametrize("mode", ["off", "record", "enforce"])
+def test_speaker_id_config_accepts_every_documented_mode(mode):
+    from atlas.config import SpeakerIdConfig
+
+    assert SpeakerIdConfig.from_config({"mode": mode}).mode == mode
+
+
+def test_speaker_id_config_refuses_an_unrecognized_mode():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerIdConfig.from_config({"mode": "sometimes"})
+    assert "off" in str(exc.value) and "record" in str(exc.value) and "enforce" in str(exc.value)
+
+
+def test_speaker_id_config_refuses_the_yaml_boolean_gotcha_for_mode():
+    """YAML 1.1 reads an unquoted `off` as a boolean -- if a caller ever
+    passes that through (a hand-edited config with the quotes stripped),
+    the error must say so by name, not just report a bad string."""
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerIdConfig.from_config({"mode": False})
+    assert "quote" in str(exc.value)
+
+
+@pytest.mark.parametrize("model", [None, "campplus", "titanet_small"])
+def test_speaker_id_config_accepts_every_documented_model(model):
+    from atlas.config import SpeakerIdConfig
+
+    assert SpeakerIdConfig.from_config({"model": model}).model == model
+
+
+def test_speaker_id_config_refuses_an_unrecognized_model():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"model": "some-other-model"})
+
+
+def test_speaker_id_config_model_path_and_model_id_are_none_until_a_model_is_set():
+    from atlas.config import SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config(None)
+    assert config.model_path is None
+    assert config.model_id is None
+
+
+def test_speaker_id_config_model_path_joins_model_dir_with_the_pinned_filename():
+    from atlas.config import SPEAKER_MODEL_FILES, SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config({"model": "campplus", "model_dir": "/models/speaker-id"})
+    assert config.model_path == "/models/speaker-id/" + SPEAKER_MODEL_FILES["campplus"]
+    assert config.model_id == "3dspeaker_speech_campplus_sv_en_voxceleb_16k"
+
+
+@pytest.mark.parametrize("threshold", [-1.0, 0.0, 1.0, 0.42])
+def test_speaker_id_config_accepts_thresholds_in_range(threshold):
+    from atlas.config import SpeakerIdConfig
+
+    assert SpeakerIdConfig.from_config({"threshold": threshold}).threshold == threshold
+
+
+@pytest.mark.parametrize("threshold", [-1.1, 1.1, float("nan"), float("inf"), "0.5", True])
+def test_speaker_id_config_refuses_a_threshold_out_of_bounds_or_the_wrong_type(threshold):
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"threshold": threshold})
+
+
+@pytest.mark.parametrize("window_ms", [500, 750, 1000])
+def test_speaker_id_config_accepts_window_ms_in_the_d09_range(window_ms):
+    from atlas.config import SpeakerIdConfig
+
+    assert SpeakerIdConfig.from_config({"window_ms": window_ms}).window_ms == window_ms
+
+
+@pytest.mark.parametrize("window_ms", [499, 1001, 0, -1, 750.5])
+def test_speaker_id_config_refuses_window_ms_outside_the_d09_range(window_ms):
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"window_ms": window_ms})
+
+
+def test_speaker_id_config_min_window_ms_must_be_less_than_window_ms_when_both_are_set():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"min_window_ms": 900, "window_ms": 500})
+
+    # No refusal when window_ms is still null -- the spike has not run yet.
+    config = SpeakerIdConfig.from_config({"min_window_ms": 900})
+    assert config.min_window_ms == 900
+
+
+def test_speaker_id_config_refuses_min_window_ms_below_100():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"min_window_ms": 99})
+
+
+@pytest.mark.parametrize("speech_rms_floor", [0.0, 0.5, 0.999])
+def test_speaker_id_config_accepts_speech_rms_floor_in_range(speech_rms_floor):
+    from atlas.config import SpeakerIdConfig
+
+    assert (
+        SpeakerIdConfig.from_config({"speech_rms_floor": speech_rms_floor}).speech_rms_floor
+        == speech_rms_floor
+    )
+
+
+@pytest.mark.parametrize("speech_rms_floor", [-0.01, 1.0, 1.5])
+def test_speaker_id_config_refuses_speech_rms_floor_out_of_range(speech_rms_floor):
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError):
+        SpeakerIdConfig.from_config({"speech_rms_floor": speech_rms_floor})
+
+
+@pytest.mark.parametrize("change_similarity_floor", [-1.0, 0.0, 1.0])
+def test_speaker_id_config_accepts_change_similarity_floor_in_range(change_similarity_floor):
+    from atlas.config import SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config({"change_similarity_floor": change_similarity_floor})
+    assert config.change_similarity_floor == change_similarity_floor
+
+
+def test_speaker_id_config_refuses_an_unknown_key():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    with pytest.raises(ConfigError) as exc:
+        SpeakerIdConfig.from_config({"not_a_real_key": 1})
+    assert "not_a_real_key" in str(exc.value)
+
+
+def test_speaker_id_config_require_measured_names_every_null_key():
+    from atlas.config import ConfigError, SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config(None)
+    with pytest.raises(ConfigError) as exc:
+        config.require_measured()
+    message = str(exc.value)
+    for name in ("model", "threshold", "window_ms", "speech_rms_floor", "change_similarity_floor"):
+        assert f"speaker_id.{name}" in message
+    assert "11-SPIKE.md" in message
+
+
+def test_speaker_id_config_require_measured_passes_once_every_key_is_set():
+    from atlas.config import SpeakerIdConfig
+
+    config = SpeakerIdConfig.from_config(
+        {
+            "model": "campplus",
+            "threshold": 0.5,
+            "window_ms": 700,
+            "speech_rms_floor": 0.02,
+            "change_similarity_floor": 0.3,
+        }
+    )
+    config.require_measured()  # must not raise
+
+
+def test_shipped_config_example_speaker_id_values_match_the_dataclass_defaults(monkeypatch):
+    """The shipped `config/config.example.yaml` and `SpeakerIdConfig()`'s
+    own dataclass defaults must never disagree (mirrors the edge.* test
+    above, D-10)."""
+    from pathlib import Path
+
+    from atlas.config import SpeakerIdConfig, load_config
+
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://atlas:test-value@db.invalid:5432/atlas")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://camera.invalid/stream")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "http://go2rtc.invalid/ensure")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+
+    example_path = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
+    config = load_config(example_path)
+
+    defaults = SpeakerIdConfig()
+    assert config.speaker_id.mode == defaults.mode
+    assert config.speaker_id.model == defaults.model
+    assert config.speaker_id.model_dir == defaults.model_dir
+    assert config.speaker_id.threshold == defaults.threshold
+    assert config.speaker_id.window_ms == defaults.window_ms
+    assert config.speaker_id.min_window_ms == defaults.min_window_ms
+    assert config.speaker_id.speech_rms_floor == defaults.speech_rms_floor
+    assert config.speaker_id.change_similarity_floor == defaults.change_similarity_floor
+    assert config.speaker_id.enrollment_dir == defaults.enrollment_dir

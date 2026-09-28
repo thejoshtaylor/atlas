@@ -23,7 +23,7 @@ fetch_models = importlib.util.module_from_spec(_spec)
 sys.modules["fetch_models"] = fetch_models
 _spec.loader.exec_module(fetch_models)
 
-from atlas.config import SttConfig, TtsConfig
+from atlas.config import SPEAKER_MODEL_FILES, SpeakerIdConfig, SttConfig, TtsConfig
 
 
 def _model_file(dest: Path, url: str = "https://example.invalid/f") -> "fetch_models.ModelFile":
@@ -279,6 +279,8 @@ stt:
 tts:
   piper_voice_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx'}"
   piper_config_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx.json'}"
+speaker_id:
+  model_dir: "{models_root / 'speaker-id'}"
 brain:
   models:
     - model: "fake-model"
@@ -295,7 +297,10 @@ database:
 
     # Every URL `plan_fetches` derives, pinned to the fake bytes
     # `_download` writes -- `main` refuses an unpinned URL, which is the
-    # whole point of WR-05's fix.
+    # whole point of WR-05's fix. `main` always plans the speaker-id files
+    # too (--only defaults to "all"), so this test's own `plan_fetches`
+    # call must pass the same `speaker_id_config` to pin every URL `main`
+    # will actually request.
     _root, planned = fetch_models.plan_fetches(
         SttConfig(
             local_model_dir=str(models_root / "faster-whisper"), local_model_size="small"
@@ -304,6 +309,7 @@ database:
             piper_voice_path=str(models_root / "piper" / "en_US-lessac-medium.onnx"),
             piper_config_path=str(models_root / "piper" / "en_US-lessac-medium.onnx.json"),
         ),
+        speaker_id_config=SpeakerIdConfig(model_dir=str(models_root / "speaker-id")),
     )
     fake_pins = {f.url: hashlib.sha256(b"fake model bytes").hexdigest() for f in planned}
 
@@ -389,9 +395,9 @@ def test_bytes_that_do_not_match_the_pinned_digest_are_deleted_not_kept(tmp_path
 
 def test_every_url_the_shipped_configuration_plans_carries_a_pinned_digest():
     """The pin table and the plan cannot drift: whatever
-    `config.example.yaml`'s own `stt.*`/`tts.*` values make this script
-    fetch must be a URL the table covers, or the shipped configuration
-    itself would be unfetchable."""
+    `config.example.yaml`'s own `stt.*`/`tts.*`/`speaker_id.*` values make
+    this script fetch must be a URL the table covers, or the shipped
+    configuration itself would be unfetchable."""
     import yaml
 
     # Parsed directly rather than through `load_config`, which would
@@ -405,12 +411,181 @@ def test_every_url_the_shipped_configuration_plans_carries_a_pinned_digest():
     )
     tts_raw = {k: v for k, v in raw["tts"].items() if k not in ("codec", "sample_rate")}
     _root, planned = fetch_models.plan_fetches(
-        SttConfig.from_config(raw["stt"]), TtsConfig.from_config(tts_raw)
+        SttConfig.from_config(raw["stt"]),
+        TtsConfig.from_config(tts_raw),
+        speaker_id_config=SpeakerIdConfig.from_config(raw["speaker_id"]),
     )
 
     assert planned
     for model_file in planned:
         assert fetch_models.pinned_sha256(model_file.url), model_file.url
+
+
+# --- Plan 11-01: speaker-id model files (D-05) --------------------------
+
+
+def test_plan_fetches_adds_one_speaker_id_file_per_entry_in_speaker_model_files(tmp_path):
+    stt_config = SttConfig(local_model_dir=str(tmp_path / "models" / "faster-whisper"))
+    tts_config = TtsConfig(
+        piper_voice_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx.json"),
+    )
+    speaker_id_config = SpeakerIdConfig(model_dir=str(tmp_path / "models" / "speaker-id"))
+
+    _root, planned = fetch_models.plan_fetches(
+        stt_config, tts_config, speaker_id_config=speaker_id_config
+    )
+
+    speaker_files = [f for f in planned if f.label.startswith("speaker-id/")]
+    assert len(speaker_files) == len(SPEAKER_MODEL_FILES)
+    dests = {f.dest for f in speaker_files}
+    for filename in SPEAKER_MODEL_FILES.values():
+        assert tmp_path / "models" / "speaker-id" / filename in dests
+    for model_file in speaker_files:
+        assert model_file.url.startswith(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
+        )
+
+
+def test_plan_fetches_omits_speaker_id_files_when_no_speaker_id_config_is_given(tmp_path):
+    stt_config = SttConfig(local_model_dir=str(tmp_path / "models" / "faster-whisper"))
+    tts_config = TtsConfig(
+        piper_voice_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(tmp_path / "models" / "piper" / "en_US-lessac-medium.onnx.json"),
+    )
+
+    _root, planned = fetch_models.plan_fetches(stt_config, tts_config)
+
+    assert not [f for f in planned if f.label.startswith("speaker-id/")]
+
+
+def test_a_speaker_id_destination_outside_the_given_root_is_refused(tmp_path):
+    models_root = tmp_path / "models"
+    models_root.mkdir()
+    stt_config = SttConfig(local_model_dir=str(models_root / "faster-whisper"))
+    tts_config = TtsConfig(
+        piper_voice_path=str(models_root / "piper" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(models_root / "piper" / "en_US-lessac-medium.onnx.json"),
+    )
+    speaker_id_config = SpeakerIdConfig(model_dir=str(tmp_path / "elsewhere" / "speaker-id"))
+
+    _root, planned = fetch_models.plan_fetches(
+        stt_config, tts_config, models_root, speaker_id_config=speaker_id_config
+    )
+    escaping = next(f for f in planned if f.label.startswith("speaker-id/"))
+
+    with pytest.raises(fetch_models.FetchError):
+        fetch_models.resolve_under_root(models_root, escaping.dest)
+
+
+def test_both_speaker_id_urls_carry_a_pinned_sha256():
+    for filename in SPEAKER_MODEL_FILES.values():
+        url = fetch_models._SPEAKER_MODEL_URL_TEMPLATE.format(filename=filename)
+        assert fetch_models.pinned_sha256(url), url
+
+
+def test_only_speaker_id_plans_just_the_two_speaker_files(tmp_path, capsys):
+    models_root = tmp_path / "models"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+stt:
+  local_model_dir: "{models_root / 'faster-whisper'}"
+tts:
+  piper_voice_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx'}"
+  piper_config_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx.json'}"
+speaker_id:
+  model_dir: "{models_root / 'speaker-id'}"
+brain:
+  models:
+    - model: "fake-model"
+database:
+  url: "postgresql+asyncpg://u:p@localhost/db"
+""",
+        encoding="utf-8",
+    )
+
+    def _download(url, part_path):
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(b"fake model bytes")
+        return fetch_models.DownloadReceipt(declared_size=len(b"fake model bytes"), declared_sha256=None)
+
+    fake_pins = {
+        fetch_models._SPEAKER_MODEL_URL_TEMPLATE.format(filename=filename): hashlib.sha256(
+            b"fake model bytes"
+        ).hexdigest()
+        for filename in SPEAKER_MODEL_FILES.values()
+    }
+
+    exit_code = fetch_models.main(
+        ["--config", str(config_path), "--model-root", str(models_root), "--only", "speaker-id"],
+        download=_download,
+        pinned=fake_pins,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == len(SPEAKER_MODEL_FILES)
+    assert all("speaker-id/" in line for line in lines)
+
+
+def test_only_local_providers_excludes_speaker_id_files(tmp_path, capsys):
+    models_root = tmp_path / "models"
+    (models_root / "piper").mkdir(parents=True)
+    (models_root / "piper" / "en_US-lessac-medium.onnx.json").write_bytes(b"{}")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+stt:
+  local_model_dir: "{models_root / 'faster-whisper'}"
+  local_model_size: "small"
+tts:
+  piper_voice_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx'}"
+  piper_config_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx.json'}"
+speaker_id:
+  model_dir: "{models_root / 'speaker-id'}"
+brain:
+  models:
+    - model: "fake-model"
+database:
+  url: "postgresql+asyncpg://u:p@localhost/db"
+""",
+        encoding="utf-8",
+    )
+
+    def _download(url, part_path):
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(b"fake model bytes")
+        return fetch_models.DownloadReceipt(declared_size=len(b"fake model bytes"), declared_sha256=None)
+
+    _root, planned = fetch_models.plan_fetches(
+        SttConfig(local_model_dir=str(models_root / "faster-whisper"), local_model_size="small"),
+        TtsConfig(
+            piper_voice_path=str(models_root / "piper" / "en_US-lessac-medium.onnx"),
+            piper_config_path=str(models_root / "piper" / "en_US-lessac-medium.onnx.json"),
+        ),
+    )
+    fake_pins = {f.url: hashlib.sha256(b"fake model bytes").hexdigest() for f in planned}
+
+    exit_code = fetch_models.main(
+        [
+            "--config",
+            str(config_path),
+            "--model-root",
+            str(models_root),
+            "--only",
+            "local-providers",
+        ],
+        download=_download,
+        pinned=fake_pins,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "speaker-id/" not in out
+    assert "faster-whisper/" in out
+    assert "piper/" in out
 
 
 def test_the_pinned_sizes_are_the_two_the_project_actually_names():
@@ -571,6 +746,7 @@ def test_the_default_model_root_is_the_mount_point_both_deployments_use():
         SttConfig.from_config(raw["stt"]),
         TtsConfig.from_config(tts_raw),
         fetch_models._DEFAULT_MODEL_ROOT,
+        speaker_id_config=SpeakerIdConfig.from_config(raw["speaker_id"]),
     )
     for model_file in planned:
         fetch_models.resolve_under_root(fetch_models._DEFAULT_MODEL_ROOT, model_file.dest)

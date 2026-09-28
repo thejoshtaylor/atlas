@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Provisions every model file the local provider set (PROV-06, D-09) needs
-into the configured `/models` root: the faster-whisper speech-to-text model
-directory, and the Piper voice plus its configuration file.
+"""Provisions every model file the local provider set (PROV-06, D-09) needs,
+plus both Phase 11 speaker-embedding candidates (D-05), into the configured
+`/models` root: the faster-whisper speech-to-text model directory, the
+Piper voice plus its configuration file, and the CAM++ and TitaNet-small
+speaker embedding models.
 
 D-11 is this script's whole reason to exist as a separate, operator-run
 step: nothing in the application ever downloads a model at boot. An
@@ -65,7 +67,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
-from atlas.config import ConfigError, load_config
+from atlas.config import SPEAKER_MODEL_FILES, ConfigError, load_config
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"
@@ -79,6 +81,16 @@ _FASTER_WHISPER_FILES: "tuple[str, ...]" = ("config.json", "model.bin", "tokeniz
 _FASTER_WHISPER_URL_TEMPLATE = "https://huggingface.co/Systran/faster-whisper-{size}/resolve/main/{filename}"
 
 _PIPER_VOICES_URL_TEMPLATE = "https://huggingface.co/rhasspy/piper-voices/resolve/main/{path}"
+
+# Both Phase 11 D-05 spike candidates, from the same GitHub Releases tag
+# (`speaker-recongition-models` -- that exact spelling, confirmed against
+# the live release this session, 11-01-PLAN.md's `<interfaces>`). Fetched
+# unconditionally by filename from `atlas.config.SPEAKER_MODEL_FILES`, never
+# gated on which one `speaker_id.model` currently selects -- the spike
+# needs both on disk to compare them.
+_SPEAKER_MODEL_URL_TEMPLATE = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/{filename}"
+)
 
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _REQUEST_TIMEOUT_S = 120.0
@@ -130,6 +142,16 @@ _PINNED_SHA256: "dict[str, str]" = {
         "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
     "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json":
         "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0",
+    # k2-fsa/sherpa-onnx, release tag speaker-recongition-models (Phase 11,
+    # D-05). GitHub's Releases API publishes no `digest` field for these
+    # assets, so both digests here were computed from the bytes the release
+    # actually served, 2026-09-28 (11-01-PLAN.md Task 2) -- the same
+    # provenance this file's own header already states for its non-LFS
+    # entries above.
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx":
+        "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx":
+        "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
 }
 
 
@@ -365,7 +387,11 @@ def _piper_voice_hub_path(filename: str) -> str:
 
 
 def plan_fetches(
-    stt_config: "Any", tts_config: "Any", model_root: "Path | None" = None
+    stt_config: "Any",
+    tts_config: "Any",
+    model_root: "Path | None" = None,
+    *,
+    speaker_id_config: "Any | None" = None,
 ) -> "tuple[Path, list[ModelFile]]":
     """Every model file the local provider set needs, and the root every
     destination must resolve under. The destinations come from
@@ -377,6 +403,16 @@ def plan_fetches(
     signature is what lets Task 2's own tests build just the two small
     dataclasses a fake source needs, with no dependency on every other
     config section's own required fields.
+
+    `speaker_id_config` (Phase 11, D-05) is optional and keyword-only,
+    added alongside the original two rather than folded into a growing
+    positional list: omitted (the default), this function's behavior is
+    byte-for-byte what it was before Phase 11 -- no speaker files planned,
+    no speaker directory in the derived-root fallback below. Given, one
+    `ModelFile` is planned per `atlas.config.SPEAKER_MODEL_FILES` entry,
+    at `speaker_id_config.model_dir`, regardless of which model
+    `speaker_id.model` currently selects -- the D-05 spike needs both on
+    disk to compare them.
 
     IN-03 (code review): `model_root` is a parameter. Given, it is an
     independent reference, and a configured destination that escapes it
@@ -391,11 +427,13 @@ def plan_fetches(
     stt_dir = Path(stt_config.local_model_dir)
     piper_voice_path = Path(tts_config.piper_voice_path)
     piper_config_path = Path(tts_config.piper_config_path)
+    speaker_id_dir = Path(speaker_id_config.model_dir) if speaker_id_config is not None else None
 
     if model_root is None:
-        model_root = Path(
-            os.path.commonpath([str(stt_dir), str(piper_voice_path.parent), str(piper_config_path.parent)])
-        )
+        commonpath_inputs = [str(stt_dir), str(piper_voice_path.parent), str(piper_config_path.parent)]
+        if speaker_id_dir is not None:
+            commonpath_inputs.append(str(speaker_id_dir))
+        model_root = Path(os.path.commonpath(commonpath_inputs))
 
     faster_whisper_files = [
         ModelFile(
@@ -417,7 +455,19 @@ def plan_fetches(
             dest=piper_config_path,
         ),
     ]
-    return model_root, [*faster_whisper_files, *piper_files]
+    speaker_id_files = (
+        [
+            ModelFile(
+                label=f"speaker-id/{filename}",
+                url=_SPEAKER_MODEL_URL_TEMPLATE.format(filename=filename),
+                dest=speaker_id_dir / filename,
+            )
+            for filename in SPEAKER_MODEL_FILES.values()
+        ]
+        if speaker_id_dir is not None
+        else []
+    )
+    return model_root, [*faster_whisper_files, *piper_files, *speaker_id_files]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -445,6 +495,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "which cannot refuse any of them"
         ),
     )
+    parser.add_argument(
+        "--only",
+        choices=("all", "local-providers", "speaker-id"),
+        default="all",
+        help=(
+            "which file set to plan (default: all). 'local-providers' plans only the "
+            "faster-whisper and Piper files the local STT/TTS provider set needs; "
+            "'speaker-id' plans only the two Phase 11 speaker-embedding models (D-05)"
+        ),
+    )
     return parser
 
 
@@ -465,7 +525,13 @@ def main(
 
     try:
         requested_root = Path(args.model_root) if args.model_root else None
-        model_root, model_files = plan_fetches(config.stt, config.tts, requested_root)
+        model_root, model_files = plan_fetches(
+            config.stt, config.tts, requested_root, speaker_id_config=config.speaker_id
+        )
+        if args.only == "local-providers":
+            model_files = [f for f in model_files if not f.label.startswith("speaker-id/")]
+        elif args.only == "speaker-id":
+            model_files = [f for f in model_files if f.label.startswith("speaker-id/")]
         results = fetch_all(model_files, model_root, download, pinned)
     # WR-06 (code review): `FetchError` alone left every failure the real
     # download path can actually produce as a raw traceback --

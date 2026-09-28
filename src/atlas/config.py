@@ -27,6 +27,7 @@ import math
 import os
 import re
 from dataclasses import MISSING, dataclass, field, fields, replace
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -862,6 +863,288 @@ class SpeakerConfig:
             tcp_url=tcp_url,
             tail_pad_s=tail_pad_s,
             tail_pad_idle_s=tail_pad_idle_s,
+        )
+
+
+# The two D-05 spike candidates, keyed by the short name `speaker_id.model`
+# names -- `fetch_models.py` reads this mapping directly rather than a
+# second, restated file-name list, so the two can never drift apart. Both
+# filenames and sizes came from the GitHub Releases API this session
+# (11-01-PLAN.md's `<interfaces>`), not training memory.
+SPEAKER_MODEL_FILES: "dict[str, str]" = {
+    "campplus": "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+    "titanet_small": "nemo_en_titanet_small.onnx",
+}
+
+
+@dataclass(frozen=True)
+class SpeakerIdConfig:
+    """The `speaker_id:` block: streaming speaker identification on the
+    edge source (Phase 11, D-05 through D-12).
+
+    `mode` defaults to `"off"` (D-10): a new install has nobody enrolled,
+    so gating every turn on an empty speaker table would silently block
+    the whole house. `"record"` runs the embedding pipeline and logs the
+    match without gating; `"enforce"` gates, but `app.py`'s own startup
+    check degrades an `"enforce"` with zero enrolled members to `"record"`
+    with a warning (D-10) -- this dataclass only validates the three
+    literal values, it does not know how many members are enrolled.
+
+    `model`, `threshold`, `window_ms`, `speech_rms_floor`, and
+    `change_similarity_floor` all default to `None` -- not a guessed
+    number -- until the Phase 11 spike (`11-SPIKE.md`) measures them on
+    real house recordings and plan 11-12 writes the winners here as
+    shipped defaults, the same `require_measured()` discipline
+    `EdgeSourceConfig` above already established for the D-18 spike. An
+    explicit `null` in configuration still means "not measured," the same
+    way `EdgeSourceConfig.asr_channel: null` does.
+
+    `model_dir` (D-03) is where `scripts/fetch_models.py --only speaker-id`
+    downloads both candidate models -- `model_path`/`model_id` join it with
+    `SPEAKER_MODEL_FILES[model]`, never a second restated path.
+
+    `min_window_ms` (250) is Claude's Discretion (11-CONTEXT.md): the
+    shortest accumulated-speech window the streaming accumulator will ever
+    embed, below D-09's 0.5-1s target cadence -- a real window is expected
+    to reach `window_ms` once the spike sets it; this floor only matters
+    for a segment that ends early.
+
+    `enrollment_dir` (D-03) holds the enrollment audio clips, under the
+    same gitignored `/data` root as everything else this codebase never
+    commits (`tests/test_repo_hygiene.py`). `enrollment_gap_ms`,
+    `enrollment_start_timeout_s`, `enrollment_max_phrase_s`, and
+    `min_enrollment_speech_ms` shape the admin enrollment flow (D-02): how
+    long a pause between prompted phrases before the recorder considers
+    one phrase finished, how long the admin has to start speaking before a
+    prompt times out, the longest one phrase's clip may run, and the
+    least accumulated speech one phrase's clip must carry to be usable.
+    """
+
+    mode: str = "off"
+    model: "str | None" = None
+    model_dir: str = "/models/speaker-id"
+    threshold: "float | None" = None
+    window_ms: "int | None" = None
+    min_window_ms: int = 250
+    speech_rms_floor: "float | None" = None
+    change_similarity_floor: "float | None" = None
+    enrollment_dir: str = "/data/speakers"
+    enrollment_gap_ms: int = 800
+    enrollment_start_timeout_s: float = 15.0
+    enrollment_max_phrase_s: float = 10.0
+    min_enrollment_speech_ms: int = 1000
+
+    _MODES = ("off", "record", "enforce")
+
+    @property
+    def model_path(self) -> "str | None":
+        if self.model is None:
+            return None
+        return str(Path(self.model_dir) / SPEAKER_MODEL_FILES[self.model])
+
+    @property
+    def model_id(self) -> "str | None":
+        if self.model is None:
+            return None
+        filename = SPEAKER_MODEL_FILES[self.model]
+        return filename[: -len(".onnx")] if filename.endswith(".onnx") else filename
+
+    def require_measured(self) -> None:
+        """Raise `ConfigError` naming every field the Phase 11 spike has
+        not yet measured -- mirrors `EdgeSourceConfig.require_measured()`
+        exactly, for the same reason: a caller that needs the tuned values
+        (the live gate, the matching code) should stop by name rather than
+        run against a guessed threshold or window."""
+        missing = [
+            name
+            for name, value in (
+                ("model", self.model),
+                ("threshold", self.threshold),
+                ("window_ms", self.window_ms),
+                ("speech_rms_floor", self.speech_rms_floor),
+                ("change_similarity_floor", self.change_similarity_floor),
+            )
+            if value is None
+        ]
+        if missing:
+            raise ConfigError(
+                f"speaker_id.{', speaker_id.'.join(missing)} must be set before speaker "
+                "identification can run -- these are measured by the Phase 11 spike "
+                "(11-SPIKE.md) and written by plan 11-12, not guessed at"
+            )
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "SpeakerIdConfig":
+        raw = raw or {}
+        known = {
+            "mode",
+            "model",
+            "model_dir",
+            "threshold",
+            "window_ms",
+            "min_window_ms",
+            "speech_rms_floor",
+            "change_similarity_floor",
+            "enrollment_dir",
+            "enrollment_gap_ms",
+            "enrollment_start_timeout_s",
+            "enrollment_max_phrase_s",
+            "min_enrollment_speech_ms",
+        }
+        for key in raw:
+            if key not in known:
+                raise ConfigError(
+                    f"speaker_id.{key} is not a recognized key -- expected one of "
+                    f"{sorted(known)!r}"
+                )
+
+        mode = raw.get("mode", cls.mode)
+        if isinstance(mode, bool):
+            # YAML 1.1's resolver reads an unquoted `off`/`on`/`yes`/`no` as
+            # a boolean, not the string this field means -- the shipped
+            # config.example.yaml quotes `"off"` for exactly this reason.
+            raise ConfigError(
+                f"speaker_id.mode must be one of {cls._MODES!r}, got the boolean {mode!r} -- "
+                'if this came from YAML, quote the value (e.g. mode: "off"), since an '
+                "unquoted off/on/yes/no parses as a boolean, not this field's string"
+            )
+        if mode not in cls._MODES:
+            raise ConfigError(
+                f"speaker_id.mode must be one of {cls._MODES!r}, got {mode!r}"
+            )
+
+        model = raw.get("model", cls.model)
+        if model is not None and model not in SPEAKER_MODEL_FILES:
+            raise ConfigError(
+                f"speaker_id.model must be null or one of {sorted(SPEAKER_MODEL_FILES)!r}, "
+                f"got {model!r}"
+            )
+
+        model_dir = raw.get("model_dir", cls.model_dir)
+        if not isinstance(model_dir, str) or not model_dir:
+            raise ConfigError(f"speaker_id.model_dir must be a non-empty string, got {model_dir!r}")
+
+        threshold = raw.get("threshold", cls.threshold)
+        if threshold is not None:
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not (
+                math.isfinite(threshold) and -1.0 <= threshold <= 1.0
+            ):
+                raise ConfigError(
+                    f"speaker_id.threshold must be null or a finite number in [-1.0, 1.0], "
+                    f"got {threshold!r}"
+                )
+            threshold = float(threshold)
+
+        window_ms = raw.get("window_ms", cls.window_ms)
+        if window_ms is not None:
+            if isinstance(window_ms, bool) or not isinstance(window_ms, int) or not (
+                500 <= window_ms <= 1000
+            ):
+                raise ConfigError(
+                    f"speaker_id.window_ms must be null or an integer in [500, 1000] (D-09), "
+                    f"got {window_ms!r}"
+                )
+
+        min_window_ms = raw.get("min_window_ms", cls.min_window_ms)
+        if isinstance(min_window_ms, bool) or not isinstance(min_window_ms, int) or min_window_ms < 100:
+            raise ConfigError(
+                f"speaker_id.min_window_ms must be an integer of 100 or more, got "
+                f"{min_window_ms!r}"
+            )
+        if window_ms is not None and min_window_ms >= window_ms:
+            raise ConfigError(
+                f"speaker_id.min_window_ms ({min_window_ms!r}) must be less than "
+                f"speaker_id.window_ms ({window_ms!r})"
+            )
+
+        speech_rms_floor = raw.get("speech_rms_floor", cls.speech_rms_floor)
+        if speech_rms_floor is not None:
+            if isinstance(speech_rms_floor, bool) or not isinstance(speech_rms_floor, (int, float)) or not (
+                0.0 <= speech_rms_floor < 1.0
+            ):
+                raise ConfigError(
+                    f"speaker_id.speech_rms_floor must be null or a number in [0.0, 1.0), "
+                    f"got {speech_rms_floor!r}"
+                )
+            speech_rms_floor = float(speech_rms_floor)
+
+        change_similarity_floor = raw.get("change_similarity_floor", cls.change_similarity_floor)
+        if change_similarity_floor is not None:
+            if (
+                isinstance(change_similarity_floor, bool)
+                or not isinstance(change_similarity_floor, (int, float))
+                or not (math.isfinite(change_similarity_floor) and -1.0 <= change_similarity_floor <= 1.0)
+            ):
+                raise ConfigError(
+                    f"speaker_id.change_similarity_floor must be null or a finite number in "
+                    f"[-1.0, 1.0], got {change_similarity_floor!r}"
+                )
+            change_similarity_floor = float(change_similarity_floor)
+
+        enrollment_dir = raw.get("enrollment_dir", cls.enrollment_dir)
+        if not isinstance(enrollment_dir, str) or not enrollment_dir:
+            raise ConfigError(
+                f"speaker_id.enrollment_dir must be a non-empty string, got {enrollment_dir!r}"
+            )
+
+        enrollment_gap_ms = raw.get("enrollment_gap_ms", cls.enrollment_gap_ms)
+        if isinstance(enrollment_gap_ms, bool) or not isinstance(enrollment_gap_ms, int) or enrollment_gap_ms <= 0:
+            raise ConfigError(
+                f"speaker_id.enrollment_gap_ms must be a positive integer, got "
+                f"{enrollment_gap_ms!r}"
+            )
+
+        enrollment_start_timeout_s = raw.get(
+            "enrollment_start_timeout_s", cls.enrollment_start_timeout_s
+        )
+        if (
+            isinstance(enrollment_start_timeout_s, bool)
+            or not isinstance(enrollment_start_timeout_s, (int, float))
+            or enrollment_start_timeout_s <= 0
+        ):
+            raise ConfigError(
+                f"speaker_id.enrollment_start_timeout_s must be a positive number, got "
+                f"{enrollment_start_timeout_s!r}"
+            )
+
+        enrollment_max_phrase_s = raw.get("enrollment_max_phrase_s", cls.enrollment_max_phrase_s)
+        if (
+            isinstance(enrollment_max_phrase_s, bool)
+            or not isinstance(enrollment_max_phrase_s, (int, float))
+            or enrollment_max_phrase_s <= 0
+        ):
+            raise ConfigError(
+                f"speaker_id.enrollment_max_phrase_s must be a positive number, got "
+                f"{enrollment_max_phrase_s!r}"
+            )
+
+        min_enrollment_speech_ms = raw.get(
+            "min_enrollment_speech_ms", cls.min_enrollment_speech_ms
+        )
+        if (
+            isinstance(min_enrollment_speech_ms, bool)
+            or not isinstance(min_enrollment_speech_ms, int)
+            or min_enrollment_speech_ms <= 0
+        ):
+            raise ConfigError(
+                f"speaker_id.min_enrollment_speech_ms must be a positive integer, got "
+                f"{min_enrollment_speech_ms!r}"
+            )
+
+        return cls(
+            mode=mode,
+            model=model,
+            model_dir=model_dir,
+            threshold=threshold,
+            window_ms=window_ms,
+            min_window_ms=min_window_ms,
+            speech_rms_floor=speech_rms_floor,
+            change_similarity_floor=change_similarity_floor,
+            enrollment_dir=enrollment_dir,
+            enrollment_gap_ms=int(enrollment_gap_ms),
+            enrollment_start_timeout_s=float(enrollment_start_timeout_s),
+            enrollment_max_phrase_s=float(enrollment_max_phrase_s),
+            min_enrollment_speech_ms=int(min_enrollment_speech_ms),
         )
 
 
@@ -1913,6 +2196,7 @@ class Config:
     camera: CameraConfig
     edge: EdgeSourceConfig
     speaker: SpeakerConfig
+    speaker_id: SpeakerIdConfig
     wake: WakeConfig
     gate: GateConfig
     barge_in: BargeInConfig
@@ -1954,6 +2238,10 @@ class Config:
             # all (D-08).
             edge=EdgeSourceConfig.from_config(raw.get("edge")),
             speaker=speaker,
+            # An absent `speaker_id:` block is allowed -- it defaults to
+            # mode "off" (D-10), so a deployment that never mentions this
+            # key behaves exactly as it did before Phase 11.
+            speaker_id=SpeakerIdConfig.from_config(raw.get("speaker_id")),
             wake=WakeConfig.from_config(raw.get("wake")),
             gate=GateConfig.from_config(raw.get("gate")),
             barge_in=BargeInConfig.from_config(raw.get("barge_in")),
