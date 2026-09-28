@@ -439,6 +439,88 @@ async def test_tool_round_cap_is_enforced(fake_audio_source, fake_stt, fake_brai
     assert timings.turn_outcome == "round_cap"
 
 
+async def _run_capped_ha_refusal_turn(
+    fake_audio_source, fake_stt, fake_brain, fake_tts, *, domain: str, service: str
+):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    class _RefusingHaHost:
+        """Home Assistant answered non-2xx: `handle_call_service` returns
+        that as an ordinary, non-error result."""
+
+        async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
+            text = json.dumps({"error": "home assistant returned 500: 500 Internal Server Error"})
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text=text)])
+
+    max_tool_rounds = 3
+    tool_call = ToolCall(
+        name="ha_call_service",
+        arguments={"domain": domain, "service": service, "entity_id": "media_player.example_spotify"},
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="play the music")])
+    brain = fake_brain(replies=[BrainReply(tool_calls=[tool_call]) for _ in range(max_tool_rounds)])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        stt,
+        brain,
+        tts,
+        _RefusingHaHost(),
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=max_tool_rounds,
+        timings=timings,
+    )
+    return brain, tts, timings, max_tool_rounds
+
+
+async def test_round_cap_after_a_home_assistant_refusal_names_what_was_refused(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    brain, tts, timings, rounds = await _run_capped_ha_refusal_turn(
+        fake_audio_source, fake_stt, fake_brain, fake_tts, domain="media_player", service="media_play"
+    )
+    assert tts.received_text == ["home assistant refused media player media play"]
+    assert timings.turn_outcome == "round_cap"
+    assert brain.call_count == rounds
+
+
+async def test_round_cap_after_a_home_assistant_refusal_does_not_read_back_a_non_slug(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    _, tts, timings, _ = await _run_capped_ha_refusal_turn(
+        fake_audio_source, fake_stt, fake_brain, fake_tts, domain="Media Player!", service="media_play"
+    )
+    assert tts.received_text == ["home assistant refused that"]
+    assert timings.turn_outcome == "round_cap"
+
+
+async def test_ha_non_2xx_prefix_matches_what_handle_call_service_returns():
+    """Coupling guard: the controller cannot import `atlas_mcp.ha` (that
+    loads a policy), so it repeats the literal. This runs the real handler."""
+    import httpx
+
+    from atlas.turn.controller import _HA_NON_2XX_PREFIX
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="Internal Server Error")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        result = await handle_call_service(
+            Policy.from_config(None),
+            client,
+            "http://ha.invalid",
+            "test-token",
+            "media_player",
+            "media_play",
+            "media_player.example_spotify",
+        )
+    assert result["error"].startswith(_HA_NON_2XX_PREFIX)
+
+
 async def test_empty_tool_call_free_reply_falls_back_to_a_spoken_reply(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):
