@@ -21,7 +21,11 @@ fetched 2026-09-25 -- the dict literal at module top names each command's
         timeout,
     )
 
-The first returned byte is a status byte. A non-zero status byte means the
+A write has the same shape with `CTRL_OUT` (bmRequestType 0x40), a wValue of
+`command_id` with no `0x80` read bit, and the payload bytes in place of
+`wLength`. A write has no status byte.
+
+The first returned byte of a read is a status byte. A non-zero status byte means the
 device rejected the read, and this module raises rather than returning the
 bytes, so a caller never mistakes a rejected read for real data (T-10-SP2).
 
@@ -45,6 +49,8 @@ _CTRL_IN = 0x80
 _CTRL_TYPE_VENDOR = 0x40
 _CTRL_RECIPIENT_DEVICE = 0x00
 _BM_REQUEST_TYPE = _CTRL_IN | _CTRL_TYPE_VENDOR | _CTRL_RECIPIENT_DEVICE
+_CTRL_OUT = 0x00
+_BM_REQUEST_TYPE_WRITE = _CTRL_OUT | _CTRL_TYPE_VENDOR | _CTRL_RECIPIENT_DEVICE
 _B_REQUEST = 0
 
 _TIMEOUT_MS = 1000  # not the SDK example's 100_000ms -- T-10-SP2
@@ -82,6 +88,14 @@ PARAMETERS: dict[str, Parameter] = {
     "AEC_SPENERGY_VALUES": Parameter(
         "AEC_SPENERGY_VALUES", resource_id=33, command_id=80, length=16, kind="float32x4"
     ),
+    # LED ring control. Ids come from the vendor command table (xvf_host.py,
+    # fetched 2026-09-28). LED_EFFECT values: 0 off, 1 breath, 2 rainbow,
+    # 3 single color, 4 doa, 5 ring. LED_COLOR is one 0xRRGGBB word for
+    # effect 3. LED_RING_COLOR is twelve 0xRRGGBB words, one per LED, for
+    # effect 5.
+    "LED_EFFECT": Parameter("LED_EFFECT", resource_id=20, command_id=12, length=1, kind="uint8"),
+    "LED_COLOR": Parameter("LED_COLOR", resource_id=20, command_id=16, length=4, kind="uint32"),
+    "LED_RING_COLOR": Parameter("LED_RING_COLOR", resource_id=20, command_id=19, length=48, kind="uint32x12"),
 }
 
 
@@ -133,6 +147,25 @@ def read_parameter(device, parameter: Parameter) -> bytes:
     if status != 0:
         raise XvfControlError(parameter, status)
     return data
+
+
+def write_parameter(device, parameter: Parameter, payload: bytes) -> None:
+    """Write `payload` to `parameter` on `device`. A write has no status
+    byte, and its wValue has no `0x80` read bit. Raises `ValueError`,
+    before any transfer, when the payload length is not the length the
+    parameter takes."""
+    if len(payload) != parameter.length:
+        raise ValueError(
+            f"{parameter.name}: payload is {len(payload)} bytes, the parameter takes {parameter.length}"
+        )
+    device.ctrl_transfer(
+        _BM_REQUEST_TYPE_WRITE,
+        _B_REQUEST,
+        parameter.command_id,
+        parameter.resource_id,
+        payload,
+        _TIMEOUT_MS,
+    )
 
 
 def decode_version(data: bytes) -> tuple[int, int, int]:

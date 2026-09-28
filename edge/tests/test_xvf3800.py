@@ -144,3 +144,40 @@ def test_lazy_usb_import() -> None:
     import atlas_edge.xvf3800 as module
 
     assert not hasattr(module, "usb")
+
+
+class WriteDevice:
+    """Records the `ctrl_transfer` arguments of a write."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def ctrl_transfer(self, *args):
+        self.calls.append(args)
+        return len(args[4])
+
+
+class TestWriteParameter:
+    def test_writes_with_the_vendor_out_request_and_no_read_bit(self) -> None:
+        device = WriteDevice()
+
+        xvf3800.write_parameter(device, PARAMETERS["LED_EFFECT"], b"\x03")
+
+        assert device.calls == [(0x40, 0, 12, 20, b"\x03", 1000)]
+        assert not device.calls[0][2] & 0x80
+
+    def test_a_payload_of_the_wrong_length_raises_before_any_transfer(self) -> None:
+        device = WriteDevice()
+
+        with pytest.raises(ValueError):
+            xvf3800.write_parameter(device, PARAMETERS["LED_COLOR"], b"\x01\x02")
+
+        assert device.calls == []
+
+    def test_the_led_parameters_carry_the_vendor_ids(self) -> None:
+        assert (PARAMETERS["LED_EFFECT"].resource_id, PARAMETERS["LED_EFFECT"].command_id) == (20, 12)
+        assert PARAMETERS["LED_EFFECT"].length == 1
+        assert (PARAMETERS["LED_COLOR"].resource_id, PARAMETERS["LED_COLOR"].command_id) == (20, 16)
+        assert PARAMETERS["LED_COLOR"].length == 4
+        assert (PARAMETERS["LED_RING_COLOR"].resource_id, PARAMETERS["LED_RING_COLOR"].command_id) == (20, 19)
+        assert PARAMETERS["LED_RING_COLOR"].length == 48
