@@ -364,9 +364,11 @@ wake:
 
   vosk:
     model_path: "/models/vosk-model-small-en-us-0.15"
-    # Restricting the decoder to the phrase plus [unk] means anything that is
-    # not the phrase decodes as [unk] and is discarded.
-    grammar: ["hey atlas", "[unk]"]
+    # The decoder picks the closest entry, so with only the phrase and [unk],
+    # "the atlas" or "hey alice" decodes as "hey atlas". The decoy entries
+    # give that speech a closer match. Only an exact "hey atlas" wakes.
+    # Change the decoys when you change the phrase.
+    grammar: ["hey atlas", "atlas", "the atlas", "at last", "hey", "alice", "the", "a", "[unk]"]
 
   # After a hit, ignore further hits for this long. Without it a drawn-out
   # "heyyy atlas" fires two sessions and the second one transcribes silence.

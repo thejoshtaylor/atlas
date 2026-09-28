@@ -1244,7 +1244,11 @@ class VoskWakeConfig:
     """
 
     model_path: str = "/models/vosk-model-small-en-us-0.15"
-    grammar: tuple[str, ...] = ("hey atlas", "[unk]")
+    # Decoys give near-miss speech ("the atlas", "hey alice") a closer
+    # match than the phrase; see config.example.yaml.
+    grammar: tuple[str, ...] = (
+        "hey atlas", "atlas", "the atlas", "at last", "hey", "alice", "the", "a", "[unk]",
+    )
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "VoskWakeConfig":
