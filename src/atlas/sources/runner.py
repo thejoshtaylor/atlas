@@ -742,6 +742,14 @@ class SourceRunner:
         self._last_hit_at = now
         logger.info("wake hit on source %r (score=%.3f)", self._name, hit.score)
         self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
+        # Plan 11-04 (D-09): duck-typed, the same way `send_event` just
+        # above is -- only `EdgeAudioSource` has `mark_wake_hit`, so a
+        # camera or browser source is untouched. Tells the attached
+        # `SpeakerTracker` (if any) which frame index the wake hit landed
+        # on, so `open_turn()` can find the segment that holds it.
+        mark_wake_hit = getattr(self._source, "mark_wake_hit", None)
+        if mark_wake_hit is not None:
+            mark_wake_hit()
         # Tells a source with a screen (the browser listener) that a turn is
         # starting. The camera's own `send_event` is a logged no-op.
         send_event = getattr(self._source, "send_event", None)

@@ -49,7 +49,7 @@ import logging
 import math
 import time
 from collections import deque
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, Protocol
 
 from atlas.audio.channels import select_channel
 from atlas.config import EdgeSourceConfig
@@ -391,6 +391,33 @@ class SegmentBoundedWakeDetector:
         self._inner.close()
 
 
+class EdgeAudioListener(Protocol):
+    """What a plan 11-04 `SpeakerTracker` (or any future listener) needs
+    from `EdgeAudioSource` -- every frame and every `vad.start`/`vad.end`
+    event `serve()` already handles, in the same wire order `serve()`
+    receives them, with no second reader of `frames()`.
+
+    `on_frame`/`on_vad_start`/`on_vad_end` fire from `serve()`'s own loop,
+    synchronously, before that loop's next `await`. `on_wake_hit` fires
+    later, from `mark_wake_hit()` (`sources/runner.py`'s own allowed-hit
+    branch), since the wake hit is only known once the runner has read the
+    frame that triggered it back out of `frames()` -- `frame_index` is
+    that frame's own index, translated back through
+    `last_yielded_frame_index` (see `EdgeAudioSource.mark_wake_hit`).
+
+    `at` is always `self._clock()` -- the same `time.monotonic` domain
+    `TurnTimings` uses, so a listener never has to reconcile two clocks.
+    """
+
+    def on_vad_start(self, seq: int, at: float) -> None: ...
+
+    def on_frame(self, chunk: bytes, frame_index: int, at: float) -> None: ...
+
+    def on_vad_end(self, seq: int, at: float) -> None: ...
+
+    def on_wake_hit(self, frame_index: int) -> None: ...
+
+
 class EdgeAudioSource:
     """Satisfies `AudioSource` over one always-on `/ws/edge` connection.
 
@@ -438,10 +465,67 @@ class EdgeAudioSource:
         # Called on every `vad.start` (app.py wires it to
         # `SegmentBoundedWakeDetector.mark_segment_start`). None until wired.
         self.on_segment_start: Callable[[], None] | None = None
+        # Plan 11-04 (D-09): every attached `EdgeAudioListener` -- the
+        # `SpeakerTracker` is the only one today, but this is a plain list,
+        # not a single optional slot, the same `SpeechSignals._subscribers`
+        # fan-out shape. `_frames_enqueued` numbers every frame `serve()`
+        # enqueues (post-increment, so the first frame gets 0); `_enqueue_
+        # frame` and `close()` both count a head-drop in `_frames_dropped`
+        # when the queue is already full. `frames()` derives each yielded
+        # chunk's own index as `_frames_yielded + _frames_dropped` (both
+        # counts remove exactly one item from the queue head, so this sum
+        # always reproduces the same index `_enqueue_frame` handed that
+        # exact chunk to `on_frame` with) before incrementing
+        # `_frames_yielded`. `last_yielded_frame_index` is what
+        # `mark_wake_hit()` reads -- the runner reads frames later than
+        # `serve()` receives them, so a wake hit's position must travel as
+        # this translated index, not the raw enqueue-time count.
+        self._listeners: "list[EdgeAudioListener]" = []
+        self._frames_enqueued: int = 0
+        self._frames_dropped: int = 0
+        self._frames_yielded: int = 0
+        self.last_yielded_frame_index: "int | None" = None
 
     @property
     def speech_signals(self) -> SpeechSignals:
         return self._speech_signals
+
+    def add_listener(self, listener: "EdgeAudioListener") -> "Callable[[], None]":
+        """Attach `listener` to every future `on_vad_start`/`on_frame`/
+        `on_vad_end`/`on_wake_hit` call. Returns an idempotent unsubscribe
+        -- calling it more than once is a no-op after the first time,
+        matching `SpeechSignals.subscribe`'s own contract."""
+        self._listeners.append(listener)
+
+        def _remove() -> None:
+            try:
+                self._listeners.remove(listener)
+            except ValueError:
+                pass  # already unsubscribed -- idempotent by design.
+
+        return _remove
+
+    def _dispatch_listeners(self, method_name: str, *args: Any) -> None:
+        """Call `method_name(*args)` on every attached listener, in
+        attachment order. A listener that raises is logged and kept --
+        the same rule `SpeechSignals.publish` follows -- so one bad
+        listener never stops delivery to the others or breaks `serve()`'s
+        own loop."""
+        for listener in list(self._listeners):
+            try:
+                getattr(listener, method_name)(*args)
+            except Exception:
+                logger.exception("edge audio listener %s raised; keeping it", method_name)
+
+    def mark_wake_hit(self) -> None:
+        """Tell every listener a wake hit landed on the most recently
+        yielded frame (`sources/runner.py`'s own allowed-hit branch calls
+        this, duck-typed, right after recording the hit). A no-op before
+        `frames()` has yielded anything at all."""
+        index = self.last_yielded_frame_index
+        if index is None:
+            return
+        self._dispatch_listeners("on_wake_hit", index)
 
     @property
     def connected_device_id(self) -> int | None:
@@ -452,6 +536,8 @@ class EdgeAudioSource:
             chunk = await self._frames_queue.get()
             if chunk is None:
                 return
+            self.last_yielded_frame_index = self._frames_yielded + self._frames_dropped
+            self._frames_yielded += 1
             yield chunk
 
     async def send_audio(self, chunk: bytes) -> None:
@@ -599,7 +685,8 @@ class EdgeAudioSource:
                                 await websocket.close(code=CLOSE_POLICY_VIOLATION)
                                 return
                             continue
-                        self._enqueue_frame(data)
+                        frame_index = self._enqueue_frame(data)
+                        self._dispatch_listeners("on_frame", data, frame_index, self._clock())
                         continue
                     text = message.get("text")
                     if text is None:
@@ -638,7 +725,11 @@ class EdgeAudioSource:
                         # D-13: a lost `vad.end` (a dropped connection mid-
                         # segment) never hangs a turn -- ending the segment
                         # synthetically is what "the fallbacks hold even
-                        # without one" means in practice.
+                        # without one" means in practice. Plan 11-04: the
+                        # tracker must see this synthetic end too, so a
+                        # dropped connection still closes out its running
+                        # segment rather than leaving it open forever.
+                        self._dispatch_listeners("on_vad_end", self._last_seq, self._clock())
                         self._speech_signals.publish(
                             {"type": MSG_VAD_END, "seq": self._last_seq, "reason": "disconnected"}
                         )
@@ -712,26 +803,33 @@ class EdgeAudioSource:
         except asyncio.QueueFull:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._frames_queue.get_nowait()
+            self._frames_dropped += 1
             self._frames_queue.put_nowait(None)
 
     def _is_whole_number_of_frames(self, data: bytes) -> bool:
         frame_bytes = 2 * self._config.channels
         return frame_bytes > 0 and len(data) % frame_bytes == 0
 
-    def _enqueue_frame(self, data: bytes) -> None:
+    def _enqueue_frame(self, data: bytes) -> int:
         """Push `data` onto the frame queue, dropping the oldest frame
         first if it is already at `MAX_QUEUED_FRAMES` -- a new frame is
         never refused, an old one is discarded instead (D-13's "a lost
         frame never hangs a turn," applied to backpressure rather than a
         dropped connection). One warning per saturation episode, reset the
         moment the queue next has room -- `sources/runner.py`'s own
-        `_pending_writes_warned` precedent."""
+        `_pending_writes_warned` precedent.
+
+        Returns `data`'s own frame index (plan 11-04) -- the value
+        `serve()` hands `on_frame` right after this call."""
+        frame_index = self._frames_enqueued
+        self._frames_enqueued += 1
         try:
             self._frames_queue.put_nowait(data)
             self._queue_saturation_warned = False
         except asyncio.QueueFull:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._frames_queue.get_nowait()
+            self._frames_dropped += 1
             self._frames_queue.put_nowait(data)
             if not self._queue_saturation_warned:
                 self._queue_saturation_warned = True
@@ -739,6 +837,7 @@ class EdgeAudioSource:
                     "edge source: frame queue saturated at %d frames; dropping the oldest",
                     MAX_QUEUED_FRAMES,
                 )
+        return frame_index
 
     def _handle_event(self, event: dict[str, Any]) -> bool:
         """Route one parsed event: `vad.start`/`vad.end`/`doa` publish to
@@ -757,6 +856,16 @@ class EdgeAudioSource:
         msg_type = event["type"]
         if msg_type in (MSG_VAD_START, MSG_VAD_END):
             self._last_seq = event["seq"]
+            # Plan 11-04: the tracker sees `vad.start`/`vad.end` before
+            # `speech_signals.publish` -- the tracker's own segment
+            # bookkeeping (starting/closing a segment) must be in place
+            # before any other subscriber (the session recorder's
+            # `edge.vad.*` mirror, the barge-in listener) reacts to the
+            # same event.
+            if msg_type == MSG_VAD_START:
+                self._dispatch_listeners("on_vad_start", event["seq"], self._clock())
+            else:
+                self._dispatch_listeners("on_vad_end", event["seq"], self._clock())
             self._speech_signals.publish(event)
             if msg_type == MSG_VAD_START and self.on_segment_start is not None:
                 self.on_segment_start()

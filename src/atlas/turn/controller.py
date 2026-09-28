@@ -102,6 +102,8 @@ from atlas.audio.cue import wake_cue as wake_cue_audio
 from atlas.speaker.fifo_writer import SpeakerError
 from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
+from atlas.speaker_id.tracker import TurnSpeakerSpan
+from atlas.speaker_id.turn_gate import SpeakerIdTurnContext, evaluate_turn_speaker
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.early_finalize import wait_for_end_of_speech
@@ -423,6 +425,7 @@ async def run_turn(
     state_timeout_ms: float = 500.0,
     state_domains: frozenset[str] | None = None,
     handoff_context: "HandoffContext | None" = None,
+    speaker_id: "SpeakerIdTurnContext | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -546,6 +549,19 @@ async def run_turn(
     changes until it opts in (`app.py`'s camera `run_turn` call passes
     `config.brain.local_intents`).
 
+    `speaker_id` (plan 11-04, D-09): `None` for every caller that predates
+    this plan (every camera and browser turn today, D-07) -- this turn
+    opens no speaker span, awaits no gate, and behaves exactly as it did
+    before this plan. Given a context whose `tracker` is not `None` (the
+    edge branch of `app.py`'s `lifespan`, mode `"record"`/`"enforce"`), a
+    span opens next to `speech_signals` below and is decided right after
+    `barge_in.mark_transcript_done()`, before the confirmation/
+    clarification branches: a turn the gate blocks stops there, silently
+    (`turn_outcome = "unknown_speaker"`, no `_speak` call at all -- the
+    first early return in this function with that shape, on purpose,
+    since D-09 wants no reply and no filler for an unenrolled voice, not a
+    spoken refusal).
+
     `state_timeout_ms`/`state_domains` (260924-4iv, items a/b): the one
     deadline, past `stt_final_at`, this turn may spend waiting on
     `state_task`/`pending_runs_task` together, and the domain filter
@@ -650,6 +666,18 @@ async def run_turn(
     # which case `_drain_to_final_transcript` behaves exactly as it did
     # before this plan.
     speech_signals = getattr(source, "speech_signals", None)
+
+    # Plan 11-04 (D-09): opened here, off the *unwrapped* source (before
+    # `_RecordingAudioSource` wraps it below), the same reason `barge_in`/
+    # `follow_up`/`sink` are all read this early. This task only opens a
+    # span for a wake turn (`incoming is None`) -- Task 2 extends this to
+    # a follow-up turn's own window (D-11). `speaker_id is None`, or a
+    # context whose `tracker` is `None` (mode `"off"`), opens nothing:
+    # every camera and browser turn's own call passes no context at all
+    # (D-07).
+    speaker_span: "TurnSpeakerSpan | None" = None
+    if speaker_id is not None and speaker_id.tracker is not None and incoming is None:
+        speaker_span = speaker_id.tracker.open_turn()
 
     # 10-07-PLAN.md (D-17): a Pi's own vad.start/vad.end/doa/latency events
     # land in this turn's session, prefixed `edge.`, for the turn's whole
@@ -772,6 +800,39 @@ async def run_turn(
             # drain, and starting the barge-in listener before that second
             # drain finishes would give `frames()` two concurrent readers.
             barge_in.mark_transcript_done()
+
+        # Plan 11-04 (D-09, D-13): decided here -- after the final
+        # transcript and after `barge_in.mark_transcript_done()`, before
+        # any macro, local intent, confirmation branch, or brain call
+        # reads `final_text`. This task skips the whole gate when
+        # `speaker_id` is `None` or carries no tracker (mode `"off"`, or
+        # every camera/browser turn, D-07) -- Task 2 removes this skip so
+        # a mode-off/no-context turn records its own "not gated" result
+        # too.
+        if speaker_id is not None and speaker_id.tracker is not None:
+            speaker_outcome = await evaluate_turn_speaker(speaker_id, speaker_span, timings=timings)
+            if session_recorder is not None:
+                # D-13/D-15: the recorder only, never `_emit_event` -- a
+                # speaker's name never reaches the browser's `turn.timing`
+                # event contract.
+                session_recorder.record_event(speaker_outcome.event)
+            if not speaker_outcome.decision.allowed:
+                timings.turn_outcome = "unknown_speaker"
+                await _cancel_state_task(state_task)
+                await _cancel_state_task(pending_runs_task)
+                # D-15: the id and the score only -- never the name.
+                logger.info(
+                    "turn %s blocked: unknown speaker (score=%s, detail=%s)",
+                    timings.turn_id,
+                    speaker_outcome.event.get("score"),
+                    speaker_outcome.event.get("detail"),
+                )
+                # The first early return in this function with no `_speak`
+                # call at all, on purpose (D-09): no reply, no filler, for
+                # an unenrolled voice in enforce mode.
+                await _emit_event(source, timings.to_event())
+                timings.log()
+                return
 
         # A-CR-02: True for the turn that continues an `amended`
         # confirmation reply, and for every later turn in the same

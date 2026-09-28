@@ -44,6 +44,7 @@ from atlas.config import (
     ConfigError,
     DatabaseConfig,
     SecurityConfig,
+    SpeakerIdConfig,
     WakeConfig,
     load_config,
     load_raw_config,
@@ -76,6 +77,8 @@ from atlas.db.repository import (
     WorkflowRepository,
 )
 from atlas.db.speaker_postgres import PostgresSpeakerRepository
+from atlas.speaker_id.embedding import SherpaEmbedder
+from atlas.speaker_id.wiring import build_speaker_context
 from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
 
 from atlas.google.env import GoogleEnvBuilder
@@ -574,6 +577,21 @@ def _build_wake_detector(wake_config: WakeConfig) -> WakeDetector:
     )
 
 
+def _build_speaker_embedder(speaker_config: SpeakerIdConfig) -> SherpaEmbedder:
+    """Build the speaker embedding model `speaker_config.model` names.
+
+    A separate, easily monkeypatched function -- the same reason
+    `_build_wake_detector` is one: the real model file is a deployment
+    artifact this repository does not carry, and a test that needs a real
+    turn to reach the speaker gate replaces this with a fake embedder
+    (`tests/speaker_fakes.py::FakeEmbedder`) rather than exercising
+    sherpa-onnx. `speaker_id.wiring.build_speaker_context` turns a real
+    `SpeakerModelError` from this call into a `ConfigError` naming the
+    model path and `scripts/fetch_models.py --only speaker-id`.
+    """
+    return SherpaEmbedder(speaker_config.model_path)
+
+
 def _build_ffmpeg_supervisor(config: Config, http_client: httpx.AsyncClient) -> FfmpegSupervisor:
     """Build the egress supervisor -- a separate, monkeypatchable function
     for the same reason `_build_wake_detector` is one: `tests/
@@ -885,7 +903,12 @@ def _warm_providers(providers: Iterable[Any], keep_alive: set[asyncio.Task]) -> 
 
 
 def _make_run_turn_for_source(
-    app: FastAPI, config: Config, source_name: str, *, room_speaker: bool = True
+    app: FastAPI,
+    config: Config,
+    source_name: str,
+    *,
+    room_speaker: bool = True,
+    speaker_id: "Any | None" = None,
 ) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
@@ -900,6 +923,11 @@ def _make_run_turn_for_source(
     turn, here, which is what makes the turn boundary explicit rather than
     inferred by an observer from the first transcript that happens to
     arrive.
+
+    `speaker_id` (plan 11-04, D-07): `None` for every caller that predates
+    this plan -- the camera and browser paths pass nothing, which is
+    `run_turn`'s own signal to skip the speaker gate entirely. Only the
+    edge branch of `lifespan` below passes a real `SpeakerIdTurnContext`.
 
     `room_speaker=False` is for a source that plays its reply somewhere
     other than the room speaker (the browser listener): its turns must not
@@ -1002,6 +1030,7 @@ def _make_run_turn_for_source(
             # site, so it carries `app.state`'s current tool host lookup
             # and pending-action repository (D-08).
             handoff_context=build_handoff_context(app, source_name),
+            speaker_id=speaker_id,
         )
 
     return _run
@@ -1185,6 +1214,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # refusal ("edge is not the configured audio source") correct for
     # every other value of `resolved_audio_source`.
     app.state.edge_source = None
+    # Plan 11-04 (D-07): same "set now, unconditionally" discipline as
+    # `edge_source` just above -- overwritten below only inside the edge
+    # branch. `None` here is what makes every camera/browser `run_turn`
+    # call site's own `speaker_id=None` default correct.
+    app.state.speaker_id_context = None
     # Phase 9 (09-01, Task 3): same tolerant `.get(...)` -- a deployment
     # (or a test's own fake repository dict) with no Google repository at
     # all boots exactly as it did before this plan; nothing below runs.
@@ -1821,6 +1855,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         edge_source.on_segment_start = wake_detector.mark_segment_start
         app.state.edge_source = edge_source
 
+        # Plan 11-04 (D-07, D-09, D-10): built once, here, after
+        # `edge_source` exists -- `build_speaker_context` attaches the
+        # tracker to this exact instance (`edge_source.add_listener`),
+        # never a second `EdgeAudioSource`. Mode `"off"` (D-10's shipped
+        # default) returns a context with no tracker at all, so a fresh
+        # install pays nothing extra here.
+        speaker_id_context = await build_speaker_context(
+            config,
+            edge_source=edge_source,
+            speaker_repo=app.state.speaker_repo,
+            embedder_factory=_build_speaker_embedder,
+        )
+        app.state.speaker_id_context = speaker_id_context
+
         # Plan 10-10 (D-16): see `_resolve_edge_barge_in_config`'s own
         # docstring for why this is never the bare global `config.barge_in`
         # handed to the camera runner unchanged.
@@ -1835,7 +1883,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # XVF3800 over the same edge socket (`send_audio`), never on
             # the camera FIFO, so this turn never waits on
             # `app.state.speaker_lock`.
-            _make_run_turn_for_source(app, config, EDGE_SOURCE_NAME, room_speaker=False),
+            _make_run_turn_for_source(
+                app, config, EDGE_SOURCE_NAME, room_speaker=False, speaker_id=speaker_id_context
+            ),
             wake_config=config.wake,
             gate_config=config.gate,
             barge_in_config=edge_barge_in_config,
@@ -2026,6 +2076,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # runs unconditionally just above.
     if app.state.edge_source is not None:
         await app.state.edge_source.close()
+    # Plan 11-04: release the `EmbeddingWorker`'s one dedicated thread --
+    # only when speaker id actually built one (mode `"record"`/`"enforce"`,
+    # `app.state.speaker_id_context` defaults to `None` otherwise, same as
+    # `edge_source` just above).
+    speaker_id_context = getattr(app.state, "speaker_id_context", None)
+    if speaker_id_context is not None and speaker_id_context.worker is not None:
+        speaker_id_context.worker.close()
     wake_detector.close()
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
