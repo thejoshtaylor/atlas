@@ -214,6 +214,48 @@ def test_state_message_falls_back_to_the_process_zone_when_unconfigured(monkeypa
 
     assert "Current date:" in message
     assert "Current time:" in message
+    assert "Say every time in " in message
+
+
+def test_state_message_tells_the_model_to_say_every_time_in_the_zone(monkeypatch):
+    """260928-lv9: the line names the zone twice, once for the rule and
+    once for the conversion clause."""
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+
+    message = _state_message({})
+
+    assert "Say every time in Europe/Berlin." in message
+    assert "change it to Europe/Berlin before you say it" in message
+
+
+def test_zone_line_sits_between_the_time_line_and_the_state_block(monkeypatch):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+
+    message = _state_message({})
+    assert (
+        message.index("Current time:")
+        < message.index("Say every time in")
+        < message.index("Current state:")
+    )
+
+    unavailable = _state_message(None)
+    assert (
+        unavailable.index("Current time:")
+        < unavailable.index("Say every time in")
+        < unavailable.index("Current state: not available")
+    )
+
+
+def test_catalog_prompt_carries_no_zone_and_no_time_instruction(monkeypatch):
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+    entities = _entities_from_fake_states()
+
+    first = _catalog_prompt(entities)
+    second = _catalog_prompt(entities)
+
+    assert first == second
+    assert "Say every time in" not in first
+    assert "Europe/Berlin" not in first
 
 
 # --- Task 2 (plan 05-05): the pending-run block, D-09 --------------------

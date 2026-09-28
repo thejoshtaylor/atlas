@@ -460,6 +460,7 @@ def test_lifespan_resolves_the_zone_from_home_assistant_end_to_end(tmp_path, mon
             assert recorded_envs["ha"]["TZ"] == "Europe/Berlin"
             assert recorded_envs["weather"]["TZ"] == "Europe/Berlin"
             assert "Europe/Berlin" in app_module._state_message({})
+            assert "Say every time in Europe/Berlin." in app_module._state_message({})
     finally:
         del app_module.app.state.ha_http_client
 
