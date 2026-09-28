@@ -511,3 +511,73 @@ async def test_vad_end_before_any_heard_word_does_not_finalize(fake_brain, fake_
             timeout=0.5,
         )
     assert timings.vad_end_at is None
+
+
+class _LateWordStt:
+    """Yields `early` at once, then the command's words only after its
+    segment has ended: speech-to-text lags the Pi's `vad.end` by about
+    150 ms. Never yields a final until finalized."""
+
+    def __init__(self, signals, early=None) -> None:
+        self._signals = signals
+        self._early = early
+
+    async def stream(self, frames, source_format, *, finalize=None):
+        if self._early is not None:
+            yield PartialTranscript(text=self._early)
+        while not self._signals.in_speech:
+            if finalize.is_set():
+                # Finalized before the command: nothing more was heard.
+                yield FinalTranscript(text=self._early or "")
+                return
+            await asyncio.sleep(0.005)
+        while self._signals.in_speech:
+            await asyncio.sleep(0.005)
+        yield PartialTranscript(text="what time is it")
+        await finalize.wait()
+        yield FinalTranscript(text="what time is it")
+
+
+@pytest.mark.parametrize("early", [None, "Hey"])
+async def test_word_after_vad_end_finalizes_without_another_segment(fake_brain, fake_tts, early):
+    """Live regression: the command's first word arrived after its own
+    `vad.end`. The watch then waited for a second `vad.end` that never
+    came, and xAI's endpointing ended the turn 2.2 s later. A preroll
+    "Hey" (the wake phrase's tail) must not count as the command."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    signals = SpeechSignals(hangover_s=0.0)
+    signals.publish({"type": "vad.start", "seq": 1})
+    signals.publish({"type": "vad.end", "seq": 1})
+    source = _SpeechSignalsSource(signals)
+    brain = fake_brain(replies=[BrainReply(text="noon")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    async def _command_segment() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+
+    asyncio.ensure_future(_command_segment())
+
+    await asyncio.wait_for(
+        run_turn(
+            source,
+            _LateWordStt(signals, early=early),
+            brain,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+            wake_phrase="hey atlas",
+        ),
+        timeout=2,
+    )
+
+    assert tts.received_text == ["noon"]
+    assert timings.vad_end_at is not None

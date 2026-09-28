@@ -709,6 +709,7 @@ async def run_turn(
             # (`incoming is not None`) must NOT finalize on that same
             # already-ended state; it waits for a genuinely new segment.
             finalize_if_already_ended=incoming is None,
+            wake_phrase=wake_phrase,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -735,6 +736,7 @@ async def run_turn(
                 # finalize immediately on the already-ended state the first
                 # drain's wake-only segment left behind.
                 finalize_if_already_ended=False,
+                wake_phrase=wake_phrase,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -1722,6 +1724,7 @@ async def _drain_to_final_transcript(
     onset_deadline: "float | None" = None,
     speech_signals: "Any | None" = None,
     finalize_if_already_ended: bool = False,
+    wake_phrase: str | None = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
 
@@ -1814,16 +1817,34 @@ async def _drain_to_final_transcript(
             # On the Pi, the wake segment has always ended by now, and the
             # preroll holds only its tail: finalizing there sent "" or
             # "Hey" to the brain and never heard the command.
-            already_ended_counts = finalize_if_already_ended
-            while True:
-                at = await wait_for_end_of_speech(
-                    speech_signals,
-                    hangover_s=speech_signals.hangover_s,
-                    already_ended_counts=already_ended_counts,
+            at = await wait_for_end_of_speech(
+                speech_signals,
+                hangover_s=speech_signals.hangover_s,
+                already_ended_counts=finalize_if_already_ended,
+            )
+            while not heard_speech.is_set():
+                # No word yet. Either speech-to-text is still catching up on
+                # the segment that just ended (about 150 ms on the Pi), or
+                # that segment was a blip. A word that arrives while nobody
+                # speaks finalizes at the `vad.end` already seen; a word from
+                # a new segment waits for that segment's own end.
+                next_end = asyncio.ensure_future(
+                    wait_for_end_of_speech(
+                        speech_signals,
+                        hangover_s=speech_signals.hangover_s,
+                        already_ended_counts=False,
+                    )
                 )
-                if heard_speech.is_set():
-                    break
-                already_ended_counts = False
+                heard = asyncio.ensure_future(heard_speech.wait())
+                try:
+                    await asyncio.wait({next_end, heard}, return_when=asyncio.FIRST_COMPLETED)
+                    if next_end.done():
+                        at = next_end.result()
+                    elif speech_signals.in_speech:
+                        at = await next_end
+                finally:
+                    heard.cancel()
+                    next_end.cancel()
             timings.mark_vad_end(at)
             finalize_event.set()
 
@@ -1887,7 +1908,17 @@ async def _drain_to_final_transcript(
             return pending
 
         arrival = _time.monotonic()
-        if brain_race._normalize_for_echo_check(getattr(event, "text", "")):
+        # A piece of the wake phrase in the preroll ("Hey", "atlas") is
+        # not the command, so it does not count as a heard word.
+        heard_text = getattr(event, "text", "")
+        heard_words = brain_race._normalize_for_echo_check(heard_text)
+        if heard_words and not (
+            wake_phrase
+            and (
+                brain_race._normalize_for_echo_check(wake_phrase).startswith(heard_words)
+                or is_wake_only(heard_text, wake_phrase)
+            )
+        ):
             heard_speech.set()
 
         if pending is not None:
