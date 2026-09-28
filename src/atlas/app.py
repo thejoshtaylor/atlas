@@ -288,6 +288,25 @@ def _resolved_timezone_name() -> str:
     return _current_moment().tzname() or "the local zone"
 
 
+def _local_state_value(value: str) -> str:
+    """Show an aware ISO timestamp state in `_resolved_timezone`.
+
+    Home Assistant timestamp sensors report UTC, and the model reads a
+    value as given. A value that is not an aware ISO timestamp is left
+    alone. A naive value has no zone we can trust, so we do not guess one.
+    A bad or out-of-range value never raises.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return value
+        return parsed.astimezone(_resolved_timezone).isoformat()
+    except (ValueError, TypeError, OverflowError):
+        return value
+
+
 def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str = "") -> str:
     """Byte-identical across every turn -- the cacheable prefix.
 
@@ -426,7 +445,7 @@ def _state_message(
     elif domains is None:
         lines.append("Current state:")
         for entity_id, state in states.items():
-            lines.append(f"- {entity_id}: {state}")
+            lines.append(f"- {entity_id}: {_local_state_value(state)}")
     else:
         sorted_domains = ", ".join(sorted(domains))
         lines.append(
@@ -435,7 +454,7 @@ def _state_message(
         )
         for entity_id, state in states.items():
             if entity_id.split(".", 1)[0] in domains:
-                lines.append(f"- {entity_id}: {state}")
+                lines.append(f"- {entity_id}: {_local_state_value(state)}")
     if pending_runs is None:
         lines.append(_PENDING_RUNS_UNAVAILABLE_LINE)
     else:
