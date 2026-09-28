@@ -51,6 +51,8 @@ from atlas.transports.base import SourceFormat
 # either way.
 FINALIZE_MESSAGE = {"type": "finalize"}
 
+_CLOSE_TIMEOUT_S = 0.1
+
 
 class XaiStt:
     """Streaming speech-to-text over xAI's WebSocket endpoint."""
@@ -117,7 +119,14 @@ class XaiStt:
         the caller's side never hangs this stream.
         """
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
-        async with websockets.connect(self.build_url(source_format), additional_headers=headers) as ws:
+        # MEASURED LIVE, 2026-09-28: xAI never acknowledges the client's
+        # close frame, so the default `close_timeout` (10 s, capped by the
+        # server's own abort at about 2 s) held this generator open for
+        # 2048 ms after the final transcript -- and `run_turn` only gets
+        # that final once this generator ends. 0.1 s ended it in 101 ms.
+        async with websockets.connect(
+            self.build_url(source_format), additional_headers=headers, close_timeout=_CLOSE_TIMEOUT_S
+        ) as ws:
             ready = json.loads(await ws.recv())
             if ready.get("type") != "transcript.created":
                 raise SttError(f"unexpected first event from xAI STT: {ready!r}")

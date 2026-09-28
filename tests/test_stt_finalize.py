@@ -155,6 +155,25 @@ async def test_xai_without_finalize_is_unchanged(monkeypatch):
     assert events == [FinalTranscript(text="turn on the fan")]
 
 
+async def test_xai_does_not_wait_on_the_close_handshake(monkeypatch):
+    """Live regression: xAI never acknowledges the close frame. The default
+    `close_timeout` held the stream open for 2048 ms after the final, and
+    the turn only gets its final once the stream ends."""
+    fake_ws = _FakeXaiWebsocket([{"type": "transcript.done", "text": "turn on the fan"}])
+    seen = {}
+
+    def _connect(*args, **kwargs):
+        seen.update(kwargs)
+        return fake_ws
+
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", _connect)
+
+    async for _ in XaiStt(_stt_cfg()).stream(_NeverEndingFrames()(), SourceFormat("pcm", 16000)):
+        pass
+
+    assert seen["close_timeout"] <= 0.1
+
+
 class _FakeSegment:
     def __init__(self, text: str) -> None:
         self.text = text
