@@ -77,6 +77,13 @@ class Playback:
         drained = int(elapsed * self._bytes_per_second)
         self._buffered_bytes = max(0, self._buffered_bytes - drained)
 
+    def pending_s(self) -> float:
+        """Seconds of reply audio the output callback has not played yet,
+        from the same decaying estimate `write` keeps. `LedController`
+        uses it to keep the replying color until the reply ends."""
+        self._decay_buffered_estimate()
+        return self._buffered_bytes / self._bytes_per_second
+
     async def write(self, mono_pcm16: bytes) -> None:
         """Duplicate `mono_pcm16` (PCM16, one channel) into both output
         channels -- samples `[a, b]` become `[a, a, b, b]` -- and forward

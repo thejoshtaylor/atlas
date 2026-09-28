@@ -85,7 +85,19 @@ class FakeWindow:
         return None
 
 
-async def _fake_runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop):
+class FakeLed:
+    def __init__(self) -> None:
+        self.states: "list[str]" = []
+        self.closed = False
+
+    def set_state(self, state: str) -> None:
+        self.states.append(state)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def _fake_runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None):
     await stop.wait()
 
 
@@ -96,6 +108,7 @@ def _fake_factories(**overrides):
         "gate_factory": lambda config: (lambda: object()),
         "doa_poller": lambda config, in_segment: FakeDoaPoller(in_segment),
         "latency_window": lambda config: FakeWindow(),
+        "led": lambda config, playback: FakeLed(),
         "runner": _fake_runner,
     }
     factories.update(overrides)
@@ -271,3 +284,37 @@ async def test_latency_ticker_yields_only_non_none_drains() -> None:
 
     assert items == ["msg"]
     assert window.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_the_service_turns_the_ring_off_first_feeds_led_states_and_closes_the_led() -> None:
+    led = FakeLed()
+
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None):
+        on_led("listening")
+
+    service_runner = build_service(
+        object(),
+        _fake_factories(led=lambda config, playback: led, runner=runner),
+    )
+    await service_runner(stop=None)
+
+    assert led.states == ["idle", "listening"]
+    assert led.closed is True
+
+
+@pytest.mark.asyncio
+async def test_the_led_closes_when_the_runner_raises() -> None:
+    led = FakeLed()
+
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None):
+        raise RuntimeError("runner failed")
+
+    service_runner = build_service(
+        object(),
+        _fake_factories(led=lambda config, playback: led, runner=runner),
+    )
+    with pytest.raises(RuntimeError, match="runner failed"):
+        await service_runner(stop=None)
+
+    assert led.closed is True

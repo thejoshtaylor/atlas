@@ -249,6 +249,7 @@ async def run_forever(
     clock: Callable[[], float] = time.monotonic,
     rng: Callable[[], float] = random.random,
     stop: "asyncio.Event | None" = None,
+    on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
 ) -> None:
     """The Pi dials the server and owns the reconnect loop (D-02): one
     `session(...)` attempt after another, forever, until `stop` is set.
@@ -272,6 +273,11 @@ async def run_forever(
         auth_refused = False
         host = urlsplit(config.server_url).hostname
 
+        # `on_led` goes to the session only when given. A session double
+        # with a fixed keyword list stays valid when no LED is wired.
+        session_kwargs: dict[str, Any] = {}
+        if on_led is not None:
+            session_kwargs["on_led"] = on_led
         try:
             await session(
                 config.server_url,
@@ -281,6 +287,7 @@ async def run_forever(
                 on_live_frame_sent=on_live_frame_sent,
                 allow_plaintext=config.allow_plaintext,
                 stop=stop_event,
+                **session_kwargs,
             )
         except websockets.exceptions.InvalidStatus as exc:
             if getattr(exc.response, "status_code", None) == 403:

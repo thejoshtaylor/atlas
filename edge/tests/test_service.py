@@ -206,3 +206,29 @@ async def test_two_consecutive_sessions_each_get_a_fresh_segmenter():
 
     assert sessions[0][0] == protocol.vad_start(0)
     assert sessions[1][0] == protocol.vad_start(0)  # seq resets -- a fresh Segmenter, not seq=1
+
+
+@pytest.mark.asyncio
+async def test_on_led_reaches_the_runner_only_when_given():
+    received: "list[object]" = []
+
+    async def runner_with_led(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led):
+        received.append(on_led)
+
+    async def runner_without_led(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop):
+        received.append("no-led")
+
+    def on_led(state):
+        return None
+
+    for runner, kwargs in ((runner_with_led, {"on_led": on_led}), (runner_without_led, {})):
+        await run_service(
+            object(),
+            capture=FakeCapture(),
+            gate_factory=lambda: FakeGate([]),
+            on_reply_audio=lambda data: None,
+            runner=runner,
+            **kwargs,
+        )
+
+    assert received == [on_led, "no-led"]

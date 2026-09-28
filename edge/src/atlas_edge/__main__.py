@@ -4,7 +4,7 @@ Builds `Capture`, `Playback` (writing reply audio through `Capture`'s own
 `enqueue_playback` seam -- see `playback.py`'s own module docstring for why
 this project never opens a second output stream on the XVF3800), a
 `SileroGate` factory, a `DoaPoller`, and a `SendDelayWindow`, then hands
-them to `run_service` (10-08). Installs a SIGTERM/SIGINT handler that sets
+them, plus a `LedController` for the ring, to `run_service` (10-08). Installs a SIGTERM/SIGINT handler that sets
 the stop event `run_service` already knows how to end on. Logs the array's
 firmware version once at startup, and never logs the token (T-10-26).
 
@@ -31,7 +31,9 @@ from atlas_edge.client import run_forever
 from atlas_edge.config import EdgeConfig, EdgeConfigError, load_config
 from atlas_edge.doa import DoaPoller
 from atlas_edge.latency import SendDelayWindow
+from atlas_edge.led import LedController
 from atlas_edge.playback import Playback
+from atlas_edge.protocol import LED_IDLE
 from atlas_edge.service import run_service
 from atlas_edge.vad import SileroGate
 
@@ -112,12 +114,19 @@ def _default_latency_window(config: EdgeConfig) -> Any:
     return SendDelayWindow()
 
 
+def _default_led(config: EdgeConfig, playback: Any) -> Any:
+    """The lookup is lazy, so a missing array never stops startup because
+    of the LEDs."""
+    return LedController(xvf3800.find_device, pending_playback_s=playback.pending_s)
+
+
 DEFAULT_FACTORIES: Factories = {
     "capture": _default_capture,
     "playback": _default_playback,
     "gate_factory": _default_gate_factory,
     "doa_poller": _default_doa_poller,
     "latency_window": _default_latency_window,
+    "led": _default_led,
     "runner": run_forever,
 }
 
@@ -169,13 +178,15 @@ async def _merge_events(
 
 def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> Callable[..., Any]:
     """Builds `Capture`, `Playback`, a `SileroGate` factory, a `DoaPoller`
-    and a `SendDelayWindow` through `factories` (the real ones by
-    default), wires them into `run_service`, and returns an async
-    `_run(stop=None)` callable `main` awaits."""
+    a `SendDelayWindow` and a `LedController` through `factories` (the real
+    ones by default), wires them into `run_service`, and returns an async
+    `_run(stop=None)` callable `main` awaits. The LED controller turns the
+    ring off at start and at stop, and shows the server's turn states."""
     built: Factories = {**DEFAULT_FACTORIES, **(factories or {})}
 
     capture = built["capture"](config)
     playback = built["playback"](config, capture)
+    led = built["led"](config, playback)
     gate_factory = built["gate_factory"](config)
     tracker = _SegmentTracker()
     window = built["latency_window"](config)
@@ -190,16 +201,23 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
             yield item
 
     async def _run(stop: "asyncio.Event | None" = None) -> None:
-        await run_service(
-            config,
-            capture=capture,
-            gate_factory=gate_factory,
-            on_reply_audio=playback.write,
-            on_live_frame_sent=on_live_frame_sent,
-            events_hook=events_hook,
-            runner=built["runner"],
-            stop=stop,
-        )
+        # The ring stays dark until the wake word. The firmware default
+        # effect would light it for any voice.
+        led.set_state(LED_IDLE)
+        try:
+            await run_service(
+                config,
+                capture=capture,
+                gate_factory=gate_factory,
+                on_reply_audio=playback.write,
+                on_live_frame_sent=on_live_frame_sent,
+                events_hook=events_hook,
+                runner=built["runner"],
+                stop=stop,
+                on_led=led.set_state,
+            )
+        finally:
+            await led.close()
 
     return _run
 

@@ -6,6 +6,7 @@ stays under 8 characters (tests/test_repo_hygiene.py's credential scan).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -288,8 +289,6 @@ def _connect_factory(ws: "_FakeWebsocket"):
 
 @pytest.mark.asyncio
 async def test_run_session_sends_live_frames_as_binary_and_reports_sent_callback():
-    import json
-
     hello_text = json.dumps(
         {
             "type": "hello",
@@ -326,3 +325,92 @@ async def test_run_session_sends_live_frames_as_binary_and_reports_sent_callback
     assert ws.sent[1] == b"plain-bytes"
     assert len(reported) == 1
     assert reported[0][0] == 12.5
+
+
+_LED_HELLO = json.dumps(
+    {
+        "type": "hello",
+        "protocol": 1,
+        "device_id": 1,
+        "sample_rate": 16000,
+        "channels": 2,
+        "asr_channel": 0,
+        "pre_roll_ms": 100,
+        "tail_ms": 100,
+        "frame_samples": 256,
+    }
+)
+
+
+async def _no_outbound(_hello):
+    return
+    yield  # pragma: no cover -- makes this an async generator
+
+
+@pytest.mark.asyncio
+async def test_run_session_hands_led_states_to_on_led_and_ends_with_idle():
+    ws = _FakeWebsocket(_LED_HELLO, incoming=[json.dumps({"type": "led", "state": "thinking"})])
+    states: list[str] = []
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+        on_led=states.append,
+    )
+
+    assert states == ["thinking", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_an_on_led_that_raises_does_not_end_the_session():
+    ws = _FakeWebsocket(
+        _LED_HELLO,
+        incoming=[
+            json.dumps({"type": "led", "state": "listening"}),
+            json.dumps({"type": "ping", "id": 4, "server_t_ms": 99}),
+        ],
+    )
+
+    def bad_on_led(state: str) -> None:
+        raise RuntimeError("usb on fire")
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+        on_led=bad_on_led,
+    )
+
+    assert any(json.loads(item).get("type") == "pong" for item in ws.sent if isinstance(item, str))
+
+
+@pytest.mark.asyncio
+async def test_run_forever_forwards_on_led_to_every_session():
+    seen: list = []
+    stop = asyncio.Event()
+    on_led = lambda state: None  # noqa: E731
+
+    async def session(url, token, *, on_led=None, **kwargs):  # noqa: ARG001
+        seen.append(on_led)
+        if len(seen) == 2:
+            stop.set()
+
+    async def no_sleep(_seconds):
+        return
+
+    await run_forever(
+        _FakeConfig(),
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        session=session,
+        sleep=no_sleep,
+        stop=stop,
+        on_led=on_led,
+    )
+
+    assert seen == [on_led, on_led]

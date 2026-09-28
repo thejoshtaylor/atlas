@@ -90,3 +90,16 @@ async def test_start_and_stop_are_harmless_no_ops() -> None:
     playback = Playback(lambda data: None)
     playback.start()
     playback.stop()
+
+
+@pytest.mark.asyncio
+async def test_pending_s_is_zero_before_any_write_then_decays_to_zero() -> None:
+    playback = Playback(lambda data: None, clock=_fake_clock([0.0, 0.0, 0.25, 5.0]))
+
+    assert playback.pending_s() == 0.0
+
+    # 1 s of mono audio at 16 kHz: 32000 bytes.
+    await playback.write(bytes(32000))
+
+    assert abs(playback.pending_s() - 0.75) < 0.01
+    assert playback.pending_s() == 0.0

@@ -35,6 +35,7 @@ async def run_service(
     events_hook: "Callable[[], AsyncIterator[str]] | None" = None,
     runner: Callable[..., Any] = run_forever,
     stop: "asyncio.Event | None" = None,
+    on_led: "Callable[[str], Any] | None" = None,
 ) -> None:
     """Opens `capture` once, then hands `runner` (`run_forever` in
     production) a `make_outbound(hello)` closure that builds a fresh
@@ -46,12 +47,18 @@ async def run_service(
         def make_outbound(hello: Hello) -> AsyncIterator[Any]:
             return _outbound_for_session(hello, capture, gate_factory, events_hook)
 
+        # `on_led` goes to the runner only when given. A runner double with
+        # a fixed keyword list stays valid when no LED is wired.
+        runner_kwargs: dict[str, Any] = {}
+        if on_led is not None:
+            runner_kwargs["on_led"] = on_led
         await runner(
             config,
             make_outbound=make_outbound,
             on_reply_audio=on_reply_audio,
             on_live_frame_sent=on_live_frame_sent,
             stop=stop,
+            **runner_kwargs,
         )
     finally:
         capture.stop()
