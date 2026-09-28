@@ -33,7 +33,7 @@ Plan 01.1-05 inserts a macro check between the empty-transcript guard and
 the tier dispatch: a transcript matching a configured macro (`turn/macros.py`)
 never reaches the tier race at all (MACRO-02), and the macro's actions run
 through the same `tool_host.call_tool` / `allow_call` path a model-issued
-call uses. `turn/macros.py` imports `_is_error`/`_result_text` back from
+call uses. `turn/macros.py` imports `_is_error`/`_spoken_error_text` back from
 this module the same deferred, function-body way `brain_race.py` already
 does, so this module can import `turn.macros` at load time with no cycle.
 
@@ -1947,8 +1947,9 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
     refusal reason, which would break the verbatim-refusal invariant
     `test_denied_reason_reaches_the_reply_verbatim` already guards for the
     single-action path (this module's own docstring, D-14). A failed
-    action's clause carries `_result_text(result)` exactly as the boundary
-    wrote it -- no prefix, no suffix, no rewording, no truncation of the
+    action's clause carries the boundary's reason with the MCP SDK's
+    "Error executing tool" wrapper removed (`_spoken_error_text`) and
+    nothing else changed -- no suffix, no rewording, no truncation of the
     reason text itself, the same rule `fire_macro`'s own docstring states for
     the macro path: a refusal never passes through a model, so there is
     nothing to summarise and nothing to shorten against. `_DENIED_FALLBACK_REPLY`
@@ -1981,7 +1982,7 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
             )
             clauses.append(f"{tool_call.name}: {_ACTION_DID_NOT_COMPLETE_CLAUSE}")
         elif _is_error(result):
-            clauses.append(_result_text(result) or _DENIED_FALLBACK_REPLY)
+            clauses.append(_spoken_error_text(tool_call.name, result) or _DENIED_FALLBACK_REPLY)
         else:
             clauses.append(_ACTION_SUCCEEDED_CLAUSE)
     return "; ".join(clauses)
@@ -2548,6 +2549,41 @@ def _result_text(result: Any) -> str:
         if text is not None:
             return text
     return ""
+
+
+_SDK_TOOL_ERROR_PREFIX = "Error executing tool "
+
+
+def _spoken_error_text(tool_name: str, result: Any) -> str:
+    """The reason a tool refused, with the MCP SDK's wrapper removed.
+
+    The SDK's `Tool.run` (`mcp/server/mcpserver/tools/base.py`) turns a
+    `ToolError` into `"Error executing tool <name>: <reason>"` and any other
+    crash into exactly `"Error executing tool <name>"`. `<name>` is the
+    child's own bare tool name. `workflow/steps.py::_is_policy_refusal`
+    already reads the same format. Only the reason belongs in speech, so this
+    returns it alone, unchanged. A crash with no reason returns `""`, and the
+    caller speaks its own fallback -- raw SDK text is never spoken.
+
+    `tool_name` is the name the brain called. Plugin naming can prefix it
+    (`<slug>__<bare>`, `plugins/naming.py`) while the SDK text carries the
+    bare name, so the part after the last `__` is tried too (the same rule
+    as `is_code_only_tool`). Text with no matching prefix is returned as it
+    is. Nested wrappers and validation text are left alone.
+    """
+    text = _result_text(result)
+    candidates = [tool_name]
+    if "__" in tool_name:
+        bare = tool_name.rsplit("__", 1)[1]
+        if bare not in candidates:
+            candidates.append(bare)
+    for name in candidates:
+        crash = f"{_SDK_TOOL_ERROR_PREFIX}{name}"
+        if text == crash:
+            return ""
+        if text.startswith(crash + ": "):
+            return text[len(crash) + 2 :]
+    return text
 
 
 def _result_payload(result: Any) -> Any:

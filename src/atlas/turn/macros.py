@@ -65,7 +65,7 @@ class _ToolHost(Protocol):
     Duplicated, not imported: importing `controller.py`'s protocol would
     import `controller.py` at module level, and `fire_macro` below already
     needs a *runtime* import from `controller.py` for `_is_error`/
-    `_result_text` -- deferred to inside the function body for exactly that
+    `_spoken_error_text` -- deferred to inside the function body for exactly that
     reason. A typing-only `Protocol` carries no runtime coupling either way,
     so duplicating this one small shape is cheaper than the alternative of
     restructuring either module around the other.
@@ -187,7 +187,7 @@ async def fire_macro(
     # deadlock the two modules on import. This mirrors `brain_race.py`'s own
     # deferred import of `controller._run_tool_rounds`, and reuses the same
     # two helpers rather than re-implementing MCP result introspection here.
-    from atlas.turn.controller import _is_error, _result_text
+    from atlas.turn.controller import _is_error, _spoken_error_text
 
     for action in macro.actions:
         if tool_owners is not None and len(tool_owners(action.tool)) > 1:
@@ -196,6 +196,6 @@ async def fire_macro(
             )
         result = await tool_host.call_tool(action.tool, action.arguments)
         if _is_error(result):
-            return MacroOutcome(succeeded=False, text=_result_text(result), cacheable=False)
+            return MacroOutcome(succeeded=False, text=_spoken_error_text(action.tool, result), cacheable=False)
 
     return MacroOutcome(succeeded=True, text=macro.reply, cacheable=True)

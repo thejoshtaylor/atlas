@@ -545,7 +545,7 @@ async def execute_pending_action(pending: "PendingAction", tool_host: Any) -> Ex
     # deadlock the two modules' load order. The same deferred-import shape
     # `turn/handoff.py::dispatch_handoff` already uses for
     # `_compose_clarifying_question`.
-    from atlas.turn.controller import _is_error, _result_text
+    from atlas.turn.controller import _is_error, _result_text, _spoken_error_text
 
     # A-WR-01: every other tool-host call on this plan's own paths is
     # defended against a raised exception (`_run_tool_rounds`'s own
@@ -568,8 +568,11 @@ async def execute_pending_action(pending: "PendingAction", tool_host: Any) -> Ex
             succeeded=False, reply_text=EXECUTION_DID_NOT_COMPLETE_REPLY, detail=EXECUTION_DID_NOT_COMPLETE_REPLY
         )
     if _is_error(result):
+        # The reply is spoken, so it carries the reason alone; `detail` is a
+        # stored diagnostic and keeps the raw text.
         text = _result_text(result)
-        return ExecutionResult(succeeded=False, reply_text=text or CANCELLED_REPLY, detail=text or None)
+        spoken = _spoken_error_text(pending.tool_name, result)
+        return ExecutionResult(succeeded=False, reply_text=spoken or CANCELLED_REPLY, detail=text or None)
     reply_text = CONFIRMED_CREATE_REPLY if pending.action == "calendar_create" else CONFIRMED_DELETE_REPLY
     return ExecutionResult(succeeded=True, reply_text=reply_text, detail=None)
 

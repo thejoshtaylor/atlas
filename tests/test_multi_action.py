@@ -766,3 +766,97 @@ async def test_only_the_top_tier_reaches_the_tool_host_when_the_shortcut_fires(
     assert len(triage_tier.envelope_client.calls) == 1
     assert "tools" not in triage_tier.envelope_client.calls[0]
     assert top_tier.envelope_client.calls == []
+
+
+# 260928-m1l: the MCP SDK wraps a ToolError as "Error executing tool <name>:
+# <reason>" (`Tool.run`); the reason alone is what the house should hear.
+
+
+def _run_one_call_turn(fake_audio_source, fake_stt, fake_tts, *, offered_name: str, result_text: str):
+    tool_host = _ByNameToolHost({offered_name: _denied(result_text)})
+    brain = _RecordingBrain(
+        replies=[
+            BrainReply(
+                tool_calls=[
+                    ToolCall(
+                        name=offered_name,
+                        arguments={"domain": "media_player", "service": "media_play", "entity_id": "x"},
+                    )
+                ]
+            )
+        ]
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="play the music")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    return tool_host, brain, source, stt, tts
+
+
+async def test_sdk_wrapper_is_stripped_from_a_spoken_refusal(fake_audio_source, fake_stt, fake_tts):
+    tool_host, brain, source, stt, tts = _run_one_call_turn(
+        fake_audio_source,
+        fake_stt,
+        fake_tts,
+        offered_name="ha_call_service",
+        result_text="Error executing tool ha_call_service: transition is only supported for lights, not media_player",
+    )
+    await run_turn(
+        source, stt, brain, tts, tool_host,
+        tools_schema=[], system_prompt="you control a home", max_tool_rounds=3, timings=TurnTimings(),
+    )
+    assert tts.received_text[-1] == "transition is only supported for lights, not media_player"
+    assert brain.call_count == 1
+
+
+async def test_a_crash_with_no_reason_speaks_the_fallback_not_the_sdk_text(
+    fake_audio_source, fake_stt, fake_tts
+):
+    from atlas.turn.controller import _DENIED_FALLBACK_REPLY
+
+    tool_host, brain, source, stt, tts = _run_one_call_turn(
+        fake_audio_source,
+        fake_stt,
+        fake_tts,
+        offered_name="ha_call_service",
+        result_text="Error executing tool ha_call_service",
+    )
+    await run_turn(
+        source, stt, brain, tts, tool_host,
+        tools_schema=[], system_prompt="you control a home", max_tool_rounds=3, timings=TurnTimings(),
+    )
+    assert tts.received_text[-1] == _DENIED_FALLBACK_REPLY
+
+
+async def test_sdk_wrapper_is_stripped_for_a_collision_prefixed_offered_name(
+    fake_audio_source, fake_stt, fake_tts
+):
+    tool_host, brain, source, stt, tts = _run_one_call_turn(
+        fake_audio_source,
+        fake_stt,
+        fake_tts,
+        offered_name="example__ha_call_service",
+        result_text="Error executing tool ha_call_service: that one is off limits",
+    )
+    await run_turn(
+        source, stt, brain, tts, tool_host,
+        tools_schema=[], system_prompt="you control a home", max_tool_rounds=3, timings=TurnTimings(),
+    )
+    assert tts.received_text[-1] == "that one is off limits"
+
+
+def test_spoken_error_text_unit_cases():
+    from atlas.turn.controller import _spoken_error_text
+
+    assert _spoken_error_text("ha_call_service", _denied("that one is off limits")) == "that one is off limits"
+    assert _spoken_error_text("ha_call_service", _denied("Error executing tool ha_call_service")) == ""
+    assert (
+        _spoken_error_text("ha_call_service", _denied("Error executing tool ha_call_service: nope")) == "nope"
+    )
+    assert (
+        _spoken_error_text("example__ha_call_service", _denied("Error executing tool ha_call_service: nope"))
+        == "nope"
+    )
+    # A prefix naming a different tool is not ours to strip.
+    other = "Error executing tool other_tool: nope"
+    assert _spoken_error_text("ha_call_service", _denied(other)) == other
+    assert _spoken_error_text("ha_call_service", _denied("")) == ""

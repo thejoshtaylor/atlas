@@ -191,6 +191,47 @@ async def test_a_call_service_step_carrying_transition_off_a_light_is_denied_bef
     assert speak.spoken == [outcome.detail["reason"]]
 
 
+async def test_a_call_service_denial_is_stored_and_spoken_without_the_sdk_wrapper():
+    """260928-m1l: the MCP SDK wraps a ToolError as "Error executing tool
+    <name>: <reason>"; the stored reason and the speech carry the reason."""
+    step = _make_step(
+        kind="call_service",
+        arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+    )
+    result = CallToolResult(
+        isError=True,
+        content=[TextContent(type="text", text="Error executing tool ha_call_service: that one is off limits")],
+    )
+    speak = _RecordingSpeak()
+
+    outcome = await execute_step(
+        step, _RecordingToolHost(result=result), WorkflowConfig(), _NOW_ON_TIME, speak=speak
+    )
+
+    assert outcome.status == "denied"
+    assert outcome.detail["reason"] == "that one is off limits"
+    assert speak.spoken == ["that one is off limits"]
+
+
+async def test_a_call_service_crash_with_no_reason_stays_failed_and_silent():
+    step = _make_step(
+        kind="call_service",
+        arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+    )
+    result = CallToolResult(
+        isError=True,
+        content=[TextContent(type="text", text="Error executing tool ha_call_service")],
+    )
+    speak = _RecordingSpeak()
+
+    outcome = await execute_step(
+        step, _RecordingToolHost(result=result), WorkflowConfig(), _NOW_ON_TIME, speak=speak
+    )
+
+    assert outcome.status == "failed"
+    assert speak.spoken == []
+
+
 def test_compose_lateness_sentence_is_deterministic_and_exact():
     assert compose_lateness_sentence(60.0) == "sorry, this was about 1 minute late."
     assert compose_lateness_sentence(120.0) == "sorry, this was about 2 minutes late."

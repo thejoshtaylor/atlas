@@ -327,7 +327,7 @@ async def handle_email_read(handoff: "Handoff", ctx: "HandoffContext | None") ->
     if ctx.tool_host is None:
         return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_read_failed")
 
-    from atlas.turn.controller import _is_error, _result_payload, _result_text
+    from atlas.turn.controller import _is_error, _result_payload, _spoken_error_text
 
     try:
         result = await ctx.tool_host.call_tool(
@@ -338,7 +338,10 @@ async def handle_email_read(handoff: "Handoff", ctx: "HandoffContext | None") ->
         return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_read_failed")
 
     if _is_error(result):
-        return HandoffOutcome(reply_text=_result_text(result), turn_outcome="email_read_failed")
+        return HandoffOutcome(
+            reply_text=_spoken_error_text("gmail_fetch_body", result) or _FETCH_UNAVAILABLE_REPLY,
+            turn_outcome="email_read_failed",
+        )
 
     body_payload = _result_payload(result)
     body_text = str(body_payload.get("body", "")) if isinstance(body_payload, dict) else ""
@@ -428,7 +431,7 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
     if ctx.tool_host is None or ctx.brain is None:
         return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_draft_failed")
 
-    from atlas.turn.controller import _is_error, _result_payload, _result_text
+    from atlas.turn.controller import _is_error, _result_payload, _spoken_error_text
 
     # A-WR-01, R2-WR-06: the docstring above promises "never a failure"
     # for a missing repository or an unlearned style. A style lookup that
@@ -455,7 +458,10 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
         logger.exception("gmail_fetch_body raised for a draft reply to %r", item.message_id)
         return HandoffOutcome(reply_text=_FETCH_UNAVAILABLE_REPLY, turn_outcome="email_draft_failed")
     if _is_error(fetch_result):
-        return HandoffOutcome(reply_text=_result_text(fetch_result), turn_outcome="email_draft_failed")
+        return HandoffOutcome(
+            reply_text=_spoken_error_text("gmail_fetch_body", fetch_result) or _FETCH_UNAVAILABLE_REPLY,
+            turn_outcome="email_draft_failed",
+        )
 
     body_payload = _result_payload(fetch_result)
     original_body = str(body_payload.get("body", "")) if isinstance(body_payload, dict) else ""
@@ -494,7 +500,10 @@ async def handle_email_draft(handoff: "Handoff", ctx: "HandoffContext | None") -
         logger.exception("gmail_create_draft raised for a draft reply to %r", item.message_id)
         return HandoffOutcome(reply_text=_DRAFT_DID_NOT_COMPLETE_REPLY, turn_outcome="email_draft_failed")
     if _is_error(create_result):
-        return HandoffOutcome(reply_text=_result_text(create_result), turn_outcome="email_draft_failed")
+        return HandoffOutcome(
+            reply_text=_spoken_error_text("gmail_create_draft", create_result) or _DRAFT_DID_NOT_COMPLETE_REPLY,
+            turn_outcome="email_draft_failed",
+        )
 
     draft_payload = _result_payload(create_result)
     draft = draft_payload.get("draft") if isinstance(draft_payload, dict) else None

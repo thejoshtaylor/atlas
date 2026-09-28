@@ -33,7 +33,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from atlas.config import WorkflowConfig
 from atlas.db.models import WorkflowStepRow
-from atlas.turn.controller import _is_error, _result_text
+from atlas.turn.controller import _is_error, _result_text, _spoken_error_text
 
 _Speak = Callable[[str], Awaitable[None]]
 
@@ -203,8 +203,8 @@ async def _execute_call_service(
     live turn path calls, via the same `McpToolHostLookup` (D-13). An
     error-shaped result whose text carries more than the SDK's own
     generic crash wrapper (`_is_policy_refusal`) is a `Denied` refusal --
-    the boundary's own words, carried into `detail`/`speech` verbatim,
-    never reworded (D-14). An error-shaped result carrying only the
+    the boundary's own words, carried into `detail`/`speech` with only the
+    SDK's wrapper removed (`_spoken_error_text`), never reworded (D-14). An error-shaped result carrying only the
     generic wrapper, or a raised exception -- the call itself never
     reached a verdict either way -- is `failed` with `retry=False` for
     this kind: a service call whose outcome is unknown must not be
@@ -240,8 +240,11 @@ async def _execute_call_service(
     if _is_error(result):
         text = _result_text(result)
         if _is_policy_refusal(_HA_CALL_SERVICE_TOOL, text):
+            # The stored reason is the spoken one: the SDK's wrapper is
+            # stripped from both (tests/test_workflow_fire_time_policy.py).
+            reason = _spoken_error_text(_HA_CALL_SERVICE_TOOL, result)
             return StepOutcome(
-                status="denied", detail={"reason": text}, speech=text or None, retry=False
+                status="denied", detail={"reason": reason}, speech=reason or None, retry=False
             )
         return StepOutcome(status="failed", detail={"error": text}, speech=None, retry=False)
     return StepOutcome(

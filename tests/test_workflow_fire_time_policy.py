@@ -353,15 +353,17 @@ async def test_a_run_scheduled_before_the_entity_was_denied_is_refused_when_it_f
         # 3. The step was refused, carrying the boundary's own wording
         #    (`Denied`'s own text, `mcp/atlas_mcp/safety.py`) -- the same
         #    "off limits" substring `test_policy_routes.py`'s own
-        #    end-to-end respawn test asserts against, the installed MCP
-        #    SDK's own "Error executing tool {name}: {message}" prefix
-        #    included, never silently skipped (D-14). The load-bearing
+        #    end-to-end respawn test asserts against. The installed MCP
+        #    SDK's own "Error executing tool {name}: {message}" prefix is
+        #    stripped from both the stored and the spoken reason, and the
+        #    step is never silently skipped (D-14). The load-bearing
         #    equality is between what was recorded and what was spoken --
         #    never a substring-containment stand-in for that one.
         assert step.status == "denied"
         assert step.result_detail is not None
         reason = step.result_detail["reason"]
         assert "off limits" in reason
+        assert not reason.startswith("Error executing tool")
         assert speak.spoken == [reason]
     finally:
         await host.aclose()
