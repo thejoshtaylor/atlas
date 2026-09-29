@@ -283,6 +283,59 @@ them. This repository does not store them. The CAM++ model carries the
 Apache-2.0 license. The TitaNet-small model carries the CC-BY-4.0 license,
 which requires attribution.
 
+## 16. Play Spotify through the array (optional)
+
+A request to play music, with no speaker named, plays through the 3.5 mm
+jack of the array. The `librespot` program receives Spotify Connect and
+writes audio into a FIFO. The edge service mixes that audio into its own
+output stream. The music gets quiet while the assistant listens and while
+it replies.
+
+1. Install the `librespot` program from the `raspotify` apt package. Then
+   stop and disable the `raspotify` service. Its unit opens ALSA directly
+   and cannot share the array with the edge service:
+
+   ```bash
+   sudo systemctl disable --now raspotify
+   ```
+
+2. To change the device name from the default `Atlas`, write this line in
+   `/etc/atlas-edge/librespot.env`:
+
+   ```
+   LIBRESPOT_NAME=<name>
+   ```
+
+3. Copy the updated edge unit and the new `librespot` unit into place.
+   Restart the edge service first, because it creates the FIFO directory:
+
+   ```bash
+   sudo cp /opt/atlas-edge/edge/systemd/atlas-edge.service \
+           /opt/atlas-edge/edge/systemd/atlas-librespot.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl restart atlas-edge
+   sudo systemctl enable --now atlas-librespot
+   ```
+
+4. Sign in once. On a phone on the house network, open Spotify and pick
+   the `Atlas` device (or your name from step 2) from the Connect list.
+   The credentials stay cached. The device then appears in the source
+   list of Home Assistant.
+5. In the admin webapp, open Plugins, then Home Assistant. Add the key
+   `SPOTIFY_DEFAULT_SOURCE` and set it to the device name. A request that
+   names a speaker still plays on that speaker.
+6. To tune the behavior, add these keys to `/etc/atlas-edge/config.toml`:
+
+   | Key | Default | Meaning |
+   |---|---|---|
+   | `music_fifo` | `/run/atlas-edge/music.fifo` | The FIFO path. An empty value turns music off. |
+   | `music_duck_level` | `0.2` | Music volume while it is ducked, from 0.0 to 1.0. |
+   | `music_duck_ramp_ms` | `150` | Time for the volume to change, in milliseconds. |
+
+   Restart the edge service after you change a key.
+
+The array plays audio at 16 kHz, so the music has no content above 8 kHz.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

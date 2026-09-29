@@ -94,7 +94,7 @@ def _ok() -> httpx.Response:
     return httpx.Response(200, json=[{"entity_id": _ENTITY, "state": "playing"}])
 
 
-async def _play(scripted: _ScriptedHa, browser, name="love refined", *, entity=_ENTITY, source=None, policy=None):
+async def _play(scripted: _ScriptedHa, browser, name="love refined", *, entity=_ENTITY, source=None, policy=None, default_source=None):
     try:
         return await handle_play_spotify_playlist(
             policy or Policy.from_config(None),
@@ -105,6 +105,7 @@ async def _play(scripted: _ScriptedHa, browser, name="love refined", *, entity=_
             entity,
             name,
             source=source,
+            default_source=default_source,
         )
     finally:
         await scripted.client.aclose()
@@ -344,3 +345,104 @@ async def test_tool_is_registered_with_the_expected_schema():
     schema = tool.input_schema if hasattr(tool, "input_schema") else tool.inputSchema
     assert set(schema["properties"]) == {"entity_id", "name", "source"}
     assert set(schema["required"]) == {"entity_id", "name"}
+
+
+# -- default speaker -------------------------------------------------------
+
+_TWO = ["Example Speaker", "Example Pi"]
+
+
+async def test_default_source_is_selected_on_an_idle_player():
+    scripted = _ScriptedHa([_state(_IDLE_FEATURES, source_list=_TWO), _ok(), _ok()])
+    await _play(scripted, _FakeBrowser(), default_source="Example Pi")
+    assert [r.method for r in scripted.requests] == ["GET", "POST", "POST"]
+    select, play = scripted.posts
+    assert select.url.path.endswith("/select_source")
+    assert json.loads(select.content)["source"] == "Example Pi"
+    assert play.url.path.endswith("/play_media")
+
+
+async def test_default_source_moves_playback_off_another_speaker():
+    scripted = _ScriptedHa(
+        [_state(_ACTIVE_FEATURES, source_list=_TWO, source="Example Speaker"), _ok(), _ok()]
+    )
+    await _play(scripted, _FakeBrowser(), default_source="Example Pi")
+    select, play = scripted.posts
+    assert json.loads(select.content)["source"] == "Example Pi"
+    assert play.url.path.endswith("/play_media")
+
+
+async def test_default_source_already_playing_only_plays():
+    scripted = _ScriptedHa(
+        [_state(_ACTIVE_FEATURES, source_list=_TWO, source="Example Pi"), _ok()]
+    )
+    await _play(scripted, _FakeBrowser(), default_source="Example Pi")
+    assert [p.url.path.rsplit("/", 1)[1] for p in scripted.posts] == ["play_media"]
+
+
+async def test_a_named_source_wins_over_the_default():
+    scripted = _ScriptedHa(
+        [_state(_ACTIVE_FEATURES, source_list=_TWO, source="Example Pi"), _ok(), _ok()]
+    )
+    await _play(scripted, _FakeBrowser(), source="Example Speaker", default_source="Example Pi")
+    assert json.loads(scripted.posts[0].content)["source"] == "Example Speaker"
+
+
+async def test_a_default_missing_from_the_source_list_is_refused_with_no_post():
+    scripted = _ScriptedHa([_state(_IDLE_FEATURES, source_list=["Example Speaker"])])
+    with pytest.raises(Denied) as exc:
+        await _play(scripted, _FakeBrowser(), default_source="Example Pi")
+    assert "Example Pi" in exc.value.reason
+    assert scripted.posts == []
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+async def test_a_blank_default_keeps_todays_behavior(blank):
+    scripted = _ScriptedHa(
+        [_state(_ACTIVE_FEATURES, source_list=_TWO, source="Example Speaker"), _ok()]
+    )
+    await _play(scripted, _FakeBrowser(), default_source=blank)
+    assert [p.url.path.rsplit("/", 1)[1] for p in scripted.posts] == ["play_media"]
+
+
+# -- default speaker: ha.py wiring -------------------------------------------
+
+
+async def test_startup_stores_the_stripped_default_source(monkeypatch):
+    monkeypatch.setenv("HA_URL", "http://ha.invalid")
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+    monkeypatch.setattr(ha_module, "_http_client", None)
+    monkeypatch.setattr(ha_module, "_registry_client", None)
+    monkeypatch.setattr(ha_module, "_default_spotify_source", None)
+    monkeypatch.setenv("SPOTIFY_DEFAULT_SOURCE", "  Example Pi ")
+    ha_module._startup()
+    try:
+        assert ha_module._default_spotify_source == "Example Pi"
+        monkeypatch.setenv("SPOTIFY_DEFAULT_SOURCE", "   ")
+        await ha_module._http_client.aclose()
+        ha_module._startup()
+        assert ha_module._default_spotify_source is None
+        monkeypatch.delenv("SPOTIFY_DEFAULT_SOURCE")
+        await ha_module._http_client.aclose()
+        ha_module._startup()
+        assert ha_module._default_spotify_source is None
+    finally:
+        await ha_module._http_client.aclose()
+
+
+async def test_the_tool_passes_the_stored_default_source(monkeypatch):
+    seen = {}
+
+    async def fake_handle(*args, **kwargs):
+        seen.update(kwargs)
+        return {"playlist": "x"}
+
+    client = httpx.AsyncClient()
+    monkeypatch.setattr(ha_module, "handle_play_spotify_playlist", fake_handle)
+    monkeypatch.setattr(ha_module, "_http_client", client)
+    monkeypatch.setattr(ha_module, "_default_spotify_source", "Example Pi")
+    try:
+        await ha_module.ha_play_spotify_playlist(_ENTITY, "love refined")
+    finally:
+        await client.aclose()
+    assert seen == {"source": None, "default_source": "Example Pi"}

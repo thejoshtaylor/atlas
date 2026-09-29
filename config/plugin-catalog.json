@@ -8,7 +8,8 @@
       "url": null,
       "config_keys": [
         {"key": "HA_URL", "label": "Home Assistant URL", "secret": false},
-        {"key": "HA_TOKEN", "label": "Home Assistant long-lived access token", "secret": true}
+        {"key": "HA_TOKEN", "label": "Home Assistant long-lived access token", "secret": true},
+        {"key": "SPOTIFY_DEFAULT_SOURCE", "label": "Default Spotify speaker (used when none is named)", "secret": false}
       ]
     },
     {

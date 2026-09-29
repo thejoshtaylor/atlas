@@ -303,6 +303,7 @@ _http_client: httpx.AsyncClient | None = None
 _base_url: str = ""
 _token: str = ""
 _registry_client: HaRegistryClient | None = None
+_default_spotify_source: str | None = None
 
 
 @mcp_server.tool()
@@ -390,7 +391,8 @@ async def ha_play_spotify_playlist(
     words like "playlist".
 
     `source` is the Spotify speaker to play on. Give it only when the person
-    names one.
+    names one. With no source, the music plays on the house's default speaker
+    when one is configured.
 
     A refusal's reason is spoken to the person as it is written.
     """
@@ -405,6 +407,7 @@ async def ha_play_spotify_playlist(
             entity_id,
             name,
             source=source,
+            default_source=_default_spotify_source,
         )
     except Denied as exc:
         raise ToolError(exc.reason) from exc
@@ -431,9 +434,10 @@ async def ha_list_entities() -> list[dict[str, Any]]:
 
 
 def _startup() -> None:
-    global _http_client, _base_url, _token, _registry_client
+    global _http_client, _base_url, _token, _registry_client, _default_spotify_source
     _base_url = os.environ["HA_URL"]
     _token = os.environ["HA_TOKEN"]
+    _default_spotify_source = os.environ.get("SPOTIFY_DEFAULT_SOURCE", "").strip() or None
     # Explicit, not relying on httpx's own default (5.0s on every axis --
     # already bounded, but this project states its own outbound bound
     # rather than depending on a library default an upgrade could change

@@ -33,6 +33,11 @@ def test_the_shipped_catalog_parses_and_seeds_the_two_builtin_plugins():
     assert ha.config_keys == (
         CatalogConfigKey(key="HA_URL", label="Home Assistant URL", secret=False),
         CatalogConfigKey(key="HA_TOKEN", label="Home Assistant long-lived access token", secret=True),
+        CatalogConfigKey(
+            key="SPOTIFY_DEFAULT_SOURCE",
+            label="Default Spotify speaker (used when none is named)",
+            secret=False,
+        ),
     )
 
     weather = find_entry(entries, "Weather")

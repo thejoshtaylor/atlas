@@ -150,6 +150,7 @@ async def handle_play_spotify_playlist(
     name: str,
     *,
     source: str | None = None,
+    default_source: str | None = None,
 ) -> dict[str, Any]:
     """Play the account's playlist that `name` best matches on a Spotify
     media player.
@@ -165,6 +166,11 @@ async def handle_play_spotify_playlist(
     `not_supported` unless BROWSE_MEDIA is set. An idle player therefore
     needs a speaker selected first. `select_source` returns only after the
     state refreshed, so there is no state re-read afterwards (latency).
+
+    `default_source` is the operator's configured speaker. It applies only
+    when `source` is blank, and it moves playback there when Spotify plays
+    somewhere else. A named `source` always wins. A blank or missing default
+    keeps the behavior described above.
 
     Only the account's first 48 playlists can be matched: that is the most
     the integration requests from Spotify.
@@ -197,17 +203,16 @@ async def handle_play_spotify_playlist(
     current_source = attributes.get("source")
 
     can_play = bool(features & PLAY_MEDIA_FEATURE) and bool(features & BROWSE_MEDIA_FEATURE)
-    wants_other = (
-        source is not None
-        and source.strip() != ""
-        and not (isinstance(current_source, str) and current_source.casefold() == source.strip().casefold())
+    wanted = (source or "").strip() or (default_source or "").strip()
+    wants_other = bool(wanted) and not (
+        isinstance(current_source, str) and current_source.casefold() == wanted.casefold()
     )
     chosen: str | None = None
     if not can_play or wants_other:
         if not (features & PLAY_MEDIA_FEATURE) and not (features & SELECT_SOURCE_FEATURE):
             raise Denied("that spotify player can't be controlled from here")
-        if source is not None and source.strip():
-            chosen = match_spoken_name(source, source_list, what="speaker")
+        if wanted:
+            chosen = match_spoken_name(wanted, source_list, what="speaker")
         elif len(source_list) == 1:
             chosen = source_list[0]
         elif not source_list:
