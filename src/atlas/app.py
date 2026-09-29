@@ -2222,8 +2222,12 @@ async def health() -> dict[str, str]:
     a gate that blocks the one route naming whether the process is even up
     is a lockout, not a safeguard. Carries no role requirement either: a
     health check answering only to an authenticated caller is not a health
-    check a container orchestrator or a load balancer can use."""
-    return {"status": "ok"}
+    check a container orchestrator or a load balancer can use.
+
+    `commit` is the commit the image was built from. The edge updater
+    compares it with its own checkout. It is empty when the image was
+    built without the GIT_SHA build arg."""
+    return {"status": "ok", "commit": os.environ.get("ATLAS_GIT_SHA", "")}
 
 
 # Every route below this point is a real backend route -- a control

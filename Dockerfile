@@ -188,6 +188,15 @@ FROM python-base AS runtime
 
 COPY --from=frontend --chown=atlas:atlas /web/dist ./web/dist
 
+# The commit this image was built from. /health reports it, and the edge
+# updater reads it. These two lines sit in the runtime stage, after the
+# frontend copy. A new commit then never invalidates the python-base
+# layers or the build-time pytest run in the test stage. An image built
+# without the arg reports an empty commit, and the edge updater does
+# nothing. CI passes the arg.
+ARG GIT_SHA=""
+ENV ATLAS_GIT_SHA=$GIT_SHA
+
 USER atlas
 
 EXPOSE 8080
