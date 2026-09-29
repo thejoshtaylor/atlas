@@ -366,6 +366,8 @@ async def test_music_is_wired_started_and_stopped_and_ducks_on_turn_state() -> N
             assert seen[state] is expected
         now = time.monotonic()
         on_live_frame_sent(now - 0.02, now)
+        # A live frame (an open VAD segment) with no turn in progress does
+        # not duck music, because the VAD fires on music.
         seen["segment"] = music.duck_active()
 
     service_runner = build_service(
@@ -379,7 +381,7 @@ async def test_music_is_wired_started_and_stopped_and_ducks_on_turn_state() -> N
     assert capture.mixer == music.mix
     assert seen["started"] == ["start"]
     assert seen["initial"] is False
-    assert seen["segment"] is True
+    assert seen["segment"] is False
     assert music.events == ["start", "stop"]
     assert led.states == ["idle", "listening", "thinking", "replying", "idle"]
 
