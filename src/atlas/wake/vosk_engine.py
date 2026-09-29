@@ -32,6 +32,18 @@ logger = logging.getLogger("atlas.wake.vosk_engine")
 _SAMPLE_RATE = 16000
 
 
+def _contains_phrase(tokens: list[str], phrase_tokens: tuple[str, ...]) -> bool:
+    """True when `phrase_tokens` occurs as a contiguous run inside `tokens`.
+
+    An empty phrase never matches. Tokens compare exactly, with no case
+    folding, because Vosk emits lowercase words from the grammar.
+    """
+    n = len(phrase_tokens)
+    if n == 0:
+        return False
+    return any(tuple(tokens[i : i + n]) == phrase_tokens for i in range(len(tokens) - n + 1))
+
+
 class VoskWakeDetector:
     """Grammar-constrained Vosk wake detector."""
 
@@ -53,22 +65,34 @@ class VoskWakeDetector:
         grammar_json = json.dumps(list(config.grammar))
         self._recognizer = vosk.KaldiRecognizer(self._model, _SAMPLE_RATE, grammar_json)
         self._phrase = phrase
+        self._phrase_tokens = tuple(phrase.split())
 
     def process(self, chunk: bytes) -> WakeHit | None:
         """Feed one chunk of 16 kHz mono PCM16 to the recognizer.
 
-        `AcceptWaveform` returns truthy only once an utterance boundary is
-        reached (grammar-constrained silence/endpoint detection inside
-        Kaldi) -- `Result()` is only meaningful at that point; every other
-        call returns `None` here regardless of `PartialResult()`'s content,
-        since a partial match is not yet a decision.
+        The detector reads the committed `Result()` when `AcceptWaveform`
+        commits, else `PartialResult()`, and fires when the phrase tokens
+        occur as a contiguous run in that text. Waiting for `AcceptWaveform`
+        alone adds Kaldi's endpoint silence (about 0.5 to 1 s) to every
+        wake, and vosk 0.3.44 has no call to shorten that silence.
+
+        A run-on command commits as the phrase plus `[unk]` tokens (for
+        example `hey atlas [unk] [unk]`), so an exact-equality check never
+        fires on it. The match is a whole-word token run, so the grammar
+        decoys (`at last`, `the atlas`) still never fire.
+
+        `Reset()` after a hit is necessary. The partial stays in the
+        recognizer until the endpoint, so it would fire again on every
+        following chunk. The `WakeGate` refractory window is a second
+        guard only.
         """
-        if not self._recognizer.AcceptWaveform(chunk):
+        if self._recognizer.AcceptWaveform(chunk):
+            text = json.loads(self._recognizer.Result()).get("text", "")
+        else:
+            text = json.loads(self._recognizer.PartialResult()).get("partial", "")
+        if not _contains_phrase(text.split(), self._phrase_tokens):
             return None
-        result = json.loads(self._recognizer.Result())
-        text = result.get("text", "").strip()
-        if text != self._phrase:
-            return None
+        self._recognizer.Reset()
         # The grammar match itself is binary -- Vosk's own result carries no
         # confidence score the way openWakeWord's threshold-based detector
         # does. 1.0 names that a match against a constrained grammar is a
