@@ -21,6 +21,7 @@ function sampleSpeaker(overrides: Record<string, unknown> = {}) {
     enrolled_phrases: 0,
     required_phrases: 5,
     model_id: "cam++",
+    retroactive_clips: 0,
     ...overrides,
   }
 }
@@ -54,6 +55,19 @@ function stubSpeakers(
         void queryClient.invalidateQueries({ queryKey: ["speakers"] })
       },
     },
+  }))
+  // 260929-j08: the mounted inbox and clip lists read `@/lib/speakerInbox`. An empty
+  // inbox and no clips keep every test below about members only.
+  mock.module("@/lib/speakerInbox", () => ({
+    voiceInboxQueryOptions: { queryKey: ["speakers", "voice-inbox"], queryFn: async () => ({ items: [] }) },
+    voiceInboxAudioUrl: (id: string) => `/audio/${id}`,
+    assignVoiceMutationOptions: { mutationFn: notStubbed("assignVoice") },
+    retroactiveClipsQueryOptions: (speakerId: number) => ({
+      queryKey: ["speakers", speakerId, "retroactive-clips"],
+      queryFn: async () => ({ clips: [] }),
+    }),
+    retroactiveClipAudioUrl: (speakerId: number, index: number) => `/clip/${speakerId}/${index}`,
+    deleteRetroactiveClipMutationOptions: { mutationFn: notStubbed("deleteRetroactiveClip") },
   }))
   // Every mounted row builds an `EnrollmentPanel` conditionally, but no
   // test in this file ever clicks "Enroll"/"Re-record phrases" -- it stays
@@ -239,4 +253,14 @@ test("a 500 from the delete route shows the server's own detail under that row, 
     ),
   ).toBeTruthy()
   expect(screen.getByText("Chris")).toBeTruthy()
+})
+
+test("a ready screen shows the 'Recent unrecognized voices' section", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubSpeakers(queryClient, { fetchSpeakers: async () => [sampleSpeaker()] })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  expect(await screen.findByText("Recent unrecognized voices")).toBeTruthy()
 })

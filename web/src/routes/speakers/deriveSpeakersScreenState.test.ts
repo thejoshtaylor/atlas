@@ -12,6 +12,7 @@ function sampleSpeaker(overrides: Partial<Speaker> = {}): Speaker {
     enrolled_phrases: 0,
     required_phrases: 5,
     model_id: "cam++",
+    retroactive_clips: 0,
     ...overrides,
   }
 }
@@ -75,5 +76,23 @@ describe("formatEnrollmentProgress", () => {
 
   test("enrolled_phrases past required (shouldn't happen, but must not break) -> 'Enrolled'", () => {
     expect(formatEnrollmentProgress(sampleSpeaker({ enrolled_phrases: 6, required_phrases: 5 }))).toBe("Enrolled")
+  })
+
+  test("clips from recordings are shown after the prompted progress", () => {
+    expect(
+      formatEnrollmentProgress(sampleSpeaker({ enrolled_phrases: 5, required_phrases: 5, retroactive_clips: 2 })),
+    ).toBe("Enrolled · 2 clips from recordings")
+    expect(
+      formatEnrollmentProgress(sampleSpeaker({ enrolled_phrases: 3, required_phrases: 5, retroactive_clips: 1 })),
+    ).toBe("3 of 5 phrases · 1 clip from recordings")
+    expect(
+      formatEnrollmentProgress(sampleSpeaker({ enrolled_phrases: 5, required_phrases: 5, retroactive_clips: 0 })),
+    ).toBe("Enrolled")
+  })
+
+  test("model_id null still reads 'Speaker ID model not set' with clips", () => {
+    expect(formatEnrollmentProgress(sampleSpeaker({ model_id: null, retroactive_clips: 2 }))).toBe(
+      "Speaker ID model not set",
+    )
   })
 })
