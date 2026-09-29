@@ -1530,6 +1530,8 @@ async def run_turn(
                 barge_in=barge_in,
                 speech_lock=speech_lock,
                 sink=sink,
+                # D-09: a readback that opens a confirm window plays last.
+                expects_answer=outcome.follow_up is not None and follow_up is not None,
             )
             if outcome.follow_up is not None and follow_up is not None:
                 # Plan 09-06 (D-06, D-09): `playback_ends_at` is set from
@@ -1598,11 +1600,20 @@ async def run_turn(
             # (holding the microphone open) stays out of scope there.
             timings.turn_outcome = "needs_clarification"
             question = _compose_clarifying_question(winner.candidates, friendly_names)
+            clarification_chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
             clarification_speech = await _speak(
-                source, tts, timings, question, kind="answer", barge_in=barge_in, speech_lock=speech_lock, sink=sink
+                source,
+                tts,
+                timings,
+                question,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+                # D-09: a question that opens a follow-up window plays last.
+                expects_answer=follow_up is not None and clarification_chain_depth <= MAX_CHAINED_FOLLOW_UPS,
             )
             if follow_up is not None:
-                clarification_chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
                 if clarification_chain_depth <= MAX_CHAINED_FOLLOW_UPS:
                     follow_up.request(
                         FollowUpRequest(
@@ -2665,9 +2676,13 @@ async def _speak(
         )
     handle = route.handle
     if kind == "filler":
-        return await _speak_direct(
-            source, tts, timings, reply_text, kind=kind, barge_in=barge_in, speech_lock=speech_lock, sink=sink
+        if not handle.claim_filler():
+            return SpeechResult(0, None, None)
+        filler = await _speak_direct(
+            source, tts, timings, reply_text, kind=kind, barge_in=barge_in, speech_lock=handle.reply_lock, sink=sink
         )
+        handle.note_playback(estimate_playback_end(filler, sink))
+        return filler
 
     async def write(text: str, needs_live_tts: bool) -> SpeechResult:
         # A cached TTS holds exact phrases only, so a prefix or a join needs the live one.
@@ -2870,6 +2885,13 @@ async def _speak_direct(
 
 
 async def _play_wake_cue(source: _AudioSource, sink: SinkFormat, speech_lock: asyncio.Lock | None) -> None:
+    route = current_reply_route.get()
+    if route is not None:
+        # Phase 12: a turn that joined a live group plays no cue, and the first
+        # turn's cue takes the reply lock so it never lands inside a reply.
+        if route.handle.joined:
+            return
+        speech_lock = route.handle.reply_lock
     cue = wake_cue_audio(sink)
     if not cue:
         return
