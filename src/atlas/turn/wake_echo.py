@@ -39,6 +39,9 @@ old "hey spire" phrase. Re-measured for "hey atlas": wake-only ("at last"
 that must never trip this check ("stop" 0.22, "turn on the lights" 0.37,
 "at last the lights" 0.43) -- provisional until a real
 corpus of camera turns says otherwise.
+
+`strip_wake_phrase` (260929-icf) is the second function: it checks that a
+transcript opens with the wake phrase and returns the text after it.
 """
 
 from __future__ import annotations
@@ -51,6 +54,10 @@ _PUNCT_RE = re.compile(r"[.,!?;:'\"()\[\]{}\-_/\\]")
 # Below this, a transcript reads as a real command rather than an echo of
 # the wake phrase -- see the module docstring for how this value was picked.
 _SIMILARITY_THRESHOLD = 0.55
+
+# The lowest similarity between the phrase keyword (its last word) and the
+# words at the start of a transcript that still counts as the wake phrase.
+_KEYWORD_SIMILARITY = 0.7
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -87,3 +94,41 @@ def is_wake_only(text: str, phrase: str) -> bool:
         if ratio >= _SIMILARITY_THRESHOLD:
             return True
     return False
+
+
+def strip_wake_phrase(text: str, phrase: str) -> str | None:
+    """Return the text after a wake phrase at the start of `text`.
+
+    Return `None` when `text` does not open with the phrase. The match is on
+    the last word of the phrase (the keyword, "atlas" for "hey atlas"). It
+    looks at the first `len(phrase words)` positions, so one lead-in word is
+    allowed. At each position it tries one word, then two words joined
+    ("at last" for "atlas").
+
+    Keyword similarity that passes: "atlas" 1.0, "atlast" 0.91, "aatlas"
+    0.91, "heyatlas" 0.77, "atless" 0.73. Keyword similarity that fails:
+    "atlanta" 0.67, "whats" 0.60, "thats" 0.60, "alice" 0.40.
+
+    Accepted misses: a sentence that opens with "the atlas", "at least", or
+    "alas" passes, because its keyword similarity is high. This check
+    narrows an ambient trigger. It is not a safety boundary: every action
+    still goes through `mcp.atlas_mcp.safety.allow_call`.
+    """
+    phrase_words = _PUNCT_RE.sub("", phrase.lower()).split()
+    raw = text.split()
+    if not phrase_words or not raw:
+        return None
+
+    keyword = phrase_words[-1]
+    norm = [_PUNCT_RE.sub("", word.lower()) for word in raw]
+    for start in range(len(phrase_words)):
+        for width in (1, 2):
+            end = start + width
+            if end > len(norm):
+                continue
+            candidate = "".join(norm[start:end])
+            if not candidate:
+                continue
+            if difflib.SequenceMatcher(None, candidate, keyword).ratio() >= _KEYWORD_SIMILARITY:
+                return " ".join(raw[end:]).lstrip(" ,.;:!?-")
+    return None

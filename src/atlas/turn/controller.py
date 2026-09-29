@@ -133,7 +133,7 @@ from atlas.turn.pending_action import (
     handle_confirmation_reply,
 )
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
-from atlas.turn.wake_echo import is_wake_only
+from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
 
 logger = logging.getLogger("atlas.turn.controller")
 
@@ -420,6 +420,7 @@ async def run_turn(
     tool_owners: "Callable[[str], tuple[str, ...]] | None" = None,
     wake_phrase: str | None = None,
     wake_cue: bool = False,
+    verify_wake: bool = False,
     brain_turn_timeout_s: float = 25.0,
     local_intents: bool = False,
     state_timeout_ms: float = 500.0,
@@ -529,6 +530,12 @@ async def run_turn(
     until whichever drain turns out to be the last one, so a source's
     barge-in listener never starts reading `frames()` while this
     function's own second drain still needs to be its sole reader.
+
+    `verify_wake` (260929-icf, default `False`): when `wake_phrase` is given
+    and this is not a follow-up turn, a leading wake phrase is removed from
+    the first final transcript. With `verify_wake` `True`, a first final that
+    does not open with the phrase (an empty one included) ends the turn with
+    `turn_outcome = "wake_unverified"`, no brain call, and no reply.
 
     `brain_turn_timeout_s` (260922-woc, default 25.0) bounds the wait on
     the tier race as a whole, on top of whatever `filler_after_ms` already
@@ -763,7 +770,25 @@ async def run_turn(
         )
         final_text = getattr(final, "text", "") if final is not None else ""
 
-        if incoming is None and wake_phrase and final_text and is_wake_only(final_text, wake_phrase):
+        # 260929-icf: a wake hit starts this turn only when `incoming is None`
+        # and `wake_phrase` is given. Remove the phrase from the transcript.
+        heard_text = final_text
+        wake_unverified = False
+        if incoming is None and wake_phrase:
+            command = strip_wake_phrase(heard_text, wake_phrase)
+            if command is not None:
+                final_text = command
+            wake_unverified = verify_wake and command is None
+
+        # With the longer preroll, a first final that is only the phrase
+        # strips to "". This is the normal case that needs the second drain.
+        if (
+            incoming is None
+            and wake_phrase
+            and heard_text
+            and not wake_unverified
+            and (not final_text or is_wake_only(final_text, wake_phrase))
+        ):
             # 260922-woc: the operator paused after the wake phrase, and
             # `stt.endpointing_ms` ended the utterance there -- the command
             # is still coming. Drain again, once (no loop): a second
@@ -869,6 +894,17 @@ async def run_turn(
             # is ever reached below, so the row is never claimed, and it
             # resolves on its own TTL like any other unanswered follow-up
             # (D-15: the confirm-window code itself takes no speaker input).
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # 260929-icf: the transcript does not open with the wake phrase, so
+        # the wake hit was a false fire. No brain call and no spoken reply.
+        if wake_unverified:
+            timings.turn_outcome = "wake_unverified"
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            logger.info("turn %s dropped: transcript does not open with the wake phrase", timings.turn_id)
             await _emit_event(source, timings.to_event())
             timings.log()
             return
