@@ -2,9 +2,10 @@ import * as React from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Link, useParams } from "react-router-dom"
 import { ErrorState } from "@/components/state/ErrorState"
-import { formatSeconds } from "@/lib/format"
+import { formatMs, formatSeconds } from "@/lib/format"
 import { fetchSession, sessionAudioUrl, sessionQueryKey, type TimelineEntry } from "@/lib/sessions"
 import { activeTimelineIndexAt, deriveSessionDetailScreenState } from "./deriveSessionDetailScreenState"
+import { formatSessionSpeaker } from "./deriveSessionsScreenState"
 
 // DBG-03, D-02, D-03, D-04, 08-UI-SPEC.md's Focal Point row: "the
 // transcript/reply/outcome block at the top ... the timeline immediately
@@ -16,6 +17,14 @@ import { activeTimelineIndexAt, deriveSessionDetailScreenState } from "./deriveS
 
 function formatStartedAt(startedAt: string): string {
   return new Date(startedAt).toLocaleString()
+}
+
+/** Score/margin to two decimals, or an em dash for a `null` margin (plan
+ * 11-10's own display rule) -- a below-threshold match still carries a
+ * real score, so this is never "not recorded", only "not applicable to
+ * this match" for a margin the gate had nothing to compare against. */
+function formatMatchNumber(value: number | null): string {
+  return value === null ? "—" : value.toFixed(2)
 }
 
 // D-09: the <audio> element is the clock; this row only ever reads
@@ -166,6 +175,19 @@ export function SessionDetailRoute() {
             <p className="text-body text-foreground">
               Replied: {screen.session.reply_text ?? "No reply."}
             </p>
+            {/* D-13: who spoke, the match score, the margin and
+                speaker_id_ms -- the best match only (this plan's own
+                prohibition: no per-member score list, no embedding). A
+                `null` speaker (recorded before this phase, or speaker id
+                off) shows the one line and stops there -- no score line
+                with nothing behind it. */}
+            <p className="text-body text-foreground">Speaker: {formatSessionSpeaker(screen.session.speaker)}</p>
+            {screen.session.speaker !== null ? (
+              <p className="readout text-label text-muted-foreground">
+                Score: {formatMatchNumber(screen.session.speaker.score)} · Margin:{" "}
+                {formatMatchNumber(screen.session.speaker.margin)} · Speaker ID: {formatMs(screen.session.speaker_id_ms)}
+              </p>
+            ) : null}
           </div>
 
           {/* `has_audio` is the server's own answer to "was anything
