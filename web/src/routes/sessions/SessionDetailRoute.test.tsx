@@ -62,6 +62,13 @@ const SAMPLE_SESSION = {
     { ts: 2.2, kind: "event", offset_s: 2.7, type: "transcript.partial" },
     { ts: 5.0, kind: "stage", offset_s: 5.5, stage: "stt_final_at" },
   ],
+  // Plan 11-10 (D-13): the default fixture carries no speaker at all --
+  // the same "recorded before this phase" shape every other pre-plan
+  // session fixture in this file already carries for its other new
+  // fields, so a test that does not care about the speaker block sees
+  // the "Speaker not recorded" branch, never an undefined crash.
+  speaker: null,
+  speaker_id_ms: null,
 }
 
 // The browser-microphone and WebRTC shape: no `PrerollReplayingSource`
@@ -306,6 +313,64 @@ test("an audio error degrades only the player region -- timeline, transcript and
   for (const button of screen.getAllByRole("button")) {
     expect(button.getAttribute("aria-current")).toBeNull()
   }
+})
+
+// --- Task 2 of 11-10 (TDD): the speaker, the score, the margin, and speaker_id_ms
+
+test("an identified session's detail shows the name, the score, the margin, and speaker_id_ms", async () => {
+  stubLib(async () => ({
+    ...SAMPLE_SESSION,
+    speaker: {
+      status: "identified",
+      speaker_id: 1,
+      speaker_name: "Member A",
+      score: 0.9142,
+      margin: 0.321,
+      detail: null,
+    },
+    speaker_id_ms: 62.3,
+  }))
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(screen.getByText(/Member A/)).toBeTruthy()
+  expect(screen.getByText(/0\.91/)).toBeTruthy()
+  expect(screen.getByText(/0\.32/)).toBeTruthy()
+  expect(screen.getByText(/62\.3 ms/)).toBeTruthy()
+})
+
+test("an identified session with a null margin shows an em dash for the margin", async () => {
+  stubLib(async () => ({
+    ...SAMPLE_SESSION,
+    speaker: {
+      status: "identified",
+      speaker_id: 1,
+      speaker_name: "Member A",
+      score: 0.91,
+      margin: null,
+      detail: null,
+    },
+    speaker_id_ms: 62.3,
+  }))
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(screen.getByText(/Margin: —/)).toBeTruthy()
+})
+
+test("a session with a null speaker shows 'Speaker not recorded' and no score line", async () => {
+  stubLib(async () => SAMPLE_SESSION)
+  const { SessionDetailRoute } = await import("./SessionDetailRoute")
+
+  renderAt(SessionDetailRoute, `/sessions/${SAMPLE_SESSION.id}`)
+  await screen.findByText(/Heard:/)
+
+  expect(screen.getByText(/Speaker not recorded/)).toBeTruthy()
+  expect(screen.queryByText(/score/i)).toBeNull()
 })
 
 // IN-02: `has_audio` was fetched, typed, and never read.
