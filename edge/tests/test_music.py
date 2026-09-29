@@ -172,7 +172,7 @@ def test_gain_tracks_even_with_no_music_buffered():
 def test_zero_ramp_is_instant():
     mixer = _mixer(duck_active=lambda: True, ramp_ms=0)
     mixer.mix(bytes(BLOCK * 4), False)
-    assert mixer.gain == pytest.approx(0.2)
+    assert mixer.gain == pytest.approx(0.05)
 
 
 # --- start(): fail-safe -------------------------------------------------------

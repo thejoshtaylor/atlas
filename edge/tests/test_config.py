@@ -111,7 +111,7 @@ def test_music_defaults(tmp_path):
     _write_config(path, _BASE)
     config = load_config(path)
     assert config.music_fifo == DEFAULT_MUSIC_FIFO == "/run/atlas-edge/music.fifo"
-    assert config.music_duck_level == 0.2
+    assert config.music_duck_level == 0.05
     assert config.music_duck_ramp_ms == 150
 
 
