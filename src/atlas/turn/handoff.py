@@ -183,6 +183,14 @@ class HandoffContext:
     # context that forgot the field behave the same way. Tests that need
     # the bare names pass them explicitly.
     proposal_tool_names: frozenset[str] = frozenset()
+    # Phase 12 (D-12): the key a stored pending action is filed under. Two
+    # turns that run at the same time on one source each pass their own key
+    # (for example "edge:3"), so turn B's proposal cannot supersede turn A's
+    # awaiting confirmation. Follow-up links of one run share the key, so an
+    # amendment still supersedes its own earlier row. `None` files the row
+    # under `source_name`, as before. The email list memory ignores this and
+    # stays keyed by `source_name` (issue #7 owns per-user data).
+    pending_source_key: "str | None" = None
 
 
 @dataclass(frozen=True)
@@ -285,7 +293,7 @@ async def dispatch_handoff(
     # exists yet).
     try:
         action_row = await ctx.pending_actions.create(
-            source=ctx.source_name,
+            source=ctx.pending_source_key or ctx.source_name,
             action=proposal.action,
             tool_name=tool_name,
             arguments=arguments,

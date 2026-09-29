@@ -99,7 +99,12 @@ def _render_for_sink(voice: Any, text: str, sample_rate: int, codec: str) -> byt
 
 class PiperTts:
     """Speech synthesis via a local Piper voice -- no account, no per-turn
-    network call (D-09, D-10)."""
+    network call (D-09, D-10).
+
+    Parallel turns (Phase 12) share this one voice on a CPU-only host, and
+    nobody checked that one voice is safe to call from two threads at once.
+    `_render_lock` lets one render run at a time, so a second parallel
+    render waits its turn (Research Pitfall 11)."""
 
     def __init__(
         self,
@@ -108,6 +113,7 @@ class PiperTts:
         load_voice: "Callable[[TtsConfig], Any]" = _load_piper_voice,
     ) -> None:
         self._config = config
+        self._render_lock = asyncio.Lock()
         if not os.path.isfile(config.piper_voice_path):
             raise ProviderUnavailable(
                 f"No Piper voice found at {config.piper_voice_path!r}. Run the model "
@@ -154,4 +160,7 @@ class PiperTts:
         Web-Audio-facing PCM path cannot share one hardcoded shape.
         """
         sink = sink or self.browser_sink()
-        return await asyncio.to_thread(_render_for_sink, self._voice, text, sink.sample_rate, sink.codec)
+        async with self._render_lock:
+            return await asyncio.to_thread(
+                _render_for_sink, self._voice, text, sink.sample_rate, sink.codec
+            )

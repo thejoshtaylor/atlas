@@ -97,7 +97,12 @@ def _run_transcribe(model: Any, audio: "np.ndarray", language: str) -> list:
 
 class FasterWhisperStt:
     """Speech-to-text via a local `faster-whisper` model -- no account, no
-    per-turn network call, no download at boot (D-09, D-11)."""
+    per-turn network call, no download at boot (D-09, D-11).
+
+    Parallel turns (Phase 12) share this one model on a CPU-only host, and
+    nobody checked that one `WhisperModel` is safe to call from two threads
+    at once. `_decode_lock` lets one decode run at a time, so a second
+    parallel decode waits its turn (Research Pitfall 11)."""
 
     def __init__(
         self,
@@ -106,6 +111,7 @@ class FasterWhisperStt:
         load_model: "Callable[[SttConfig], Any]" = _load_faster_whisper_model,
     ) -> None:
         self._config = config
+        self._decode_lock = asyncio.Lock()
         if not os.path.isdir(config.local_model_dir):
             raise ProviderUnavailable(
                 f"No faster-whisper model found at {config.local_model_dir!r}. Run the "
@@ -222,9 +228,10 @@ class FasterWhisperStt:
         audio = _pcm16_to_float32(pcm16)
 
         try:
-            segments = await asyncio.to_thread(
-                _run_transcribe, self._model, audio, self._config.language
-            )
+            async with self._decode_lock:
+                segments = await asyncio.to_thread(
+                    _run_transcribe, self._model, audio, self._config.language
+                )
         except Exception as exc:
             raise SttError(f"local speech-to-text model failed: {exc}") from exc
 

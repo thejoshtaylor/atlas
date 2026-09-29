@@ -16,7 +16,9 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
+def build_handoff_context(
+    app: "FastAPI", source_name: str, *, pending_source_key: "str | None" = None
+) -> HandoffContext:
     """Read `app.state`'s current pending-action repository, tool host
     lookup, and brain -- called once per turn, at the call site, so every
     turn sees whatever `app.state.tool_host_lookup` currently points at
@@ -37,6 +39,11 @@ def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
     (no repository, no credentials) to exist, so there is nothing to be
     tolerant of. Every later call reuses the same instance, matching
     `EmailListMemory`'s own "per application" contract (D-16, SRC-03).
+
+    Phase 12 (D-12): `pending_source_key`, when given, is the key this
+    turn's pending action is stored under, so two parallel turns on one
+    source never supersede each other's awaiting confirmation. The email
+    list memory stays keyed by `source_name`.
     """
     # R2-WR-04, R2-WR-05: the exact names the running Google plugin's own
     # proposal and event-list tools are offered under -- the only names a
@@ -62,4 +69,5 @@ def build_handoff_context(app: "FastAPI", source_name: str) -> HandoffContext:
         # samples, and signature through it.
         style_repo=getattr(app.state, "google_account_repo", None),
         proposal_tool_names=proposal_tool_names,
+        pending_source_key=pending_source_key,
     )
