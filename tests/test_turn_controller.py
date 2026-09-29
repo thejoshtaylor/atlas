@@ -1795,9 +1795,9 @@ async def test_wake_only_then_nothing_speaks_the_no_speech_reply(fake_tts):
 
 
 async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_tts):
-    """"hey atlas turn on the lights" in a single final transcript is left
-    alone -- the LLM copes, and stripping the wake phrase out is out of
-    scope. Only one drain ever runs."""
+    """"hey atlas turn on the lights" in a single final transcript needs no
+    second drain. 260929-icf puts the strip in scope: the wake phrase is
+    removed even with `verify_wake` off. Only one drain ever runs."""
     from atlas.providers.base import FinalTranscript
     from atlas.timing import TurnTimings
     from atlas.turn.controller import run_turn
@@ -1824,7 +1824,7 @@ async def test_wake_phrase_followed_by_a_command_in_one_breath_drains_once(fake_
     assert len(stt.received_by_call) == 1
     assert brain.received_messages[-1][-1] == {
         "role": "user",
-        "content": "hey atlas turn on the lights",
+        "content": "turn on the lights",
     }
     assert tts.received_text == ["turned on the lights"]
 
@@ -2559,3 +2559,112 @@ async def test_local_intents_disabled_by_default_falls_through_to_the_brain(
 
     assert brain.call_count == 1
     assert tts.received_text == ["turned off the fan"]
+
+
+# --- 260929-icf: the transcript is a second check on every wake hit ---
+
+
+async def _run_wake_turn(fake_tts, stt_calls, *, wake_phrase="hey atlas", verify_wake=None, source=None):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    stt = _SequentialDrainingStt(calls=stt_calls)
+    brain = _RecordingBrain(replies=[BrainReply(text="turned on the lights")])
+    live_source = source if source is not None else _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    extra = {} if verify_wake is None else {"verify_wake": verify_wake}
+    await run_turn(
+        live_source,
+        stt,
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase=wake_phrase,
+        **extra,
+    )
+    return stt, brain, tts, timings, live_source
+
+
+async def test_unverified_wake_turn_ends_silently(fake_tts):
+    stt, brain, tts, timings, source = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="She left the car in the lot.")]], verify_wake=True
+    )
+    assert len(stt.received_by_call) == 1
+    assert brain.received_messages == []
+    assert tts.received_text == []
+    assert source.sent_audio == []
+    assert timings.turn_outcome == "wake_unverified"
+
+
+async def test_empty_transcript_on_a_verified_wake_turn_speaks_nothing(fake_tts):
+    stt, brain, tts, timings, source = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="")]], verify_wake=True
+    )
+    assert brain.received_messages == []
+    assert tts.received_text == []
+    assert source.sent_audio == []
+    assert timings.turn_outcome == "wake_unverified"
+
+
+async def test_verified_wake_turn_strips_the_phrase_before_the_brain(fake_tts):
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="Hey, Atlas, turn on the lights.")]], verify_wake=True
+    )
+    assert len(stt.received_by_call) == 1
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights."}
+    assert timings.turn_outcome != "wake_unverified"
+
+
+async def test_verified_phrase_only_first_final_still_drains_a_second_time(fake_tts):
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts,
+        [[FinalTranscript(text="Hey Atlas.")], [FinalTranscript(text="turn on the lights")]],
+        verify_wake=True,
+    )
+    assert len(stt.received_by_call) == 2
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights"}
+    assert timings.turn_outcome != "wake_unverified"
+
+
+async def test_verify_wake_off_passes_an_unrelated_transcript_through(fake_tts):
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="She left the car in the lot.")]]
+    )
+    assert brain.received_messages[-1][-1] == {
+        "role": "user",
+        "content": "She left the car in the lot.",
+    }
+    assert timings.turn_outcome != "wake_unverified"
+
+
+async def test_a_turn_with_no_wake_phrase_is_never_verified(fake_tts):
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="turn on the lights")]], wake_phrase=None, verify_wake=True
+    )
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn on the lights"}
+    assert timings.turn_outcome != "wake_unverified"
+
+
+async def test_a_follow_up_turn_is_never_verified_or_stripped(fake_tts):
+    from atlas.turn.follow_up import FollowUpChannel, FollowUpRequest
+
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(
+        incoming=FollowUpRequest(
+            kind="clarification",
+            chain_depth=1,
+            original_transcript="add dentist on friday at 3",
+            question="home or work?",
+        )
+    )
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="home")]], verify_wake=True, source=source
+    )
+    assert len(brain.received_messages) == 1
+    assert brain.received_messages[0][-1] == {"role": "user", "content": "home"}
+    assert timings.turn_outcome != "wake_unverified"
