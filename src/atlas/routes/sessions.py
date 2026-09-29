@@ -22,6 +22,15 @@ recording it would be a change to what the recorder captures -- a change
 08-CONTEXT.md defers by name. The source label lives on `/live` (D-08),
 where the source is genuinely known at the moment the event is emitted;
 this module never infers one from the audio format.
+
+Plan 11-04 has the recorder write a `speaker.result` event on every turn
+(D-13) -- this module reads the last one back and adds it to the summary
+and the detail response (`_last_speaker_result`). Per D-15, a speaker
+label is exactly as untrusted as transcribed text: this route hands the
+operator a name and a score, never anything read as authorization for
+anything. Per this plan's own prohibition, only the best match reaches
+the browser -- the full per-member `scores` map the event itself carries
+stays server-side.
 """
 
 from __future__ import annotations
@@ -30,9 +39,10 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from atlas.auth.dependencies import CurrentUser, Role, require_role
 from atlas.config import SessionConfig
@@ -126,6 +136,22 @@ def _incomplete_recording_error(session_id: str) -> HTTPException:
 # --- Response models --------------------------------------------------------
 
 
+class SessionSpeakerResponse(BaseModel):
+    """The last `speaker.result` event (`speaker_id.turn_gate._build_event`),
+    narrowed to what an operator may see. `speaker_id`/`score`/`margin`/
+    `detail` are `None` for `status: "unknown"` unless the underlying event
+    itself set them (a below-threshold match still carries a score and a
+    margin). No per-member `scores` map and no embedding reaches this
+    model at all -- the plan's own prohibition."""
+
+    status: Literal["identified", "unknown"]
+    speaker_id: "int | None" = None
+    speaker_name: "str | None" = None
+    score: "float | None" = None
+    margin: "float | None" = None
+    detail: "str | None" = None
+
+
 class SessionSummaryResponse(BaseModel):
     id: str
     started_at: datetime
@@ -133,6 +159,7 @@ class SessionSummaryResponse(BaseModel):
     reply_text: "str | None"
     duration_ms: "float | None"
     has_audio: bool
+    speaker: "SessionSpeakerResponse | None" = None
 
 
 class SessionsListResponse(BaseModel):
@@ -176,6 +203,11 @@ class SessionDetailResponse(BaseModel):
     # so the screen can name it, not recomputed a second time.
     preroll_s: float = 0.0
     timeline: list[TimelineEntryResponse]
+    speaker: "SessionSpeakerResponse | None" = None
+    # `TurnTimings.speaker_id_ms` (plan 11-04, D-16), read straight off
+    # `timing.json` -- `None` for a session recorded before this phase, the
+    # same shape every other stage-timing field here already takes.
+    speaker_id_ms: "float | None" = None
 
 
 # --- Filesystem helpers ------------------------------------------------------
@@ -229,6 +261,33 @@ def _last_reply_text(events: list[dict]) -> "str | None":
         if event.get("type") == "reply.text":
             reply_text = event.get("text")
     return reply_text
+
+
+def _last_speaker_result(events: list[dict]) -> "SessionSpeakerResponse | None":
+    """The last `speaker.result` event (plan 11-04, D-13), validated into
+    the narrowed response shape this route promises -- last wins, the same
+    convention `_last_reply_text` already uses. An event this route cannot
+    read as one (missing `status`, a `status` outside the two named
+    values, or a field of the wrong shape) is skipped rather than raised:
+    one bad event must not turn an otherwise-good session into
+    `recording_incomplete`, the same blast-radius discipline
+    `_session_summary` already gives a damaged directory."""
+    result: "SessionSpeakerResponse | None" = None
+    for event in events:
+        if event.get("type") != "speaker.result":
+            continue
+        try:
+            result = SessionSpeakerResponse(
+                status=event.get("status"),
+                speaker_id=event.get("speaker_id"),
+                speaker_name=event.get("speaker_name"),
+                score=event.get("score"),
+                margin=event.get("margin"),
+                detail=event.get("detail"),
+            )
+        except (ValidationError, TypeError):
+            continue
+    return result
 
 
 def _transcript_before_stt_final(events: list[dict], stt_final_at: "float | None") -> "str | None":
@@ -362,6 +421,7 @@ def _session_summary(name: str, started_at: datetime, directory: Path) -> Sessio
             reply_text=_last_reply_text(events),
             duration_ms=_sum_durations(stage_durations_ms),
             has_audio=_has_audio(directory, timing_payload.get("audio_format")),
+            speaker=_last_speaker_result(events),
         )
     except (OSError, ValueError, TypeError):
         # The blast radius of one unreadable directory is that one row.
@@ -494,6 +554,8 @@ def _session_detail(session_id: str, started_at: datetime, directory: Path) -> S
             has_audio=_has_audio(directory, audio_format),
             preroll_s=shift_s,
             timeline=timeline,
+            speaker=_last_speaker_result(events),
+            speaker_id_ms=timing_payload.get("speaker_id_ms"),
         )
     except (OSError, ValueError, TypeError):
         # WR-01: the same blast-radius discipline `_session_summary` above

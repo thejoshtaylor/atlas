@@ -5,6 +5,19 @@
 // drift from what the server actually sends.
 import { apiFetch } from "./api"
 
+/** `SessionSpeakerResponse`'s exact shape (plan 11-10, D-13). No `scores`
+ * field -- deliberate, matching `routes/sessions.py`'s own prohibition: no
+ * per-member score list and no embedding reach the browser, the best
+ * match only. */
+export interface SessionSpeaker {
+  status: "identified" | "unknown"
+  speaker_id: number | null
+  speaker_name: string | null
+  score: number | null
+  margin: number | null
+  detail: string | null
+}
+
 /** `SessionSummaryResponse`'s exact shape. No source field -- deliberate,
  * see `routes/sessions.py`'s own module docstring: which source heard a
  * turn is not among the artifacts `session/recorder.py` writes. */
@@ -15,6 +28,7 @@ export interface SessionSummary {
   reply_text: string | null
   duration_ms: number | null
   has_audio: boolean
+  speaker: SessionSpeaker | null
 }
 
 interface SessionsListResponse {
@@ -50,6 +64,10 @@ export interface SessionDetail {
    * derived server-side is `session/timeline.py::preroll_offset_s`. */
   preroll_s: number
   timeline: TimelineEntry[]
+  speaker: SessionSpeaker | null
+  /** `TurnTimings.speaker_id_ms` (plan 11-04, D-16). `null` for a session
+   * recorded before this phase. */
+  speaker_id_ms: number | null
 }
 
 export const SESSIONS_QUERY_KEY = ["sessions"] as const

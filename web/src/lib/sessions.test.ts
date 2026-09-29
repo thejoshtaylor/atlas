@@ -28,6 +28,7 @@ function sampleSession(overrides: Partial<SessionSummary> = {}): SessionSummary 
     reply_text: "the reply",
     duration_ms: 812.5,
     has_audio: true,
+    speaker: null,
     ...overrides,
   }
 }

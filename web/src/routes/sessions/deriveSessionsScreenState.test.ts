@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { ApiError } from "@/lib/api"
-import type { SessionSummary } from "@/lib/sessions"
-import { deriveSessionsScreenState, formatSessionDuration, summarizeSessionOutcome } from "./deriveSessionsScreenState"
+import type { SessionSpeaker, SessionSummary } from "@/lib/sessions"
+import {
+  deriveSessionsScreenState,
+  formatSessionDuration,
+  formatSessionSpeaker,
+  summarizeSessionOutcome,
+} from "./deriveSessionsScreenState"
 
 function sampleSession(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
@@ -11,6 +16,7 @@ function sampleSession(overrides: Partial<SessionSummary> = {}): SessionSummary 
     reply_text: "the reply",
     duration_ms: 812.5,
     has_audio: true,
+    speaker: null,
     ...overrides,
   }
 }
@@ -111,5 +117,45 @@ describe("formatSessionDuration", () => {
 
   test("a null duration is not reached, end to end", () => {
     expect(formatSessionDuration(null)).toBe("not reached end to end")
+  })
+})
+
+function sampleSpeaker(overrides: Partial<SessionSpeaker> = {}): SessionSpeaker {
+  return {
+    status: "identified",
+    speaker_id: 1,
+    speaker_name: "Member A",
+    score: 0.91,
+    margin: 0.32,
+    detail: null,
+    ...overrides,
+  }
+}
+
+describe("formatSessionSpeaker", () => {
+  test("a null speaker (a session recorded before this phase) reads 'Speaker not recorded'", () => {
+    expect(formatSessionSpeaker(null)).toBe("Speaker not recorded")
+  })
+
+  test("an identified speaker reads the member's name", () => {
+    expect(formatSessionSpeaker(sampleSpeaker())).toBe("Member A")
+  })
+
+  test("unknown with detail speaker_id_off reads 'Speaker ID off'", () => {
+    expect(
+      formatSessionSpeaker(sampleSpeaker({ status: "unknown", speaker_name: null, detail: "speaker_id_off" })),
+    ).toBe("Speaker ID off")
+  })
+
+  test("unknown with detail not_edge_source also reads 'Speaker ID off'", () => {
+    expect(
+      formatSessionSpeaker(sampleSpeaker({ status: "unknown", speaker_name: null, detail: "not_edge_source" })),
+    ).toBe("Speaker ID off")
+  })
+
+  test("any other unknown detail reads 'Unknown voice'", () => {
+    expect(
+      formatSessionSpeaker(sampleSpeaker({ status: "unknown", speaker_name: null, detail: "below_threshold" })),
+    ).toBe("Unknown voice")
   })
 })

@@ -42,16 +42,30 @@ def _write_recorded_session(
     transcript_text: "str | None" = "the transcript",
     started_offset_days: float = 0.0,
     include_audio: bool = True,
+    speaker_events: "list[dict] | None" = None,
+    speaker_id_ms: "float | None" = None,
 ) -> Path:
     """Build one real session directory through `SessionRecorder` --
     construct one and close it, exactly as `turn/controller.py` does,
-    rather than hand-writing `events.jsonl`/`timing.json` ourselves."""
+    rather than hand-writing `events.jsonl`/`timing.json` ourselves.
+
+    `speaker_events` (plan 11-10) are recorded in order right after the
+    transcript, mirroring where `evaluate_turn_speaker` runs relative to
+    `run_turn`'s other events -- a test wanting "two speaker.result events,
+    last wins" passes two dicts here. `speaker_id_ms` sets `TurnTimings`'
+    own field before `close()` so it reaches `timing.json` the same way the
+    real recorder writes it (`_serialize_timings`'s `dataclasses.asdict`).
+    """
     timings = TurnTimings(turn_outcome=turn_outcome)
     timings.mark_turn_started()
+    if speaker_id_ms is not None:
+        timings.speaker_id_ms = speaker_id_ms
     recorder = SessionRecorder(session_config, timings)
     recorder.set_audio_format("pcm", 8000)
     if transcript_text is not None:
         recorder.record_event({"type": "transcript.partial", "text": transcript_text})
+    for speaker_event in speaker_events or []:
+        recorder.record_event(speaker_event)
     timings.mark_stt_final()
     if reply_text is not None:
         recorder.record_event({"type": "reply.text", "text": reply_text})
@@ -718,3 +732,175 @@ def test_a_viewer_is_refused_the_audio_route_and_an_operator_succeeds(tmp_path, 
 
     assert viewer_client.get(f"/api/sessions/{directory.name}/audio").status_code == 403
     assert operator_client.get(f"/api/sessions/{directory.name}/audio").status_code == 200
+
+
+# --- Plan 11-10 (D-13): speaker on the summary and detail responses --------
+
+
+def _speaker_result_event(**overrides: object) -> dict:
+    """A well-formed `speaker.result` event, exactly the shape
+    `speaker_id.turn_gate._build_event` writes -- overrides let a test
+    narrow it to one field it cares about without restating the rest."""
+    event: dict = {
+        "type": "speaker.result",
+        "status": "identified",
+        "speaker_id": 1,
+        "speaker_name": "Member A",
+        "best_speaker_id": 1,
+        "score": 0.91,
+        "margin": 0.32,
+        "scores": {"1": 0.91, "2": 0.4},
+        "model_id": "titanet-small",
+        "mode": "enforce",
+        "effective_mode": "enforce",
+        "blocked": False,
+        "reason": None,
+        "detail": None,
+        "speech_ms": 900.0,
+        "window_count": 2,
+        "speaker_id_ms": 62.0,
+    }
+    event.update(overrides)
+    return event
+
+
+def test_a_session_with_an_identified_speaker_result_lists_the_speaker_name(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config, speaker_events=[_speaker_result_event()])
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+
+    assert session["id"] == directory.name
+    assert session["speaker"]["status"] == "identified"
+    assert session["speaker"]["speaker_name"] == "Member A"
+    # No per-member score list and no embedding reach the browser (this
+    # plan's own prohibition) -- `SessionSpeakerResponse` never declares
+    # `scores` at all, so it cannot appear in the serialized response.
+    assert "scores" not in session["speaker"]
+
+
+def test_two_speaker_result_events_in_one_session_the_last_one_wins(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(
+        session_config,
+        speaker_events=[
+            _speaker_result_event(speaker_id=1, speaker_name="Member A"),
+            _speaker_result_event(speaker_id=2, speaker_name="Member B"),
+        ],
+    )
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+
+    assert session["id"] == directory.name
+    assert session["speaker"]["speaker_name"] == "Member B"
+
+
+def test_a_session_with_no_speaker_result_event_lists_with_a_null_speaker(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+
+    assert session["speaker"] is None
+
+
+def test_a_speaker_result_event_with_a_status_outside_the_two_named_values_lists_a_null_speaker(
+    tmp_path, fake_account_repository
+):
+    """A `status` outside `identified`/`unknown` fails `SessionSpeakerResponse`'s
+    own `Literal` validation -- the row must still list, with `speaker`
+    null, never `recording_incomplete` (CR-01's blast-radius discipline,
+    applied to this new field)."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(
+        session_config, speaker_events=[_speaker_result_event(status="sideways")]
+    )
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+
+    assert session["id"] == directory.name
+    assert session["speaker"] is None
+    assert session["turn_outcome"] == "completed"
+
+
+def test_a_speaker_result_line_that_is_not_a_json_object_lists_a_null_speaker(
+    tmp_path, fake_account_repository
+):
+    """`_read_jsonl` already drops a line that does not parse as a JSON
+    object before `_last_speaker_result` ever sees it -- this proves the
+    end-to-end behavior the plan names (a malformed event never turns the
+    row into `recording_incomplete`), not `_read_jsonl`'s own mechanism."""
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+    with (directory / EVENTS_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write("\n" + json.dumps(["speaker.result", "not-an-object"]))
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    session = client.get("/api/sessions").json()["sessions"][0]
+
+    assert session["id"] == directory.name
+    assert session["speaker"] is None
+    assert session["turn_outcome"] == "completed"
+
+
+def test_the_detail_route_returns_speaker_and_speaker_id_ms(tmp_path, fake_account_repository):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(
+        session_config,
+        speaker_events=[_speaker_result_event(margin=0.5)],
+        speaker_id_ms=62.0,
+    )
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    body = client.get(f"/api/sessions/{directory.name}").json()
+
+    assert body["speaker"]["status"] == "identified"
+    assert body["speaker"]["speaker_name"] == "Member A"
+    assert body["speaker"]["score"] == 0.91
+    assert body["speaker"]["margin"] == 0.5
+    assert body["speaker_id_ms"] == 62.0
+
+
+def test_a_session_recorded_before_this_phase_has_a_null_speaker_and_null_speaker_id_ms(
+    tmp_path, fake_account_repository
+):
+    security = SecurityConfig()
+    account_repo = fake_account_repository()
+    session_config = SessionConfig(dir=str(tmp_path))
+    directory = _write_recorded_session(session_config)
+
+    app = _build_sessions_app(security, account_repo, session_config)
+    client = _client_with_role(app, security, account_repo, "operator")
+
+    body = client.get(f"/api/sessions/{directory.name}").json()
+
+    assert body["speaker"] is None
+    assert body["speaker_id_ms"] is None

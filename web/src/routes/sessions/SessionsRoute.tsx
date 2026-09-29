@@ -4,7 +4,12 @@ import { EmptyState } from "@/components/state/EmptyState"
 import { ErrorState } from "@/components/state/ErrorState"
 import { SkeletonList } from "@/components/state/SkeletonList"
 import { SESSIONS_QUERY_KEY, fetchSessions, type SessionSummary } from "@/lib/sessions"
-import { deriveSessionsScreenState, formatSessionDuration, summarizeSessionOutcome } from "./deriveSessionsScreenState"
+import {
+  deriveSessionsScreenState,
+  formatSessionDuration,
+  formatSessionSpeaker,
+  summarizeSessionOutcome,
+} from "./deriveSessionsScreenState"
 
 // WEB-07, D-01, D-02, 08-UI-SPEC.md's Focal Point row: "the card list
 // itself, in reverse-chronological order ... there is no primary action on
@@ -18,7 +23,9 @@ function SessionRow({ session }: { session: SessionSummary }) {
     <li className="px-4 py-3">
       <Link to={`/sessions/${session.id}`} className="flex flex-col gap-1 touch-target">
         <span className="truncate text-body text-foreground">{summarizeSessionOutcome(session)}</span>
-        <span className="readout text-label text-muted-foreground">{formatSessionDuration(session.duration_ms)}</span>
+        <span className="readout text-label text-muted-foreground">
+          {formatSessionDuration(session.duration_ms)} · {formatSessionSpeaker(session.speaker)}
+        </span>
       </Link>
     </li>
   )

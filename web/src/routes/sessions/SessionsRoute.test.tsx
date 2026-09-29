@@ -24,6 +24,7 @@ function sampleSession(overrides: Record<string, unknown> = {}) {
     reply_text: "Turn the kitchen lights on",
     duration_ms: 812.5,
     has_audio: true,
+    speaker: null,
     ...overrides,
   }
 }
@@ -124,6 +125,35 @@ test("empty_transcript renders the fixed copy, not the raw outcome string", asyn
   renderRoute(SessionsRoute)
 
   expect(await screen.findByText("Understood no speech.")).toBeTruthy()
+})
+
+test("a mounted row for an identified session shows the member's name", async () => {
+  stubSessions(async () => [
+    sampleSession({
+      speaker: {
+        status: "identified",
+        speaker_id: 1,
+        speaker_name: "Member A",
+        score: 0.91,
+        margin: 0.32,
+        detail: null,
+      },
+    }),
+  ])
+  const { SessionsRoute } = await import("./SessionsRoute")
+
+  renderRoute(SessionsRoute)
+
+  expect(await screen.findByText(/Member A/)).toBeTruthy()
+})
+
+test("a mounted row for a session with a null speaker shows 'Speaker not recorded'", async () => {
+  stubSessions(async () => [sampleSession({ speaker: null })])
+  const { SessionsRoute } = await import("./SessionsRoute")
+
+  renderRoute(SessionsRoute)
+
+  expect(await screen.findByText(/Speaker not recorded/)).toBeTruthy()
 })
 
 test("no control whose accessible name names removal exists anywhere on this screen (D-12)", async () => {

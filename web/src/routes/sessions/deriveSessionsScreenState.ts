@@ -4,7 +4,7 @@
 // fact about data, never a fact about a render.
 import { ApiError } from "@/lib/api"
 import { formatMs } from "@/lib/format"
-import type { SessionSummary } from "@/lib/sessions"
+import type { SessionSpeaker, SessionSummary } from "@/lib/sessions"
 
 export interface QueryLike<T> {
   status: "pending" | "error" | "success"
@@ -48,6 +48,10 @@ export function deriveSessionsScreenState(query: QueryLike<SessionSummary[]>): S
 const OUTCOME_SUMMARY: Record<string, string> = {
   empty_transcript: "Understood no speech.",
   empty_reply: "No reply was given.",
+  // Plan 11-10 (D-09, D-13): the gate's own silent stop for a speaker this
+  // deployment does not recognise -- a raw `unknown_speaker` string would
+  // read as an error rather than the deliberate refusal it is.
+  unknown_speaker: "Stopped: the voice is not enrolled.",
 }
 
 /** A row's summary text: the reply, truncated to one line by CSS at the
@@ -65,4 +69,18 @@ export function summarizeSessionOutcome(session: Pick<SessionSummary, "reply_tex
  * to end" for a session whose duration could not be measured. */
 export function formatSessionDuration(durationMs: number | null): string {
   return `${formatMs(durationMs)} end to end`
+}
+
+/** Who spoke this turn, in the four states this plan (11-10) names.
+ * `null` -- a session recorded before this phase, or one built with no
+ * speaker context at all -- reads "Speaker not recorded", never a blank.
+ * `detail` "speaker_id_off"/"not_edge_source" both mean speaker id took no
+ * measurement at all (mode off, or a camera/browser turn -- D-07), so both
+ * read the same "Speaker ID off" rather than the generic unknown-voice
+ * copy, which would wrongly suggest a real, failed match attempt. */
+export function formatSessionSpeaker(speaker: SessionSpeaker | null): string {
+  if (speaker === null) return "Speaker not recorded"
+  if (speaker.status === "identified") return speaker.speaker_name ?? "Unknown voice"
+  if (speaker.detail === "speaker_id_off" || speaker.detail === "not_edge_source") return "Speaker ID off"
+  return "Unknown voice"
 }
