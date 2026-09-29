@@ -15,16 +15,27 @@ import asyncio
 import json
 import time
 
+from atlas.audio.cue import wake_cue
 from atlas.config import SessionConfig
-from atlas.providers.base import BrainReply, FinalTranscript
+from atlas.providers.base import BrainReply, FinalTranscript, ToolCall
+from atlas.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
+from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.speaker_id.matching import MatchResult, ReferenceSet
 from atlas.speaker_id.tracker import SPEAKER_DECISION_TIMEOUT_S, SpeakerMeasurement
 from atlas.speaker_id.turn_gate import SpeakerIdTurnContext
 from atlas.timing import TurnTimings
+from atlas.turn import brain_race
 from atlas.turn.controller import run_turn
+from atlas.turn.follow_up import FollowUpChannel
+from atlas.turn.handoff import HandoffContext
 from atlas.turn.reply_group import GroupSpeaker, current_reply_route
 from atlas.turn.turn_context import TurnContext
+from tests.conftest import FakeAudioSource
+
+from google_fakes import FakeGoogle
+from pending_action_fakes import FakePendingActionRepository
+from test_follow_up_window import _NOW, _GoogleToolHost, _home_account
 
 _TIMEOUT_S = 5.0
 
@@ -92,6 +103,21 @@ def _of_type(events: list[dict], event_type: str) -> list[dict]:
     return [event for event in events if event.get("type") == event_type]
 
 
+class _TimedSource(FakeAudioSource):
+    """A fake source that records when each chunk was sent, and can declare a sink."""
+
+    def __init__(self, frames=(), *, sink: SinkFormat | None = None) -> None:
+        super().__init__(frames=frames)
+        self.send_times: list[float] = []
+        self._sink = sink
+        if sink is not None:
+            self.sink_format = lambda: sink  # type: ignore[method-assign]
+
+    async def send_audio(self, chunk: bytes) -> None:
+        self.send_times.append(time.monotonic())
+        await super().send_audio(chunk)
+
+
 class _Turn:
     """One turn's doubles, and a coroutine that runs it inside the group."""
 
@@ -102,20 +128,28 @@ class _Turn:
         *,
         key: str,
         order_frame: int,
-        answer: str,
+        answer: str = "",
         live_tts,
-        fake_audio_source,
         fake_stt,
         fake_brain,
         member: tuple[int, str] | None = None,
         transcript: str = "turn something on",
         group_id: str = "group-1",
         with_handle: bool = True,
+        brain=None,
+        tool_host=None,
+        follow_up=None,
+        sink: SinkFormat | None = None,
+        run_kwargs: dict | None = None,
     ) -> None:
+        self.run_kwargs = run_kwargs or {}
         self.key = key
-        self.source = fake_audio_source(frames=[b"\x00\x01"] * 3)
+        self.source = _TimedSource(frames=[b"\x00\x01"] * 3, sink=sink)
+        if follow_up is not None:
+            self.source.follow_up = follow_up
+        self.tool_host = tool_host
         self.stt = fake_stt(events=[FinalTranscript(text=transcript)])
-        self.brain = fake_brain(replies=[BrainReply(text=answer)])
+        self.brain = brain if brain is not None else fake_brain(replies=[BrainReply(text=answer)])
         self.tts = live_tts
         self.timings = TurnTimings()
         self.recorder = SessionRecorder(SessionConfig(dir=str(tmp_path / key)), self.timings)
@@ -137,7 +171,7 @@ class _Turn:
                 self.stt,
                 self.brain,
                 self.tts,
-                None,
+                self.tool_host,
                 tools_schema=[],
                 system_prompt="you control a home",
                 max_tool_rounds=3,
@@ -145,7 +179,7 @@ class _Turn:
                 session_recorder=self.recorder,
                 speaker_id=_speaker_context(self.tracker),
                 turn_context=self.context,
-                **extra,
+                **{**self.run_kwargs, **extra},
             )
         finally:
             if self.handle is not None:
@@ -161,11 +195,11 @@ async def _run_both(*turns: _Turn, **extra) -> None:
 
 
 async def test_two_turns_in_one_group_speak_one_merged_reply_in_speech_order(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
-    common = dict(live_tts=live_tts, fake_audio_source=fake_audio_source, fake_stt=fake_stt, fake_brain=fake_brain)
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain)
     josh = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
     sam = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
 
@@ -177,11 +211,11 @@ async def test_two_turns_in_one_group_speak_one_merged_reply_in_speech_order(
 
 
 async def test_each_turn_keeps_its_own_reply_text_and_group_events_with_no_name(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
-    common = dict(live_tts=live_tts, fake_audio_source=fake_audio_source, fake_stt=fake_stt, fake_brain=fake_brain)
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain)
     josh = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
     sam = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
 
@@ -207,11 +241,11 @@ async def test_each_turn_keeps_its_own_reply_text_and_group_events_with_no_name(
 
 
 async def test_both_turns_get_answer_audio_at_from_the_shared_write(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
-    common = dict(live_tts=live_tts, fake_audio_source=fake_audio_source, fake_stt=fake_stt, fake_brain=fake_brain)
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain)
     josh = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
     sam = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
 
@@ -224,11 +258,11 @@ async def test_both_turns_get_answer_audio_at_from_the_shared_write(
 
 
 async def test_the_runner_opened_span_is_used_and_closed_and_the_tracker_opens_none(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
-    common = dict(live_tts=live_tts, fake_audio_source=fake_audio_source, fake_stt=fake_stt, fake_brain=fake_brain)
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain)
     josh = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
     sam = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
 
@@ -241,11 +275,11 @@ async def test_the_runner_opened_span_is_used_and_closed_and_the_tracker_opens_n
 
 
 async def test_note_speaker_gets_the_identified_id_and_name_before_the_reply(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
-    common = dict(live_tts=live_tts, fake_audio_source=fake_audio_source, fake_stt=fake_stt, fake_brain=fake_brain)
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain)
     josh = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
     sam = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
 
@@ -261,7 +295,7 @@ async def test_note_speaker_gets_the_identified_id_and_name_before_the_reply(
 
 
 async def test_a_turn_alone_on_the_parallel_path_speaks_its_own_text_with_its_own_tts(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
@@ -273,7 +307,6 @@ async def test_a_turn_alone_on_the_parallel_path_speaks_its_own_text_with_its_ow
         answer="the fan is on",
         member=(1, "Josh"),
         live_tts=live_tts,
-        fake_audio_source=fake_audio_source,
         fake_stt=fake_stt,
         fake_brain=fake_brain,
     )
@@ -287,7 +320,7 @@ async def test_a_turn_alone_on_the_parallel_path_speaks_its_own_text_with_its_ow
 
 
 async def test_a_turn_context_with_no_group_and_no_span_opens_the_tracker_span_and_speaks_directly(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
@@ -298,7 +331,6 @@ async def test_a_turn_context_with_no_group_and_no_span_opens_the_tracker_span_a
         order_frame=100,
         answer="the fan is on",
         live_tts=live_tts,
-        fake_audio_source=fake_audio_source,
         fake_stt=fake_stt,
         fake_brain=fake_brain,
         with_handle=False,
@@ -316,7 +348,7 @@ async def test_a_turn_context_with_no_group_and_no_span_opens_the_tracker_span_a
 
 
 async def test_the_reply_route_is_reset_when_the_turn_ends(
-    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+    tmp_path, fake_stt, fake_brain, fake_tts
 ):
     speaker = GroupSpeaker(merge_wait_s=0.2)
     live_tts = fake_tts(chunks=[b"\x01\x02"])
@@ -328,7 +360,6 @@ async def test_the_reply_route_is_reset_when_the_turn_ends(
         answer="the fan is on",
         member=(1, "Josh"),
         live_tts=live_tts,
-        fake_audio_source=fake_audio_source,
         fake_stt=fake_stt,
         fake_brain=fake_brain,
     )
@@ -360,3 +391,256 @@ async def test_a_turn_with_no_turn_context_is_unchanged(tmp_path, fake_audio_sou
     assert tts.received_text == ["the fan is on"]
     assert timings.answer_audio_at is not None and timings.answer_audio_at >= started
     assert current_reply_route.get() is None
+
+
+# --- Task 2: questions last, one filler, the cue under the lock ---------------
+
+
+def _statement_turn(tmp_path, speaker, live_tts, fake_stt, fake_brain, **extra) -> _Turn:
+    return _Turn(
+        tmp_path,
+        speaker,
+        key="src:2",
+        order_frame=300,
+        answer="the door is locked",
+        member=(2, "Sam"),
+        live_tts=live_tts,
+        fake_stt=fake_stt,
+        fake_brain=fake_brain,
+        **extra,
+    )
+
+
+async def test_a_readback_that_opens_a_confirm_window_plays_after_the_statement_in_its_own_call(
+    tmp_path, fake_stt, fake_brain, fake_tts
+):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    tool_host = _GoogleToolHost((_home_account(),), FakeGoogle().client)
+    pending = FakePendingActionRepository()
+    proposal = BrainReply(
+        tool_calls=[
+            ToolCall(
+                name="calendar_propose_event",
+                arguments={"title": "Dentist", "start": "2026-10-02T15:00", "account": "home"},
+            )
+        ]
+    )
+    brain = fake_brain(replies=[proposal])
+    channel = FollowUpChannel()
+    handoff_context = HandoffContext(
+        source_name="src", tool_host=tool_host, pending_actions=pending, brain=brain, now=_NOW
+    )
+    asker = _Turn(
+        tmp_path,
+        speaker,
+        key="src:1",
+        order_frame=100,
+        member=(1, "Josh"),
+        live_tts=live_tts,
+        fake_stt=fake_stt,
+        fake_brain=fake_brain,
+        transcript="add dentist on friday at 3",
+        brain=brain,
+        tool_host=tool_host,
+        follow_up=channel,
+        run_kwargs={"handoff_context": handoff_context},
+    )
+    statement = _statement_turn(tmp_path, speaker, live_tts, fake_stt, fake_brain)
+
+    await _run_both(asker, statement)
+
+    assert len(live_tts.received_text) == 2
+    assert live_tts.received_text[0] == "Sam, the door is locked."
+    assert live_tts.received_text[1].startswith("Josh, ")
+    assert _of_type(asker.events, "reply.group")[0]["role"] == "question"
+    assert channel.requested is not None
+    assert channel.requested.kind == "confirmation"
+    # D-09: the window opens from the readback's own write, not the statement's.
+    assert channel.requested.playback_ends_at >= asker.source.send_times[-1]
+    assert channel.requested.playback_ends_at > statement.source.send_times[-1]
+
+
+async def test_a_clarifying_question_plays_last_and_its_window_comes_from_its_own_write(
+    tmp_path, fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    clarifying = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying, delay_s=0.0),
+        calls_tools=False,
+    )
+    channel = FollowUpChannel()
+    asker = _Turn(
+        tmp_path,
+        speaker,
+        key="src:1",
+        order_frame=100,
+        member=(1, "Josh"),
+        live_tts=live_tts,
+        fake_stt=fake_stt,
+        fake_brain=fake_brain,
+        transcript="turn on the lamp",
+        follow_up=channel,
+        run_kwargs={"tiers": [triage_tier]},
+    )
+    statement = _statement_turn(tmp_path, speaker, live_tts, fake_stt, fake_brain)
+
+    await _run_both(asker, statement)
+
+    assert len(live_tts.received_text) == 2
+    assert live_tts.received_text[0] == "Sam, the door is locked."
+    assert live_tts.received_text[1].startswith("Josh, ")
+    assert channel.requested is not None
+    assert channel.requested.kind == "clarification"
+    assert channel.requested.playback_ends_at >= asker.source.send_times[-1]
+    assert channel.requested.playback_ends_at > statement.source.send_times[-1]
+
+
+async def test_a_clarifying_question_past_the_chain_cap_is_a_statement(
+    tmp_path, fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpRequest
+
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    clarifying = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying, delay_s=0.0),
+        calls_tools=False,
+    )
+    incoming = FollowUpRequest(
+        kind="clarification",
+        chain_depth=MAX_CHAINED_FOLLOW_UPS,
+        original_transcript="turn on the lamp",
+        question="which one?",
+    )
+    channel = FollowUpChannel(incoming=incoming)
+    asker = _Turn(
+        tmp_path,
+        speaker,
+        key="src:1",
+        order_frame=100,
+        member=(1, "Josh"),
+        live_tts=live_tts,
+        fake_stt=fake_stt,
+        fake_brain=fake_brain,
+        transcript="the desk one",
+        follow_up=channel,
+        run_kwargs={"tiers": [triage_tier]},
+    )
+    statement = _statement_turn(tmp_path, speaker, live_tts, fake_stt, fake_brain)
+
+    await _run_both(asker, statement)
+
+    # No window follows, so the question is a statement and merges in speech order.
+    assert channel.requested is None
+    assert len(live_tts.received_text) == 1
+    assert live_tts.received_text[0].startswith("Josh, ")
+    assert "Sam, the door is locked." in live_tts.received_text[0]
+
+
+async def test_two_grouped_turns_that_both_reach_the_filler_deadline_play_one_filler(
+    tmp_path, fake_stt, fake_brain, fake_tts
+):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    filler_bytes = b"\xfe\xff"
+    kwargs = {
+        "filler_after_ms": 50,
+        "filler_cache": {None: {FILLER_TEXT[DEFAULT_FILLER]: filler_bytes}},
+        "poll_interval_s": 0.01,
+    }
+    slow_a = fake_brain(replies=[BrainReply(text="the fan is on")], delay_s=0.3)
+    slow_b = fake_brain(replies=[BrainReply(text="the door is locked")], delay_s=0.3)
+    josh = _Turn(
+        tmp_path, speaker, key="src:1", order_frame=100, member=(1, "Josh"), live_tts=live_tts,
+        fake_stt=fake_stt, fake_brain=fake_brain, brain=slow_a, run_kwargs=kwargs,
+    )
+    sam = _Turn(
+        tmp_path, speaker, key="src:2", order_frame=300, member=(2, "Sam"), live_tts=live_tts,
+        fake_stt=fake_stt, fake_brain=fake_brain, brain=slow_b, run_kwargs=kwargs,
+    )
+
+    await _run_both(josh, sam)
+
+    played = josh.source.sent_audio + sam.source.sent_audio
+    assert played.count(filler_bytes) == 1
+    assert live_tts.received_text == ["Josh, the fan is on. Sam, the door is locked."]
+
+
+async def test_a_lone_turn_on_the_parallel_path_plays_a_precached_phrase_from_the_cache(
+    tmp_path, fake_stt, fake_brain, fake_tts
+):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    cached_bytes = b"\xca\xfe"
+    solo = _Turn(
+        tmp_path, speaker, key="src:1", order_frame=100, answer="Done.", member=(1, "Josh"), live_tts=live_tts,
+        fake_stt=fake_stt, fake_brain=fake_brain, run_kwargs={"filler_cache": {None: {"done": cached_bytes}}},
+    )
+
+    await _run_both(solo)
+
+    assert solo.source.sent_audio == [cached_bytes]
+    assert live_tts.received_text == []
+    assert _of_type(solo.events, "reply.group")[0]["role"] == "alone"
+
+
+async def test_the_first_turn_of_a_group_plays_the_wake_cue_under_the_reply_lock(
+    tmp_path, fake_stt, fake_brain, fake_tts
+):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    sink = SinkFormat("alaw", 8000)
+    cue = wake_cue(sink)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    first = _Turn(
+        tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"),
+        live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain, sink=sink, run_kwargs={"wake_cue": True},
+    )
+
+    await speaker.reply_lock.acquire()
+    task = asyncio.create_task(first.run())
+    await asyncio.sleep(0.1)
+    # The reply lock is held elsewhere, so the cue has not been sent.
+    assert first.source.sent_audio == []
+    speaker.reply_lock.release()
+    await asyncio.wait_for(task, _TIMEOUT_S)
+
+    assert first.source.sent_audio[0] == cue
+
+
+async def test_a_turn_that_joined_a_live_group_plays_no_wake_cue(tmp_path, fake_stt, fake_brain, fake_tts):
+    speaker = GroupSpeaker(merge_wait_s=0.2)
+    sink = SinkFormat("alaw", 8000)
+    cue = wake_cue(sink)
+    live_tts = fake_tts(chunks=[b"\x01\x02"])
+    common = dict(live_tts=live_tts, fake_stt=fake_stt, fake_brain=fake_brain, sink=sink, run_kwargs={"wake_cue": True})
+    first = _Turn(tmp_path, speaker, key="src:1", order_frame=100, answer="the fan is on", member=(1, "Josh"), **common)
+    joined = _Turn(tmp_path, speaker, key="src:2", order_frame=300, answer="the door is locked", member=(2, "Sam"), **common)
+
+    await _run_both(first, joined)
+
+    assert first.source.sent_audio.count(cue) == 1
+    assert cue not in joined.source.sent_audio
