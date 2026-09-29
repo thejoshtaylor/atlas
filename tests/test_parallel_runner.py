@@ -9,13 +9,17 @@ fakes and the real `SourceRunner`; only the wake detector is scripted.
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
 from typing import Any
 
-from atlas.config import GateConfig, WakeConfig
+from atlas.config import BargeInConfig, EdgeSourceConfig, GateConfig, WakeConfig
 from atlas.sources.runner import BargeInMonitor, SourceRunner
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.timing import TurnTimings
+from atlas.transports.edge import EdgeAudioSource
 from atlas.turn.controller import run_turn
+from atlas.turn.follow_up import FollowUpRequest
 from atlas.turn.turn_context import TURN_GROUP_EVENT, TurnContext
 
 from tests.conftest import (
@@ -27,6 +31,7 @@ from tests.conftest import (
     FakeWakeHit,
     FinalTranscript,
 )
+from tests.edge_fakes import FakeEdgeSocket, fake_edge_device
 
 # 10 ms of 16 kHz mono PCM16 (`FakeAudioSource.source_format`): 32 bytes per ms.
 CHUNK_BYTES = 320
@@ -458,3 +463,322 @@ def test_bind_recorder_records_one_turn_group_event_with_no_speaker_label():
     assert "Josh" not in str(recorded[0])
     assert recorded[1] == {"type": "later"}
     assert len(recorded) == 2
+
+
+# --- LED ownership, one follow-up window at a time, barge-in on its own queue (Task 3) ---
+
+
+def _edge_config() -> EdgeSourceConfig:
+    return EdgeSourceConfig(sample_rate=16000, channels=2, asr_channel=1, pre_roll_ms=200, tail_ms=300)
+
+
+def _led_states(socket: FakeEdgeSocket) -> list[str]:
+    return [json.loads(text)["state"] for text in socket.sent_text if json.loads(text).get("type") == "led"]
+
+
+async def _serve_edge(source: EdgeAudioSource, socket: FakeEdgeSocket) -> "asyncio.Task[None]":
+    task = asyncio.create_task(source.serve(socket, fake_edge_device(device_id=1)))
+    await _wait_until(lambda: socket.sent_text != [])
+    return task
+
+
+async def _disconnect_edge(socket: FakeEdgeSocket, task: "asyncio.Task[None]") -> None:
+    socket.push_disconnect()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+def _edge_runner(source: EdgeAudioSource, run_turn_fn: Any) -> SourceRunner:
+    runner = _runner(source, run_turn_fn, _HitOnCalls(), parallel=ParallelTurns(max_concurrent=3))
+    assert runner.turn_group is not None
+    runner.turn_group.push_frame(bytes(1024), 0)
+    return runner
+
+
+async def test_the_edge_led_state_property_and_no_thinking_while_replying():
+    source = EdgeAudioSource(_edge_config())
+    socket = FakeEdgeSocket()
+    task = await _serve_edge(source, socket)
+    assert source.led_state == "idle"
+
+    await source.send_event({"type": "transcript.final"})
+    assert source.led_state == "thinking"
+    await source.send_audio(b"reply")
+    assert source.led_state == "replying"
+    await source.send_event({"type": "transcript.final"})  # a second turn's final transcript
+
+    assert source.led_state == "replying"
+    assert _led_states(socket) == ["thinking", "replying"]
+    await _disconnect_edge(socket, task)
+
+
+async def test_overlapping_turns_show_listening_once_then_thinking_then_replying_and_idle_after_the_last():
+    source = EdgeAudioSource(_edge_config())
+    socket = FakeEdgeSocket()
+    task = await _serve_edge(source, socket)
+    b_started, a_replying, release_a = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    turns = iter(["a", "b"])
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        if next(turns) == "a":
+            await b_started.wait()
+            await source.send_event({"type": "transcript.final"})
+            await source.send_audio(b"a-reply")
+            a_replying.set()
+            await release_a.wait()
+        else:
+            b_started.set()
+            await a_replying.wait()
+            await source.send_event({"type": "transcript.final"})
+            await source.send_audio(b"b-reply")
+
+    runner = _edge_runner(source, run_turn_fn)
+    group = runner.turn_group
+    assert group is not None
+    group.start_wake_turn(0)
+    group.start_wake_turn(0)
+    await _wait_until(lambda: b_started.is_set() and group.live_count == 1)
+
+    # The second turn ended while the first is still live: no idle yet.
+    assert _led_states(socket) == ["listening", "thinking", "replying"]
+    release_a.set()
+    await group.drain()
+
+    assert _led_states(socket) == ["listening", "thinking", "replying", "idle"]
+    await _disconnect_edge(socket, task)
+
+
+async def test_when_one_turn_raises_the_other_finishes_and_the_ring_ends_at_idle():
+    source = EdgeAudioSource(_edge_config())
+    socket = FakeEdgeSocket()
+    task = await _serve_edge(source, socket)
+    turns = iter(["a", "b"])
+    finished: list[str] = []
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        if next(turns) == "a":
+            await source.send_event({"type": "transcript.final"})
+            raise RuntimeError("brain blew up")
+        await asyncio.sleep(0.02)
+        finished.append("b")
+
+    runner = _edge_runner(source, run_turn_fn)
+    group = runner.turn_group
+    assert group is not None
+    group.start_wake_turn(0)
+    group.start_wake_turn(0)
+    await group.drain()
+
+    assert finished == ["b"]
+    assert _led_states(socket)[-1] == "idle"
+    assert group.live_count == 0
+    await _disconnect_edge(socket, task)
+
+
+def _follow_up_request() -> FollowUpRequest:
+    return FollowUpRequest(
+        kind="confirmation",
+        chain_depth=1,
+        original_transcript="add dentist",
+        question="add dentist?",
+        pending_action_id=1,
+        playback_ends_at=0.0,
+    )
+
+
+def _follow_up_runner(source: Any, run_turn_fn: Any, detector: Any, **kwargs: Any) -> SourceRunner:
+    return _runner(
+        source,
+        run_turn_fn,
+        detector,
+        parallel=kwargs.pop("parallel", ParallelTurns(max_concurrent=3)),
+        follow_up_window_s=lambda: 6.0,
+        follow_up_echo_tail_s=0.0,
+        clock=lambda: 0.0,
+        **kwargs,
+    )
+
+
+async def test_two_turns_that_each_ask_a_question_open_their_follow_up_windows_one_at_a_time():
+    source = FakeAudioSource([_frame(i) for i in range(FRAME_COUNT)])
+    events: list[tuple[str, str]] = []
+    release_window = asyncio.Event()
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        key = turn_source.turn_context.turn_key
+        if turn_source.follow_up.incoming is None:
+            turn_source.follow_up.request(_follow_up_request())
+            return
+        events.append(("open", key))
+        await release_window.wait()
+        events.append(("end", key))
+
+    runner = _follow_up_runner(source, run_turn_fn, _HitOnCalls(2, 4))
+    run_task = asyncio.create_task(runner.run())
+    await _wait_until(lambda: len(events) >= 1)
+    await asyncio.sleep(0.05)
+    assert [kind for kind, _ in events] == ["open"], "the second window opened while the first was open"
+
+    release_window.set()
+    await asyncio.wait_for(run_task, timeout=5.0)
+
+    (first_open, first_key), (first_end, first_end_key), (second_open, second_key), (second_end, _) = events
+    assert (first_open, first_end, second_open, second_end) == ("open", "end", "open", "end")
+    assert first_key == first_end_key and first_key != second_key
+
+
+async def test_a_follow_up_window_waits_until_every_other_live_turn_has_its_final_transcript():
+    source = FakeAudioSource([_frame(i) for i in range(FRAME_COUNT)])
+    window_opened = asyncio.Event()
+    b_transcribed = asyncio.Event()
+    turns = iter(["a", "b"])
+    a_started = asyncio.Event()
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        if turn_source.follow_up.incoming is not None:
+            window_opened.set()
+            return
+        if next(turns) == "a":
+            a_started.set()
+            turn_source.follow_up.request(_follow_up_request())
+            return
+        await a_started.wait()
+        await b_transcribed.wait()
+        turn_source.barge_in.mark_transcript_done()
+        await asyncio.sleep(0.02)
+
+    runner = _follow_up_runner(source, run_turn_fn, _HitOnCalls(2, 4))
+    run_task = asyncio.create_task(runner.run())
+    await _wait_until(lambda: a_started.is_set())
+    await asyncio.sleep(0.05)
+    assert not window_opened.is_set(), "the window opened before the other turn had its final transcript"
+
+    b_transcribed.set()
+    await asyncio.wait_for(run_task, timeout=5.0)
+    assert window_opened.is_set()
+
+
+async def test_a_follow_up_window_also_opens_once_the_other_turn_has_ended():
+    source = FakeAudioSource([_frame(i) for i in range(FRAME_COUNT)])
+    window_opened = asyncio.Event()
+    turns = iter(["a", "b"])
+    b_may_end = asyncio.Event()
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        if turn_source.follow_up.incoming is not None:
+            window_opened.set()
+            return
+        if next(turns) == "a":
+            turn_source.follow_up.request(_follow_up_request())
+            return
+        await b_may_end.wait()  # ends without ever marking its transcript done
+
+    runner = _follow_up_runner(source, run_turn_fn, _HitOnCalls(2, 4))
+    run_task = asyncio.create_task(runner.run())
+    await asyncio.sleep(0.05)
+    assert not window_opened.is_set()
+
+    b_may_end.set()
+    await asyncio.wait_for(run_task, timeout=5.0)
+    assert window_opened.is_set()
+
+
+async def test_the_follow_up_turn_keeps_the_group_identity_and_answers_only_the_asking_speaker():
+    source = FakeAudioSource([_frame(i) for i in range(FRAME_COUNT)])
+    contexts: list[TurnContext] = []
+    events: list[str] = []
+    registry = _FakeReplyRegistry(events)
+    claims = object()
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        context = turn_source.turn_context
+        contexts.append(context)
+        if turn_source.follow_up.incoming is None:
+            context.note_speaker("speaker-7", "Josh")
+            turn_source.follow_up.request(_follow_up_request())
+
+    runner = _follow_up_runner(
+        source,
+        run_turn_fn,
+        _HitOnCalls(3),
+        parallel=ParallelTurns(max_concurrent=3, reply_registry=registry, claims_factory=lambda: claims),
+    )
+    await asyncio.wait_for(runner.run(), timeout=5.0)
+
+    asking, answering = contexts
+    assert (answering.turn_key, answering.group_id) == (asking.turn_key, asking.group_id)
+    assert answering.claims is claims and answering.reply_group is registry.handles[0]
+    assert (asking.follow_up, answering.follow_up) == (False, True)
+    assert asking.answer_only_from is None
+    assert answering.answer_only_from == "speaker-7"
+    assert len(registry.registered) == 1 and registry.handles[0].finished == 1
+
+
+class _QueueSource(FakeAudioSource):
+    """Frames come from a queue the test feeds. Counts `frames()` calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queue: "asyncio.Queue[bytes | None]" = asyncio.Queue()
+        self.frames_calls = 0
+
+    async def frames(self):
+        self.frames_calls += 1
+        while True:
+            chunk = await self.queue.get()
+            if chunk is None:
+                return
+            yield chunk
+
+
+async def test_an_enabled_barge_in_listener_reads_its_own_subscription_and_the_source_is_read_once():
+    source = _QueueSource()
+    listened: list[bytes] = []
+    transcript_done, release = asyncio.Event(), asyncio.Event()
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        turn_source.barge_in.mark_transcript_done()
+        transcript_done.set()
+        await release.wait()
+
+    runner = _runner(
+        source,
+        run_turn_fn,
+        _HitOnCalls(2),
+        parallel=ParallelTurns(max_concurrent=3),
+        barge_in_config=BargeInConfig(enabled=True),
+    )
+
+    def record_energy(chunk: bytes) -> float:
+        listened.append(chunk)
+        return 0.0
+
+    runner._barge_in_energy = record_energy  # noqa: SLF001
+    run_task = asyncio.create_task(runner.run())
+    for index in range(4):
+        source.queue.put_nowait(_frame(index))
+    await transcript_done.wait()
+    await _wait_until(lambda: runner.turn_group is not None and runner.turn_group.fanout.latest_index == 3)
+    await asyncio.sleep(0.05)  # the listener subscribes once it has seen transcript_done
+    for index in range(4, 7):
+        source.queue.put_nowait(_frame(index))
+    await _wait_until(lambda: len(listened) >= 3)
+
+    assert listened[-3:] == [_frame(4), _frame(5), _frame(6)]
+    assert source.frames_calls == 1
+    release.set()
+    source.queue.put_nowait(None)
+    await asyncio.wait_for(run_task, timeout=5.0)
+    assert source.frames_calls == 1
+
+
+def test_the_follow_up_window_opens_after_the_readback_plus_the_echo_tail():
+    from atlas.sources.runner import follow_up_window_opens_at
+
+    requested = SimpleNamespace(playback_ends_at=10.0)
+
+    assert follow_up_window_opens_at(requested, echo_tail_s=0.8, calibration=None, now=99.0) == 10.8
+    # No estimated playback end: the window is measured from `now`.
+    assert follow_up_window_opens_at(SimpleNamespace(playback_ends_at=None), echo_tail_s=0.8, calibration=None, now=5.0) == 5.8
+    # A calibrated echo delay plus the 0.2 s margin beats a smaller configured tail.
+    calibration = SimpleNamespace(delay_s=1.5)
+    assert follow_up_window_opens_at(requested, echo_tail_s=0.8, calibration=calibration, now=0.0) == 10.0 + 1.7
