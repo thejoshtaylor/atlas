@@ -86,5 +86,18 @@ class TurnContext:
 
 def follow_up_speaker_mismatch(turn_context: Any, *, incoming: Any, speaker_event: dict, effective_mode: str) -> bool:
     """True when a follow-up turn must be blocked because someone other than
-    the person Atlas asked is answering (D-10). Skeleton: not yet decided."""
-    return False
+    the person Atlas asked is answering (D-10).
+
+    Only enforce mode restricts, and only when the asking turn had an
+    identified speaker (`answer_only_from`). The ids are compared as text, so
+    an id that the tracker gives as a number and one stored as text still
+    agree. The restriction narrows who may answer. The confirm code takes no
+    speaker input (Phase 11 D-15).
+    """
+    if incoming is None or turn_context is None or effective_mode != "enforce":
+        return False
+    asked = getattr(turn_context, "answer_only_from", None)
+    if asked is None:
+        return False
+    answering = speaker_event.get("speaker_id")
+    return answering is None or str(answering) != str(asked)

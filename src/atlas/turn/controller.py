@@ -135,7 +135,7 @@ from atlas.turn.pending_action import (
     handle_confirmation_reply,
 )
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
-from atlas.turn.turn_context import TurnContext
+from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
 from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
 
 logger = logging.getLogger("atlas.turn.controller")
@@ -921,6 +921,28 @@ async def run_turn(
             # is ever reached below, so the row is never claimed, and it
             # resolves on its own TTL like any other unanswered follow-up
             # (D-15: the confirm-window code itself takes no speaker input).
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # D-10: in enforce mode only the person Atlas asked may answer. Silent,
+        # and the stored pending action expires on its TTL, as for a blocked
+        # unknown speaker above. Ids only in the log, never a name.
+        if follow_up_speaker_mismatch(
+            turn_context,
+            incoming=incoming,
+            speaker_event=speaker_outcome.event,
+            effective_mode=speaker_outcome.decision.effective_mode,
+        ):
+            timings.turn_outcome = "follow_up_wrong_speaker"
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            logger.info(
+                "turn %s blocked: follow-up answered by speaker %s, asked %s",
+                timings.turn_id,
+                speaker_outcome.event.get("speaker_id"),
+                turn_context.answer_only_from if turn_context is not None else None,
+            )
             await _emit_event(source, timings.to_event())
             timings.log()
             return
