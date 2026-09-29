@@ -236,11 +236,17 @@ this section if you do not need this feature.
 2. Open your config file. Confirm the `speaker_id:` block sets `model`,
    `window_ms`, `speech_rms_floor`, and `change_similarity_floor`. A prior
    spike on this project measured these four values. Do not guess at them.
+   The shipped config reads `model` from the `SPEAKER_ID_MODEL` environment
+   variable. Set it to `campplus` or `titanet_small`. For Docker Compose, set
+   it in `.env`. For Helm, set it in the runtime Secret.
 3. Sign in to the admin webapp as an admin.
 4. Open the **Speakers** screen.
 5. Add each household member. For each member, read the five prompted
    phrases into the Pi's own microphone.
-6. Set `speaker_id.mode: record` in your config file. Restart the server.
+6. Set `SPEAKER_ID_MODE=record` in the same place as `SPEAKER_ID_MODEL`.
+   On Compose, run `docker compose up -d app`. The command `docker compose
+   restart` does not read `.env` again. On Helm, restart the pod after you
+   change the Secret.
 7. Speak several ordinary turns to the Pi as each enrolled member. Let some
    turns come from an unenrolled voice too, for example a visitor or the
    television.
@@ -264,7 +270,8 @@ this section if you do not need this feature.
 
    Copy the printed `recommended_threshold` value into `speaker_id.threshold`
    in your config file.
-10. Set `speaker_id.mode: enforce` in your config file. Restart the server.
+10. Set `SPEAKER_ID_MODE=enforce` in the same place. Apply the change the
+    same way as in step 6.
 11. Measure the time speaker identification adds to a turn:
 
     ```bash

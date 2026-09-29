@@ -71,6 +71,12 @@ services:
       # "" and stop startup.
       TTS_CODEC: "${TTS_CODEC:-alaw}"
       TTS_SAMPLE_RATE: "${TTS_SAMPLE_RATE:-8000}"
+      # 260929-ikm: speaker_id.mode and speaker_id.model read these two
+      # variables. The mode needs a non-empty default. An empty value would
+      # reach SpeakerIdConfig as "" and stop startup. An empty model means
+      # null, which is no model selected.
+      SPEAKER_ID_MODE: "${SPEAKER_ID_MODE:-off}"
+      SPEAKER_ID_MODEL: "${SPEAKER_ID_MODEL:-}"
       # 260922-fmi (D-15, D-20): the calibration echo-path route's on/off
       # switch. Safe default false, same as the shipped config.
       CALIBRATION_ROUTE_ENABLED: "${CALIBRATION_ROUTE_ENABLED:-false}"

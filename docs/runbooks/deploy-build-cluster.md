@@ -103,6 +103,18 @@ still builds the camera URL from them the old way:
 - `TAPO_USER`
 - `TAPO_PASSWORD`
 
+Two more keys are optional. They turn on speaker identification. Edge
+microphone runbook section 15 (`edge-microphone.md`) describes the full
+procedure:
+
+- `SPEAKER_ID_MODE` takes `off`, `record`, or `enforce`. When the key is
+  absent, the mode is `off`.
+- `SPEAKER_ID_MODEL` takes `campplus` or `titanet_small`. When the key is
+  absent, no model is set, and enrollment answers 409.
+
+The pod reads the Secret only at start. Restart the pod after you change
+either key.
+
 **`HA_URL` and `HA_TOKEN` do NOT belong in this Secret.** Home Assistant is
 a plugin now, not a `config.yaml` block. Its credentials live in the
 plugins table (seeded by `alembic/versions/0008_plugin_tables.py`). You
