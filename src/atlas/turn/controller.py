@@ -796,7 +796,7 @@ async def run_turn(
         )
         final_text = getattr(final, "text", "") if final is not None else ""
         # D-04: a speaker change ended this turn, so its transcript still holds
-        # the next voice's first words. Transcribe its own frames again.
+        # the next voice's first words. `trim_at_split` runs `retranscribe` on its own frames.
         trimmed_text = await trim_at_split(
             turn_context, speaker_span, stt, source.source_format(), timeout_s=min(brain_turn_timeout_s, 5.0)
         )
