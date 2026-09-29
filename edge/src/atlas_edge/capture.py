@@ -7,7 +7,8 @@ also opens, and keeps running for its whole lifetime, an output stream on
 the same device -- filled from an internal playback queue, and silence
 when that queue is empty. `enqueue_playback` is the one seam plan 10-09's
 `Playback` writes reply audio through, so it never opens a second output
-handle on hardware that cannot support one.
+handle on hardware that cannot support one. An optional `mixer` callable
+(`music.MusicMixer.mix`) adds music to each output block in the same way.
 
 `sounddevice` is imported lazily (inside `_default_stream_factory`), never
 at module scope, so this module imports cleanly on a dev host with no
@@ -69,6 +70,7 @@ class Capture:
         frame_samples: int = FRAME_SAMPLES,
         stream_factory: "Callable[..., Any] | None" = None,
         max_queued: int = 256,
+        mixer: "Callable[[bytes, bool], bytes] | None" = None,
     ) -> None:
         self._device_name = device_name
         self._sample_rate = sample_rate
@@ -76,6 +78,7 @@ class Capture:
         self._frame_samples = frame_samples
         self._stream_factory = stream_factory or self._default_stream_factory
         self._max_queued = max_queued
+        self.mixer = mixer
         self._block_duration_s = frame_samples / sample_rate
 
         self._input_stream: Any = None
@@ -85,6 +88,7 @@ class Capture:
         self._queue_event = None
         self.dropped = 0
         self._last_status_warn_at = 0.0
+        self._last_mixer_warn_at = 0.0
 
         # Read on the output-stream thread, written from whichever thread
         # calls `enqueue_playback` -- both `deque.append`/`popleft` are
@@ -127,6 +131,7 @@ class Capture:
             self._warn_status(status)
         needed = frames * self._channels * _BYTES_PER_SAMPLE
         buf = bytearray()
+        reply_active = bool(self._playback_queue)
         while len(buf) < needed and self._playback_queue:
             buf += self._playback_queue.popleft()
         if len(buf) > needed:
@@ -135,7 +140,21 @@ class Capture:
             buf = buf[:needed]
         elif len(buf) < needed:
             buf += bytes(needed - len(buf))  # silence when the queue is empty
-        outdata[:] = bytes(buf)
+        block = bytes(buf)
+        if self.mixer is not None:
+            # An exception must not leave this callback: PortAudio would stop
+            # the stream, and the microphone with it.
+            try:
+                block = self.mixer(block, reply_active)
+            except Exception as exc:  # noqa: BLE001
+                self._warn_mixer(exc)
+        outdata[:] = block
+
+    def _warn_mixer(self, exc: Exception) -> None:
+        now = time.monotonic()
+        if now - self._last_mixer_warn_at >= 1.0:
+            logger.warning("capture music mixer failed: %s", exc)
+            self._last_mixer_warn_at = now
 
     def _input_callback(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
         if status:

@@ -236,3 +236,55 @@ async def test_playback_queue_leftover_is_carried_to_the_next_callback():
     capture._output_callback(outdata2, frames, None, None)
     assert bytes(outdata2)[:10] == oversized[needed:]
     assert bytes(outdata2)[10:] == bytes(needed - 10)
+
+
+# --- Capture: music mixer seam ------------------------------------------------
+
+
+def _mixer_capture(mixer):
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    capture.mixer = mixer
+    return capture
+
+
+def test_mixer_gets_the_block_and_reply_active_true_when_the_queue_fed_it():
+    calls: list = []
+
+    def mixer(block, reply_active):
+        calls.append((block, reply_active))
+        return block
+
+    capture = _mixer_capture(mixer)
+    needed = 256 * 2 * 2
+    capture.enqueue_playback(bytes([7]) * 100)
+    outdata = bytearray(needed)
+    capture._output_callback(outdata, 256, None, None)
+
+    assert calls == [(bytes([7]) * 100 + bytes(needed - 100), True)]
+    assert bytes(outdata) == calls[0][0]
+
+
+def test_mixer_gets_reply_active_false_when_the_queue_was_empty():
+    calls: list = []
+    capture = _mixer_capture(lambda block, active: calls.append(active) or block)
+    capture._output_callback(bytearray(256 * 4), 256, None, None)
+    assert calls == [False]
+
+
+def test_mixer_result_replaces_the_block():
+    capture = _mixer_capture(lambda block, active: bytes([9]) * len(block))
+    outdata = bytearray(256 * 4)
+    capture._output_callback(outdata, 256, None, None)
+    assert bytes(outdata) == bytes([9]) * (256 * 4)
+
+
+def test_a_raising_mixer_leaves_the_reply_block_and_does_not_raise():
+    def mixer(block, active):
+        raise RuntimeError("boom")
+
+    capture = _mixer_capture(mixer)
+    needed = 256 * 4
+    capture.enqueue_playback(bytes([5]) * needed)
+    outdata = bytearray(needed)
+    capture._output_callback(outdata, 256, None, None)
+    assert bytes(outdata) == bytes([5]) * needed
