@@ -103,7 +103,7 @@ from atlas.speaker.fifo_writer import SpeakerError
 from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.speaker_id.tracker import TurnSpeakerSpan
-from atlas.speaker_id.turn_gate import SpeakerIdTurnContext, evaluate_turn_speaker
+from atlas.speaker_id.turn_gate import SpeakerIdTurnContext, compose_speaker_hint, evaluate_turn_speaker
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.early_finalize import wait_for_end_of_speech
@@ -560,7 +560,14 @@ async def run_turn(
     (`turn_outcome = "unknown_speaker"`, no `_speak` call at all -- the
     first early return in this function with that shape, on purpose,
     since D-09 wants no reply and no filler for an unenrolled voice, not a
-    spoken refusal).
+    spoken refusal). Plan 11-06 (D-12): a second voice inside the same
+    segment splits at the change point -- `speaker_span.split_event`
+    finalizes speech-to-text the moment it fires, and `decide()` aggregates
+    only the kept part; every dropped part is recorded and never becomes a
+    turn here. Plan 11-06 (D-14, D-15): an identified WAKE turn (never a
+    follow-up) gets the member's name as one fixed, untrusted system
+    message (`compose_speaker_hint`) -- the label itself never reaches a
+    macro, a tool call's arguments, `Policy`, or the confirmation round.
 
     `state_timeout_ms`/`state_domains` (260924-4iv, items a/b): the one
     deadline, past `stt_final_at`, this turn may spend waiting on
@@ -1254,6 +1261,20 @@ async def run_turn(
                     "role": "system",
                     "content": _state_message(states_or_none, pending_runs_or_none, domains=state_domains),
                 }
+            )
+        # 11-06-PLAN.md Task 2 (D-14, D-15): an identified WAKE turn only --
+        # `incoming is None` excludes every follow-up (a confirmation, an
+        # amendment, a clarification's own answer), since a no-wake-word
+        # window is exactly the boundary D-15 answers "never" for. The
+        # guess is a fixed template composed in code (`compose_speaker_hint`),
+        # never by a model, and it names only a member's own display name --
+        # never transcribed text -- so it cannot become a second, hidden
+        # instruction. Placed after the state message and before
+        # `prior_exchange`/the user message, matching `<interfaces>`'s own
+        # catalog/state/hint/user ordering.
+        if incoming is None and speaker_outcome.speaker_name is not None:
+            messages.append(
+                {"role": "system", "content": compose_speaker_hint(speaker_outcome.speaker_name)}
             )
         # Plan 09-06/09-07 (D-06, D-08): a continuation turn's own prior
         # exchange -- an amendment's original request and the readback it
