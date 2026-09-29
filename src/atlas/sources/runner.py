@@ -654,6 +654,7 @@ class SourceRunner:
                 run_turn=run_turn_fn,
                 new_monitor=self._new_barge_in_monitor,
                 watch_barge_in=self._watch_barge_in,
+                record_blocked_hit=self._record_blocked_hit,
                 clock=clock,
             )
             self._turn_group = TurnGroup(name, source, parallel, hooks)
@@ -780,6 +781,9 @@ class SourceRunner:
         decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
         if not decision.allowed:
             self._record_blocked_hit(hit.score, decision.reason, now)
+            return
+
+        if self._turn_group is not None and not self._turn_group.check_admission(hit.score, now):
             return
 
         self._last_hit_at = now

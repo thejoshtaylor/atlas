@@ -19,6 +19,7 @@ import logging
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from atlas.sources.frame_fanout import FrameSubscription, TurnFrameSource
+from atlas.turn.turn_context import TurnContext
 
 if TYPE_CHECKING:
     from atlas.sources.turn_group import TurnGroup
@@ -35,10 +36,14 @@ class TurnRun:
         turn_source: TurnFrameSource,
         monitor: Any,
         subscription: FrameSubscription,
+        context: TurnContext,
+        reply_handle: Any | None,
     ) -> None:
         self._group = group
         self._turn_source = turn_source
         self._monitor = monitor
+        self._context = context
+        self._reply_handle = reply_handle
         self._subscriptions: list[FrameSubscription] = [subscription]
         self.task: "asyncio.Task[None] | None" = None
 
@@ -60,7 +65,18 @@ class TurnRun:
         finally:
             for subscription in self._subscriptions:
                 subscription.close()
+            self._finish_reply()
             await self._group.release(self)
+
+    def _finish_reply(self) -> None:
+        """Tell the reply handle this turn, follow-ups included, is over."""
+        handle, self._reply_handle = self._reply_handle, None
+        if handle is None:
+            return
+        try:
+            handle.finish()
+        except Exception:
+            logger.exception("source %r: a reply handle failed to finish", self._group.name)
 
     async def _run_stage(self, turn_source: Any, monitor: Any) -> None:
         """One `run_turn_fn` call next to its own barge-in listener, the way

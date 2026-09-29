@@ -45,7 +45,9 @@ class FrameSubscription:
 
     def __init__(self, fanout: "FrameFanout", *, queue_frames: int, replay_from: int | None) -> None:
         self._fanout = fanout
-        self._queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=queue_frames)
+        # One slot beyond the frame bound, so the end marker always fits and never
+        # costs a real frame.
+        self._queue: "asyncio.Queue[Any]" = asyncio.Queue(maxsize=queue_frames + 1)
         self._min_index = replay_from
         self._closed = False
         self._ended = False
@@ -64,22 +66,18 @@ class FrameSubscription:
             self.first_frame_index = frame_index
         if replayed:
             self.replayed_bytes += len(chunk)
-        self._put(chunk)
-
-    def _put(self, item: Any) -> None:
-        try:
-            self._queue.put_nowait(item)
-            self._saturation_warned = False
-        except asyncio.QueueFull:
+        if self._queue.qsize() >= self._queue_frames:
             with contextlib.suppress(asyncio.QueueEmpty):
                 self._queue.get_nowait()
-            self._queue.put_nowait(item)
             if not self._saturation_warned:
                 self._saturation_warned = True
                 logger.warning(
                     "frame subscription saturated at %d frames; dropping the oldest",
                     self._queue_frames,
                 )
+        else:
+            self._saturation_warned = False
+        self._queue.put_nowait(chunk)
 
     async def frames(self) -> AsyncIterator[bytes]:
         while not self._ended:
@@ -96,7 +94,7 @@ class FrameSubscription:
             return
         self._closed = True
         self._fanout._detach(self)
-        self._put(_END)
+        self._queue.put_nowait(_END)
 
 
 class FrameFanout:
