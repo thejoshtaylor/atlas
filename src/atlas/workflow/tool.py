@@ -29,6 +29,7 @@ operator to say a number.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import datetime, timezone, tzinfo
 from typing import Any, Callable, Literal
 
@@ -193,6 +194,17 @@ class AppendWorkflowStepsRequest(BaseModel):
     )
 
 
+# The run ids this turn's own context showed the model (WR-01). It is a
+# ContextVar and not a host attribute because parallel turns (Phase 12, D-12)
+# share one host: each turn runs in its own task, so each task sees only its
+# own set. `run_turn` sets it before it creates the tier tasks, and a child
+# task copies the parent's value. The default is empty, so a task that never
+# set it refuses every run id (fail closed).
+_turn_run_ids: ContextVar[frozenset[int]] = ContextVar(
+    "atlas_turn_run_ids", default=frozenset()
+)
+
+
 class WorkflowToolHost:
     """A small in-process tool host exposing `schedule_workflow`,
     `cancel_workflow_run`, and `append_workflow_steps`, with a `.tools`
@@ -224,6 +236,11 @@ class WorkflowToolHost:
     A turn that never called it (this host constructed but no turn run
     yet, or a caller with no pending-run fetch wired at all) refuses
     every `run_id` by default -- fail closed, not fail open.
+
+    The scope is per task, and so per turn (D-12): parallel turns share this
+    one host, and a turn that sets its ids must never change what another
+    running turn may cancel or append to. It lives in the module-level
+    `_turn_run_ids` ContextVar for that reason.
     """
 
     def __init__(
@@ -236,9 +253,6 @@ class WorkflowToolHost:
         self._repository = repository
         self._zone = zone
         self._clock = clock
-        # WR-01 fix: fail closed -- no run id is valid until a turn
-        # actually shows one, never an unbounded/implicit "anything goes."
-        self._current_turn_run_ids: frozenset[int] = frozenset()
         self.tools: list[Tool] = [
             Tool(
                 name=SCHEDULE_WORKFLOW_TOOL_NAME,
@@ -277,13 +291,15 @@ class WorkflowToolHost:
         fix) -- before either write tool below can be called this turn,
         since the pending-run fetch that produces `run_ids` is awaited
         and injected into the model's context before any tool round
-        starts. Replaces the previous turn's set entirely; never merges
+        starts. Replaces this task's previous set entirely; never merges
         with it, so a run cancelled or completed since the last turn
-        cannot leak forward as still-valid."""
-        self._current_turn_run_ids = frozenset(run_ids)
+        cannot leak forward as still-valid. It sets the value for the
+        calling task only (a ContextVar), so a parallel turn's own call
+        never changes what this turn may act on (D-12)."""
+        _turn_run_ids.set(frozenset(run_ids))
 
     def _run_id_shown_this_turn(self, run_id: int) -> bool:
-        return run_id in self._current_turn_run_ids
+        return run_id in _turn_run_ids.get()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
         if name == SCHEDULE_WORKFLOW_TOOL_NAME:
