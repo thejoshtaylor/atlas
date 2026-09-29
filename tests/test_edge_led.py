@@ -354,3 +354,88 @@ async def test_a_filler_keeps_the_ring_spinning_until_the_answer_audio(
 
     assert order == ["led:thinking", filler_bytes, "led:replying", answer_bytes]
     await _disconnect(socket, task)
+
+
+async def test_filler_audio_sends_no_led_message_while_thinking():
+    from atlas.transports.base import speech_kind
+
+    source = EdgeAudioSource(_config())
+    socket = FakeEdgeSocket()
+    task = await _serve(source, socket)
+    await source.set_led_state("thinking")
+
+    token = speech_kind.set("filler")
+    try:
+        await source.send_audio(b"filler")
+    finally:
+        speech_kind.reset(token)
+    assert _led_states(socket) == ["thinking"]
+    assert socket.sent_bytes == [b"filler"]
+
+    await source.send_audio(b"answer")
+    assert _led_states(socket) == ["thinking", "replying"]
+    assert socket.sent_bytes == [b"filler", b"answer"]
+    await _disconnect(socket, task)
+
+
+async def test_filler_audio_leaves_the_listening_state_alone():
+    from atlas.transports.base import speech_kind
+
+    source = EdgeAudioSource(_config())
+    socket = FakeEdgeSocket()
+    task = await _serve(source, socket)
+    await source.set_led_state("listening")
+
+    token = speech_kind.set("filler")
+    try:
+        await source.send_audio(b"filler")
+    finally:
+        speech_kind.reset(token)
+
+    assert _led_states(socket) == ["listening"]
+    assert socket.sent_bytes == [b"filler"]
+    await _disconnect(socket, task)
+
+
+class _KindRecordingSource:
+    def __init__(self) -> None:
+        self.kinds: list[str | None] = []
+
+    async def send_audio(self, chunk: bytes) -> None:
+        from atlas.transports.base import speech_kind
+
+        self.kinds.append(speech_kind.get())
+
+
+@pytest.mark.parametrize("kind", ["filler", "answer"])
+async def test_speak_shows_its_kind_to_the_source_and_resets_it(fake_tts, kind):
+    from atlas.timing import TurnTimings
+    from atlas.transports.base import speech_kind
+    from atlas.turn.controller import _speak
+
+    source = _KindRecordingSource()
+    await _speak(source, fake_tts(chunks=[b"a", b"b"]), TurnTimings(), "text", kind=kind)
+
+    assert source.kinds == [kind, kind]
+    assert speech_kind.get() is None
+
+
+class _RaisingTts:
+    async def synthesize(self, text_deltas, sink: Any = None):
+        async for _ in text_deltas:
+            pass
+        yield b"a"
+        raise RuntimeError("synthesis failed")
+
+
+async def test_speak_resets_the_kind_when_synthesis_raises():
+    from atlas.timing import TurnTimings
+    from atlas.transports.base import speech_kind
+    from atlas.turn.controller import _speak
+
+    source = _KindRecordingSource()
+    with pytest.raises(RuntimeError):
+        await _speak(source, _RaisingTts(), TurnTimings(), "text", kind="filler")
+
+    assert source.kinds == ["filler"]
+    assert speech_kind.get() is None
