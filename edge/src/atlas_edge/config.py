@@ -20,7 +20,10 @@ DEFAULT_VAD_MIN_SILENCE_MS = 250
 # librespot (edge/systemd/atlas-librespot.service) writes music PCM here.
 # atlas-edge.service owns the directory through RuntimeDirectory=.
 DEFAULT_MUSIC_FIFO = "/run/atlas-edge/music.fifo"
-DEFAULT_MUSIC_DUCK_LEVEL = 0.2
+# At 0.2 (-14 dB) the lyrics stay loud enough that the VAD never sends
+# `vad.end` and STT transcribes them. At 0.05 (-26 dB) the operator speaks
+# the command over near-silence.
+DEFAULT_MUSIC_DUCK_LEVEL = 0.05
 DEFAULT_MUSIC_DUCK_RAMP_MS = 150
 
 

@@ -419,7 +419,7 @@ it replies.
    | Key | Default | Meaning |
    |---|---|---|
    | `music_fifo` | `/run/atlas-edge/music.fifo` | The FIFO path. An empty value turns music off. |
-   | `music_duck_level` | `0.2` | Music volume while it is ducked, from 0.0 to 1.0. |
+   | `music_duck_level` | `0.05` | Music volume while it is ducked, from 0.0 to 1.0. |
    | `music_duck_ramp_ms` | `150` | Time for the volume to change, in milliseconds. |
 
    Restart the edge service after you change a key.

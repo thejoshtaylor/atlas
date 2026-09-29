@@ -34,7 +34,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 LIBRESPOT_RATE = 44100  # librespot writes 44.1 kHz, S16LE, stereo
-DEFAULT_DUCK_LEVEL = 0.2
+DEFAULT_DUCK_LEVEL = 0.05
 DEFAULT_DUCK_RAMP_MS = 150
 DEFAULT_MAX_BUFFER_S = 0.25
 
