@@ -485,6 +485,28 @@ def test_calibration_directory_default_location_is_gitignored():
     )
 
 
+@skip_without_git_dir
+def test_speaker_enrollment_directory_default_location_is_gitignored():
+    """D-03, Phase 11, plan 11-07: `SpeakerIdConfig().enrollment_dir`
+    (biometric enrollment clips) falls under the repository's existing
+    ignore rules, checked directly with `git check-ignore` -- the same
+    ordering `test_calibration_directory_default_location_is_gitignored`
+    above already establishes, applied before this plan's enrollment
+    clips are ever written for real."""
+    from atlas.config import SpeakerIdConfig
+
+    candidate = Path(SpeakerIdConfig().enrollment_dir.lstrip("/")) / "1" / "phrase-0.wav"
+    proc = subprocess.run(
+        ["git", "check-ignore", "--quiet", str(candidate)],
+        cwd=_REPO_ROOT,
+        timeout=30,
+    )
+    assert proc.returncode == 0, (
+        f"{candidate} is not covered by the repository's ignore rules -- "
+        "an enrollment clip written to the default directory would be trackable by git"
+    )
+
+
 # DEP-05's second clause: no entity id or credential-shaped literal survives
 # anywhere in the repository's HISTORY, not only its current working tree.
 # The tests above already prove the working-tree half; a deleted secret is
