@@ -14,8 +14,10 @@ them directly, so `python -m atlas_edge --help` runs on a dev host with
 no XVF3800 attached.
 
 Music from librespot reaches the array through `MusicMixer`, which mixes
-into `Capture`'s output callback. It ducks while a speech segment is open
-and while the server turn state is listening, thinking, or replying.
+into `Capture`'s output callback. Music ducks while the server turn state
+is listening, thinking, or replying, and while reply audio plays. An open
+speech segment does not duck it. The VAD fires on music that leaks past the
+echo canceller.
 """
 
 from __future__ import annotations
@@ -209,13 +211,18 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
     window = built["latency_window"](config)
     doa_poller = built["doa_poller"](config, tracker.in_segment)
 
-    # Music ducks for an open speech segment or a turn in progress. Reply
-    # audio ducks through Capture's own reply_active flag. Both reads are
-    # plain attribute reads, safe from the PortAudio thread.
+    # Music ducks only while a server turn is in progress. The listening,
+    # thinking, and replying LED states set the turn flag. The idle state
+    # clears it. Reply audio ducks through Capture's own reply_active flag.
+    # The VAD segment is not used. The Silero VAD fires on music that leaks
+    # past the XVF3800 echo canceller. A duck driven by the segment would
+    # lower music with no wake word, then pump it: duck, the VAD closes,
+    # unduck, the VAD opens. The read is a plain attribute read, safe from
+    # the PortAudio thread.
     turn_active = [False]
 
     def duck_active() -> bool:
-        return tracker.in_segment() or turn_active[0]
+        return turn_active[0]
 
     def on_led(state: str) -> None:
         if state in (LED_LISTENING, LED_THINKING, LED_REPLYING):
