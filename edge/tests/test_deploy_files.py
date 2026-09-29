@@ -75,11 +75,13 @@ class TestLibrespotUnit:
         assert "--format S16" in exec_start
         assert "--disable-audio-cache" in exec_start
 
-    def test_runs_as_a_dynamic_user_never_the_token_holder(self) -> None:
+    def test_runs_as_its_own_user_never_the_token_holder(self) -> None:
         text = self._text()
-        assert "DynamicUser=yes" in text
+        assert re.search(r"^User=atlas-librespot$", text, re.MULTILINE)
         assert "SupplementaryGroups=atlas-edge" in text
-        assert not re.search(r"^User=", text, re.MULTILINE)
+        assert not re.search(r"^User=atlas-edge$", text, re.MULTILINE)
+        # A dynamic UID breaks Avahi discovery over D-Bus on stock Pi OS.
+        assert not re.search(r"^DynamicUser=", text, re.MULTILINE)
 
     def test_restart_sandbox_and_name_settings(self) -> None:
         text = self._text()

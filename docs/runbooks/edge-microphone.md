@@ -382,6 +382,13 @@ it replies.
    sudo systemctl disable --now raspotify
    ```
 
+   Then create the system user that runs `librespot`:
+
+   ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin \
+     --user-group atlas-librespot
+   ```
+
 2. To change the device name from the default `Atlas`, write this line in
    `/etc/atlas-edge/librespot.env`:
 
@@ -428,3 +435,4 @@ The array plays audio at 16 kHz, so the music has no content above 8 kHz.
 | The log shows "PortAudio library not found" | `libportaudio2` is not installed | Run step 2 again |
 | `enforce` mode stops an enrolled member's turns | The threshold no longer fits this member's voice | Run `tune` again (step 9) with fresh labeled turns, or re-enroll the member (step 5) |
 | `enforce` mode lets everyone through | No member is enrolled for the model `speaker_id.model` selects | Enroll at least one member (step 5), or select the model you enrolled members under |
+| `atlas-librespot` restarts again and again, and its log shows "Avahi error: Setting up dns-sd failed" | The unit runs with `DynamicUser=yes`, and D-Bus cannot find that user | Use the unit from step 17, which runs as the `atlas-librespot` user. Create the user first (step 17, sub-step 1) |

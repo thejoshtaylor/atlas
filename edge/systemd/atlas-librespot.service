@@ -3,7 +3,9 @@
 # librespot cannot open the array itself, because atlas-edge holds the only
 # output stream. See edge/src/atlas_edge/music.py.
 #
-# Install: copy to /etc/systemd/system/atlas-librespot.service, then
+# Install: create the user once,
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin --user-group atlas-librespot
+# then copy to /etc/systemd/system/atlas-librespot.service, then
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now atlas-librespot
 # Do this after you install the updated atlas-edge.service, which creates
@@ -23,11 +25,15 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# T-260929-iad-01: librespot listens on the LAN. DynamicUser keeps it away
-# from the bearer token in /etc/atlas-edge/config.toml (mode 0600, owned by
-# atlas-edge). The group atlas-edge only gives write access to the FIFO.
-# Never set User=atlas-edge here.
-DynamicUser=yes
+# T-260929-iad-01: librespot listens on the LAN. Its own system user keeps
+# it away from the bearer token in /etc/atlas-edge/config.toml (mode 0600,
+# owned by atlas-edge). The group atlas-edge only gives write access to the
+# FIFO. Never set User=atlas-edge here.
+# Do not use DynamicUser. librespot publishes itself through Avahi over
+# D-Bus, and D-Bus drops a dynamic UID when /etc/nsswitch.conf has no
+# systemd module (stock Raspberry Pi OS).
+User=atlas-librespot
+Group=atlas-librespot
 SupplementaryGroups=atlas-edge
 StateDirectory=atlas-librespot
 # The default device name is generic. To change it for one house, put
