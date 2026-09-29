@@ -1,0 +1,30 @@
+# Moves this Pi to the commit the server was built from. The timer
+# atlas-edge-update.timer starts this unit. It reads the commit from the
+# server's /health route. If the commit differs from the checkout, it
+# installs that commit and restarts atlas-edge.
+#
+# This unit runs as root. It writes /opt/atlas-edge and
+# /etc/systemd/system, and it calls systemctl. The atlas-edge.service
+# sandbox cannot do that, and that is intended.
+#
+# Install:
+#   1. Copy atlas-edge-update.service and atlas-edge-update.timer to
+#      /etc/systemd/system/.
+#   2. sudo systemctl daemon-reload
+#   3. sudo systemctl enable --now atlas-edge-update.timer
+# After that, the updater refreshes these two unit files itself.
+# See docs/runbooks/edge-microphone.md step 12.
+
+[Unit]
+Description=ATLAS edge updater (follow the server's build commit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# systemd sets no HOME for a unit without User=, and uv keeps its cache
+# under HOME.
+Environment=HOME=/root
+# A hung install must not block every later timer run.
+TimeoutStartSec=15min
+ExecStart=/opt/atlas-edge/edge/scripts/update.sh

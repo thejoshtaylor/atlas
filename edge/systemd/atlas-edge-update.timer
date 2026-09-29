@@ -1,0 +1,13 @@
+# Starts atlas-edge-update.service 5 minutes after boot and every 15
+# minutes after that. The service file has the install steps.
+
+[Unit]
+Description=ATLAS edge updater timer
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
