@@ -336,3 +336,37 @@ def test_score_corpus_report_ends_with_keys_and_verdict(tmp_path):
         "speech_rms_floor", "enrollment_gap_ms", "short_reply_acceptance", "embed_ms_p95",
     ):
         assert key in report["keys"]
+
+
+def test_score_corpus_two_command_members_gives_q5_floor_in_keys(tmp_path):
+    root = tmp_path / "speakers"
+    for i in range(10):
+        _write_full_speech_clip(root, "member-a", "command", f"hey atlas, command {i}", amplitude=5000, seconds=2.0)
+        _write_full_speech_clip(root, "member-b", "command", f"hey atlas, command {i}", amplitude=-5000, seconds=2.0)
+    _write_full_speech_clip(root, "member-a", "enrollment", "the morning light", amplitude=5000)
+    _write_full_speech_clip(root, "member-b", "enrollment", "the morning light", amplitude=-5000)
+
+    report = speaker_spike.score_corpus(root, embedder_factory=_fake_embedder_factory, transcriber=lambda pcm16: "")
+
+    assert report["q5"]["result"] == "PASS"
+    floor = report["keys"]["change_similarity_floor"]
+    assert isinstance(floor, float)
+    assert floor in speaker_spike._DEFAULT_FLOOR_GRID
+    assert report["q5"]["detection_rate"] >= 0.80
+    assert report["q5"]["false_split_rate"] <= 0.10
+
+
+def test_score_corpus_one_command_member_leaves_q5_floor_unset(tmp_path):
+    root = tmp_path / "speakers"
+    for i in range(20):
+        _write_full_speech_clip(root, "member-a", "command", f"hey atlas, command {i}", amplitude=5000, seconds=2.0)
+    _write_full_speech_clip(root, "member-a", "enrollment", "the morning light", amplitude=5000)
+    for i in range(20):  # enough impostor trials that Q2 wins, so Q5 runs and finds no different-label pair
+        _write_full_speech_clip(root, "other", "other", None, amplitude=15000)
+
+    report = speaker_spike.score_corpus(root, embedder_factory=_fake_embedder_factory, transcriber=lambda pcm16: "")
+
+    assert report["q2"]["result"] == "PASS"
+    assert report["q5"]["result"].startswith("FAIL")
+    assert "different-label pair" in report["q5"]["result"]
+    assert report["keys"]["change_similarity_floor"] is None
