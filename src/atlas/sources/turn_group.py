@@ -16,7 +16,7 @@ import asyncio
 import logging
 import secrets
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from atlas.audio.ring import bytes_per_ms
 from atlas.sources.frame_fanout import FrameFanout, TurnFrameSource
@@ -25,7 +25,14 @@ from atlas.transports.edge import LED_IDLE, LED_LISTENING, MAX_QUEUED_FRAMES
 from atlas.turn.follow_up import FollowUpChannel
 from atlas.turn.turn_context import TurnContext
 
+if TYPE_CHECKING:
+    from atlas.speaker_id.tracker import PartEvent, SpeakerTracker, TurnSpeakerSpan
+
 logger = logging.getLogger("atlas.sources.turn_group")
+
+# Bounds on what the group remembers about parts (T-12-20).
+_MAX_WOKEN_SEGMENTS = 8
+_MAX_STARTED_PARTS = 64
 
 # `wake_events.block_reason` is free text, so these need no migration.
 BLOCK_TURN_CAP = "turn_cap"
@@ -92,6 +99,13 @@ class TurnGroup:
         self._reply_quiet_until: float | None = None
         # One follow-up window at a time on a source (D-10).
         self.follow_up_lock = asyncio.Lock()
+        # Segment seq -> the wake hit frames in it (D-03). Only a woken segment's parts may start a turn.
+        self._woken: dict[int, list[int]] = {}
+        # (segment seq, part index) pairs that already started a turn: one turn per part.
+        self._started_parts: dict[tuple[int, int], None] = {}
+        self._watched: "SpeakerTracker | None" = None
+        self._unwatch: Callable[[], None] | None = None
+        self._watch_tracker(self._tracker())
 
     @property
     def source(self) -> Any:
@@ -139,8 +153,41 @@ class TurnGroup:
     def start_wake_turn(self, hit_frame_index: int) -> TurnRun:
         """Start a turn for a wake hit on frame `hit_frame_index`. Its queue
         starts at the hit frame minus the preroll frames, so the turn hears the
-        wake phrase and what came just before it, with no gap and no repeat."""
-        replay_from = hit_frame_index - self._preroll_frames() + 1
+        wake phrase and what came just before it, with no gap and no repeat.
+        The turn's speaker span opens here, at the hit frame, so two hits close
+        together never share one wake mark."""
+        tracker = self._tracker()
+        self._watch_tracker(tracker)
+        run = self._start_turn(
+            hit_frame_index - self._preroll_frames() + 1,
+            span=self._open_span(tracker, hit_frame_index),
+            split_part=False,
+        )
+        if tracker is not None:
+            self._note_woken(tracker, hit_frame_index)
+            # A late wake detector: parts that appeared before the hit are already known.
+            self._consider_parts(tracker.parts_after(hit_frame_index))
+        return run
+
+    def start_part_turn(self, event: "PartEvent") -> TurnRun | None:
+        """Start a turn for a second voice, with no wake word (D-01). Its audio
+        replays from the part's first frame. Each part starts one turn: a part
+        that already started one returns `None`. `_on_part` applies the spawn
+        rules first."""
+        key = (event.segment_seq, event.part_index)
+        if key in self._started_parts:
+            return None
+        self._started_parts[key] = None
+        while len(self._started_parts) > _MAX_STARTED_PARTS:
+            del self._started_parts[next(iter(self._started_parts))]
+        tracker = self._tracker()
+        return self._start_turn(
+            event.first_frame_index,
+            span=self._open_span(tracker, event.first_frame_index),
+            split_part=True,
+        )
+
+    def _start_turn(self, replay_from: int, *, span: "TurnSpeakerSpan | None", split_part: bool) -> TurnRun:
         monitor = self.hooks.new_monitor()
         subscription = self.fanout.subscribe(replay_from=replay_from)
         if not self._runs:
@@ -155,6 +202,8 @@ class TurnGroup:
             turn_key=turn_key,
             group_id=self._group_id,
             order_frame=order_frame,
+            split_part=split_part,
+            speaker_span=span,
             reply_group=reply_handle,
             claims=self._claims,
             replay_until=lambda end, start=order_frame: self.fanout.slice(start, end),
@@ -167,7 +216,90 @@ class TurnGroup:
         run = TurnRun(self, turn_source, monitor, subscription, context, reply_handle)
         self._runs.add(run)
         run.start()
+        if span is not None and run.task is not None:
+            # Backstop: the span leaves the tracker's live list when the turn task ends.
+            run.task.add_done_callback(lambda _task, span=span: span.close())
         return run
+
+    # -- parts (D-01 trigger 1, D-02 to D-05) ---------------------------------
+
+    def _speaker(self) -> Any | None:
+        provider = self._spec.speaker_context
+        if provider is None:
+            return None
+        try:
+            return provider()
+        except Exception:
+            logger.exception("source %r: the speaker context failed", self.name)
+            return None
+
+    def _tracker(self) -> "SpeakerTracker | None":
+        return getattr(self._speaker(), "tracker", None)
+
+    def _watch_tracker(self, tracker: "SpeakerTracker | None") -> None:
+        """Listen to `tracker` for new parts, once per tracker."""
+        if tracker is None or tracker is self._watched:
+            return
+        if self._unwatch is not None:
+            self._unwatch()
+        self._watched = tracker
+        self._unwatch = tracker.add_part_listener(self._on_part)
+
+    def _open_span(self, tracker: "SpeakerTracker | None", frame_index: int) -> "TurnSpeakerSpan | None":
+        if tracker is None:
+            return None
+        try:
+            return tracker.open_turn_at(frame_index)
+        except Exception:
+            logger.exception("source %r: could not open a speaker span", self.name)
+            return None
+
+    def _note_woken(self, tracker: "SpeakerTracker", hit_frame_index: int) -> None:
+        seq = tracker.segment_seq_for_frame(hit_frame_index)
+        if seq is None:
+            return
+        self._woken.setdefault(seq, []).append(hit_frame_index)
+        while len(self._woken) > _MAX_WOKEN_SEGMENTS:
+            del self._woken[next(iter(self._woken))]
+
+    def _on_part(self, event: "PartEvent") -> None:
+        self._consider_parts([event])
+
+    def _consider_parts(self, events: "list[PartEvent]") -> None:
+        """Apply the spawn rules to each part, in order, and start a turn for
+        each part that passes. Drops are logged as counts, never names."""
+        dropped: dict[str, int] = {}
+        for event in events:
+            reason = self._part_drop_reason(event)
+            if reason is None and self.at_capacity():
+                self.hooks.record_blocked_hit(0.0, BLOCK_TURN_CAP, self.hooks.clock())
+                reason = BLOCK_TURN_CAP
+            if reason is not None:
+                dropped[reason] = dropped.get(reason, 0) + 1
+                continue
+            self.start_part_turn(event)
+        for reason, count in dropped.items():
+            logger.info("source %r: dropped %d speaker part(s): %s", self.name, count, reason)
+
+    def _part_drop_reason(self, event: "PartEvent") -> str | None:
+        hits = self._woken.get(event.segment_seq)
+        if not hits:
+            return "segment_not_woken"  # D-03
+        if (event.segment_seq, event.part_index) in self._started_parts:
+            return "already_started"
+        context = self._speaker()
+        tracker = getattr(context, "tracker", None)
+        if tracker is None:
+            return "no_speaker_tracker"
+        # The wake part is read now, over every window embedded so far, so a
+        # window that closed after the hit still counts (D-04).
+        wake_parts = {index if (index := tracker.part_index_at(hit)) is not None else 0 for hit in hits}
+        if event.part_index <= min(wake_parts) or event.part_index in wake_parts:
+            return "not_after_wake_part"
+        references = getattr(context, "references", None)
+        if getattr(context, "mode", None) != "enforce" or references is None or references.enrolled_count <= 0:
+            return "speaker_id_not_enforced"  # D-02
+        return None
 
     def _open_group(self) -> None:
         """The live count went from 0 to 1: a new group, and a new claims

@@ -32,7 +32,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from atlas.audio.channels import select_channel
 from atlas.speaker_id.change_point import find_change_points, part_index_for_frame, split_parts
@@ -53,6 +53,9 @@ SPEAKER_DECISION_TIMEOUT_S = 1.0
 # never grow without bound.
 _MAX_SEGMENTS = 32
 _MAX_WINDOWS_PER_SEGMENT = 240
+# Live spans (one per running turn, Phase 12). Oldest dropped, so a turn that
+# never closed its span cannot grow this list without bound.
+_MAX_LIVE_SPANS = 8
 
 
 @dataclass(eq=False)
@@ -67,6 +70,17 @@ class _PendingWindow:
     completed_at: "float | None" = None
 
 
+@dataclass(frozen=True)
+class PartEvent:
+    """A new part (index 1 or more) of one tracker segment (Phase 12), from
+    the part's first window. Emitted once per part to every part listener."""
+
+    segment_seq: int
+    part_index: int
+    first_frame_index: int
+    started_at: float
+
+
 @dataclass(eq=False)
 class _Segment:
     """One tracker segment (see module docstring). `eq=False`: `_Segment`
@@ -79,6 +93,8 @@ class _Segment:
     in_speech: bool = True
     first_frame_index: "int | None" = None
     last_frame_index: "int | None" = None
+    # Parts 1 and up already emitted to the part listeners, in order.
+    parts: "list[PartEvent]" = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -173,6 +189,7 @@ class TurnSpeakerSpan:
     called from the tracker's own window-done callback each time one more
     of this span's windows finishes embedding, so a second voice's turn
     can end without waiting for `decide()` to be awaited at all.
+    `split_frame_index`: first frame of the part after the kept part.
     """
 
     def __init__(
@@ -189,6 +206,13 @@ class TurnSpeakerSpan:
         self._wake_frame_index = wake_frame_index
         self.split_event: "asyncio.Event" = asyncio.Event()
         self.split_detected_at: "float | None" = None
+        self.split_frame_index: "int | None" = None
+        self._closed = False
+
+    def close(self) -> None:
+        """Stop live detection. Safe to call twice; `decide()` still works."""
+        self._closed = True
+        self._tracker._drop_span(self)
 
     def _segments(self) -> "list[_Segment]":
         if self._start_after is not None:
@@ -213,7 +237,7 @@ class TurnSpeakerSpan:
         nothing after the wake phrase needs to stop -- `kept_index` already
         being the LAST part is exactly that case.
         """
-        if self.split_event.is_set():
+        if self._closed or self.split_event.is_set():
             return
         valid = _collect_valid_windows(self._segments(), self._start_after)
         if len(valid) < 2:
@@ -230,6 +254,7 @@ class TurnSpeakerSpan:
         parts = split_parts(len(valid), change_points)
         kept_index = _kept_part_index(parts, windows, self._wake_frame_index)
         if kept_index < len(parts) - 1:
+            self.split_frame_index = windows[parts[kept_index + 1][0]].first_frame_index
             self.split_event.set()
             self.split_detected_at = now
 
@@ -387,10 +412,10 @@ class SpeakerTracker:
         self._segments: "list[_Segment]" = []
         self._current_segment: "_Segment | None" = None
         self._wake_mark_frame_index: "int | None" = None
-        # D-12: the one span live detection reports to -- overwritten by the
-        # next `open_turn()` call, since only one turn is ever in flight on
-        # an edge source's own connection at a time.
-        self._active_span: "TurnSpeakerSpan | None" = None
+        # D-12: every open span, so live detection reports to each running
+        # turn (Phase 12 runs several at once). `TurnSpeakerSpan.close()` leaves it.
+        self._live_spans: "list[TurnSpeakerSpan]" = []
+        self._part_listeners: "list[Callable[[PartEvent], None]]" = []
 
     # -- EdgeAudioListener protocol -----------------------------------
 
@@ -452,10 +477,9 @@ class SpeakerTracker:
         mark. `start_after=t` (a follow-up turn, D-11): anchors the span to
         every window, in any segment now or later, whose `started_at >= t`.
 
-        D-12: the returned span becomes `self._active_span` either way --
+        D-12: the returned span joins the live list either way --
         `_submit_window`'s own window-done callback reports every newly
-        finished window to it, live, for as long as it stays the most
-        recently opened span.
+        finished window to it, live, until `span.close()`.
         """
         if start_after is not None:
             span = TurnSpeakerSpan(self, start_after=start_after)
@@ -464,21 +488,87 @@ class SpeakerTracker:
             self._wake_mark_frame_index = None
             start_segment = self._segment_for_frame(frame_index)
             span = TurnSpeakerSpan(self, start_segment=start_segment, wake_frame_index=frame_index)
-        self._active_span = span
+        self._add_span(span)
         return span
+
+    def open_turn_at(self, frame_index: int) -> TurnSpeakerSpan:
+        """Open a span for the part that holds `frame_index`: a wake turn's hit
+        frame or a part turn's first frame. It reads no wake mark, so two hits
+        close together never share one (Phase 12). A split that already exists
+        sets `split_event` at once."""
+        span = TurnSpeakerSpan(
+            self, start_segment=self._segment_for_frame(frame_index), wake_frame_index=frame_index
+        )
+        self._add_span(span)
+        span._check_for_split(self._clock())
+        return span
+
+    def add_part_listener(self, callback: "Callable[[PartEvent], None]") -> "Callable[[], None]":
+        """Call `callback` once per new part. A callback that raises is logged
+        and kept. Returns a function that removes it."""
+        self._part_listeners.append(callback)
+
+        def _remove() -> None:
+            if callback in self._part_listeners:
+                self._part_listeners.remove(callback)
+
+        return _remove
+
+    def segment_seq_for_frame(self, frame_index: int) -> "int | None":
+        """The `vad.start` seq of the segment whose frame range holds
+        `frame_index`, or `None` when no recorded segment holds it."""
+        segment = self._segment_holding(frame_index)
+        return segment.seq if segment is not None else None
+
+    def part_index_at(self, frame_index: int) -> "int | None":
+        """The part holding `frame_index` over the windows embedded so far, or
+        `None` when its segment has none."""
+        segment = self._segment_holding(frame_index)
+        if segment is None:
+            return None
+        valid = _collect_valid_windows([segment], None)
+        if not valid:
+            return None
+        embeddings = [pending.future.result() for pending in valid]
+        change_points = find_change_points(embeddings, similarity_floor=self.change_similarity_floor)
+        parts = split_parts(len(valid), change_points)
+        return part_index_for_frame(parts, [pending.window for pending in valid], frame_index)
+
+    def parts_after(self, frame_index: int) -> "list[PartEvent]":
+        """Parts already seen after the part holding `frame_index`, oldest first."""
+        segment = self._segment_holding(frame_index)
+        wake_part = self.part_index_at(frame_index)
+        if segment is None or wake_part is None:
+            return []
+        return [event for event in segment.parts if event.part_index > wake_part]
+
+    def _add_span(self, span: TurnSpeakerSpan) -> None:
+        self._live_spans.append(span)
+        while len(self._live_spans) > _MAX_LIVE_SPANS:
+            self._live_spans.pop(0)
+
+    def _drop_span(self, span: TurnSpeakerSpan) -> None:
+        if span in self._live_spans:
+            self._live_spans.remove(span)
+
+    def _segment_holding(self, frame_index: int) -> "_Segment | None":
+        for segment in self._segments:
+            if segment.first_frame_index is None:
+                continue
+            last = segment.last_frame_index
+            if last is None:
+                last = segment.first_frame_index
+            if segment.first_frame_index <= frame_index <= last:
+                return segment
+        return None
 
     def _segment_for_frame(self, frame_index: "int | None") -> "_Segment | None":
         if not self._segments:
             return None
         if frame_index is not None:
-            for segment in self._segments:
-                if segment.first_frame_index is None:
-                    continue
-                last = segment.last_frame_index
-                if last is None:
-                    last = segment.first_frame_index
-                if segment.first_frame_index <= frame_index <= last:
-                    return segment
+            held = self._segment_holding(frame_index)
+            if held is not None:
+                return held
         # No mark, or the mark named an index no recorded segment's frame
         # range holds (already aged out of history) -- the most recent
         # segment is the safest available approximation.
@@ -494,10 +584,36 @@ class SpeakerTracker:
             pending.completed_at = self._clock()
             # D-12: live detection runs right here, on the loop, with no
             # extra task -- the module docstring's own promise.
-            if self._active_span is not None:
-                self._active_span._check_for_split(self._clock())
+            for span in list(self._live_spans):
+                span._check_for_split(self._clock())
+            self._emit_new_parts(segment)
 
         future.add_done_callback(_mark_completed)
         segment.windows.append(pending)
         if len(segment.windows) > _MAX_WINDOWS_PER_SEGMENT:
             segment.windows.pop(0)
+
+    def _emit_new_parts(self, segment: "_Segment") -> None:
+        """Phase 12 part monitor: emit a `PartEvent` for each part not yet
+        emitted. Change points only append as windows arrive, so no part is
+        emitted twice or withdrawn."""
+        valid = _collect_valid_windows([segment], None)
+        if len(valid) < 2:
+            return
+        embeddings = [pending.future.result() for pending in valid]
+        change_points = find_change_points(embeddings, similarity_floor=self.change_similarity_floor)
+        parts = split_parts(len(valid), change_points)
+        for index in range(len(segment.parts) + 1, len(parts)):
+            first_window = valid[parts[index][0]].window
+            event = PartEvent(
+                segment_seq=segment.seq,
+                part_index=index,
+                first_frame_index=first_window.first_frame_index,
+                started_at=first_window.started_at,
+            )
+            segment.parts.append(event)
+            for listener in list(self._part_listeners):
+                try:
+                    listener(event)
+                except Exception:
+                    logger.exception("a speaker part listener raised; it stays attached")
