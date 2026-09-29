@@ -218,6 +218,71 @@ following:
    Confirm `events.jsonl` holds an `edge.latency` event with an
    `added_delay_ms_p95` value.
 
+## 15. Speaker identification (optional)
+
+Speaker identification learns the voice of each household member. It can stop a
+turn from a person who is not enrolled. It works on the edge microphone only.
+A camera turn always records speaker "unknown".
+
+Three modes exist: `off`, `record`, and `enforce`. The default is `off`. Skip
+this section if you do not need this feature.
+
+1. Fetch both speaker-id models into the running container:
+
+   ```bash
+   docker compose exec app env PYTHONPATH=src .venv/bin/python scripts/fetch_models.py --only speaker-id
+   ```
+
+2. Open your config file. Confirm the `speaker_id:` block sets `model`,
+   `window_ms`, `speech_rms_floor`, and `change_similarity_floor`. A prior
+   spike on this project measured these four values. Do not guess at them.
+3. Sign in to the admin webapp as an admin.
+4. Open the **Speakers** screen.
+5. Add each household member. For each member, read the five prompted
+   phrases into the Pi's own microphone.
+6. Set `speaker_id.mode: record` in your config file. Restart the server.
+7. Speak several ordinary turns to the Pi as each enrolled member. Let some
+   turns come from an unenrolled voice too, for example a visitor or the
+   television.
+8. Label those turns. Run this command once for each enrolled member, using
+   that member's id from the Speakers screen:
+
+   ```bash
+   docker compose exec app env PYTHONPATH=src .venv/bin/python scripts/tune_speaker_threshold.py label \
+       --sessions /data/sessions --labels /data/speaker-labels.json \
+       --since <start time> --until <end time> --speaker-id <member id>
+   ```
+
+   Run the same command once more with `--other` in place of
+   `--speaker-id <member id>`, for the turns from unenrolled voices.
+9. Tune the threshold from the labeled turns:
+
+   ```bash
+   docker compose exec app env PYTHONPATH=src .venv/bin/python scripts/tune_speaker_threshold.py tune \
+       --sessions /data/sessions --labels /data/speaker-labels.json
+   ```
+
+   Copy the printed `recommended_threshold` value into `speaker_id.threshold`
+   in your config file.
+10. Set `speaker_id.mode: enforce` in your config file. Restart the server.
+11. Measure the time speaker identification adds to a turn:
+
+    ```bash
+    docker compose exec app env PYTHONPATH=src .venv/bin/python scripts/measure_speaker_id.py \
+        --sessions /data/sessions
+    ```
+
+    Confirm the report's `verdict` field reads `PASS`.
+
+A recording of an enrolled member's voice can also pass this check. This is a
+known limit, not a defect. The speaker label only personalizes the reply. It
+never grants permission for anything.
+
+Both models come from the sherpa-onnx project's own release. Step 1 downloads
+them. This repository does not store them. The CAM++ model carries the
+Apache-2.0 license. The TitaNet-small model carries the CC-BY-4.0 license,
+which requires attribution.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -225,3 +290,5 @@ following:
 | The Pi's log shows an HTTP 403 on connect | The token is wrong, or an admin revoked it | Pair the device again (step 9) and rewrite `config.toml` (step 10) |
 | The connection closes with code 4009 | Another Pi already holds this token's connection | Confirm only one Pi runs with this token, or pair a second device |
 | The log shows "PortAudio library not found" | `libportaudio2` is not installed | Run step 2 again |
+| `enforce` mode stops an enrolled member's turns | The threshold no longer fits this member's voice | Run `tune` again (step 9) with fresh labeled turns, or re-enroll the member (step 5) |
+| `enforce` mode lets everyone through | No member is enrolled for the model `speaker_id.model` selects | Enroll at least one member (step 5), or select the model you enrolled members under |
