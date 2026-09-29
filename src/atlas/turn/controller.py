@@ -135,6 +135,7 @@ from atlas.turn.pending_action import (
     handle_confirmation_reply,
 )
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
+from atlas.turn.transcript_trim import trim_at_split
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
 from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
 
@@ -794,6 +795,13 @@ async def run_turn(
             split_event=speaker_span.split_event if speaker_span is not None else None,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
+        # D-04: a speaker change ended this turn, so its transcript still holds
+        # the next voice's first words. Transcribe its own frames again.
+        trimmed_text = await trim_at_split(
+            turn_context, speaker_span, stt, source.source_format(), timeout_s=min(brain_turn_timeout_s, 5.0)
+        )
+        if trimmed_text is not None:
+            final_text = trimmed_text
 
         # 260929-icf: a wake hit starts this turn only when `incoming is None`
         # and `wake_phrase` is given. Remove the phrase from the transcript.
@@ -846,6 +854,13 @@ async def run_turn(
                 split_event=speaker_span.split_event if speaker_span is not None else None,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
+            # D-04: the command's own segment can end at a change point too.
+            # The slice starts at the turn's first frame, so it holds the wake phrase.
+            trimmed_text = await trim_at_split(
+                turn_context, speaker_span, stt, source.source_format(), timeout_s=min(brain_turn_timeout_s, 5.0)
+            )
+            if trimmed_text is not None:
+                final_text = strip_wake_phrase(trimmed_text, wake_phrase) or trimmed_text
 
         timings.mark_stt_final()
         # 260924-4iv (item a): one absolute deadline, in `_time.monotonic()`'s

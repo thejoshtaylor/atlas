@@ -267,3 +267,34 @@ async def test_a_turn_with_no_turn_context_never_transcribes_again(tmp_path, fak
 
     assert len(stt.calls) == 1
     assert trims == []
+
+
+async def test_a_command_segment_that_a_split_ended_is_trimmed_and_loses_the_wake_phrase(
+    tmp_path, fake_audio_source, fake_tts
+):
+    """The operator paused after the wake phrase, so the command is heard by a
+    second drain. The change point arrives during that drain."""
+    span = _StubSpan(split=False, split_frame_index=3)
+
+    class _SplitsDuringSecondDrain(_ScriptedStt):
+        async def stream(self, frames, source_format=None, *, finalize=None):
+            if len(self.calls) == 1:
+                span.split_event.set()
+            async for event in super().stream(frames, source_format, finalize=finalize):
+                yield event
+
+    stt = _SplitsDuringSecondDrain("hey atlas", "turn on the lamp and open the door", "hey atlas turn on the lamp")
+
+    brain, trims = await _run(
+        tmp_path,
+        fake_audio_source,
+        fake_tts,
+        stt,
+        span=span,
+        replay_until=lambda end: list(_FRAMES[:end]),
+    )
+
+    assert len(stt.calls) == 3
+    assert stt.calls[2] == _FRAMES[:3]
+    assert _user_text(brain) == "turn on the lamp"
+    assert [trim["method"] for trim in trims] == ["retranscribe"]
