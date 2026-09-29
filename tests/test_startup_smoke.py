@@ -1671,6 +1671,10 @@ def test_a_boot_with_the_edge_audio_source_sets_app_state_and_precaches_the_edge
     with TestClient(app_module.app):
         assert app_module.app.state.audio_source == "edge"
         assert ("pcm", 16000) in app_module.app.state.filler_caches
+        # 260929-mii: only the edge deployment offers the volume tool.
+        names = {tool["function"]["name"] for tool in app_module.app.state.tools_schema}
+        assert "set_speaker_volume" in names
+        assert app_module.app.state.volume_tool_host is not None
 
 
 def test_a_boot_with_no_stored_audio_source_precaches_only_the_browser_and_camera_sinks(
@@ -1695,6 +1699,9 @@ def test_a_boot_with_no_stored_audio_source_precaches_only_the_browser_and_camer
     with TestClient(app_module.app):
         assert app_module.app.state.audio_source == "camera"
         assert ("pcm", 16000) not in app_module.app.state.filler_caches
+        names = {tool["function"]["name"] for tool in app_module.app.state.tools_schema}
+        assert "set_speaker_volume" not in names
+        assert app_module.app.state.volume_tool_host is None
         assert set(app_module.app.state.filler_caches.keys()) == {None, ("alaw", 8000)}
 
 

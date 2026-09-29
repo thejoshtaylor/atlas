@@ -215,6 +215,15 @@ edge:
   # measure this stream's own added delay (10-07-PLAN.md), not a timeout.
   ping_interval_s: 5.0
 
+  # The voice tool ("turn it up", "set the volume to 60") changes the level
+  # of the Pi's speaker. Transcribed text is untrusted, and a TV can say
+  # "volume zero" or "volume max", so the server clamps every level to
+  # min_percent..max_percent. step_percent is the size of one "up" or "down".
+  volume:
+    min_percent: 30
+    max_percent: 100
+    step_percent: 10
+
 speaker_id:
   # Streaming speaker identification on the edge microphone only (Phase 11,
   # D-07) -- camera turns always record speaker "unknown" and this gate

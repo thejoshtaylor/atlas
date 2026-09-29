@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import atlas_edge.protocol as pi_protocol
 
-from atlas.config import EdgeSourceConfig
+from atlas.config import EdgeSourceConfig, EdgeVolumeConfig
 from atlas.transports import edge as server_protocol
 
 
@@ -104,3 +104,37 @@ def test_a_bad_led_message_is_refused_on_both_sides():
     ):
         with pytest.raises(pi_protocol.ProtocolError):
             pi_protocol.parse_server_message(json.dumps(raw))
+
+
+def test_volume_constants_match():
+    assert server_protocol.MSG_VOLUME == pi_protocol.MSG_VOLUME
+    assert server_protocol.MSG_VOLUME_RESULT == pi_protocol.MSG_VOLUME_RESULT
+    assert server_protocol.VOLUME_DIRECTIONS == pi_protocol.VOLUME_DIRECTIONS
+    assert server_protocol.MAX_VOLUME_ERROR_CHARS == pi_protocol.MAX_VOLUME_ERROR_CHARS
+
+
+def test_every_server_volume_message_parses_on_the_pi_side():
+    limits = EdgeVolumeConfig()
+    # Level 0 arrives as 30: the server clamps it into the limits.
+    absolute = pi_protocol.parse_server_message(server_protocol.build_volume(1, level=0, volume=limits))
+    assert absolute == pi_protocol.Volume(id=1, min_percent=30, max_percent=100, level=30)
+    for direction in ("up", "down"):
+        relative = pi_protocol.parse_server_message(
+            server_protocol.build_volume(2, direction=direction, volume=limits)
+        )
+        assert relative == pi_protocol.Volume(
+            id=2, min_percent=30, max_percent=100, direction=direction, step_percent=10
+        )
+
+
+def test_every_pi_volume_result_parses_on_the_server_side():
+    assert server_protocol.parse_edge_event(pi_protocol.volume_result(3, level=60)) == {
+        "type": "volume.result",
+        "id": 3,
+        "level": 60,
+    }
+    assert server_protocol.parse_edge_event(pi_protocol.volume_result(3, error="no amixer")) == {
+        "type": "volume.result",
+        "id": 3,
+        "error": "no amixer",
+    }

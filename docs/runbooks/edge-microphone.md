@@ -158,6 +158,20 @@ it.
    sudo chmod 600 /etc/atlas-edge/config.toml
    ```
 
+4. You can change the speaker level by voice, for example "turn it up" or
+   "set the volume to 60". The Pi then changes one ALSA mixer control with
+   `amixer`. To use a different card or control, add these keys to
+   `config.toml`:
+
+   | Key | Default | Meaning |
+   |---|---|---|
+   | `volume_card` | `Array` | The ALSA card name that `amixer -c` takes. |
+   | `volume_control` | `PCM,0` | The mixer control. A value must not start with `-`. |
+
+   The server keys `edge.volume.min_percent`, `edge.volume.max_percent`, and
+   `edge.volume.step_percent` (30, 100, and 10) limit every level. Restart the
+   edge service after you change a key on the Pi.
+
 ## 11. Install and start the service
 
 1. Copy the systemd unit into place:

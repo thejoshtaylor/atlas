@@ -111,6 +111,7 @@ from atlas.sources.runner import SourceRunner
 from atlas.speaker.ffmpeg_supervisor import FfmpegSupervisor, build_tcp_argv
 from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
+from atlas.speaker.volume_tool import VolumeToolHost, set_current_turn_target
 from atlas.timing import TurnTimings
 from atlas.transports.camera import CameraAudioSource
 from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, SegmentBoundedWakeDetector
@@ -994,6 +995,13 @@ def _make_run_turn_for_source(
             }
         )
         source = ObserverPublishingSource(source, source_name, app.state.observer_registry)
+        # The ContextVar belongs to this turn's task (Phase 12 D-12). The
+        # edge source has at most one connected device, which is the device
+        # that heard this turn. Every other source sets None, so the tool
+        # refuses.
+        volume_tool_host = getattr(app.state, "volume_tool_host", None)
+        if volume_tool_host is not None:
+            set_current_turn_target(app.state.edge_source if source_name == EDGE_SOURCE_NAME else None)
         await run_turn(
             source,
             app.state.stt,
@@ -1464,6 +1472,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `start_all()` performs.
     workflow_tool_host = WorkflowToolHost(workflow_repo, zone=_resolved_timezone)
     app.state.workflow_tool_host = workflow_tool_host
+    # Only the edge source has a speaker this tool can reach, so other
+    # deployments never see it.
+    volume_tool_host = VolumeToolHost() if resolved_audio_source == EDGE_SOURCE_NAME else None
+    app.state.volume_tool_host = volume_tool_host
 
     # Entities are fetched once, after the plugins are up (below) -- the
     # cacheable catalog prompt is rebuilt from this snapshot every time
@@ -1491,11 +1503,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         object, never mutated, so a turn already holding the previous
         lookup and schema keeps exactly those, mid-rebuild or not.
         """
-        app.state.tool_host_lookup = McpToolHostLookup(
-            [*plugin_manager.hosts, workflow_tool_host]
-        )
+        in_process_hosts = [workflow_tool_host]
+        if volume_tool_host is not None:
+            in_process_hosts.append(volume_tool_host)
+        app.state.tool_host_lookup = McpToolHostLookup([*plugin_manager.hosts, *in_process_hosts])
         app.state.tools_schema = plugin_manager.tools_schema + mcp_tools_to_openai_tools(
-            workflow_tool_host.tools
+            [tool for host in in_process_hosts for tool in host.tools]
         )
         # Plan 06-04 (D-10): the ownership block naming which plugin owns
         # each collision-prefixed tool -- rebuilt here, on the same swap as
