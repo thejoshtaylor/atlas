@@ -82,3 +82,9 @@ class TurnContext:
         """Forward `event` to the bound recorder. A no-op before binding."""
         if self._record_event is not None:
             self._record_event(event)
+
+
+def follow_up_speaker_mismatch(turn_context: Any, *, incoming: Any, speaker_event: dict, effective_mode: str) -> bool:
+    """True when a follow-up turn must be blocked because someone other than
+    the person Atlas asked is answering (D-10). Skeleton: not yet decided."""
+    return False
