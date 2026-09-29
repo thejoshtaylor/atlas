@@ -69,6 +69,13 @@ call *and* the barge-in listener, so the listener's lifetime is scoped to
 the turn's -- cancelled the instant the turn task finishes, so it never
 starves the next wake evaluation once `run()`'s loop resumes.
 
+**Parallel turns (Phase 12, D-01):** a runner built with a `ParallelTurns` spec
+takes the other branch. `run()` stays the only caller of `source.frames()`. It
+pushes every chunk into the `TurnGroup` fan-out before detection, and an allowed
+hit starts a `TurnRun` task instead of awaiting a turn, so wake detection keeps
+running during every turn. A runner with no spec (the camera, the browser
+listener) runs the serial path above unchanged.
+
 **Detector work runs off the loop (D2, quick task 260924-4is):** every
 call this module makes into `wake_detector.process()` or
 `decode_for_detector()` -- for the wake hit and for the barge-in
@@ -99,6 +106,7 @@ from atlas.calibration.record import EchoCalibration
 from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
+from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel
@@ -551,6 +559,7 @@ class SourceRunner:
         wake_event_repo: WakeEventRepository | None = None,
         follow_up_window_s: Callable[[], float] | None = None,
         follow_up_echo_tail_s: float = 0.8,
+        parallel: "ParallelTurns | None" = None,
     ) -> None:
         self._name = name
         self._source = source
@@ -638,6 +647,21 @@ class SourceRunner:
             barge_in_config.resolve(name) if barge_in_config is not None else BargeInConfig(enabled=False)
         )
 
+        # Phase 12: `None` keeps the serial path. A spec builds the group of live turns.
+        self._turn_group: TurnGroup | None = None
+        if parallel is not None:
+            hooks = TurnHooks(
+                run_turn=run_turn_fn,
+                new_monitor=self._new_barge_in_monitor,
+                watch_barge_in=self._watch_barge_in,
+                clock=clock,
+            )
+            self._turn_group = TurnGroup(name, source, parallel, hooks)
+
+    @property
+    def turn_group(self) -> "TurnGroup | None":
+        return self._turn_group
+
     @property
     def wake_threshold(self) -> float:
         """The score this runner's gate currently requires a wake hit to
@@ -689,8 +713,11 @@ class SourceRunner:
         caller's `wake_detector.close()` right after from freeing a
         model a worker thread is still using.
         """
+        cancelled = False
         try:
             async for chunk in self._source.frames():
+                if self._turn_group is not None:
+                    self._turn_group.push_frame(chunk, getattr(self._source, "last_yielded_frame_index", None))
                 try:
                     await self._process_chunk(chunk)
                 except asyncio.CancelledError:
@@ -701,7 +728,14 @@ class SourceRunner:
                         "for the wake word rather than ending the whole source's task",
                         self._name,
                     )
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
+            if self._turn_group is not None:
+                # Before the executor goes: a live turn's barge-in listener still uses it.
+                self._turn_group.close_frames()
+                await self._turn_group.drain(cancel=cancelled)
             self._detector_executor.shutdown(wait=True, cancel_futures=True)
 
     def _detect(self, chunk: bytes) -> WakeHit | None:
@@ -726,7 +760,7 @@ class SourceRunner:
         """One chunk of `run()`'s own loop body, split out so `run()` can
         wrap it in the containment `try`/`except` above without also
         catching an exception from `self._source.frames()` itself."""
-        if self._preroll is not None:
+        if self._preroll is not None and self._turn_group is None:
             self._preroll.push(chunk)
 
         # Plan 11-07 (D-02, Research Assumption A4): duck-typed, the same
@@ -764,6 +798,12 @@ class SourceRunner:
         send_event = getattr(self._source, "send_event", None)
         if send_event is not None:
             await send_event({"type": "wake.heard"})
+
+        if self._turn_group is not None:
+            # Phase 12 (D-01): the turn runs as its own task; this loop keeps reading frames.
+            assert self._turn_group.fanout.latest_index is not None
+            self._turn_group.start_wake_turn(self._turn_group.fanout.latest_index)
+            return
 
         # A source with an LED ring (the edge Pi) shows the turn state. The
         # ring stays dark until this point and goes dark again in `finally`.
@@ -928,7 +968,7 @@ class SourceRunner:
             with contextlib.suppress(asyncio.CancelledError):
                 await listener_task
 
-    async def _watch_barge_in(self, monitor: "BargeInMonitor") -> None:
+    async def _watch_barge_in(self, monitor: "BargeInMonitor", frames: "AsyncIterator[bytes] | None" = None) -> None:
         """Become the sole reader of `self._source.frames()` once it is
         safe to (module docstring), feeding every chunk into `monitor`
         until cancelled -- by energy for most sources, or by `vad.start`
@@ -964,6 +1004,10 @@ class SourceRunner:
         two native calls for one source can never overlap). Unaffected by
         the `speech_signals` branch above: that branch never decodes or
         measures energy at all.
+
+        Phase 12: `frames` replaces `self._source.frames()` when given. A
+        parallel turn passes its own subscription, so this listener is never a
+        second reader of the source.
         """
         if not monitor.enabled:
             return
@@ -983,13 +1027,13 @@ class SourceRunner:
 
             unsubscribe = speech_signals.subscribe(_on_speech_signal, replay_segment=False)
             try:
-                async for _chunk in self._source.frames():
+                async for _chunk in (frames if frames is not None else self._source.frames()):
                     pass
             finally:
                 unsubscribe()
             return
         loop = asyncio.get_running_loop()
-        async for chunk in self._source.frames():
+        async for chunk in (frames if frames is not None else self._source.frames()):
             energy = await loop.run_in_executor(self._detector_executor, self._barge_in_energy, chunk)
             if energy is None:
                 continue
@@ -1144,6 +1188,7 @@ class SourceRunnerSpec:
     wake_event_repo: WakeEventRepository | None = None
     follow_up_window_s: Callable[[], float] | None = None
     follow_up_echo_tail_s: float = 0.8
+    parallel: "ParallelTurns | None" = None
 
 
 def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[SourceRunner]:
@@ -1179,6 +1224,7 @@ def assemble_source_runners(specs: Mapping[str, SourceRunnerSpec]) -> list[Sourc
             wake_event_repo=spec.wake_event_repo,
             follow_up_window_s=spec.follow_up_window_s,
             follow_up_echo_tail_s=spec.follow_up_echo_tail_s,
+            parallel=spec.parallel,
         )
         for name, spec in specs.items()
     ]
