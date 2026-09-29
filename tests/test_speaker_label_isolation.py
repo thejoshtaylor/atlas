@@ -250,3 +250,40 @@ async def test_a_confirmation_rounds_messages_never_carry_the_name_or_the_hint_t
         serialized = json.dumps(message)
         assert "Member A" not in serialized
         assert "Untrusted hint" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# 12-03: entity claims key on the per-run turn key, never on a speaker label
+# ---------------------------------------------------------------------------
+
+
+def test_claiming_tool_host_call_tool_carries_no_speaker_parameter():
+    from atlas.turn.entity_claims import ClaimingToolHost
+
+    params = inspect.signature(ClaimingToolHost.call_tool).parameters
+    assert not _no_name_carries_speaker(params.keys())
+
+
+def test_claim_registry_claim_carries_no_speaker_parameter():
+    from atlas.turn.entity_claims import ClaimRegistry
+
+    params = inspect.signature(ClaimRegistry.claim).parameters
+    assert not _no_name_carries_speaker(params.keys())
+
+
+async def test_two_claim_wrappers_with_one_label_but_different_owners_still_conflict():
+    from atlas.turn.entity_claims import ClaimingToolHost, ClaimRegistry, is_claim_refusal
+
+    class _Host:
+        async def call_tool(self, name, arguments):
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
+
+    registry = ClaimRegistry()
+    arguments = {"domain": "light", "service": "turn_on", "entity_id": "light.lamp"}
+    first = ClaimingToolHost(_Host(), registry=registry, owner="edge:1", label=lambda: "Josh")
+    second = ClaimingToolHost(_Host(), registry=registry, owner="edge:2", label=lambda: "Josh")
+
+    await first.call_tool("ha_call_service", dict(arguments))
+    refused = await second.call_tool("ha_call_service", dict(arguments))
+
+    assert is_claim_refusal(refused) is not None

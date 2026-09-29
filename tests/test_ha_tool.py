@@ -506,3 +506,71 @@ def test_the_child_never_sees_secrets_the_parent_holds_for_other_plugins(monkeyp
 
     for name in _HOSTILE_PARENT_SECRETS:
         assert not seen[name], f"{name} leaked into the Home Assistant MCP child's environment"
+
+
+# ---------------------------------------------------------------------------
+# 12-03: `ha_expand_target`, the read-only tool the server calls before it
+# claims an area, device, or label target (D-15).
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_expand_target_returns_the_sorted_entity_ids():
+    from atlas_mcp.ha import handle_expand_target
+    from tests.test_ha_registry_expansion import _FakeRegistryClient, _office_snapshot
+
+    result = await handle_expand_target(
+        _FakeRegistryClient(snapshot=_office_snapshot()), "area", "area_example_office"
+    )
+
+    assert result == {"entity_ids": ["light.example_lamp", "switch.example_fan"]}
+
+
+@pytest.mark.parametrize(
+    ("kind", "target_id", "reason_part"),
+    [
+        ("room", "area_example_office", "room"),
+        ("area", "area_example_nonexistent", "i don't know a area called"),
+        ("area", "area_example_workshop_empty", "i don't know a area called"),
+    ],
+)
+async def test_handle_expand_target_refuses_what_resolve_target_refuses(kind, target_id, reason_part):
+    from atlas_mcp.ha import handle_expand_target
+    from tests.test_ha_registry_expansion import _FakeRegistryClient, _office_snapshot
+
+    with pytest.raises(Denied) as exc_info:
+        await handle_expand_target(_FakeRegistryClient(snapshot=_office_snapshot()), kind, target_id)
+
+    assert reason_part in exc_info.value.reason
+
+
+async def test_handle_expand_target_refuses_an_unreachable_registry():
+    from atlas_mcp.ha import handle_expand_target
+    from atlas_mcp.registry import RegistryUnavailableError
+    from tests.test_ha_registry_expansion import _FakeRegistryClient
+
+    with pytest.raises(Denied) as exc_info:
+        await handle_expand_target(_FakeRegistryClient(error=RegistryUnavailableError("down")), "area", "x")
+
+    assert "can't reach the home assistant registry" in exc_info.value.reason
+
+
+async def test_handle_expand_target_refuses_an_empty_area_with_the_same_reason_resolve_target_uses():
+    from atlas_mcp.ha import handle_expand_target
+    from atlas_mcp.registry import RegistrySnapshot
+    from tests.test_ha_registry_expansion import _FakeRegistryClient
+
+    snapshot = RegistrySnapshot(areas=frozenset({"area_empty"}), devices={}, labels=frozenset(), entities=())
+
+    with pytest.raises(Denied) as exc_info:
+        await handle_expand_target(_FakeRegistryClient(snapshot=snapshot), "area", "area_empty")
+
+    assert exc_info.value.reason == "that area has nothing in it"
+
+
+async def test_ha_expand_target_is_registered_and_named_code_only():
+    from atlas_mcp.ha_names import HA_CODE_ONLY_TOOL_NAMES, HA_EXPAND_TARGET_TOOL
+
+    registered = {tool.name for tool in await ha_module.mcp_server.list_tools()}
+
+    assert HA_EXPAND_TARGET_TOOL in registered
+    assert HA_EXPAND_TARGET_TOOL in HA_CODE_ONLY_TOOL_NAMES
