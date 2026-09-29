@@ -216,3 +216,281 @@ async def test_speak_in_group_without_a_recorder_or_a_sink_still_reports_playbac
 
     assert speech.role == "alone"
     assert ends == [speech.result.last_write_at]
+
+
+# -- Task 2: the bounded wait, late replies, questions last, one filler, a
+# -- leader that fails ------------------------------------------------------
+
+
+async def test_the_wait_is_bounded_and_a_later_statement_plays_on_its_own():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    started = time.monotonic()
+    speech_a = await asyncio.wait_for(
+        a.speak("the lamp is on", expects_answer=False, write=write), _TIMEOUT_S
+    )
+    waited = time.monotonic() - started
+
+    assert 0.03 <= waited < 1.0
+    assert write.calls == [("Josh, the lamp is on.", True)]
+    assert speech_a.role == "lead"
+    assert speech_a.merged_count == 1
+    assert speech_a.prefixed is True
+    assert speech_a.merge_wait_ms is not None and speech_a.merge_wait_ms >= 30
+
+    speech_b = await asyncio.wait_for(
+        b.speak("it is 18 degrees", expects_answer=False, write=write), _TIMEOUT_S
+    )
+
+    assert write.calls[1] == ("Sam, it is 18 degrees.", True)
+    assert speech_b.role == "late"
+    assert speech_b.merged_count == 1
+    assert speech_b.prefixed is True
+
+
+async def test_a_finished_turn_lets_the_pending_statement_flush_at_once():
+    speaker = GroupSpeaker(merge_wait_s=5.0)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    started = time.monotonic()
+    task_a = _speak(a, "the lamp is on", write)
+    await asyncio.sleep(0.01)
+    assert write.calls == []
+    b.finish()
+    speech_a = await asyncio.wait_for(task_a, _TIMEOUT_S)
+
+    assert time.monotonic() - started < 1.0
+    assert speech_a.role == "lead"
+    assert speech_a.merged_count == 1
+    assert write.calls == [("Josh, the lamp is on.", True)]
+
+
+async def test_a_question_plays_after_the_pending_statement_in_its_own_write():
+    speaker = GroupSpeaker(merge_wait_s=1.0)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    task_b = _speak(b, "it is 18 degrees", write)
+    await asyncio.sleep(0)
+    task_a = _speak(a, "shall I turn it off?", write, expects_answer=True)
+    speech_a, speech_b = await _gather(task_a, task_b)
+
+    assert write.calls == [
+        ("Sam, it is 18 degrees.", True),
+        ("Josh, shall I turn it off?", True),
+    ]
+    assert speech_b.role == "lead"
+    assert speech_a.role == "question"
+    assert speech_a.merged_count == 1
+    assert speech_a.prefixed is True
+
+
+async def test_a_question_that_arrives_first_still_plays_after_the_statement():
+    speaker = GroupSpeaker(merge_wait_s=1.0)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    task_a = _speak(a, "shall I turn it off?", write, expects_answer=True)
+    await asyncio.sleep(0.01)
+    assert write.calls == []
+    task_b = _speak(b, "it is 18 degrees", write)
+    speech_a, speech_b = await _gather(task_a, task_b)
+
+    assert [text for text, _ in write.calls] == [
+        "Sam, it is 18 degrees.",
+        "Josh, shall I turn it off?",
+    ]
+    assert speech_a.role == "question"
+    assert speech_b.role == "lead"
+
+
+async def test_a_question_alone_in_its_group_plays_at_once_with_its_own_text():
+    speaker = GroupSpeaker(merge_wait_s=5.0)
+    handle = speaker.register("turn-a", 100, group_id="group-1")
+    write = FakeWrite()
+
+    speech = await asyncio.wait_for(
+        handle.speak("shall I turn it off?", expects_answer=True, write=write), _TIMEOUT_S
+    )
+
+    assert write.calls == [("shall I turn it off?", False)]
+    assert speech.role == "alone"
+
+
+async def test_the_second_question_waits_until_the_first_asker_finishes():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    task_a = _speak(a, "shall I turn it off?", write, expects_answer=True)
+    task_b = _speak(b, "shall I turn it on?", write, expects_answer=True)
+    await asyncio.sleep(0.15)
+
+    assert write.calls == [("Josh, shall I turn it off?", True)]
+    assert task_a.done()
+    assert not task_b.done()
+
+    a.finish()
+    speech_b = await asyncio.wait_for(task_b, _TIMEOUT_S)
+
+    assert write.calls[1] == ("Sam, shall I turn it on?", True)
+    assert speech_b.role == "question"
+
+
+async def test_a_handle_that_asks_again_in_its_chain_keeps_its_question_slot():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+    b.finish()
+    write = FakeWrite()
+
+    first = await asyncio.wait_for(
+        a.speak("which lamp?", expects_answer=True, write=write), _TIMEOUT_S
+    )
+    second = await asyncio.wait_for(
+        a.speak("the big one?", expects_answer=True, write=write), _TIMEOUT_S
+    )
+
+    assert first.role == second.role == "question"
+    assert [text for text, _ in write.calls] == ["Josh, which lamp?", "Josh, the big one?"]
+
+
+async def test_one_filler_per_group_and_none_once_a_write_has_started():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+
+    assert a.claim_filler() is True
+    assert a.claim_filler() is False
+    assert b.claim_filler() is False
+
+    a.finish()
+    b.finish()
+    c = speaker.register("turn-c", 500, group_id="group-2")
+    assert c.claim_filler() is True
+
+    c.finish()
+    d = speaker.register("turn-d", 600, group_id="group-3")
+    seen: list[bool] = []
+
+    async def write(text: str, needs_live_tts: bool) -> FakeResult:
+        seen.append(d.claim_filler())
+        now = time.monotonic()
+        return FakeResult(len(text), now, now)
+
+    await d.speak("done", expects_answer=False, write=write)
+
+    assert seen == [False]
+    assert d.claim_filler() is False
+
+
+async def test_no_filler_after_the_group_first_flush_started():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+    write = FakeWrite()
+
+    await a.speak("the lamp is on", expects_answer=False, write=write)
+
+    assert b.claim_filler() is False
+
+
+async def test_two_writes_never_overlap_through_the_reply_lock():
+    speaker = GroupSpeaker(merge_wait_s=0.02)
+    a, b = _two_handles(speaker)
+    c = speaker.register("turn-c", 500, group_id="group-1")
+    c.set_label("Kim")
+    write = FakeWrite(delay_s=0.1, lock=speaker.reply_lock)
+
+    task_a = _speak(a, "the lamp is on", write)
+    task_b = _speak(b, "it is 18 degrees", write)
+    await asyncio.sleep(0.06)
+    # The merged write (A and B) is running. C is late and must wait for it.
+    assert len(write.calls) == 1
+    task_c = _speak(c, "the door is shut", write)
+    await _gather(task_a, task_b, task_c)
+
+    assert len(write.calls) == 2
+    assert write.calls[0][0] == "Josh, the lamp is on. Sam, it is 18 degrees."
+    assert write.calls[1][0] == "Kim, the door is shut."
+    assert write.starts[1] >= write.ends[0]
+    assert speaker.reply_lock.locked() is False
+
+
+async def test_a_failed_leader_lets_each_follower_write_its_own_line():
+    speaker = GroupSpeaker(merge_wait_s=1.0)
+    a, b = _two_handles(speaker)
+    write_a = FakeWrite()
+
+    async def failing_write(text: str, needs_live_tts: bool):
+        raise RuntimeError("speaker is down")
+
+    task_b = _speak(b, "it is 18 degrees", failing_write)
+    await asyncio.sleep(0)
+    task_a = _speak(a, "the lamp is on", write_a)
+    results = await asyncio.wait_for(
+        asyncio.gather(task_a, task_b, return_exceptions=True), _TIMEOUT_S
+    )
+
+    speech_a, error_b = results
+    assert isinstance(error_b, RuntimeError)
+    assert write_a.calls == [("Josh, the lamp is on.", True)]
+    assert speech_a.role == "late"
+    assert speech_a.merged_count == 1
+
+
+async def test_a_cancelled_leader_releases_its_followers():
+    speaker = GroupSpeaker(merge_wait_s=5.0)
+    a, b = _two_handles(speaker)
+    c = speaker.register("turn-c", 500, group_id="group-1")
+    write = FakeWrite()
+
+    task_b = _speak(b, "it is 18 degrees", write)
+    await asyncio.sleep(0)
+    task_a = _speak(a, "the lamp is on", write)
+    await asyncio.sleep(0.01)
+    assert c.claim_filler() is True  # C is idle, so the merge is still waiting
+    task_b.cancel()
+    speech_a = await asyncio.wait_for(task_a, _TIMEOUT_S)
+
+    assert speech_a.role == "late"
+    assert write.calls == [("Josh, the lamp is on.", True)]
+
+
+async def test_a_cancelled_follower_leaves_the_merge():
+    speaker = GroupSpeaker(merge_wait_s=1.0)
+    a, b = _two_handles(speaker)
+    c = speaker.register("turn-c", 500, group_id="group-1")
+    write = FakeWrite()
+
+    task_b = _speak(b, "it is 18 degrees", write)
+    await asyncio.sleep(0)
+    task_a = _speak(a, "the lamp is on", write)
+    await asyncio.sleep(0.01)
+    task_a.cancel()
+    await asyncio.sleep(0)
+    c.finish()
+    speech_b = await asyncio.wait_for(task_b, _TIMEOUT_S)
+
+    assert speech_b.merged_count == 1
+    assert write.calls == [("Sam, it is 18 degrees.", True)]
+
+
+async def test_a_new_registration_after_the_last_finish_starts_a_fresh_group():
+    speaker = GroupSpeaker(merge_wait_s=0.05)
+    a, b = _two_handles(speaker)
+    a.finish()
+    b.finish()
+    b.finish()  # a second finish is harmless
+
+    c = speaker.register("turn-c", 500, group_id="group-2")
+    c.set_label("Kim")
+    write = FakeWrite()
+    speech = await asyncio.wait_for(
+        c.speak("done", expects_answer=False, write=write), _TIMEOUT_S
+    )
+
+    assert c.joined is False
+    assert speech.role == "alone"
+    assert speech.prefixed is False
+    assert write.calls == [("done", False)]
