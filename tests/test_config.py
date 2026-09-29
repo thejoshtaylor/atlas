@@ -1222,6 +1222,34 @@ def test_wake_config_rejects_an_unknown_engine():
     assert "vosk" in str(exc.value)
 
 
+def test_wake_verify_transcript_defaults_to_true():
+    from atlas.config import WakeConfig
+
+    assert WakeConfig.from_config({}).verify_transcript is True
+
+
+def test_wake_verify_transcript_can_be_overridden_for_one_source():
+    from atlas.config import WakeConfig
+
+    wake = WakeConfig.from_config({"sources": {"edge": {"verify_transcript": False}}})
+    assert wake.resolve("edge").verify_transcript is False
+    assert wake.resolve("camera").verify_transcript is True
+
+
+def test_wake_verify_transcript_rejects_a_non_boolean():
+    from atlas.config import ConfigError, WakeConfig
+
+    with pytest.raises(ConfigError) as exc:
+        WakeConfig.from_config({"verify_transcript": "yes"})
+    assert "wake.verify_transcript" in str(exc.value)
+
+
+def test_camera_preroll_defaults_to_1500_ms():
+    from atlas.config import CameraConfig
+
+    assert CameraConfig.from_config({}).preroll_ms == 1500
+
+
 def test_gate_config_still_carrying_an_identity_key_is_a_startup_error():
     from atlas.config import ConfigError, GateConfig
 
