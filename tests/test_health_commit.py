@@ -1,6 +1,6 @@
 """GET /health names the commit the image was built from.
 
-The edge updater (edge/scripts/update.sh) reads the "commit" key and moves
+The edge updater script under edge/scripts reads the "commit" key and moves
 the Pi to that commit. An image built without the GIT_SHA build arg reports
 "", and the updater does nothing on an empty value. The route stays open:
 these requests carry no cookie, and no admin account exists.

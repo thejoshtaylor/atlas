@@ -104,7 +104,7 @@ still builds the camera URL from them the old way:
 - `TAPO_PASSWORD`
 
 Two more keys are optional. They turn on speaker identification. Edge
-microphone runbook section 15 (`edge-microphone.md`) describes the full
+microphone runbook section 16 (`edge-microphone.md`) describes the full
 procedure:
 
 - `SPEAKER_ID_MODE` takes `off`, `record`, or `enforce`. When the key is

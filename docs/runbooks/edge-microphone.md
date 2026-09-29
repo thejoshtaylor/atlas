@@ -176,14 +176,73 @@ it.
 3. This unit restarts the service forever on any exit, with no limit on
    the number of restarts (D-04).
 
-## 12. Select the edge microphone in the setup wizard
+## 12. Turn on automatic updates
+
+The Pi follows the server's build commit. Every 15 minutes, the Pi reads the
+commit from the server's `/health` route. The first check is 5 minutes after
+boot. If the Pi runs a different commit, it checks out that commit and
+installs it the same way as steps 3 and 11. Then it restarts the edge
+service. If the service does not stay up for 30 seconds, the Pi goes back to
+the previous commit.
+
+1. Copy the two updater units into place:
+
+   ```bash
+   sudo cp /opt/atlas-edge/edge/systemd/atlas-edge-update.service \
+     /opt/atlas-edge/edge/systemd/atlas-edge-update.timer /etc/systemd/system/
+   ```
+
+2. Reload systemd, then enable and start the timer:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now atlas-edge-update.timer
+   ```
+
+3. Optional: run one check now:
+
+   ```bash
+   sudo systemctl start atlas-edge-update.service
+   ```
+
+4. Read the log of the updater:
+
+   ```bash
+   journalctl -u atlas-edge-update
+   ```
+
+Keep these facts in mind:
+
+- The updater runs only commits that are on `main` of the repository you
+  cloned in step 3. It refuses any other commit and logs the refusal. The
+  server must build from that same repository.
+- The updater refreshes only the unit files that are already in
+  `/etc/systemd/system`. Optional units stay off until you install them.
+  The `atlas-librespot` unit stays off until you install it in step 17.
+- Build the server image with the `GIT_SHA` build argument set to the full
+  commit. Without it, `/health` reports an empty commit and the updater
+  does nothing:
+
+  ```bash
+  docker build --build-arg GIT_SHA="$(git rev-parse HEAD)" -t <your-registry>/atlas:<tag> .
+  ```
+
+- A restart during a spoken turn drops that turn.
+
+To turn the updater off:
+
+```bash
+sudo systemctl disable --now atlas-edge-update.timer
+```
+
+## 13. Select the edge microphone in the setup wizard
 
 1. In the admin webapp, open the setup wizard's audio source step.
 2. Select **Edge microphone (Raspberry Pi)**.
 3. Restart the server. The audio source change takes effect only after a
    restart, and this turns the camera microphone off (D-15).
 
-## 13. Check reachability
+## 14. Check reachability
 
 The Pi always dials out to the server. The server never needs the Pi's own
 address (D-02).
@@ -204,7 +263,7 @@ following:
    over the network with no encryption. State this risk to anyone who
    asks why this option exists.
 
-## 14. Confirm it works
+## 15. Confirm it works
 
 1. Watch the Pi's own service log:
 
@@ -218,7 +277,7 @@ following:
    Confirm `events.jsonl` holds an `edge.latency` event with an
    `added_delay_ms_p95` value.
 
-## 15. Speaker identification (optional)
+## 16. Speaker identification (optional)
 
 Speaker identification learns the voice of each household member. It can stop a
 turn from a person who is not enrolled. It works on the edge microphone only.
@@ -307,7 +366,7 @@ them. This repository does not store them. The CAM++ model carries the
 Apache-2.0 license. The TitaNet-small model carries the CC-BY-4.0 license,
 which requires attribution.
 
-## 16. Play Spotify through the array (optional)
+## 17. Play Spotify through the array (optional)
 
 A request to play music, with no speaker named, plays through the 3.5 mm
 jack of the array. The `librespot` program receives Spotify Connect and

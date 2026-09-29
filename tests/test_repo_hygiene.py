@@ -168,6 +168,14 @@ _ALLOWED_OBJECT_IDS = {
     # real house's `sensor.<anything else>` is still caught, in the working
     # tree and in history alike.
     "yaml",
+    # 260929-kqy. `update` is a Home Assistant domain, and `\b` matches
+    # the hyphen in the systemd unit names `atlas-edge-update.service` and
+    # `atlas-edge-update.timer`. Both are file names, never a house
+    # entity's object id. `_ENTITY_ID_RE` itself is unchanged, so a real
+    # `update.<anything else>` is still caught, in the working tree and in
+    # history alike.
+    "service",
+    "timer",
 }
 
 # The file suffixes the entity-id convention is actually enforced against --

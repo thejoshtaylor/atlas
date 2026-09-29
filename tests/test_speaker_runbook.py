@@ -17,14 +17,14 @@ _RUNBOOK_PATH = _REPO_ROOT / "docs" / "runbooks" / "edge-microphone.md"
 
 def _section_text() -> str:
     text = _RUNBOOK_PATH.read_text(encoding="utf-8")
-    match = re.search(r"## 15\. Speaker identification.*?(?=\n## Troubleshooting)", text, re.DOTALL)
-    assert match is not None, "expected a '## 15. Speaker identification' section before Troubleshooting"
+    match = re.search(r"## 16\. Speaker identification.*?(?=\n## Troubleshooting)", text, re.DOTALL)
+    assert match is not None, "expected a '## 16. Speaker identification' section before Troubleshooting"
     return match.group(0)
 
 
 def test_runbook_has_exactly_one_speaker_identification_section():
     text = _RUNBOOK_PATH.read_text(encoding="utf-8")
-    assert text.count("## 15. Speaker identification") == 1
+    assert text.count("## 16. Speaker identification") == 1
 
 
 def test_every_named_script_path_exists():
