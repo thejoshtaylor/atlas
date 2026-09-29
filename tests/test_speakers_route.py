@@ -201,3 +201,14 @@ def test_no_session_gets_401_on_all_three_routes(tmp_path, monkeypatch):
         assert anonymous.get("/api/speakers").status_code == 401
         assert anonymous.post("/api/speakers", json={"display_name": "Member B"}).status_code == 401
         assert anonymous.delete(f"/api/speakers/{created['id']}").status_code == 401
+
+
+def test_the_voice_inbox_route_is_registered_and_not_shadowed(tmp_path, monkeypatch):
+    """260929-j08: `GET /api/speakers/voice-inbox` reaches the inbox router,
+    not a `/api/speakers/{speaker_id}` route."""
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        response = client.get("/api/speakers/voice-inbox")
+        assert response.status_code == 200, response.text
+        assert response.json() == {"items": []}
