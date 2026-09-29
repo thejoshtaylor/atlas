@@ -21,7 +21,8 @@ from typing import Any, Awaitable, Callable
 from atlas.audio.ring import bytes_per_ms
 from atlas.sources.frame_fanout import FrameFanout, TurnFrameSource
 from atlas.sources.turn_run import TurnRun
-from atlas.transports.edge import MAX_QUEUED_FRAMES
+from atlas.transports.edge import LED_IDLE, LED_LISTENING, MAX_QUEUED_FRAMES
+from atlas.turn.follow_up import FollowUpChannel
 from atlas.turn.turn_context import TurnContext
 
 logger = logging.getLogger("atlas.sources.turn_group")
@@ -66,6 +67,10 @@ class TurnHooks:
     watch_barge_in: Callable[..., Awaitable[None]]
     record_blocked_hit: Callable[[float, str | None, float], None]
     clock: Callable[[], float]
+    # A source with no follow-up window leaves these `None` and turns never ask a question.
+    follow_up_window_s: Callable[[], float] | None = None
+    follow_up_window_opens_at: Callable[[Any], float] | None = None
+    follow_up_source: Callable[[Any, float], Any] | None = None
 
 
 class TurnGroup:
@@ -85,6 +90,8 @@ class TurnGroup:
         self._group_id: str | None = None
         self._claims: Any | None = None
         self._reply_quiet_until: float | None = None
+        # One follow-up window at a time on a source (D-10).
+        self.follow_up_lock = asyncio.Lock()
 
     @property
     def source(self) -> Any:
@@ -155,6 +162,8 @@ class TurnGroup:
         turn_source = TurnFrameSource(subscription, self._source, preroll_bytes=subscription.replayed_bytes)
         turn_source.barge_in = monitor
         turn_source.turn_context = context
+        if self.hooks.follow_up_window_s is not None:
+            turn_source.follow_up = FollowUpChannel()
         run = TurnRun(self, turn_source, monitor, subscription, context, reply_handle)
         self._runs.add(run)
         run.start()
@@ -203,11 +212,48 @@ class TurnGroup:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def release(self, run: TurnRun) -> None:
-        """A turn ended (`TurnRun._run`'s `finally`)."""
+        """A turn ended (`TurnRun._run`'s `finally`). The ring goes idle only
+        when the last live turn ends (D-11), and the group's claims end with it (D-14)."""
         self._runs.discard(run)
         if not self._runs:
             self._claims = None
+            await self._set_led(LED_IDLE)
 
     def forget(self, run: TurnRun) -> None:
         """Backstop for a task cancelled before it ever started."""
         self._runs.discard(run)
+
+    async def on_admitted(self) -> None:
+        """A turn started. The ring shows `listening` only when nothing is
+        busier, so a turn that starts while another one replies changes nothing."""
+        if getattr(self._source, "led_state", LED_IDLE) == LED_IDLE:
+            await self._set_led(LED_LISTENING)
+
+    async def on_follow_up_window(self) -> None:
+        """A follow-up window is about to open. The ring shows `listening` only
+        when that turn is the only live turn (D-11)."""
+        if len(self._runs) == 1:
+            await self._set_led(LED_LISTENING)
+
+    async def wait_for_transcripts(self, me: TurnRun) -> bool:
+        """Wait until every other live turn has its final transcript or has
+        ended, so a follow-up window never opens over another turn's speech
+        (D-10). Returns whether it had to wait."""
+        waited = False
+        while True:
+            pending = [run for run in list(self._runs) if run is not me and run.awaiting_transcript]
+            if not pending:
+                return waited
+            waited = True
+            await asyncio.gather(*(run.wait_transcribed() for run in pending))
+
+    async def _set_led(self, state: str) -> None:
+        """Show `state` on the source's LED ring. A source with no ring is
+        skipped. A failure is logged and never reaches a turn."""
+        set_led_state = getattr(self._source, "set_led_state", None)
+        if set_led_state is None:
+            return
+        try:
+            await set_led_state(state)
+        except Exception:
+            logger.warning("source %r: could not set the led state %r", self.name, state, exc_info=True)

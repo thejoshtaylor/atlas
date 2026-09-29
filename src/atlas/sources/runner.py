@@ -109,7 +109,7 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
-from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel
+from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
 
@@ -485,6 +485,20 @@ class PrerollReplayingSource:
         return getattr(self._wrapped, "speech_signals", None)
 
 
+def follow_up_window_opens_at(
+    requested: FollowUpRequest, *, echo_tail_s: float, calibration: EchoCalibration | None, now: float
+) -> float:
+    """When a follow-up window opens: the readback's estimated playback end (or
+    `now`, when there is none) plus the echo tail. The tail is the larger of the
+    configured one and a real calibration's measured delay plus a fixed 0.2 s
+    margin (D-09), so a measured acoustic fact is never overridden by a smaller
+    constant."""
+    tail_s = echo_tail_s
+    if calibration is not None:
+        tail_s = max(tail_s, calibration.delay_s + 0.2)
+    return (requested.playback_ends_at if requested.playback_ends_at is not None else now) + tail_s
+
+
 class FollowUpSource:
     """Wraps one `AudioSource`, dropping every frame chunk read before
     `opens_at` -- the one mechanism that keeps a follow-up turn's own STT
@@ -656,6 +670,9 @@ class SourceRunner:
                 watch_barge_in=self._watch_barge_in,
                 record_blocked_hit=self._record_blocked_hit,
                 clock=clock,
+                follow_up_window_s=follow_up_window_s,
+                follow_up_window_opens_at=self._follow_up_opens_at,
+                follow_up_source=lambda wrapped, opens_at: FollowUpSource(wrapped, opens_at, clock),
             )
             self._turn_group = TurnGroup(name, source, parallel, hooks)
 
@@ -926,12 +943,7 @@ class SourceRunner:
         """
         while channel.requested is not None and channel.requested.chain_depth <= MAX_CHAINED_FOLLOW_UPS:
             requested = channel.requested
-            tail_s = self._follow_up_echo_tail_s
-            if self._calibration is not None:
-                tail_s = max(tail_s, self._calibration.delay_s + 0.2)
-            opens_at = (
-                requested.playback_ends_at if requested.playback_ends_at is not None else self._clock()
-            ) + tail_s
+            opens_at = self._follow_up_opens_at(requested)
 
             follow_up_source = FollowUpSource(self._source, opens_at, self._clock)
             monitor = self._new_barge_in_monitor()
@@ -948,6 +960,13 @@ class SourceRunner:
             await self._run_one_turn(follow_up_source, monitor)
 
             channel = new_channel
+
+    def _follow_up_opens_at(self, requested: FollowUpRequest) -> float:
+        # The clock is read only when there is no playback end, as it always was.
+        now = self._clock() if requested.playback_ends_at is None else 0.0
+        return follow_up_window_opens_at(
+            requested, echo_tail_s=self._follow_up_echo_tail_s, calibration=self._calibration, now=now
+        )
 
     async def _run_one_turn(self, turn_source: Any, monitor: "BargeInMonitor") -> None:
         """Run one turn, plus its own barge-in listener -- see the module

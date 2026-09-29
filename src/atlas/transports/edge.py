@@ -573,10 +573,17 @@ class EdgeAudioSource:
         """Nothing to render for most events, like the camera's own
         `send_event` (`transports/camera.py`): a Pi has no screen for a
         partial transcript. The final transcript is the boundary between
-        hearing and thinking, so it moves the ring to `thinking`."""
-        if event.get("type") == "transcript.final":
+        hearing and thinking, so it moves the ring to `thinking`. With
+        parallel turns (Phase 12, D-11) one turn may be replying already, and
+        the ring never drops from `replying` back to `thinking`."""
+        if event.get("type") == "transcript.final" and self._led_state != LED_REPLYING:
             await self.set_led_state(LED_THINKING)
         logger.debug("edge source send_event: %s", event.get("type"))
+
+    @property
+    def led_state(self) -> str:
+        """The last LED state this source recorded (read-only)."""
+        return self._led_state
 
     async def set_led_state(self, state: str) -> None:
         """Tell the Pi to show `state` on its LED ring. Never raises,

@@ -631,24 +631,26 @@ async def test_a_follow_up_window_waits_until_every_other_live_turn_has_its_fina
     window_opened = asyncio.Event()
     b_transcribed = asyncio.Event()
     turns = iter(["a", "b"])
-    a_started = asyncio.Event()
+    a_asked, b_started = asyncio.Event(), asyncio.Event()
 
     async def run_turn_fn(turn_source: Any) -> None:
         if turn_source.follow_up.incoming is not None:
             window_opened.set()
             return
         if next(turns) == "a":
-            a_started.set()
+            await b_started.wait()  # ask only once the other turn is live
             turn_source.follow_up.request(_follow_up_request())
+            a_asked.set()
             return
-        await a_started.wait()
+        b_started.set()
+        await a_asked.wait()
         await b_transcribed.wait()
         turn_source.barge_in.mark_transcript_done()
         await asyncio.sleep(0.02)
 
     runner = _follow_up_runner(source, run_turn_fn, _HitOnCalls(2, 4))
     run_task = asyncio.create_task(runner.run())
-    await _wait_until(lambda: a_started.is_set())
+    await _wait_until(lambda: a_asked.is_set())
     await asyncio.sleep(0.05)
     assert not window_opened.is_set(), "the window opened before the other turn had its final transcript"
 
@@ -661,15 +663,17 @@ async def test_a_follow_up_window_also_opens_once_the_other_turn_has_ended():
     source = FakeAudioSource([_frame(i) for i in range(FRAME_COUNT)])
     window_opened = asyncio.Event()
     turns = iter(["a", "b"])
-    b_may_end = asyncio.Event()
+    b_may_end, b_started = asyncio.Event(), asyncio.Event()
 
     async def run_turn_fn(turn_source: Any) -> None:
         if turn_source.follow_up.incoming is not None:
             window_opened.set()
             return
         if next(turns) == "a":
+            await b_started.wait()  # ask only once the other turn is live
             turn_source.follow_up.request(_follow_up_request())
             return
+        b_started.set()
         await b_may_end.wait()  # ends without ever marking its transcript done
 
     runner = _follow_up_runner(source, run_turn_fn, _HitOnCalls(2, 4))
