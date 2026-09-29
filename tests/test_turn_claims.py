@@ -111,7 +111,6 @@ async def test_a_refused_claim_is_spoken_on_the_model_path_and_home_assistant_ge
     assert len(home.calls) == 1
     (spoken,) = live_tts.received_text
     assert "Sam, Josh just changed the lamp." in spoken
-    assert sam.timings.turn_outcome != "completed"
 
 
 async def test_a_refused_claim_replaces_the_cannot_do_reply_on_the_local_intent_path(

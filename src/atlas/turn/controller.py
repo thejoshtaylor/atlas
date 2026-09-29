@@ -124,6 +124,7 @@ from atlas.turn.handoff import (
     is_code_only_tool,
     parse_handoff,
 )
+from atlas.turn.entity_claims import is_claim_refusal, unclaimed
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
 from atlas.turn.reply_group import ReplyRoute, current_reply_route, speak_in_group
@@ -1121,7 +1122,8 @@ async def run_turn(
             # its result would have joined either.
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
-            outcome = await fire_macro(matched_macro, tool_host, tool_owners=tool_owners)
+            # D-16: a macro is an operator-written phrase and takes no claim.
+            outcome = await fire_macro(matched_macro, unclaimed(tool_host), tool_owners=tool_owners)
             timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
             # A macro reply is an answer, not a holding phrase -- it is the one
             # utterance in this system that is both the answer and instant. On
@@ -1185,6 +1187,10 @@ async def run_turn(
                 state_read = True
                 if isinstance(state_result, list):
                     entities = state_result
+                    # D-13: the claim refusal below names the entity from this
+                    # same fetch, so the names are noted before the call.
+                    if turn_context is not None:
+                        turn_context.note_friendly_names(_friendly_names(entities))
 
             local_intent = match_on_off(final_text, entities) if entities else None
             if local_intent is not None:
@@ -1196,6 +1202,7 @@ async def run_turn(
                 # resolved it) or still needed by nothing here, and
                 # `_cancel_state_task` is a no-op on an already-done task.
                 await _cancel_state_task(pending_runs_task)
+                tool_result: Any = None
                 try:
                     tool_result = await tool_host.call_tool(
                         "ha_call_service",
@@ -1219,7 +1226,12 @@ async def run_turn(
                 else:
                     intent_failed = _is_error(tool_result)
 
-                if intent_failed:
+                claim_refusal = is_claim_refusal(tool_result) if intent_failed else None
+                if claim_refusal:
+                    # D-13, D-15: another turn in the group just changed it.
+                    timings.turn_outcome = "claim_refused"
+                    reply_text = claim_refusal
+                elif intent_failed:
                     timings.turn_outcome = "local_intent_failed"
                     reply_text = _CANNOT_DO_REPLY
                 else:
@@ -1229,7 +1241,9 @@ async def run_turn(
                 # attempted -- a policy denial may have been on purpose
                 # (CMD-08's own doctrine, applied here the same way the
                 # macro path already applies it above).
-                speaking_tts = _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
+                speaking_tts = (
+                    tts if claim_refusal else _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
+                )
                 await _speak(
                     source,
                     speaking_tts,
@@ -1277,11 +1291,9 @@ async def run_turn(
                 states_or_none = None
             elif isinstance(state_result, list):
                 states_or_none = {entity["entity_id"]: entity["state"] for entity in state_result}
-                friendly_names = {
-                    entity["entity_id"]: entity["friendly_name"]
-                    for entity in state_result
-                    if isinstance(entity, dict) and "friendly_name" in entity
-                }
+                friendly_names = _friendly_names(state_result)
+                if turn_context is not None:
+                    turn_context.note_friendly_names(friendly_names)
             else:
                 states_or_none = {}
         if pending_runs_task is not None:
@@ -2305,6 +2317,15 @@ def _round_settles_as_done(reply: Any, results: list[Any], messages: list[dict[s
 
     transcript = brain_race._last_user_message(messages)
     return transcript is not None and not asks_for_information(transcript)
+
+
+def _friendly_names(entities: "list[Any]") -> dict[str, str]:
+    """Entity id to friendly name, for the entities that carry one."""
+    return {
+        entity["entity_id"]: entity["friendly_name"]
+        for entity in entities
+        if isinstance(entity, dict) and "friendly_name" in entity
+    }
 
 
 def _compose_clarifying_question(candidates: "tuple[str, ...]", friendly_names: "Mapping[str, str]") -> str:
