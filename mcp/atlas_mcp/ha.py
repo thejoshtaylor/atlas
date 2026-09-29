@@ -32,6 +32,7 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from atlas_mcp.registry import HaRegistryClient, RegistryError, UnknownRegistryTargetError, expand_target, ws_url_from_http
+from atlas_mcp.ha_names import HA_EXPAND_TARGET_TOOL
 from atlas_mcp.ha_spotify import handle_play_spotify_playlist
 from atlas_mcp.safety import Denied, Policy, allow_call, allow_read
 
@@ -93,6 +94,24 @@ async def _resolve_target(
     if not entity_ids:
         raise Denied(f"that {kind} has nothing in it")
     return sorted(entity_ids)
+
+
+async def handle_expand_target(
+    registry: "HaRegistryClient | None",
+    kind: str,
+    target_id: str,
+) -> dict[str, list[str]]:
+    """Turn one area, device, or label into the sorted entity ids it reaches.
+
+    Read-only, and it never calls Home Assistant's REST API. It uses the same
+    `_resolve_target` that `handle_call_service` uses, so the ids returned are
+    the ids a write would touch, and every refusal reads the same. The server
+    calls this before it claims an expanded target (Phase 12 D-15). An unknown
+    `kind` raises `Denied`.
+    """
+    if kind not in _TARGET_KINDS:
+        raise Denied(f"i don't know a kind of target called {kind!r}")
+    return {"entity_ids": await _resolve_target(registry, kind, target_id)}
 
 
 async def handle_call_service(
@@ -409,6 +428,21 @@ async def ha_play_spotify_playlist(
             source=source,
             default_source=_default_spotify_source,
         )
+    except Denied as exc:
+        raise ToolError(exc.reason) from exc
+
+
+@mcp_server.tool(name=HA_EXPAND_TARGET_TOOL)
+async def ha_expand_target(kind: str, target_id: str) -> dict[str, list[str]]:
+    """Code-only: list the entity ids an area, device, or label reaches.
+
+    The server calls this to decide which entities a write would claim. A later
+    plan hides this tool from the model. `kind` is `area`, `device`, or
+    `label`. A target the registry does not know, or that holds nothing, is
+    refused by name.
+    """
+    try:
+        return await handle_expand_target(_registry_client, kind, target_id)
     except Denied as exc:
         raise ToolError(exc.reason) from exc
 

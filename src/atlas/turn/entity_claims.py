@@ -42,8 +42,7 @@ _TARGET_ARGUMENTS: tuple[tuple[str, str], ...] = (
     ("label", "label_id"),
 )
 
-_NO_EXPANSION_REPLY = "i can't tell which devices that reaches"
-_UNREADABLE_EXPANSION_REPLY = "i can't tell which devices that reaches"
+_UNRESOLVED_TARGET_REPLY = "i can't tell which devices that reaches"
 
 
 @dataclass(frozen=True)
@@ -223,13 +222,51 @@ class ClaimingToolHost:
             return await self.inner.call_tool(name, arguments)
 
         entities = targets.entity_ids
+        if targets.expand:
+            expanded = await self._expand(name, bare_name, targets.expand)
+            if not isinstance(expanded, frozenset):
+                return expanded
+            entities = entities | expanded
+
+        # From here to the claim there is no `await`, so no other turn runs
+        # between the check and the set.
+        newly_claimed = frozenset(entity_id for entity_id in entities if self._registry.holder(entity_id) is None)
         refusal = self._registry.claim(entities, self._owner, self._label())
         if refusal is not None:
             self._record(CLAIM_REFUSED_EVENT, entities)
             text = claim_refusal_text(refusal, self._friendly_name(refusal.entity_id))
             return _error_result(text, claim_refusal=True)
         self._record(CLAIM_TAKEN_EVENT, entities)
-        return await self.inner.call_tool(name, arguments)
+        try:
+            result = await self.inner.call_tool(name, arguments)
+        except BaseException:
+            self._registry.release(newly_claimed, self._owner)
+            raise
+        if _failed(result):
+            self._registry.release(newly_claimed, self._owner)
+        return result
+
+    async def _expand(self, name: str, bare_name: str, expand: tuple[tuple[str, str], ...]) -> "frozenset[str] | Any":
+        """The union of the entity ids the child gives for every target, or the
+        result to return in place of the write: the child's own refusal when it
+        cannot expand, or a fixed sentence when there is no way to ask."""
+        if self._expand_tool_name is None:
+            return _error_result(_UNRESOLVED_TARGET_REPLY, claim_refusal=False)
+        # A collision prefix on the write's name (`slug__ha_call_service`)
+        # belongs to the same plugin as the expand tool.
+        prefix = name[: len(name) - len(bare_name)]
+        expand_name = f"{prefix}{self._expand_tool_name}"
+        union: set[str] = set()
+        for kind, target_id in expand:
+            result = await self.inner.call_tool(expand_name, {"kind": kind, "target_id": target_id})
+            if _is_error_result(result):
+                return result
+            payload = _result_payload(result)
+            ids = payload.get("entity_ids") if isinstance(payload, dict) else None
+            if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids) or not ids:
+                return _error_result(_UNRESOLVED_TARGET_REPLY, claim_refusal=False)
+            union.update(ids)
+        return frozenset(union)
 
 
 def unclaimed(host: Any) -> Any:

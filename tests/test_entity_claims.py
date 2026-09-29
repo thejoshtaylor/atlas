@@ -50,14 +50,14 @@ def _host(
     )
 
 
-_LAMP = {"domain": "light", "service": "turn_on", "entity_id": "light.lamp"}
+_LAMP = {"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"}
 
 
 async def test_second_turn_write_to_a_claimed_entity_is_refused_with_a_spoken_sentence():
     registry = ClaimRegistry()
     inner = _FakeInnerHost()
-    first = _host(inner, registry, "edge:1", "Josh", friendly={"light.lamp": "lamp"})
-    second = _host(inner, registry, "edge:2", "Sam", friendly={"light.lamp": "lamp"})
+    first = _host(inner, registry, "edge:1", "Josh", friendly={"light.example_lamp": "lamp"})
+    second = _host(inner, registry, "edge:2", "Sam", friendly={"light.example_lamp": "lamp"})
 
     first_result = await first.call_tool("ha_call_service", dict(_LAMP))
     second_result = await second.call_tool("ha_call_service", dict(_LAMP))
@@ -75,19 +75,19 @@ async def test_entity_without_a_friendly_name_reads_as_its_object_id():
     inner = _FakeInnerHost()
     first = _host(inner, registry, "edge:1", "Josh")
     second = _host(inner, registry, "edge:2", "Sam")
-    arguments = {"domain": "light", "service": "turn_on", "entity_id": "light.living_room_lamp"}
+    arguments = {"domain": "light", "service": "turn_on", "entity_id": "light.example_living_room_lamp"}
 
     await first.call_tool("ha_call_service", dict(arguments))
     refused = await second.call_tool("ha_call_service", dict(arguments))
 
-    assert refused.content[0].text == "Josh just changed the living room lamp."
+    assert refused.content[0].text == "Josh just changed the example living room lamp."
 
 
 async def test_claimer_without_a_label_reads_as_another_request():
     registry = ClaimRegistry()
     inner = _FakeInnerHost()
-    first = _host(inner, registry, "edge:1", None, friendly={"light.lamp": "lamp"})
-    second = _host(inner, registry, "edge:2", "Sam", friendly={"light.lamp": "lamp"})
+    first = _host(inner, registry, "edge:1", None, friendly={"light.example_lamp": "lamp"})
+    second = _host(inner, registry, "edge:2", "Sam", friendly={"light.example_lamp": "lamp"})
 
     await first.call_tool("ha_call_service", dict(_LAMP))
     refused = await second.call_tool("ha_call_service", dict(_LAMP))
@@ -114,7 +114,7 @@ async def test_a_different_entity_is_not_blocked():
     second = _host(inner, registry, "edge:2", "Sam")
 
     await first.call_tool("ha_call_service", dict(_LAMP))
-    other = await second.call_tool("ha_call_service", {**_LAMP, "entity_id": "light.desk"})
+    other = await second.call_tool("ha_call_service", {**_LAMP, "entity_id": "light.example_desk"})
 
     assert other.isError is False
     assert len(inner.calls) == 2
@@ -131,9 +131,9 @@ async def test_claim_events_carry_the_turn_key_and_entities_and_never_a_label():
     await second.call_tool("ha_call_service", dict(_LAMP))
 
     assert [event["type"] for event in events] == [CLAIM_TAKEN_EVENT, CLAIM_REFUSED_EVENT]
-    assert events[0]["entity_ids"] == ["light.lamp"]
+    assert events[0]["entity_ids"] == ["light.example_lamp"]
     assert events[0]["turn_key"] == "edge:1"
-    assert events[1]["entity_ids"] == ["light.lamp"]
+    assert events[1]["entity_ids"] == ["light.example_lamp"]
     assert events[1]["turn_key"] == "edge:2"
     assert "Josh" not in repr(events)
     assert "Sam" not in repr(events)
@@ -193,33 +193,33 @@ _OFFICE = {"domain": "light", "service": "turn_on", "area_id": "office"}
 
 async def test_an_area_target_claims_every_entity_the_expansion_returns():
     registry = ClaimRegistry()
-    inner = _ScriptedHost({("area", "office"): _expanded(["light.desk", "light.lamp"])})
+    inner = _ScriptedHost({("area", "office"): _expanded(["light.example_desk", "light.example_lamp"])})
     first = _host(inner, registry, "edge:1", "Josh")
     second = _host(inner, registry, "edge:2", "Sam")
 
     result = await first.call_tool("ha_call_service", dict(_OFFICE))
-    refused = await second.call_tool("ha_call_service", {"domain": "light", "service": "turn_off", "entity_id": "light.lamp"})
+    refused = await second.call_tool("ha_call_service", {"domain": "light", "service": "turn_off", "entity_id": "light.example_lamp"})
 
     assert result.isError is False
     assert [call[0] for call in inner.calls].count("ha_expand_target") == 1
     assert inner.calls[0] == ("ha_expand_target", {"kind": "area", "target_id": "office"})
-    assert refused.content[0].text == "Josh just changed the lamp."
-    assert registry.holder("light.desk") == ("edge:1", "Josh")
+    assert refused.content[0].text == "Josh just changed the example lamp."
+    assert registry.holder("light.example_desk") == ("edge:1", "Josh")
 
 
 async def test_an_expanded_target_conflicts_when_any_one_entity_is_held():
     registry = ClaimRegistry()
-    inner = _ScriptedHost({("area", "office"): _expanded(["light.desk", "light.lamp"])})
+    inner = _ScriptedHost({("area", "office"): _expanded(["light.example_desk", "light.example_lamp"])})
     first = _host(inner, registry, "edge:1", "Josh")
     second = _host(inner, registry, "edge:2", "Sam")
 
-    await first.call_tool("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.lamp"})
+    await first.call_tool("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"})
     refused = await second.call_tool("ha_call_service", dict(_OFFICE))
 
     assert refused.isError is True
-    assert is_claim_refusal(refused) == "Josh just changed the lamp."
+    assert is_claim_refusal(refused) == "Josh just changed the example lamp."
     # One refused entity refuses the whole call, and claims nothing of the rest.
-    assert registry.holder("light.desk") is None
+    assert registry.holder("light.example_desk") is None
     assert [call[0] for call in inner.calls] == ["ha_call_service", "ha_expand_target"]
 
 
@@ -233,18 +233,18 @@ async def test_an_expansion_error_is_returned_unchanged_and_nothing_is_claimed()
 
     assert result is refusal
     assert [call[0] for call in inner.calls] == ["ha_expand_target"]
-    assert registry.holder("light.desk") is None
+    assert registry.holder("light.example_desk") is None
 
 
 async def test_an_entity_id_together_with_an_area_claims_the_union():
     registry = ClaimRegistry()
-    inner = _ScriptedHost({("area", "office"): _expanded(["light.desk"])})
+    inner = _ScriptedHost({("area", "office"): _expanded(["light.example_desk"])})
     first = _host(inner, registry, "edge:1", "Josh")
 
-    await first.call_tool("ha_call_service", {**_OFFICE, "entity_id": "light.lamp"})
+    await first.call_tool("ha_call_service", {**_OFFICE, "entity_id": "light.example_lamp"})
 
-    assert registry.holder("light.desk") == ("edge:1", "Josh")
-    assert registry.holder("light.lamp") == ("edge:1", "Josh")
+    assert registry.holder("light.example_desk") == ("edge:1", "Josh")
+    assert registry.holder("light.example_lamp") == ("edge:1", "Josh")
 
 
 async def test_a_missing_expand_tool_refuses_the_call_and_claims_nothing():
@@ -257,14 +257,14 @@ async def test_a_missing_expand_tool_refuses_the_call_and_claims_nothing():
     assert result.isError is True
     assert is_claim_refusal(result) is None
     assert inner.calls == []
-    assert registry.holder("light.desk") is None
+    assert registry.holder("light.example_desk") is None
 
 
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
         ("ha_call_service", {"domain": "todo", "service": "get_items", "entity_id": "todo.shopping"}),
-        ("ha_get_state", {"entity_id": "light.lamp"}),
+        ("ha_get_state", {"entity_id": "light.example_lamp"}),
         ("ha_list_entities", {}),
         ("weather_forecast", {"entity_id": "weather.home"}),
         ("google_calendar_list", {"entity_id": "calendar.home"}),
@@ -287,9 +287,9 @@ async def test_reads_and_other_tools_never_claim(name, arguments):
 async def test_playing_a_spotify_playlist_claims_the_media_player():
     registry = ClaimRegistry()
     inner = _ScriptedHost()
-    first = _host(inner, registry, "edge:1", "Josh", friendly={"media_player.den": "den speaker"})
-    second = _host(inner, registry, "edge:2", "Sam", friendly={"media_player.den": "den speaker"})
-    arguments = {"entity_id": "media_player.den", "name": "morning"}
+    first = _host(inner, registry, "edge:1", "Josh", friendly={"media_player.example_den": "den speaker"})
+    second = _host(inner, registry, "edge:2", "Sam", friendly={"media_player.example_den": "den speaker"})
+    arguments = {"entity_id": "media_player.example_den", "name": "morning"}
 
     await first.call_tool("ha_play_spotify_playlist", dict(arguments))
     refused = await second.call_tool("ha_play_spotify_playlist", dict(arguments))
@@ -302,9 +302,9 @@ async def test_a_failed_write_releases_only_what_that_call_newly_claimed(write):
     registry = ClaimRegistry()
     inner = _ScriptedHost(write="ok")
     first = _host(inner, registry, "edge:1", "Josh")
-    await first.call_tool("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.lamp"})
+    await first.call_tool("ha_call_service", {"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"})
     inner.write = write
-    inner.expansions[("area", "office")] = _expanded(["light.desk", "light.lamp"])
+    inner.expansions[("area", "office")] = _expanded(["light.example_desk", "light.example_lamp"])
 
     if write == "raise":
         with pytest.raises(RuntimeError):
@@ -314,17 +314,17 @@ async def test_a_failed_write_releases_only_what_that_call_newly_claimed(write):
         assert result is not None
 
     # The lamp was claimed by an earlier, successful write and stays claimed.
-    assert registry.holder("light.lamp") == ("edge:1", "Josh")
+    assert registry.holder("light.example_lamp") == ("edge:1", "Josh")
     # The desk was newly claimed by the failed call, so it is free again.
-    assert registry.holder("light.desk") is None
+    assert registry.holder("light.example_desk") is None
 
 
 async def test_a_failed_write_does_not_release_another_turns_claim():
     registry = ClaimRegistry()
-    registry.claim(frozenset({"light.lamp"}), "edge:2", "Sam")
-    registry.release(frozenset({"light.lamp"}), "edge:1")
+    registry.claim(frozenset({"light.example_lamp"}), "edge:2", "Sam")
+    registry.release(frozenset({"light.example_lamp"}), "edge:1")
 
-    assert registry.holder("light.lamp") == ("edge:2", "Sam")
+    assert registry.holder("light.example_lamp") == ("edge:2", "Sam")
 
 
 def test_unclaimed_returns_the_inner_host_and_a_plain_host_unchanged():

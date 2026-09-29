@@ -279,7 +279,7 @@ async def test_two_claim_wrappers_with_one_label_but_different_owners_still_conf
             return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")])
 
     registry = ClaimRegistry()
-    arguments = {"domain": "light", "service": "turn_on", "entity_id": "light.lamp"}
+    arguments = {"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"}
     first = ClaimingToolHost(_Host(), registry=registry, owner="edge:1", label=lambda: "Josh")
     second = ClaimingToolHost(_Host(), registry=registry, owner="edge:2", label=lambda: "Josh")
 

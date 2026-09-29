@@ -559,7 +559,7 @@ async def test_handle_expand_target_refuses_an_empty_area_with_the_same_reason_r
     from atlas_mcp.registry import RegistrySnapshot
     from tests.test_ha_registry_expansion import _FakeRegistryClient
 
-    snapshot = RegistrySnapshot(areas=frozenset({"area_empty"}), devices={}, labels=frozenset(), entities=())
+    snapshot = RegistrySnapshot(areas=frozenset({"area_empty"}), devices={}, labels=frozenset(), entities=(), fetched_at=0.0)
 
     with pytest.raises(Denied) as exc_info:
         await handle_expand_target(_FakeRegistryClient(snapshot=snapshot), "area", "area_empty")
