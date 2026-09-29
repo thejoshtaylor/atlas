@@ -55,12 +55,13 @@ def test_trim_keeps_the_asr_channel_only():
 
 
 def test_trim_drops_frames_under_the_rms_floor():
-    raw = interleave(3000, 3000, 16000) + interleave(10, 10, 16000)
+    # 16384 samples is 64 whole 256-sample slices, so no slice mixes loud and quiet.
+    raw = interleave(3000, 3000, 16384) + interleave(10, 10, 16384)
 
     pcm, speech_ms = trim_turn_speech(raw, asr_channel=0, **{**_TRIM, "speech_rms_floor": 0.01})
 
-    assert speech_ms == 1000.0
-    assert pcm == _pcm(3000, 16000)
+    assert speech_ms == 1024.0
+    assert pcm == _pcm(3000, 16384)
 
 
 def test_trim_cuts_the_head_to_the_length_cap():

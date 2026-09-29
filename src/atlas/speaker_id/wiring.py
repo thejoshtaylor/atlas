@@ -55,6 +55,31 @@ def ensure_embedding_worker(state: Any, speaker_config: SpeakerIdConfig) -> Embe
     return worker
 
 
+async def refresh_live_reference(
+    state: Any,
+    repo: "SpeakerRepository",
+    *,
+    speaker_id: int,
+    display_name: str,
+    model_id: str,
+) -> None:
+    """Make the live `ReferenceSet` match the stored vectors of one member.
+
+    Do nothing when there is no live set (mode `"off"`). Replace the member
+    when the repository holds vectors for the member. Remove the member when
+    it holds none, so a deleted last clip cannot leave a stale reference.
+    """
+    context = getattr(state, "speaker_id_context", None)
+    if context is None or context.references is None:
+        return
+    rows = await repo.list_reference_embeddings(model_id)
+    vectors = [row.vector for row in rows if row.speaker_id == speaker_id]
+    if vectors:
+        context.references.upsert_speaker(speaker_id, display_name, vectors)
+    else:
+        context.references.remove_speaker(speaker_id)
+
+
 async def build_speaker_context(
     config: Config,
     *,

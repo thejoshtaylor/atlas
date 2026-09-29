@@ -29,6 +29,7 @@ from atlas.routes.plugins import router as plugins_router
 from atlas.routes.policy import router as policy_router
 from atlas.routes.providers import router as providers_router
 from atlas.routes.sessions import router as sessions_router
+from atlas.routes.speaker_inbox import router as speaker_inbox_router
 from atlas.routes.speakers import router as speakers_router
 from atlas.routes.wake import router as wake_router
 from atlas.routes.wizard import router as wizard_router
@@ -76,4 +77,6 @@ def register_routers(app: FastAPI) -> None:
     # Plan 11-03 (D-01, D-03, D-04): household member (speaker) CRUD, after
     # the edge devices router, matching this list's own arrival order.
     gated.include_router(speakers_router)
+    # 260929-j08: voice inbox and retroactive clips, after the members router.
+    gated.include_router(speaker_inbox_router)
     app.include_router(gated)

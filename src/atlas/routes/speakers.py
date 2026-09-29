@@ -43,6 +43,18 @@ REQUIRED_ENROLLMENT_PHRASES = len(ENROLLMENT_PHRASES)
 _NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
 
 
+def validate_display_name(value: str) -> str:
+    """Trim `value` and check it against the member-name rule. Shared by
+    `POST /api/speakers` and the voice inbox assign route."""
+    trimmed = value.strip()
+    if not _NAME_RE.match(trimmed):
+        raise ValueError(
+            "display_name must be 1-64 characters of letters, digits, space, '-', '_' "
+            "and '.' (after trimming)"
+        )
+    return trimmed
+
+
 class SpeakerCreateRequest(BaseModel):
     display_name: str
     linked_user_id: "int | None" = None
@@ -50,13 +62,7 @@ class SpeakerCreateRequest(BaseModel):
     @field_validator("display_name")
     @classmethod
     def _validate_display_name(cls, value: str) -> str:
-        trimmed = value.strip()
-        if not _NAME_RE.match(trimmed):
-            raise ValueError(
-                "display_name must be 1-64 characters of letters, digits, space, '-', '_' "
-                "and '.' (after trimming)"
-            )
-        return trimmed
+        return validate_display_name(value)
 
 
 class SpeakerResponse(BaseModel):
@@ -113,6 +119,21 @@ class EnrollmentResponse(BaseModel):
     required_phrases: int
 
 
+async def create_speaker_or_409(
+    repo: SpeakerRepository, *, display_name: str, linked_user_id: "int | None"
+) -> Speaker:
+    """Create a member. A duplicate display name is a named 409, never a
+    500, matching `routes/accounts.py`'s own `create_user` handling."""
+    try:
+        return await repo.create_speaker(
+            display_name=display_name,
+            linked_user_id=linked_user_id,
+            created_at=datetime.now(timezone.utc),
+        )
+    except IntegrityError:
+        raise _display_name_conflict_error() from None
+
+
 @router.get("/api/speakers")
 async def list_speakers(
     request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
@@ -147,18 +168,9 @@ async def create_speaker(
         if linked_user is None:
             raise _unknown_linked_user_error()
 
-    try:
-        speaker = await repo.create_speaker(
-            display_name=payload.display_name,
-            linked_user_id=payload.linked_user_id,
-            created_at=datetime.now(timezone.utc),
-        )
-    except IntegrityError:
-        # A unique-violation on speakers.display_name -- surfaced as a
-        # named refusal, never an unhandled 500, matching
-        # `routes/accounts.py`'s own `create_user` IntegrityError handling.
-        raise _display_name_conflict_error() from None
-
+    speaker = await create_speaker_or_409(
+        repo, display_name=payload.display_name, linked_user_id=payload.linked_user_id
+    )
     return _to_response(speaker, enrolled_phrases=0, model_id=config.speaker_id.model_id)
 
 
