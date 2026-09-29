@@ -126,6 +126,7 @@ from atlas.turn.handoff import (
 )
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
+from atlas.turn.reply_group import ReplyRoute, current_reply_route, speak_in_group
 from atlas.turn.pending_action import (
     BULK_REFUSAL_REPLY,
     CANCELLED_REPLY,
@@ -133,6 +134,7 @@ from atlas.turn.pending_action import (
     handle_confirmation_reply,
 )
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
+from atlas.turn.turn_context import TurnContext
 from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
 
 logger = logging.getLogger("atlas.turn.controller")
@@ -427,6 +429,7 @@ async def run_turn(
     state_domains: frozenset[str] | None = None,
     handoff_context: "HandoffContext | None" = None,
     speaker_id: "SpeakerIdTurnContext | None" = None,
+    turn_context: "TurnContext | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
 
@@ -598,6 +601,16 @@ async def run_turn(
     ids; and the MCP child's own safety policy still runs on every
     `call_service` whatever this turn saw, so a turn with no live state
     can never reach an entity the operator marked off limits.
+
+    `turn_context` (Phase 12, plan 12-07): this turn's place in a group of
+    parallel turns on one edge source, built by `sources/turn_run.py`.
+    `None` (the default, and every camera, browser, and serial turn) leaves
+    this function exactly as it was. Given a context: its `speaker_span`,
+    when set, replaces the span `open_turn` would open, and it is closed
+    when the turn ends; the session recorder is bound to it; the identified
+    speaker is noted on it after the gate; and, when it holds a reply
+    handle, `current_reply_route` routes every `_speak` of this turn
+    through the group's coordinator.
     """
     timings.mark_turn_started()
     timings.turn_outcome = "completed"
@@ -649,6 +662,12 @@ async def run_turn(
     # Plan 09-06: skipped for a follow-up turn -- there is no fresh wake
     # hit to cue, and the window already opened silently after the
     # readback's own echo tail (D-09).
+    # Phase 12 (12-07): set before the cue so the cue sees the group too. Reset
+    # in the outer `finally`.
+    reply_route_token = None
+    if turn_context is not None and turn_context.reply_group is not None:
+        reply_route = ReplyRoute(handle=turn_context.reply_group, live_tts=tts, record_event=turn_context.record_event)
+        reply_route_token = current_reply_route.set(reply_route)
     if wake_cue and sink is not None and incoming is None:
         await _play_wake_cue(source, sink, speech_lock)
 
@@ -691,7 +710,10 @@ async def run_turn(
     # nothing: every camera and browser turn's own call passes no context
     # at all (D-07).
     speaker_span: "TurnSpeakerSpan | None" = None
-    if speaker_id is not None and speaker_id.tracker is not None:
+    if turn_context is not None and turn_context.speaker_span is not None:
+        # Phase 12: the runner opened this span at the wake hit.
+        speaker_span = turn_context.speaker_span
+    elif speaker_id is not None and speaker_id.tracker is not None:
         start_after = follow_up.window_opens_at if incoming is not None and follow_up is not None else None
         speaker_span = speaker_id.tracker.open_turn(start_after=start_after)
 
@@ -731,6 +753,8 @@ async def run_turn(
         # about them moves (DBG-03).
         session_recorder.set_preroll_bytes(getattr(source, "preroll_bytes", 0))
         source = _RecordingAudioSource(source, session_recorder)
+        if turn_context is not None:
+            turn_context.bind_recorder(session_recorder.record_event)
 
     try:
         turn_deadline = clock() + max_utterance_s
@@ -857,6 +881,8 @@ async def run_turn(
         # a blocked outcome. A turn with no span (`speaker_span is None`)
         # never blocks either way.
         speaker_outcome = await evaluate_turn_speaker(speaker_id, speaker_span, timings=timings)
+        if turn_context is not None:
+            turn_context.note_speaker(speaker_outcome.event.get("speaker_id"), speaker_outcome.speaker_name)
         if session_recorder is not None:
             # D-13/D-15: the recorder only, never `_emit_event` -- a
             # speaker's name never reaches the browser's `turn.timing`
@@ -1688,6 +1714,12 @@ async def run_turn(
         # no-op when no subscription was ever made.
         if _edge_event_unsubscribe is not None:
             _edge_event_unsubscribe()
+        # Phase 12 (12-07): `getattr`, so a span double with no `close` works.
+        close_span = getattr(speaker_span, "close", None)
+        if close_span is not None:
+            close_span()
+        if reply_route_token is not None:
+            current_reply_route.reset(reply_route_token)
         # Covers every exit path above, including the two early returns --
         # exactly the turns whose folders an operator will want, and the
         # easiest ones to leak (D-13, T-02-22). A no-op when
@@ -2613,8 +2645,74 @@ async def _speak(
     barge_in: "_BargeInMonitor | None" = None,
     speech_lock: "asyncio.Lock | None" = None,
     sink: "SinkFormat | None" = None,
+    expects_answer: bool = False,
+) -> SpeechResult:
+    """Speak one utterance, through the turn's reply group when it has one.
+
+    With no `current_reply_route` (every camera, browser, and scheduled
+    utterance, and every serial turn) this is `_speak_direct`, unchanged.
+    With a route (Phase 12, plan 12-07), an answer goes through the group's
+    coordinator, which may merge it with other turns' answers into one TTS
+    call, and the write holds the group's reply lock in place of
+    `speech_lock`. `expects_answer` marks a question that opens a follow-up
+    window: it plays after the group's statements. A filler plays at most
+    once per group.
+    """
+    route = current_reply_route.get()
+    if route is None:
+        return await _speak_direct(
+            source, tts, timings, reply_text, kind=kind, barge_in=barge_in, speech_lock=speech_lock, sink=sink
+        )
+    handle = route.handle
+    if kind == "filler":
+        return await _speak_direct(
+            source, tts, timings, reply_text, kind=kind, barge_in=barge_in, speech_lock=speech_lock, sink=sink
+        )
+
+    async def write(text: str, needs_live_tts: bool) -> SpeechResult:
+        # A cached TTS holds exact phrases only, so a prefix or a join needs the live one.
+        return await _speak_direct(
+            source,
+            route.live_tts if needs_live_tts else tts,
+            timings,
+            text,
+            kind=kind,
+            barge_in=barge_in,
+            speech_lock=handle.reply_lock,
+            sink=sink,
+            event_text=reply_text,
+        )
+
+    speech = await speak_in_group(route, reply_text, expects_answer=expects_answer, sink=sink, write=write)
+    if speech.role == "follow":
+        # The lead wrote this turn's words. Its own session still gets its own marks and text.
+        written_at = speech.result.first_write_at
+        if written_at is not None:
+            if timings.first_audio_at is None:
+                timings.first_audio_at = written_at
+            if timings.answer_audio_at is None:
+                timings.answer_audio_at = written_at
+        await _emit_event(source, {"type": "reply.text", "text": reply_text})
+    return speech.result
+
+
+async def _speak_direct(
+    source: _AudioSource,
+    tts: _TtsProvider,
+    timings: TurnTimings,
+    reply_text: str,
+    *,
+    kind: Literal["filler", "answer"],
+    barge_in: "_BargeInMonitor | None" = None,
+    speech_lock: "asyncio.Lock | None" = None,
+    sink: "SinkFormat | None" = None,
+    event_text: str | None = None,
 ) -> SpeechResult:
     """Speak one utterance, and mark whichever timing(s) `kind` calls for.
+
+    `event_text` (Phase 12): the text the `reply.text` event carries, when it
+    differs from `reply_text`. A merged group reply is spoken as one text,
+    and each turn's own event still names only its own answer.
 
     `sink=None` -- the default, and every caller that predates 260922-cts
     -- reproduces the exact browser-PCM request `tts.synthesize` always
@@ -2756,7 +2854,7 @@ async def _speak(
                 source,
                 {"type": "reply.interrupted", "chunks_sent": chunks_sent, "chunks_total": chunks_total},
             )
-        await _emit_event(source, {"type": "reply.text", "text": reply_text})
+        await _emit_event(source, {"type": "reply.text", "text": reply_text if event_text is None else event_text})
 
     token = speech_kind.set(kind)
     try:
