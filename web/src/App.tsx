@@ -26,6 +26,7 @@ import { ProvidersRoute } from "@/routes/providers/ProvidersRoute"
 import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { SessionDetailRoute } from "@/routes/sessions/SessionDetailRoute"
 import { SessionsRoute } from "@/routes/sessions/SessionsRoute"
+import { SpeakersRoute } from "@/routes/speakers/SpeakersRoute"
 import { WakeTuningRoute } from "@/routes/wake-tuning/WakeTuningRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
 import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
@@ -89,6 +90,7 @@ function AppRoutes() {
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />
             <Route path="/edge-devices" element={<EdgeDevicesRoute />} />
+            <Route path="/speakers" element={<SpeakersRoute />} />
             <Route path="/settings" element={<SettingsRoute />} />
             <Route path="/plugins" element={<PluginsRoute />} />
             <Route path="/providers" element={<ProvidersRoute />} />

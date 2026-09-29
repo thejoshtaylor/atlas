@@ -61,6 +61,9 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: "/providers", label: "Providers", minimumRole: "admin", icon: Cpu },
       { to: "/accounts", label: "Accounts", minimumRole: "admin", icon: Users },
       { to: "/edge-devices", label: "Edge devices", minimumRole: "admin", icon: Router },
+      // Phase 11, D-04: household members the assistant can recognize by
+      // voice. Admin only -- enrollment reads biometric data.
+      { to: "/speakers", label: "Speakers", minimumRole: "admin", icon: AudioLines },
       { to: "/settings", label: "Settings", minimumRole: "admin", icon: Settings },
       { to: "/google", label: "Google accounts", minimumRole: "admin", icon: Mail },
     ],
