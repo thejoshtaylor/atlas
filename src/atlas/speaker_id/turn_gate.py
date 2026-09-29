@@ -13,6 +13,7 @@ already follow (10-07-PLAN.md), since a speaker's name is not something
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -140,7 +141,14 @@ async def evaluate_turn_speaker(
 
     end_of_speech_at = timings.vad_end_at if timings.vad_end_at is not None else timings.stt_final_at
     if span is not None:
+        # Task 3 (D-16): `speaker_gate_wait_ms` is the wall-clock time this
+        # turn actually spent awaiting `decide()` -- a coarser sibling of
+        # `speaker_id_ms` (below), which is computed from the measurement's
+        # own `ready_at` instead, so a slow event loop cannot make that
+        # number look better than it is.
+        wait_start = time.monotonic()
         measurement = await span.decide(end_of_speech_at=end_of_speech_at, references=context.references)
+        timings.speaker_gate_wait_ms = (time.monotonic() - wait_start) * 1000.0
     else:
         # A tracker exists but this turn opened no span -- `run_turn`
         # always opens one whenever `speaker_id.tracker` is not `None`, so
@@ -149,6 +157,7 @@ async def evaluate_turn_speaker(
             match=None, speech_ms=0.0, window_count=0, ready_at=None, speaker_id_ms=None,
             detail="no_speech_measured",
         )
+    timings.speaker_id_ms = measurement.speaker_id_ms
 
     enrolled_count = context.references.enrolled_count if context.references is not None else 0
     best_score = measurement.match.best_score if measurement.match is not None else None

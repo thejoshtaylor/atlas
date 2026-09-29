@@ -95,6 +95,20 @@ class TurnTimings:
     # contract, since a browser/camera turn never has one) but included in
     # `log()` so it reaches the structured log line every other stage does.
     vad_end_at: float | None = None
+    # 11-04-PLAN.md Task 3 (D-16): `speaker_id_ms` is how long speaker
+    # identification added after `vad_end` -- computed by `speaker_id.
+    # turn_gate.evaluate_turn_speaker` from the measurement's own `ready_at`,
+    # never from when `decide()` happened to be awaited (a wedged event
+    # loop must never make this number look better than it is).
+    # `speaker_gate_wait_ms` is the wall-clock time this turn actually spent
+    # awaiting the gate's own `decide()` call -- a coarser, always-available
+    # sibling for a turn with no `vad_end_at`/no measurement ready_at.
+    # Kept out of `_STAGE_ORDER`/`to_event()`, the same reason `vad_end_at`
+    # is: a camera or browser turn never has either field, and the browser
+    # timing contract does not move for a turn that has no speaker gate at
+    # all. Included in `log()` for the same structured-log-line reason.
+    speaker_id_ms: float | None = None
+    speaker_gate_wait_ms: float | None = None
 
     def mark_turn_started(self) -> None:
         """Record the moment the turn began -- the mic toggle, in Phase 1."""
@@ -330,6 +344,8 @@ class TurnTimings:
                 "first_audio_at": self.first_audio_at,
                 "answer_audio_at": self.answer_audio_at,
                 "vad_end_at": self.vad_end_at,
+                "speaker_id_ms": self.speaker_id_ms,
+                "speaker_gate_wait_ms": self.speaker_gate_wait_ms,
                 "end_of_speech_to_first_audio_ms": self.end_of_speech_to_first_audio_ms,
                 "end_of_speech_to_answer_audio_ms": self.end_of_speech_to_answer_audio_ms,
                 "endpointing_delay_ms": self.endpointing_delay_ms,

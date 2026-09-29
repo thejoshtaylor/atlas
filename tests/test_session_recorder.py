@@ -101,6 +101,41 @@ def test_turn_timings_survive_serialization_with_an_unset_stage_as_null(tmp_path
     assert payload["stt_final_at"] is None
 
 
+def test_speaker_id_ms_and_speaker_gate_wait_ms_reach_timing_json_but_not_the_stage_order(tmp_path):
+    """11-04-PLAN.md Task 3: both fields serialize (`dataclasses.asdict`
+    needs no recorder change), stay `None` when unset like every other
+    unreached-stage field, and never join `_STAGE_ORDER`/`to_event()` -- a
+    camera or browser turn never has either, and the browser timing
+    contract does not move for a turn with no speaker gate at all."""
+    from atlas.timing import _STAGE_ORDER
+
+    config = _session_config(tmp_path)
+    unset_timings = TurnTimings()
+    unset_timings.mark_turn_started()
+    recorder = SessionRecorder(config, unset_timings)
+    recorder.close(unset_timings)
+
+    payload = json.loads((recorder.directory / "timing.json").read_text(encoding="utf-8"))
+    assert "speaker_id_ms" in payload
+    assert payload["speaker_id_ms"] is None
+    assert "speaker_gate_wait_ms" in payload
+    assert payload["speaker_gate_wait_ms"] is None
+    assert "speaker_id_ms" not in _STAGE_ORDER
+    assert "speaker_gate_wait_ms" not in _STAGE_ORDER
+    assert "speaker_id_ms" not in unset_timings.to_event()
+    assert "speaker_gate_wait_ms" not in unset_timings.to_event()
+
+    set_timings = TurnTimings()
+    set_timings.mark_turn_started()
+    set_timings.speaker_id_ms = 42.0
+    set_timings.speaker_gate_wait_ms = 55.0
+    recorder2 = SessionRecorder(config, set_timings)
+    recorder2.close(set_timings)
+    payload2 = json.loads((recorder2.directory / "timing.json").read_text(encoding="utf-8"))
+    assert payload2["speaker_id_ms"] == 42.0
+    assert payload2["speaker_gate_wait_ms"] == 55.0
+
+
 def test_two_equal_timestamp_stages_both_appear_with_their_own_equal_values(tmp_path):
     """`first_audio_at`/`answer_audio_at` are deliberately bit-equal on a
     turn with no filler -- neither may be collapsed into the other nor
