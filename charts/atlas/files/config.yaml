@@ -151,18 +151,14 @@ camera:
   sample_rate: 8000
   channels: 1
 
-  # How much audio to keep before the wake word fires. The wake detector
-  # reports a hit about 0.2-0.3 s after the phrase ends (260923-spd, measured
-  # against six live camera turns), and a speaker usually runs straight from
-  # "hey atlas" into the command with no pause, so the first syllables of the
-  # command are already in the past by the time we know to listen. Replaying
-  # this buffer into the transcriber recovers them. 300 ms covers that
-  # detector lag with room to spare; audio that keeps arriving while STT
-  # connects is queued by the source, not lost, so there is no need to hold
-  # more than the lag itself -- a bigger window only replays more of the wake
-  # word itself back into STT. The wake-only continuation (260922-woc) stays
-  # as the safety net for a transcript that turns out to be wake-word-only.
-  preroll_ms: 300
+  # The audio from before the wake hit that goes to speech-to-text. 1500 ms
+  # holds the whole wake phrase (about 0.7 s) plus the detector report lag
+  # (about 0.3 s). Speech-to-text must hear the phrase, because
+  # `wake.verify_transcript` below needs it, and ATLAS removes it before the
+  # text goes to the language model. The edge microphone and the browser
+  # listener use this same value. If you set `wake.verify_transcript` to
+  # false, you can make this value lower.
+  preroll_ms: 1500
 
 edge:
   # The Pi + Seeed reSpeaker XVF3800 audio source (Phase 10). This block
@@ -191,8 +187,8 @@ edge:
 
   # The audio the Pi sends before Silero opens a segment, set from the
   # measured onset lag (D-08) -- not camera.preroll_ms above, which is
-  # this server's own replay of its wake-detector report lag, a different
-  # measurement of a different delay. 10-SPIKE.md's Q5:
+  # this server's own replay of the wake phrase and the detector report
+  # lag, a different measurement of a different delay. 10-SPIKE.md's Q5:
   # derive_pre_roll_ms(onset_delays_ms) over 20 measured utterances =
   # ceil((max_onset_ms + 100) / 50) * 50 = ceil((974.0 + 100) / 50) * 50 =
   # 1100. The Silero onset delay measured p50 275.0 ms, p95 856.2 ms, max
@@ -461,6 +457,15 @@ wake:
   # Play a short chime on a wake-word hit, so the speaker knows when to start
   # the command. Only a source with a speaker (the camera) plays it.
   cue: true
+
+  # Check each wake hit against the speech-to-text transcript. If the
+  # transcript does not open with the wake phrase (for example a television
+  # or talk in the room), the turn stops with no reply, and the session shows
+  # the outcome `wake_unverified`. Set it to false to stop the check. To set
+  # it for one source only, put it under `wake.sources`, for example
+  # `sources: {edge: {verify_transcript: false}}`. The source names are
+  # camera, edge, and browser_listen.
+  verify_transcript: true
 
 gate:
   # Voice is an ambient trigger: the camera microphone hears the television, and

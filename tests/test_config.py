@@ -828,6 +828,10 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # `test_mcp_key_still_present_is_a_startup_error_naming_it` covers the
     # rejection; there is no `Config` field left to assert on here.
 
+    # 260929-icf: the transcript check and the preroll that feeds it.
+    assert config.camera.preroll_ms == 1500
+    assert config.wake.verify_transcript is True
+
     assert config.database.run_migrations_at_startup is True
     assert config.security.secret_key_env == "ATLAS_SECRET_KEY"
     assert config.security.access_token_ttl_s == 900
