@@ -360,9 +360,11 @@ class SegmentBoundedWakeDetector:
 
     The Pi sends only VAD-gated segments, not continuous audio. Vosk commits
     a result only after it hears enough silence, so a segment whose tail
-    holds room noise leaves its utterance open, and the next segment's
-    "hey atlas" decodes as "[unk] hey atlas" -- never a wake hit. Each
-    `vad.start` begins a new utterance, so the detector starts clean there.
+    holds room noise leaves its utterance open. The detector matches the
+    phrase as a token run, so a leading `[unk]` no longer hides "hey atlas".
+    But the stale open decode and partial from the previous segment can
+    still bleed into the next one. Each `vad.start` begins a new utterance,
+    so the detector starts clean there.
 
     `mark_segment_start` runs on the event loop and only sets a flag; the
     reset itself happens inside `process`, on the runner's detector thread,
