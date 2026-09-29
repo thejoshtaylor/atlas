@@ -729,6 +729,15 @@ class SourceRunner:
         if self._preroll is not None:
             self._preroll.push(chunk)
 
+        # Plan 11-07 (D-02, Research Assumption A4): duck-typed, the same
+        # way `mark_wake_hit` below is -- only `EdgeAudioSource` has
+        # `wake_suppressed`, so a camera or browser source is untouched.
+        # A prompted enrollment phrase must never start a real turn; the
+        # pre-roll buffer still gets the chunk just above, unconditionally,
+        # so a turn started right after enrollment ends still has one.
+        if getattr(self._source, "wake_suppressed", False):
+            return
+
         hit = await asyncio.get_running_loop().run_in_executor(self._detector_executor, self._detect, chunk)
         if hit is None:
             return

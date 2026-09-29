@@ -485,6 +485,13 @@ class EdgeAudioSource:
         self._frames_dropped: int = 0
         self._frames_yielded: int = 0
         self.last_yielded_frame_index: "int | None" = None
+        # Plan 11-07 (D-02, Research Assumption A4): true only while an
+        # admin enrollment capture is running on this source. Checked,
+        # duck-typed, by `sources/runner.py`'s own `_process_chunk` --
+        # a prompted phrase read for enrollment must never start a real
+        # turn. Set and cleared by `speaker_id/enrollment.py::enroll_phrase`
+        # around one capture's lifetime, always from a `finally` block.
+        self.wake_suppressed: bool = False
 
     @property
     def speech_signals(self) -> SpeechSignals:

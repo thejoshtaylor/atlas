@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable
 
 from atlas.config import Config, ConfigError, SpeakerIdConfig
 from atlas.speaker_id.embedding import EmbeddingWorker, SpeakerEmbedder, SpeakerModelError
@@ -24,9 +26,33 @@ from atlas.speaker_id.turn_gate import SpeakerIdTurnContext
 
 if TYPE_CHECKING:
     from atlas.db.speaker_repository import SpeakerRepository
+    from atlas.speaker_id.enrollment import ClipStore
     from atlas.transports.edge import EdgeAudioSource
 
 logger = logging.getLogger("atlas.speaker_id.wiring")
+
+
+def ensure_embedding_worker(state: Any, speaker_config: SpeakerIdConfig) -> EmbeddingWorker:
+    """Return a worker to embed enrollment clips with (plan 11-07).
+
+    The running context's own worker when `speaker_id.mode` already built
+    one (`"record"`/`"enforce"`) -- never a second, redundant worker
+    thread. Otherwise a lazily-built worker, cached on `state.
+    speaker_enrollment_worker` on first use: enrollment must work in mode
+    `"off"` too (D-10 -- an operator enrolls members before switching
+    modes on), and mode `"off"` builds no worker at all
+    (`build_speaker_context` above).
+    """
+    context = getattr(state, "speaker_id_context", None)
+    if context is not None and context.worker is not None:
+        return context.worker
+    cached = getattr(state, "speaker_enrollment_worker", None)
+    if cached is not None:
+        return cached
+    embedder = state.speaker_embedder_factory(speaker_config)
+    worker = EmbeddingWorker(embedder)
+    state.speaker_enrollment_worker = worker
+    return worker
 
 
 async def build_speaker_context(
@@ -110,3 +136,97 @@ async def build_speaker_context(
         model_id=speaker_config.model_id,
         worker=worker,
     )
+
+
+@dataclass(frozen=True)
+class ReconcileReport:
+    """One `reconcile_enrollment` run's outcome (D-03) -- logged as two
+    counts only, never a member id or a directory name (`app.py`'s own
+    `lifespan` call site)."""
+
+    orphans_removed: int
+    phrases_reembedded: int
+
+
+async def reconcile_enrollment(
+    *,
+    repo: "SpeakerRepository",
+    clip_store: "ClipStore",
+    speaker_config: SpeakerIdConfig,
+    embedder_factory: "Callable[[SpeakerIdConfig], SpeakerEmbedder]",
+) -> ReconcileReport:
+    """Run at every start, before either audio source branch (plan
+    11-07, D-03): remove every enrollment clip directory whose member no
+    longer has a row (an interrupted delete, T-11-26), then re-embed every
+    remaining member's stored clips under the currently configured model
+    if they are not already embedded under it -- a model change needs no
+    new recording.
+
+    A missing enrollment root is not an error, and this function never
+    creates one -- there is nothing to reconcile until the first clip is
+    ever written. A directory whose name does not parse as an integer is
+    left alone and logged, never touched (a stray file an operator placed
+    there is not this function's business). With `speaker_config.model`
+    unset, or the model file missing, the orphan sweep still runs in
+    full -- only the re-embedding half is skipped, with one info line
+    naming why.
+    """
+    root = clip_store.root
+    if not root.is_dir():
+        return ReconcileReport(orphans_removed=0, phrases_reembedded=0)
+
+    orphans_removed = 0
+    remaining_speaker_ids: "list[int]" = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        try:
+            speaker_id = int(entry.name)
+        except ValueError:
+            logger.info(
+                "speaker enrollment reconcile: leaving non-numeric directory %r under the "
+                "enrollment root alone",
+                entry.name,
+            )
+            continue
+        speaker = await repo.get_speaker(speaker_id)
+        if speaker is None:
+            clip_store.delete_speaker_dir(speaker_id)
+            orphans_removed += 1
+            continue
+        remaining_speaker_ids.append(speaker_id)
+
+    if speaker_config.model is None:
+        logger.info("speaker enrollment reconcile: speaker_id.model is not set -- skipping re-embedding")
+        return ReconcileReport(orphans_removed=orphans_removed, phrases_reembedded=0)
+
+    try:
+        embedder = embedder_factory(speaker_config)
+    except SpeakerModelError as exc:
+        logger.info("speaker enrollment reconcile: %s -- skipping re-embedding", exc)
+        return ReconcileReport(orphans_removed=orphans_removed, phrases_reembedded=0)
+
+    model_id = speaker_config.model_id
+    assert model_id is not None  # guarded above: speaker_config.model is not None.
+    phrases_reembedded = 0
+    worker = EmbeddingWorker(embedder)
+    try:
+        existing_counts = await repo.count_embeddings(model_id)
+        for speaker_id in remaining_speaker_ids:
+            if existing_counts.get(speaker_id, 0) > 0:
+                continue
+            for phrase_index in clip_store.list_clips(speaker_id):
+                pcm = clip_store.read_clip(speaker_id, phrase_index)
+                vector = await worker.embed(pcm)
+                await repo.upsert_embedding(
+                    speaker_id=speaker_id,
+                    phrase_index=phrase_index,
+                    model_id=model_id,
+                    vector=list(vector),
+                    created_at=datetime.now(timezone.utc),
+                )
+                phrases_reembedded += 1
+    finally:
+        worker.close()
+
+    return ReconcileReport(orphans_removed=orphans_removed, phrases_reembedded=phrases_reembedded)

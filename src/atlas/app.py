@@ -78,7 +78,8 @@ from atlas.db.repository import (
 )
 from atlas.db.speaker_postgres import PostgresSpeakerRepository
 from atlas.speaker_id.embedding import SherpaEmbedder
-from atlas.speaker_id.wiring import build_speaker_context
+from atlas.speaker_id.enrollment import ClipStore
+from atlas.speaker_id.wiring import build_speaker_context, reconcile_enrollment
 from atlas_mcp.google_tools import CODE_ONLY_TOOL_NAMES, GOOGLE_PLUGIN_MODULE
 
 from atlas.google.env import GoogleEnvBuilder
@@ -1219,6 +1220,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # branch. `None` here is what makes every camera/browser `run_turn`
     # call site's own `speaker_id=None` default correct.
     app.state.speaker_id_context = None
+    # Plan 11-07 (D-02, D-10): the enrollment flow's own worker-building
+    # factory and single in-flight flag -- set unconditionally, here,
+    # regardless of `speaker_id.mode` or `resolved_audio_source`, so
+    # enrollment works even in mode "off" (an operator enrolls members
+    # before switching modes on) and even before the edge branch below
+    # ever runs. `speaker_enrollment_worker` (the lazily-built, cached
+    # worker `ensure_embedding_worker` builds on first use in mode "off")
+    # is deliberately NOT set here -- its absence is what "not built yet"
+    # means to `getattr(state, "speaker_enrollment_worker", None)`.
+    app.state.speaker_embedder_factory = _build_speaker_embedder
+    app.state.speaker_enrollment_in_progress = False
     # Phase 9 (09-01, Task 3): same tolerant `.get(...)` -- a deployment
     # (or a test's own fake repository dict) with no Google repository at
     # all boots exactly as it did before this plan; nothing below runs.
@@ -1769,6 +1781,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # would measure each other (T-02-51).
     app.state.calibration_in_progress = False
 
+    # Plan 11-07 (D-03): before either source branch below -- a member's
+    # clips must be reconciled against Postgres at every start, regardless
+    # of which audio source this boot resolved to (enrollment itself works
+    # in mode "off", above). `app.state.speaker_clip_store` is set only
+    # when a speaker repository exists at all, the same tolerant-`None`
+    # discipline `app.state.speaker_repo` itself already carries -- a
+    # deployment with no speaker repository configured reconciles nothing
+    # and `routes/speakers.py`'s enrollment route never reads this
+    # attribute in that case either, since `speaker_repo` itself is `None`
+    # there too.
+    app.state.speaker_clip_store = None
+    if app.state.speaker_repo is not None:
+        clip_store = ClipStore(config.speaker_id.enrollment_dir)
+        app.state.speaker_clip_store = clip_store
+        reconcile_report = await reconcile_enrollment(
+            repo=app.state.speaker_repo,
+            clip_store=clip_store,
+            speaker_config=config.speaker_id,
+            embedder_factory=_build_speaker_embedder,
+        )
+        # D-03: the two counts only, never a member id or name.
+        logger.info(
+            "speaker enrollment reconcile: %d orphan clip director%s removed, %d phrase%s re-embedded",
+            reconcile_report.orphans_removed,
+            "y" if reconcile_report.orphans_removed == 1 else "ies",
+            reconcile_report.phrases_reembedded,
+            "" if reconcile_report.phrases_reembedded == 1 else "s",
+        )
+
     if resolved_audio_source == CAMERA_SOURCE_NAME:
         camera_source.start()
 
@@ -2083,6 +2124,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     speaker_id_context = getattr(app.state, "speaker_id_context", None)
     if speaker_id_context is not None and speaker_id_context.worker is not None:
         speaker_id_context.worker.close()
+    # Plan 11-07: the enrollment flow's own lazily-built worker (mode
+    # "off", where `speaker_id_context.worker` above is `None`) -- absent
+    # unless enrollment actually ran at least once this process's life.
+    speaker_enrollment_worker = getattr(app.state, "speaker_enrollment_worker", None)
+    if speaker_enrollment_worker is not None:
+        speaker_enrollment_worker.close()
     wake_detector.close()
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
