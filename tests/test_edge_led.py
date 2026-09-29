@@ -271,3 +271,86 @@ async def test_a_source_without_led_support_runs_a_wake_turn_unchanged():
     await _runner(source, run_turn_fn)._process_chunk(bytes(1024))  # noqa: SLF001
 
     assert turns == [1]
+
+
+class _EdgeDelegatingSource(FakeAudioSource):
+    """A turn source that hands audio and events to a served edge source.
+
+    It declares no `sink_format`, so `run_turn` resolves `sink=None`, plays
+    no wake cue, and looks the filler up under the key `None`."""
+
+    def __init__(self, edge: EdgeAudioSource, frames: Any = ()) -> None:
+        super().__init__(frames=frames)
+        self._edge = edge
+
+    async def send_audio(self, chunk: bytes) -> None:
+        await self._edge.send_audio(chunk)
+
+    async def send_event(self, event: dict[str, Any]) -> None:
+        await self._edge.send_event(event)
+
+
+async def test_a_filler_keeps_the_ring_spinning_until_the_answer_audio(
+    fake_stt, fake_brain, fake_tts, fake_envelope_client
+):
+    from atlas.providers.base import BrainReply, FinalTranscript
+    from atlas.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+
+    edge = EdgeAudioSource(_config())
+    socket = FakeEdgeSocket()
+    task = await _serve(edge, socket)
+    order: list[Any] = []
+    original_text, original_bytes = socket.send_text, socket.send_bytes
+
+    async def record_text(data: str) -> None:
+        parsed = json.loads(data)
+        if parsed.get("type") == "led":
+            order.append(f"led:{parsed['state']}")
+        await original_text(data)
+
+    async def record_bytes(data: bytes) -> None:
+        order.append(data)
+        await original_bytes(data)
+
+    socket.send_text = record_text  # type: ignore[method-assign]
+    socket.send_bytes = record_bytes  # type: ignore[method-assign]
+
+    answer_bytes = b"\x01\x02"
+    filler_bytes = b"\xfe\xff"
+    answer = "it is done"
+    reply = TierReply(answer=answer, confident=True, needs_tool=False, filler=FillerPhrase.ONE_MOMENT)
+    top_tier = brain_race.TierBrain(
+        index=0,
+        model="top-model",
+        brain=fake_brain(replies=[BrainReply(text=answer)], delay_s=0.05),
+        envelope_client=fake_envelope_client(reply=reply, delay_s=0.0),
+        calls_tools=True,
+    )
+    fake_now = [0.0]
+
+    def clock() -> float:
+        fake_now[0] += 0.3
+        return fake_now[0]
+
+    await run_turn(
+        _EdgeDelegatingSource(edge, frames=[b"\x00\x01"]),
+        fake_stt(events=[FinalTranscript(text="what time is it")]),
+        top_tier.brain,
+        fake_tts(chunks=[answer_bytes]),
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        tiers=[top_tier],
+        filler_after_ms=600,
+        filler_cache={None: {FILLER_TEXT[DEFAULT_FILLER]: filler_bytes}},
+        clock=clock,
+        poll_interval_s=0.01,
+    )
+
+    assert order == ["led:thinking", filler_bytes, "led:replying", answer_bytes]
+    await _disconnect(socket, task)

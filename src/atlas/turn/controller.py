@@ -95,7 +95,7 @@ from atlas_mcp.google_tools import UNREACHABLE_KEY
 from atlas.audio.channels import stt_view
 from atlas.config import MacroConfig
 from atlas.providers.base import BrainError
-from atlas.transports.base import SourceFormat
+from atlas.transports.base import SourceFormat, speech_kind
 from atlas.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from atlas.providers.tts_cache import CachedTts
 from atlas.audio.cue import wake_cue as wake_cue_audio
@@ -2608,6 +2608,11 @@ async def _speak(
     chunk (criterion 6 wants "any audio, filler included" for that mark);
     only the answer utterance also marks `answer_audio`.
 
+    `kind` also goes to the source through the `speech_kind` context
+    variable, for the whole write loop. The edge source keeps its ring at
+    `thinking` while a filler plays. The `finally` below resets it, so a
+    raise or a cancellation never leaves `"filler"` set for a later chunk.
+
     Both marks are set from one captured `time.monotonic()` reading, not two
     separate calls to `timings.mark_first_audio()`/`mark_answer_audio()`: a
     turn whose race finished before the filler deadline reaches this branch
@@ -2717,11 +2722,15 @@ async def _speak(
             )
         await _emit_event(source, {"type": "reply.text", "text": reply_text})
 
-    if speech_lock is not None:
-        async with speech_lock:
+    token = speech_kind.set(kind)
+    try:
+        if speech_lock is not None:
+            async with speech_lock:
+                await _synthesize_and_write()
+        else:
             await _synthesize_and_write()
-    else:
-        await _synthesize_and_write()
+    finally:
+        speech_kind.reset(token)
 
     return SpeechResult(bytes_sent=bytes_sent, first_write_at=first_write_at, last_write_at=last_write_at)
 

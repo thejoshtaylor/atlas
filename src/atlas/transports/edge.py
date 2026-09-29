@@ -37,7 +37,9 @@ connection completely untouched -- refusal is the new connection's own
 can light its ring. The ring stays dark until the wake word. `SourceRunner`
 sends `listening` at the wake hit and `idle` at the end of the turn.
 `send_event` sends `thinking` at the final transcript. `send_audio` sends
-`replying` before the first reply chunk. No LED problem ever breaks a turn.
+`replying` before the first chunk of the answer. A filler plays while the
+ring still spins, so the ring spins from the final transcript until the real
+answer starts. No LED problem ever breaks a turn.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ from typing import Any, AsyncIterator, Callable, Protocol
 from atlas.audio.channels import select_channel
 from atlas.config import EdgeSourceConfig
 from atlas.providers.tts_xai import SinkFormat
-from atlas.transports.base import SourceFormat
+from atlas.transports.base import SourceFormat, speech_kind
 
 logger = logging.getLogger("atlas.transports.edge")
 
@@ -552,10 +554,11 @@ class EdgeAudioSource:
         (D-14) -- dropped, with one warning per disconnected episode, when
         no device is connected.
 
-        The first chunk after `thinking` moves the ring to `replying`,
-        before the bytes go out. The wake cue plays while the state is
-        `listening`, so it does not change the state."""
-        if self._led_state == LED_THINKING:
+        A filler chunk goes out with the ring still at `thinking`. The first
+        chunk of any other kind moves the ring to `replying` before its
+        bytes go out. The wake cue plays at `listening` and does not change
+        the state."""
+        if self._led_state == LED_THINKING and speech_kind.get() != "filler":
             await self.set_led_state(LED_REPLYING)
         if self._websocket is None:
             if not self._send_audio_warned:

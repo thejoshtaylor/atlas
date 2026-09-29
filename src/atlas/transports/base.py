@@ -24,12 +24,22 @@ Four members and nothing else:
 - `send_event()` -- the partial transcript, the reply text, and the timing
   line the page renders live, as JSON-shaped events.
 - `source_format()` -- the `SourceFormat` this source actually produces.
+
+`speech_kind` is the only per-chunk signal a source gets beyond those four
+members.
 """
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Protocol
+
+# `_speak` sets this to "filler" or "answer" while it writes one utterance.
+# A source can read it in `send_audio`. It is None outside `_speak`. It
+# crosses every source wrapper because the wrappers call `send_audio` in the
+# same task.
+speech_kind: ContextVar[str | None] = ContextVar("atlas_speech_kind", default=None)
 
 
 @dataclass(frozen=True)
