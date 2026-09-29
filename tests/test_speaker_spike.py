@@ -198,6 +198,39 @@ def test_question_q5_too_few_pairs_fails():
     assert result["result"].startswith("FAIL")
 
 
+# --- Q6 noise-frame regression (2026-09-29): "other" clips and speech edges -
+
+
+def test_score_corpus_noise_floor_ignores_other_clips_and_pre_onset_speech(tmp_path):
+    """Regression for the real 11-08 house corpus defect: `score_corpus`'s
+    noise-frame collection wrongly counted a loud "other" (music) clip and
+    the loud frames right at a speech interval's edges (Silero's own
+    onset/offset lag), 10x-inflating the measured floor (operator
+    diagnosis, 2026-09-29)."""
+    root = tmp_path / "speakers"
+    quiet, loud = 100, 8000
+    onset_frames, speech_frames, trailing_frames = 40, 60, 180
+
+    n_frames = onset_frames + speech_frames + trailing_frames
+    samples = np.empty((n_frames * FRAME_SAMPLES, 2), dtype=np.int16)
+    samples[: onset_frames * FRAME_SAMPLES] = loud  # pre-onset: real speech Silero has not flagged yet
+    samples[onset_frames * FRAME_SAMPLES : (onset_frames + speech_frames) * FRAME_SAMPLES] = loud
+    samples[(onset_frames + speech_frames) * FRAME_SAMPLES :] = quiet  # real background noise
+    speech_flags = [False] * onset_frames + [True] * speech_frames + [False] * trailing_frames
+    speaker_corpus.write_clip(root, "member-a", "command", "hey atlas, what time is it", samples, speech_flags, SAMPLE_RATE)
+
+    other_samples = np.full((100 * FRAME_SAMPLES, 2), loud, dtype=np.int16)
+    speaker_corpus.write_clip(root, "other", "other", None, other_samples, [False] * 100, SAMPLE_RATE)
+
+    report = speaker_spike.score_corpus(root, embedder_factory=_fake_embedder_factory, transcriber=lambda pcm16: "")
+
+    q6 = report["q6"]
+    assert q6["result"] == "PASS"
+    # A floor anywhere near the loud amplitude's own RMS (8000/32768 * 1.5
+    # ~= 0.366) means the "other" clip or a pre-onset frame leaked back in.
+    assert q6["speech_rms_floor"] < 0.01
+
+
 # --- Q7 -----------------------------------------------------------------
 
 

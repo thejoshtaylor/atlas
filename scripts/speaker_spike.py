@@ -2,16 +2,14 @@
 """The D-05/D-06/D-08/D-09/D-12 spike scorer: turns a recorded speaker
 corpus into one JSON report with a coded pass/fail rule per question
 (11-05-PLAN.md). Every `question_q*` function takes already-computed
-inputs -- no audio, no model -- so each rule is tested in isolation from
-the pipeline that produces its inputs.
-
+inputs -- no audio, no model -- so each rule is tested in isolation.
 Order matters (`<interfaces>`, 11-05-PLAN.md): Q1 picks the channel and Q6
-the noise floor before the embedding questions (Q2 onward) run, since both
-feed the windowing/matching pipeline every later question shares.
+the noise floor before the embedding questions (Q2 onward), since both
+feed the shared windowing/matching pipeline.
 
-Run on the dev host, after `edge/spike/speaker_corpus.py record` has built a
-corpus copied to `edge/spike/results/speakers/` (gitignored). `atlas` is not
-an installed package -- like every script here, this needs `PYTHONPATH=src`:
+Run on the dev host after `edge/spike/speaker_corpus.py record` builds a
+corpus at `edge/spike/results/speakers/` (gitignored). `atlas` is not an
+installed package -- like every script here, this needs `PYTHONPATH=src`:
 
     PYTHONPATH=src .venv/bin/python scripts/speaker_spike.py score \\
         --corpus edge/spike/results/speakers --model-dir models/speaker-id
@@ -44,6 +42,11 @@ _MANIFEST_FILENAME = "manifest.jsonl"
 _BLOCKING_QUESTIONS = ("q1", "q2", "q5", "q6", "q7")
 _DEFAULT_WINDOW_OPTIONS: "tuple[int, ...]" = (500, 750, 1000)
 _DEFAULT_FLOOR_GRID: "tuple[float, ...]" = tuple(round(0.05 * i, 2) for i in range(20))
+
+# Q6 noise-frame margins (operator diagnosis, 2026-09-29, real 11-08 house corpus:
+# unfiltered noise frames gave a 10x-too-high floor, 0.051 vs. the corrected 0.0033/0.0052).
+_NOISE_INTERVAL_MARGIN_MS = 500.0  # excludes frames this close to a VAD interval's edge -- Silero's own onset/offset lag leaks real speech energy just outside the interval it flagged.
+_NOISE_CLIP_ONSET_MS = 500.0  # excludes each clip's own first 500ms outright -- the ~300ms Silero onset lag means real speech can precede the first flagged interval.
 
 @dataclass(frozen=True)
 class CorpusClip:
@@ -84,6 +87,12 @@ def _ceil_to(value: float, step: float) -> float:
 def _frame_in_intervals(start_ms: float, end_ms: float, intervals_ms: "Sequence[Sequence[float]]") -> bool:
     return any(iv[0] <= start_ms < iv[1] for iv in intervals_ms)
 
+def _frame_is_room_noise(start_ms: float, end_ms: float, intervals_ms: "Sequence[Sequence[float]]") -> bool:
+    """Q6's noise-frame filter: past the clip's own onset margin, and outside every interval's own margin (operator diagnosis, 2026-09-29)."""
+    if start_ms < _NOISE_CLIP_ONSET_MS:
+        return False
+    return not any(iv[0] - _NOISE_INTERVAL_MARGIN_MS < end_ms and start_ms < iv[1] + _NOISE_INTERVAL_MARGIN_MS for iv in intervals_ms)
+
 def _channel_pcm16(clip: CorpusClip, channel: int) -> bytes:
     samples = _read_wav(clip.file)
     col = channel if samples.shape[1] > channel else 0
@@ -113,8 +122,7 @@ def embed_windows(
     return embeddings
 
 def _trim_with_margin(pcm16: bytes, intervals_ms: "Sequence[Sequence[float]]", margin_ms: float, sample_rate: int) -> bytes:
-    """The enrollment embedding input: the clip trimmed to its outer
-    speech-interval bounds, widened by `margin_ms` on each side."""
+    """The enrollment embedding input: the clip trimmed to its outer speech-interval bounds, widened by `margin_ms` on each side."""
     samples = np.frombuffer(pcm16, dtype="<i2")
     if not intervals_ms:
         return pcm16
@@ -134,9 +142,7 @@ def _classify(genuine: "list[float]", impostor: "list[float]", min_trials: int, 
     return {"eer": None, "threshold": None, "result": reason}
 
 def _pick_best(passing: "dict[Any, dict]", tie_better: "Callable[[Any, dict, Any, dict], bool]") -> "tuple[Any, dict]":
-    """The lowest-`eer` candidate in `passing`, with ties within 0.5pp
-    broken by `tie_better(candidate, result, best, best_result)` (Q2's and
-    Q3's own tie rules, `<interfaces>`, 11-05-PLAN.md)."""
+    """The lowest-`eer` candidate in `passing`, with ties within 0.5pp broken by `tie_better(candidate, result, best, best_result)` (Q2's/Q3's own tie rules, `<interfaces>`, 11-05-PLAN.md)."""
     ranked = sorted(passing.items(), key=lambda kv: kv[1]["eer"])
     best, best_result = ranked[0]
     for candidate, result in ranked[1:]:
@@ -148,8 +154,7 @@ def _score_model_window(
     *, embedder: Any, enrollment_by_label: "dict[str, list[tuple[bytes, list]]]", command_clips: "Sequence[tuple[str, bytes, list]]",
     other_clips: "Sequence[tuple[bytes, list]]", window_ms: int, speech_rms_floor: float, sample_rate: int = SAMPLE_RATE, enrollment_margin_ms: float = 200.0,
 ) -> "dict[str, Any]":
-    """Score every command/other clip against every enrolled member's
-    reference, for one embedder and one window length (D-06)."""
+    """Score every command/other clip against every enrolled member's reference, for one embedder and one window length (D-06)."""
     references: "dict[str, np.ndarray]" = {}
     for label, clips in enrollment_by_label.items():
         vectors = [embedder.embed(_trim_with_margin(pcm16, intervals, enrollment_margin_ms, sample_rate)) for pcm16, intervals in clips]
@@ -274,10 +279,7 @@ def question_q5(*, clip_windows: "Sequence[tuple[str, list[np.ndarray]]]", windo
             (same_pairs if label_i == label_j else diff_pairs).append(entry)
 
     if len(diff_pairs) < min_pairs or len(same_pairs) < min_pairs:
-        return {
-            "result": f"FAIL ({len(diff_pairs)} different-label pair(s), {len(same_pairs)} same-label pair(s), need at least {min_pairs} of each)",
-            "floors": {}, "chosen_floor": None,
-        }
+        return {"result": f"FAIL ({len(diff_pairs)} different-label pair(s), {len(same_pairs)} same-label pair(s), need at least {min_pairs} of each)", "floors": {}, "chosen_floor": None}
 
     floor_reports: "dict[float, Any]" = {}
     for floor in floor_grid:
@@ -313,11 +315,7 @@ def question_q7(enrollment_clips_intervals: "Sequence[list]", *, min_clips: int 
     if len(enrollment_clips_intervals) < min_clips:
         return {"result": f"FAIL (only {len(enrollment_clips_intervals)} enrollment clip(s), need at least {min_clips})", "single_interval_share": None, "enrollment_gap_ms": None}
     single_share = sum(1 for iv in enrollment_clips_intervals if len(iv) == 1) / len(enrollment_clips_intervals)
-    gaps_ms = [
-        b[0] - a[1]
-        for intervals in enrollment_clips_intervals
-        for a, b in zip(sorted(intervals, key=lambda iv: iv[0]), sorted(intervals, key=lambda iv: iv[0])[1:])
-    ]
+    gaps_ms = [b[0] - a[1] for intervals in enrollment_clips_intervals for a, b in zip(sorted(intervals, key=lambda iv: iv[0]), sorted(intervals, key=lambda iv: iv[0])[1:])]
     p95_gap = evaluation.percentile(gaps_ms, 95) if gaps_ms else 0.0
     return {"result": "PASS", "single_interval_share": single_share, "p95_gap_ms": p95_gap, "enrollment_gap_ms": max(800, _ceil_to(p95_gap + 200, 50))}
 
@@ -346,8 +344,7 @@ def question_q9(*, embed_times_ms: "Sequence[float]") -> "dict[str, Any]":
     return {"result": "PASS", "p50_ms": evaluation.percentile(embed_times_ms, 50), "p95_ms": evaluation.percentile(embed_times_ms, 95)}
 
 def overall_verdict(results: "dict[str, dict]") -> str:
-    """`FAIL (Qn: reason; ...)` naming every failed question among
-    Q1/Q2/Q5/Q6/Q7 -- Q3, Q4, Q8, Q9 never affect this verdict."""
+    """`FAIL (Qn: reason; ...)` naming every failed question among Q1/Q2/Q5/Q6/Q7 -- Q3, Q4, Q8, Q9 never affect this verdict."""
     failures = [f"{name.upper()}: {results[name]['result']}" for name in _BLOCKING_QUESTIONS if not results.get(name, {}).get("result", "").startswith("PASS")]
     return f"FAIL ({'; '.join(failures)})" if failures else "PASS"
 
@@ -368,8 +365,7 @@ def score_corpus(
     root: Path, *, embedder_factory: "Callable[[str], Any]", transcriber: "Callable[[bytes], str]", models: "Sequence[str]" = tuple(SPEAKER_MODEL_FILES),
     window_options: "Sequence[int]" = _DEFAULT_WINDOW_OPTIONS, floor_grid: "Sequence[float]" = _DEFAULT_FLOOR_GRID, sample_rate: int = SAMPLE_RATE,
 ) -> "dict[str, Any]":
-    """Run every question in order and return the full report, ending with
-    `keys` and `verdict` (`<interfaces>`, 11-05-PLAN.md)."""
+    """Run every question in order and return the full report, ending with `keys` and `verdict` (`<interfaces>`, 11-05-PLAN.md)."""
     clips = load_corpus(root)
     enrollment_clips = [c for c in clips if c.kind == "enrollment"]
     command_clips_raw = [c for c in clips if c.kind == "command"]
@@ -382,10 +378,12 @@ def score_corpus(
     noise_rms: "list[float]" = []
     frame_ms = FRAME_SAMPLES * 1000.0 / sample_rate
     for clip in clips:
+        if clip.kind == "other":
+            continue  # music/TV/radio, not room noise (operator diagnosis, 2026-09-29)
         samples = np.frombuffer(_channel_pcm16(clip, asr_channel), dtype="<i2")
         for i, start in enumerate(range(0, len(samples) - FRAME_SAMPLES + 1, FRAME_SAMPLES)):
             start_ms = i * frame_ms
-            if not _frame_in_intervals(start_ms, start_ms + frame_ms, clip.speech_intervals_ms):
+            if _frame_is_room_noise(start_ms, start_ms + frame_ms, clip.speech_intervals_ms):
                 frame_bytes = np.ascontiguousarray(samples[start : start + FRAME_SAMPLES]).astype("<i2").tobytes()
                 noise_rms.append(rms_amplitude(frame_bytes))
     q6 = question_q6(noise_rms)
