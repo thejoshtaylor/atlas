@@ -568,6 +568,45 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class EdgeVolumeConfig:
+    """The `edge.volume:` block: the limits that clamp every level the
+    voice tool sends to the Pi's speaker. Transcribed text is untrusted,
+    and a TV can say "volume max" or "volume zero", so the server keeps
+    every level inside `min_percent`..`max_percent`. `step_percent` is the
+    size of one spoken "up" or "down"."""
+
+    min_percent: int = 30
+    max_percent: int = 100
+    step_percent: int = 10
+
+    @classmethod
+    def from_config(cls, raw: dict | None) -> "EdgeVolumeConfig":
+        if raw is None:
+            return cls()
+        if not isinstance(raw, dict):
+            raise ConfigError(f"edge.volume must be a mapping, got {raw!r}")
+        known = {"min_percent", "max_percent", "step_percent"}
+        for key in raw:
+            if key not in known:
+                raise ConfigError(f"edge.volume.{key} is not a recognized key -- expected one of {sorted(known)!r}")
+        values: dict[str, int] = {}
+        for key in ("min_percent", "max_percent", "step_percent"):
+            value = raw.get(key, getattr(cls, key))
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"edge.volume.{key} must be an integer, got {value!r}")
+            values[key] = value
+        if not (0 <= values["min_percent"] <= values["max_percent"] <= 100):
+            raise ConfigError(
+                "edge.volume.min_percent and edge.volume.max_percent must satisfy "
+                f"0 <= min_percent <= max_percent <= 100, got {values['min_percent']!r} and "
+                f"{values['max_percent']!r}"
+            )
+        if not (1 <= values["step_percent"] <= 100):
+            raise ConfigError(f"edge.volume.step_percent must be an integer in [1, 100], got {values['step_percent']!r}")
+        return cls(**values)
+
+
+@dataclass(frozen=True)
 class EdgeSourceConfig:
     """The `edge:` block: the Pi + XVF3800 audio source (Phase 10, D-01,
     D-08, D-09, D-11).
@@ -619,6 +658,8 @@ class EdgeSourceConfig:
     operator raises only if recorded sessions show sentences cut at a
     pause. `ping_interval_s: float = 5.0` is the WebSocket keepalive the
     Pi answers with a `pong` (protocol v1, `edge/src/atlas_edge/protocol.py`).
+    `volume` holds the limits that clamp every level the voice tool sends,
+    because transcribed text is untrusted and a TV can say "volume max".
     """
 
     sample_rate: int = 16000
@@ -628,6 +669,7 @@ class EdgeSourceConfig:
     tail_ms: int | None = 1300
     end_of_speech_hangover_ms: int = 0
     ping_interval_s: float = 5.0
+    volume: EdgeVolumeConfig = field(default_factory=EdgeVolumeConfig)
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "EdgeSourceConfig":
@@ -640,6 +682,7 @@ class EdgeSourceConfig:
             "tail_ms",
             "end_of_speech_hangover_ms",
             "ping_interval_s",
+            "volume",
         }
         for key in raw:
             if key not in known:
@@ -693,6 +736,7 @@ class EdgeSourceConfig:
             tail_ms=tail_ms,
             end_of_speech_hangover_ms=int(end_of_speech_hangover_ms),
             ping_interval_s=float(ping_interval_s),
+            volume=EdgeVolumeConfig.from_config(raw.get("volume")),
         )
 
     def require_measured(self) -> None:

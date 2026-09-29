@@ -54,7 +54,7 @@ from collections import deque
 from typing import Any, AsyncIterator, Callable, Protocol
 
 from atlas.audio.channels import select_channel
-from atlas.config import EdgeSourceConfig
+from atlas.config import EdgeSourceConfig, EdgeVolumeConfig
 from atlas.providers.tts_xai import SinkFormat
 from atlas.transports.base import SourceFormat, speech_kind
 
@@ -74,6 +74,17 @@ MSG_DOA = "doa"
 MSG_LATENCY = "latency"
 # Server to Pi: the turn state the Pi shows on its LED ring.
 MSG_LED = "led"
+# Server to Pi: set the speaker volume. Pi to server: the answer.
+MSG_VOLUME = "volume"
+MSG_VOLUME_RESULT = "volume.result"
+
+# The two steps of a relative `volume` message.
+VOLUME_DIRECTIONS = ("up", "down")
+# The Pi runs amixer up to two times at 2 s each. This covers that and the
+# round trip.
+VOLUME_REPLY_TIMEOUT_S = 5.0
+# The longest error text a `volume.result` may carry. The parser cuts it.
+MAX_VOLUME_ERROR_CHARS = 200
 
 # The four states of the `led` message, in turn order. The ring is dark at
 # `idle`. `EdgeAudioSource.set_led_state` sends each one. The Pi restates
@@ -142,6 +153,12 @@ MAX_OUTSTANDING_PINGS = 8
 ADDED_DELAY_BUDGET_MS = 50
 
 
+class EdgeVolumeError(Exception):
+    """A volume request did not complete: no device is connected, the
+    device did not answer in time, the device disconnected, or the device
+    reported an error."""
+
+
 class EdgeProtocolError(ValueError):
     """Raised by `parse_edge_event` for any text frame that is not valid
     JSON, is not an object, names an unsupported `type`, or fails that
@@ -204,11 +221,13 @@ def parse_edge_event(text: str) -> dict[str, Any]:
     silently dropped rather than carried forward into
     `speech_signals.publish`.
 
-    Accepts all five Pi-to-server message types (`<interfaces>`):
+    Accepts all six Pi-to-server message types (`<interfaces>`):
     `vad.start`/`vad.end` (integer `seq >= 0`), `doa` (1-8 finite
     azimuths in `[0, 360)`, 0-8 finite non-negative energies), `latency`
     (three finite values in `[0, 60000]` plus `frames >= 0`), and `pong`
-    (integer `id` and `server_t_ms`). Raises `EdgeProtocolError` for
+    (integer `id` and `server_t_ms`), and `volume.result` (integer `id >= 0`
+    and exactly one of an integer `level` in `[0, 100]` or a string
+    `error`, cut to `MAX_VOLUME_ERROR_CHARS`). Raises `EdgeProtocolError` for
     anything else: invalid JSON, a non-object, an unknown `type`, or any
     field that is the wrong type, out of range, non-finite (`NaN`/
     `Infinity` -- valid JSON extensions Python's own parser accepts), or
@@ -261,6 +280,22 @@ def parse_edge_event(text: str) -> dict[str, Any]:
         server_t_ms = _require_int(raw.get("server_t_ms"), "pong.server_t_ms")
         return {"type": msg_type, "id": ping_id, "server_t_ms": server_t_ms}
 
+    if msg_type == MSG_VOLUME_RESULT:
+        request_id = _require_int(raw.get("id"), "volume.result.id")
+        if request_id < 0:
+            raise EdgeProtocolError(f"volume.result.id must be >= 0, got {request_id!r}")
+        level = raw.get("level")
+        error = raw.get("error")
+        if (level is None) == (error is None):
+            raise EdgeProtocolError("volume.result must carry exactly one of level and error")
+        if level is not None:
+            level = _require_int(level, "volume.result.level")
+            _require_range(level, "volume.result.level", lo=0, hi=100)
+            return {"type": msg_type, "id": request_id, "level": level}
+        if not isinstance(error, str):
+            raise EdgeProtocolError(f"volume.result.error must be a string, got {error!r}")
+        return {"type": msg_type, "id": request_id, "error": error[:MAX_VOLUME_ERROR_CHARS]}
+
     raise EdgeProtocolError(f"unsupported edge event type: {msg_type!r}")
 
 
@@ -270,6 +305,47 @@ def build_led(state: str) -> str:
     if state not in LED_STATES:
         raise ValueError(f"unknown led state: {state!r}")
     return json.dumps({"type": MSG_LED, "state": state})
+
+
+def build_volume(
+    request_id: int,
+    *,
+    level: "int | None" = None,
+    direction: "str | None" = None,
+    volume: EdgeVolumeConfig,
+) -> str:
+    """The `volume` message that asks the Pi to change its speaker level.
+    Give exactly one of `level` (a percent) and `direction` (`up` or
+    `down`), or `ValueError` is raised. The server clamps an absolute
+    `level` into the `volume` limits here. A relative request carries
+    `step_percent`, because the server does not know the current level.
+    Both forms carry `min_percent` and `max_percent`, so the Pi holds the
+    same limits on a stepped level."""
+    if (level is None) == (direction is None):
+        raise ValueError("give exactly one of level and direction")
+    if level is not None:
+        clamped = max(volume.min_percent, min(volume.max_percent, level))
+        return json.dumps(
+            {
+                "type": MSG_VOLUME,
+                "id": request_id,
+                "level": clamped,
+                "min_percent": volume.min_percent,
+                "max_percent": volume.max_percent,
+            }
+        )
+    if direction not in VOLUME_DIRECTIONS:
+        raise ValueError(f"unknown volume direction: {direction!r}")
+    return json.dumps(
+        {
+            "type": MSG_VOLUME,
+            "id": request_id,
+            "direction": direction,
+            "step_percent": volume.step_percent,
+            "min_percent": volume.min_percent,
+            "max_percent": volume.max_percent,
+        }
+    )
 
 
 def build_hello(config: EdgeSourceConfig, device_id: int) -> str:
@@ -434,7 +510,13 @@ class EdgeAudioSource:
     supersede, or a rival refusal never does (module docstring).
     """
 
-    def __init__(self, config: EdgeSourceConfig, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        config: EdgeSourceConfig,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        volume_reply_timeout_s: float = VOLUME_REPLY_TIMEOUT_S,
+    ) -> None:
         # D-18/Pitfall 3: refuses construction until the spike's numbers
         # (asr_channel, pre_roll_ms, tail_ms) are configured -- never a
         # guessed channel index.
@@ -457,6 +539,12 @@ class EdgeAudioSource:
         # Pi turns its ring off by itself at each connect.
         self._led_state: str = LED_IDLE
         self._led_send_warned = False
+        # Volume requests that wait for the Pi's `volume.result`, by id. The
+        # id counter never resets, so a late reply from an old connection
+        # cannot match a new request.
+        self._volume_reply_timeout_s = volume_reply_timeout_s
+        self._pending_volume: "dict[int, asyncio.Future[dict[str, Any]]]" = {}
+        self._next_volume_id = 0
         # Per-connection ping/added-delay state (10-07-PLAN.md) -- reset at
         # the top of `serve()` every time a connection becomes the active
         # one, so a reconnect never carries a stale outstanding-ping id or
@@ -579,6 +667,34 @@ class EdgeAudioSource:
         if event.get("type") == "transcript.final" and self._led_state != LED_REPLYING:
             await self.set_led_state(LED_THINKING)
         logger.debug("edge source send_event: %s", event.get("type"))
+
+    async def set_volume(self, *, level: "int | None" = None, direction: "str | None" = None) -> int:
+        """Ask the connected Pi to set its speaker volume and return the
+        level the Pi read back. Give a `level` or a `direction`. Raises
+        `EdgeVolumeError` when no device is connected, the Pi does not
+        answer in time, the Pi disconnects, or the Pi reports an error."""
+        websocket = self._websocket
+        if websocket is None:
+            raise EdgeVolumeError("no edge device is connected")
+        request_id = self._next_volume_id
+        self._next_volume_id += 1
+        try:
+            text = build_volume(request_id, level=level, direction=direction, volume=self._config.volume)
+        except ValueError as exc:
+            raise EdgeVolumeError(str(exc)) from exc
+        future: "asyncio.Future[dict[str, Any]]" = asyncio.get_running_loop().create_future()
+        self._pending_volume[request_id] = future
+        try:
+            await websocket.send_text(text)
+            try:
+                reply = await asyncio.wait_for(future, timeout=self._volume_reply_timeout_s)
+            except asyncio.TimeoutError as exc:
+                raise EdgeVolumeError("the edge device did not answer the volume request") from exc
+        finally:
+            self._pending_volume.pop(request_id, None)
+        if "error" in reply:
+            raise EdgeVolumeError(reply["error"])
+        return reply["level"]
 
     @property
     def led_state(self) -> str:
@@ -755,6 +871,12 @@ class EdgeAudioSource:
                     self._websocket = None
                     self._connected_device_id = None
                     self._active_task = None
+                    # A request that waits for this connection can never get
+                    # its answer.
+                    for pending in self._pending_volume.values():
+                        if not pending.done():
+                            pending.set_exception(EdgeVolumeError("the edge device disconnected"))
+                    self._pending_volume.clear()
         finally:
             # 10-07-PLAN.md: cancelled regardless of supersede/rival
             # outcome -- this ping task belongs to this specific `serve()`
@@ -894,6 +1016,19 @@ class EdgeAudioSource:
             self._publish_latency_event(event)
         elif msg_type == MSG_PONG:
             return self._handle_pong(event)
+        elif msg_type == MSG_VOLUME_RESULT:
+            return self._handle_volume_result(event)
+        return True
+
+    def _handle_volume_result(self, event: dict[str, Any]) -> bool:
+        """Give a `volume.result` to the request that waits for it. An id
+        that matches no waiting request is reported invalid, the same as an
+        unmatched pong (T-10-25)."""
+        future = self._pending_volume.pop(event["id"], None)
+        if future is None:
+            return False
+        if not future.done():
+            future.set_result(event)
         return True
 
     def _handle_pong(self, event: dict[str, Any]) -> bool:

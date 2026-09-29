@@ -24,6 +24,15 @@ MSG_DOA = "doa"
 MSG_LATENCY = "latency"
 # Server to Pi: the turn state to show on the LED ring.
 MSG_LED = "led"
+# Server to Pi: set the speaker volume. Pi to server: the answer.
+MSG_VOLUME = "volume"
+MSG_VOLUME_RESULT = "volume.result"
+
+# The two steps of a relative `volume` message, and the longest error text a
+# `volume.result` may carry. The server restates the same values in
+# `src/atlas/transports/edge.py`.
+VOLUME_DIRECTIONS = ("up", "down")
+MAX_VOLUME_ERROR_CHARS = 200
 
 # The four LED states, in turn order. The server restates the same values
 # in `src/atlas/transports/edge.py`.
@@ -74,9 +83,64 @@ class Led:
     state: str
 
 
-def parse_server_message(text: str) -> "Hello | Ping | Led":
-    """Parse one text frame from the server -- `hello`, `ping`, or `led`,
-    the only three message types the server ever sends. Raises `ProtocolError` for
+@dataclass(frozen=True)
+class Volume:
+    """A request to set the speaker volume. Either `level` (an absolute
+    percent) or `direction` with `step_percent` is set, never both. The
+    server always sends the `min_percent` and `max_percent` limits, and this
+    Pi keeps every level inside them."""
+
+    id: int
+    min_percent: int
+    max_percent: int
+    level: "int | None" = None
+    direction: "str | None" = None
+    step_percent: "int | None" = None
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _parse_volume(raw: "dict[str, Any]") -> Volume:
+    request_id = raw.get("id")
+    if not _is_int(request_id) or request_id < 0:
+        raise ProtocolError(f"server volume message has a bad id: {request_id!r}")
+    min_percent = raw.get("min_percent")
+    max_percent = raw.get("max_percent")
+    if (
+        not _is_int(min_percent)
+        or not _is_int(max_percent)
+        or not (0 <= min_percent <= max_percent <= 100)
+    ):
+        raise ProtocolError(
+            f"server volume message has bad limits: {min_percent!r}, {max_percent!r}"
+        )
+    level = raw.get("level")
+    direction = raw.get("direction")
+    if (level is None) == (direction is None):
+        raise ProtocolError("server volume message needs exactly one of level and direction")
+    if level is not None:
+        if not _is_int(level) or not (0 <= level <= 100):
+            raise ProtocolError(f"server volume message has a bad level: {level!r}")
+        return Volume(id=request_id, min_percent=min_percent, max_percent=max_percent, level=level)
+    step_percent = raw.get("step_percent")
+    if direction not in VOLUME_DIRECTIONS:
+        raise ProtocolError(f"server volume message has a bad direction: {direction!r}")
+    if not _is_int(step_percent) or not (1 <= step_percent <= 100):
+        raise ProtocolError(f"server volume message has a bad step_percent: {step_percent!r}")
+    return Volume(
+        id=request_id,
+        min_percent=min_percent,
+        max_percent=max_percent,
+        direction=direction,
+        step_percent=step_percent,
+    )
+
+
+def parse_server_message(text: str) -> "Hello | Ping | Led | Volume":
+    """Parse one text frame from the server -- `hello`, `ping`, `led`, or
+    `volume`, the only four message types the server ever sends. Raises `ProtocolError` for
     anything else, including a `hello` naming a protocol version other
     than `PROTOCOL_VERSION` -- this Pi must never guess at a wire shape a
     version mismatch might have changed.
@@ -122,6 +186,9 @@ def parse_server_message(text: str) -> "Hello | Ping | Led":
             raise ProtocolError(f"server led message names an unknown state: {state!r}")
         return Led(state=state)
 
+    if msg_type == MSG_VOLUME:
+        return _parse_volume(raw)
+
     raise ProtocolError(f"unsupported server message type: {msg_type!r}")
 
 
@@ -153,3 +220,17 @@ def latency(p50: float, p95: float, max_ms: float, frames: int) -> str:
 
 def pong(ping_id: int, server_t_ms: int) -> str:
     return json.dumps({"type": MSG_PONG, "id": ping_id, "server_t_ms": server_t_ms})
+
+
+def volume_result(request_id: int, *, level: "int | None" = None, error: "str | None" = None) -> str:
+    """The answer to a `volume` message: the `level` read back from the
+    mixer, or an `error` text. Give exactly one, or `ValueError` is raised.
+    The error is cut to `MAX_VOLUME_ERROR_CHARS`."""
+    if (level is None) == (error is None):
+        raise ValueError("give exactly one of level and error")
+    payload: dict[str, Any] = {"type": MSG_VOLUME_RESULT, "id": request_id}
+    if level is not None:
+        payload["level"] = level
+    else:
+        payload["error"] = error[:MAX_VOLUME_ERROR_CHARS]
+    return json.dumps(payload)
