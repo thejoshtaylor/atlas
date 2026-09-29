@@ -12,6 +12,10 @@ Every hardware import (`sounddevice`, `sherpa_onnx`, `usb`) stays lazy,
 inside whatever module already owns it -- this module imports none of
 them directly, so `python -m atlas_edge --help` runs on a dev host with
 no XVF3800 attached.
+
+Music from librespot reaches the array through `MusicMixer`, which mixes
+into `Capture`'s output callback. It ducks while a speech segment is open
+and while the server turn state is listening, thinking, or replying.
 """
 
 from __future__ import annotations
@@ -32,8 +36,9 @@ from atlas_edge.config import EdgeConfig, EdgeConfigError, load_config
 from atlas_edge.doa import DoaPoller
 from atlas_edge.latency import SendDelayWindow
 from atlas_edge.led import LedController
+from atlas_edge.music import MusicMixer
 from atlas_edge.playback import Playback
-from atlas_edge.protocol import LED_IDLE
+from atlas_edge.protocol import LED_IDLE, LED_LISTENING, LED_REPLYING, LED_THINKING
 from atlas_edge.service import run_service
 from atlas_edge.vad import SileroGate
 
@@ -120,6 +125,17 @@ def _default_led(config: EdgeConfig, playback: Any) -> Any:
     return LedController(xvf3800.find_device, pending_playback_s=playback.pending_s)
 
 
+def _default_music(config: EdgeConfig, duck_active: Callable[[], bool]) -> Any:
+    if not config.music_fifo:
+        return None
+    return MusicMixer(
+        config.music_fifo,
+        duck_active=duck_active,
+        duck_level=config.music_duck_level,
+        ramp_ms=config.music_duck_ramp_ms,
+    )
+
+
 DEFAULT_FACTORIES: Factories = {
     "capture": _default_capture,
     "playback": _default_playback,
@@ -127,6 +143,7 @@ DEFAULT_FACTORIES: Factories = {
     "doa_poller": _default_doa_poller,
     "latency_window": _default_latency_window,
     "led": _default_led,
+    "music": _default_music,
     "runner": run_forever,
 }
 
@@ -192,6 +209,25 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
     window = built["latency_window"](config)
     doa_poller = built["doa_poller"](config, tracker.in_segment)
 
+    # Music ducks for an open speech segment or a turn in progress. Reply
+    # audio ducks through Capture's own reply_active flag. Both reads are
+    # plain attribute reads, safe from the PortAudio thread.
+    turn_active = [False]
+
+    def duck_active() -> bool:
+        return tracker.in_segment() or turn_active[0]
+
+    def on_led(state: str) -> None:
+        if state in (LED_LISTENING, LED_THINKING, LED_REPLYING):
+            turn_active[0] = True
+        elif state == LED_IDLE:
+            turn_active[0] = False
+        led.set_state(state)
+
+    music = built["music"](config, duck_active)
+    if music is not None:
+        capture.mixer = music.mix
+
     def on_live_frame_sent(captured_at: float, sent_at: float) -> None:
         tracker.mark_live_frame(sent_at)
         window.record(captured_at, sent_at)
@@ -204,6 +240,8 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
         # The ring stays dark until the wake word. The firmware default
         # effect would light it for any voice.
         led.set_state(LED_IDLE)
+        if music is not None:
+            music.start()
         try:
             await run_service(
                 config,
@@ -214,9 +252,11 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
                 events_hook=events_hook,
                 runner=built["runner"],
                 stop=stop,
-                on_led=led.set_state,
+                on_led=on_led,
             )
         finally:
+            if music is not None:
+                music.stop()
             await led.close()
 
     return _run

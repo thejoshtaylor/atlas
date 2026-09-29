@@ -7,7 +7,7 @@ import stat
 
 import pytest
 
-from atlas_edge.config import EdgeConfig, EdgeConfigError, load_config
+from atlas_edge.config import DEFAULT_MUSIC_FIFO, EdgeConfig, EdgeConfigError, load_config
 
 
 def _write_config(path, text: str, mode: int = 0o600) -> None:
@@ -99,3 +99,49 @@ def test_repr_never_contains_the_token(tmp_path):
 def test_frozen_dataclass_stat_mode_bits():
     # Sanity: 0o077 masks group+other read/write/execute.
     assert stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IWOTH | stat.S_IXOTH == 0o077
+
+
+# --- music knobs ----------------------------------------------------------------
+
+_BASE = 'server_url = "wss://atlas.example.test/ws/edge"\ntoken = "tok1234"\n'
+
+
+def test_music_defaults(tmp_path):
+    path = tmp_path / "config.toml"
+    _write_config(path, _BASE)
+    config = load_config(path)
+    assert config.music_fifo == DEFAULT_MUSIC_FIFO == "/run/atlas-edge/music.fifo"
+    assert config.music_duck_level == 0.2
+    assert config.music_duck_ramp_ms == 150
+
+
+def test_music_knobs_can_be_overridden(tmp_path):
+    path = tmp_path / "config.toml"
+    _write_config(
+        path, _BASE + 'music_fifo = "/tmp/m.fifo"\nmusic_duck_level = 0.5\nmusic_duck_ramp_ms = 0\n'
+    )
+    config = load_config(path)
+    assert config.music_fifo == "/tmp/m.fifo"
+    assert config.music_duck_level == 0.5
+    assert config.music_duck_ramp_ms == 0
+
+
+def test_empty_music_fifo_means_music_off(tmp_path):
+    path = tmp_path / "config.toml"
+    _write_config(path, _BASE + 'music_fifo = ""\n')
+    assert load_config(path).music_fifo == ""
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "1.5"])
+def test_duck_level_out_of_range_is_refused(tmp_path, bad):
+    path = tmp_path / "config.toml"
+    _write_config(path, _BASE + f"music_duck_level = {bad}\n")
+    with pytest.raises(EdgeConfigError, match="music_duck_level"):
+        load_config(path)
+
+
+def test_negative_duck_ramp_is_refused(tmp_path):
+    path = tmp_path / "config.toml"
+    _write_config(path, _BASE + "music_duck_ramp_ms = -1\n")
+    with pytest.raises(EdgeConfigError, match="music_duck_ramp_ms"):
+        load_config(path)

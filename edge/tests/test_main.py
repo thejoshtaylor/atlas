@@ -6,6 +6,7 @@ every factory is a fake, injected through `main(..., factories=...)`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import signal
@@ -109,6 +110,7 @@ def _fake_factories(**overrides):
         "doa_poller": lambda config, in_segment: FakeDoaPoller(in_segment),
         "latency_window": lambda config: FakeWindow(),
         "led": lambda config, playback: FakeLed(),
+        "music": lambda config, duck_active: None,
         "runner": _fake_runner,
     }
     factories.update(overrides)
@@ -318,3 +320,101 @@ async def test_the_led_closes_when_the_runner_raises() -> None:
         await service_runner(stop=None)
 
     assert led.closed is True
+
+
+# --- music mixer wiring ----------------------------------------------------------
+
+
+class FakeMusic:
+    def __init__(self, duck_active) -> None:
+        self.duck_active = duck_active
+        self.events: "list[str]" = []
+
+    def mix(self, block: bytes, reply_active: bool) -> bytes:
+        return block
+
+    def start(self) -> None:
+        self.events.append("start")
+
+    def stop(self) -> None:
+        self.events.append("stop")
+
+
+@pytest.mark.asyncio
+async def test_music_is_wired_started_and_stopped_and_ducks_on_turn_state() -> None:
+    box: "dict" = {}
+    capture = FakeCapture()
+    led = FakeLed()
+    seen: "dict" = {}
+
+    def music_factory(config, duck_active):
+        box["music"] = FakeMusic(duck_active)
+        return box["music"]
+
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None):
+        music = box["music"]
+        seen["started"] = list(music.events)
+        seen["initial"] = music.duck_active()
+        for state, expected in (
+            ("listening", True),
+            ("thinking", True),
+            ("replying", True),
+            ("idle", False),
+        ):
+            on_led(state)
+            seen[state] = music.duck_active()
+            assert seen[state] is expected
+        now = time.monotonic()
+        on_live_frame_sent(now - 0.02, now)
+        seen["segment"] = music.duck_active()
+
+    service_runner = build_service(
+        object(),
+        _fake_factories(capture=lambda config: capture, led=lambda c, p: led,
+                        music=music_factory, runner=runner),
+    )
+    await service_runner(stop=None)
+
+    music = box["music"]
+    assert capture.mixer == music.mix
+    assert seen["started"] == ["start"]
+    assert seen["initial"] is False
+    assert seen["segment"] is True
+    assert music.events == ["start", "stop"]
+    assert led.states == ["idle", "listening", "thinking", "replying", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_music_is_stopped_when_the_runner_raises() -> None:
+    box: "dict" = {}
+
+    def music_factory(config, duck_active):
+        box["music"] = FakeMusic(duck_active)
+        return box["music"]
+
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None):
+        raise RuntimeError("runner failed")
+
+    service_runner = build_service(object(), _fake_factories(music=music_factory, runner=runner))
+    with pytest.raises(RuntimeError):
+        await service_runner(stop=None)
+    assert box["music"].events == ["start", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_no_music_means_no_mixer_and_run_still_works() -> None:
+    capture = FakeCapture()
+    stop = asyncio.Event()
+    stop.set()
+    service_runner = build_service(object(), _fake_factories(capture=lambda config: capture))
+    await service_runner(stop=stop)
+    assert not hasattr(capture, "mixer")
+
+
+def test_default_music_is_none_when_the_fifo_is_empty() -> None:
+    class Cfg:
+        music_fifo = ""
+        music_duck_level = 0.2
+        music_duck_ramp_ms = 150
+
+    assert main_module._default_music(Cfg(), lambda: False) is None

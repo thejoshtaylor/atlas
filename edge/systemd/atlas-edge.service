@@ -27,6 +27,13 @@ Group=atlas-edge
 # rule this project's own 99-atlas-edge-xvf3800.rules grants (T-10-30).
 SupplementaryGroups=audio plugdev
 WorkingDirectory=/opt/atlas-edge/edge
+# The music FIFO lives in /run/atlas-edge. The group atlas-edge can only
+# traverse this directory, so atlas-librespot can open the FIFO but can
+# never create a regular file in its place. Preserve keeps the FIFO open
+# in librespot across an atlas-edge restart.
+RuntimeDirectory=atlas-edge
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
 Environment=PYTHONPATH=/opt/atlas-edge/edge/src
 ExecStart=/opt/atlas-edge/edge/.venv/bin/python -m atlas_edge --config /etc/atlas-edge/config.toml
 Restart=always

@@ -1,0 +1,52 @@
+# The Spotify Connect receiver for the edge Pi. librespot writes raw PCM
+# into a FIFO, and atlas-edge mixes that audio into the XVF3800 output.
+# librespot cannot open the array itself, because atlas-edge holds the only
+# output stream. See edge/src/atlas_edge/music.py.
+#
+# Install: copy to /etc/systemd/system/atlas-librespot.service, then
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-librespot
+# Do this after you install the updated atlas-edge.service, which creates
+# /run/atlas-edge. The librespot binary comes from the raspotify package.
+# Keep raspotify.service disabled. Its unit opens ALSA directly and would
+# take the array from atlas-edge.
+#
+# Sign in once: open Spotify on a phone on the house network and pick this
+# device from the Connect list. librespot caches the credentials in the
+# StateDirectory, and the device then shows in the Spotify Web API.
+
+[Unit]
+Description=ATLAS Spotify Connect receiver (librespot, PCM into the atlas-edge FIFO)
+After=network-online.target atlas-edge.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# T-260929-iad-01: librespot listens on the LAN. DynamicUser keeps it away
+# from the bearer token in /etc/atlas-edge/config.toml (mode 0600, owned by
+# atlas-edge). The group atlas-edge only gives write access to the FIFO.
+# Never set User=atlas-edge here.
+DynamicUser=yes
+SupplementaryGroups=atlas-edge
+StateDirectory=atlas-librespot
+# The default device name is generic. To change it for one house, put
+# LIBRESPOT_NAME=<name> in /etc/atlas-edge/librespot.env. EnvironmentFile
+# overrides Environment, so no change to git is needed.
+Environment=LIBRESPOT_NAME=Atlas
+EnvironmentFile=-/etc/atlas-edge/librespot.env
+# The --device path must equal DEFAULT_MUSIC_FIFO in atlas_edge/config.py.
+ExecStart=/usr/bin/librespot --backend pipe --device /run/atlas-edge/music.fifo --format S16 --bitrate 160 --disable-audio-cache --system-cache /var/lib/atlas-librespot
+Restart=always
+RestartSec=2
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

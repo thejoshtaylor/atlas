@@ -17,6 +17,11 @@ DEFAULT_PLAYBACK_DEVICE = "reSpeaker"
 DEFAULT_VAD_MODEL_PATH = "/var/lib/atlas-edge/silero_vad.onnx"
 DEFAULT_VAD_THRESHOLD = 0.5
 DEFAULT_VAD_MIN_SILENCE_MS = 250
+# librespot (edge/systemd/atlas-librespot.service) writes music PCM here.
+# atlas-edge.service owns the directory through RuntimeDirectory=.
+DEFAULT_MUSIC_FIFO = "/run/atlas-edge/music.fifo"
+DEFAULT_MUSIC_DUCK_LEVEL = 0.2
+DEFAULT_MUSIC_DUCK_RAMP_MS = 150
 
 
 class EdgeConfigError(Exception):
@@ -37,6 +42,10 @@ class EdgeConfig:
     vad_threshold: float = DEFAULT_VAD_THRESHOLD
     vad_min_silence_ms: int = DEFAULT_VAD_MIN_SILENCE_MS
     allow_plaintext: bool = False
+    # An empty music_fifo turns music off.
+    music_fifo: str = DEFAULT_MUSIC_FIFO
+    music_duck_level: float = DEFAULT_MUSIC_DUCK_LEVEL
+    music_duck_ramp_ms: int = DEFAULT_MUSIC_DUCK_RAMP_MS
 
 
 def load_config(path: "str | os.PathLike[str]") -> EdgeConfig:
@@ -66,6 +75,15 @@ def load_config(path: "str | os.PathLike[str]") -> EdgeConfig:
     except ValueError as exc:
         raise EdgeConfigError(str(exc)) from exc
 
+    music_duck_level = float(raw.get("music_duck_level", DEFAULT_MUSIC_DUCK_LEVEL))
+    if not 0.0 <= music_duck_level <= 1.0:
+        raise EdgeConfigError(
+            f"{path}: music_duck_level must be from 0.0 to 1.0, not {music_duck_level}"
+        )
+    music_duck_ramp_ms = int(raw.get("music_duck_ramp_ms", DEFAULT_MUSIC_DUCK_RAMP_MS))
+    if music_duck_ramp_ms < 0:
+        raise EdgeConfigError(f"{path}: music_duck_ramp_ms must be 0 or more, not {music_duck_ramp_ms}")
+
     return EdgeConfig(
         server_url=server_url,
         token=token,
@@ -75,4 +93,7 @@ def load_config(path: "str | os.PathLike[str]") -> EdgeConfig:
         vad_threshold=float(raw.get("vad_threshold", DEFAULT_VAD_THRESHOLD)),
         vad_min_silence_ms=int(raw.get("vad_min_silence_ms", DEFAULT_VAD_MIN_SILENCE_MS)),
         allow_plaintext=allow_plaintext,
+        music_fifo=str(raw.get("music_fifo", DEFAULT_MUSIC_FIFO)),
+        music_duck_level=music_duck_level,
+        music_duck_ramp_ms=music_duck_ramp_ms,
     )

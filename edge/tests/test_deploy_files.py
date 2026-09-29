@@ -8,8 +8,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from atlas_edge.config import DEFAULT_MUSIC_FIFO
+
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
 _SERVICE_PATH = _EDGE_ROOT / "systemd" / "atlas-edge.service"
+_LIBRESPOT_PATH = _EDGE_ROOT / "systemd" / "atlas-librespot.service"
 _UDEV_PATH = _EDGE_ROOT / "udev" / "99-atlas-edge-xvf3800.rules"
 _FETCH_SCRIPT_PATH = _EDGE_ROOT / "scripts" / "fetch-vad-model.sh"
 
@@ -47,6 +50,48 @@ class TestSystemdUnit:
 
     def test_wanted_by_multi_user_target(self) -> None:
         assert "WantedBy=multi-user.target" in _service_text()
+
+    def test_owns_the_runtime_directory_for_the_music_fifo(self) -> None:
+        text = _service_text()
+        assert "RuntimeDirectory=atlas-edge" in text
+        assert "RuntimeDirectoryMode=0750" in text
+        assert "RuntimeDirectoryPreserve=restart" in text
+
+
+class TestLibrespotUnit:
+    def _text(self) -> str:
+        return _LIBRESPOT_PATH.read_text()
+
+    def _exec_start(self) -> str:
+        match = re.search(r"^ExecStart=(.+)$", self._text(), re.MULTILINE)
+        assert match is not None
+        return match.group(1)
+
+    def test_exec_start_pipes_s16_pcm_into_the_config_fifo(self) -> None:
+        exec_start = self._exec_start()
+        assert exec_start.startswith("/usr/bin/librespot ")
+        assert "--backend pipe" in exec_start
+        assert f"--device {DEFAULT_MUSIC_FIFO}" in exec_start
+        assert "--format S16" in exec_start
+        assert "--disable-audio-cache" in exec_start
+
+    def test_runs_as_a_dynamic_user_never_the_token_holder(self) -> None:
+        text = self._text()
+        assert "DynamicUser=yes" in text
+        assert "SupplementaryGroups=atlas-edge" in text
+        assert not re.search(r"^User=", text, re.MULTILINE)
+
+    def test_restart_sandbox_and_name_settings(self) -> None:
+        text = self._text()
+        for line in (
+            "Restart=always",
+            "StartLimitIntervalSec=0",
+            "NoNewPrivileges=yes",
+            "Environment=LIBRESPOT_NAME=Atlas",
+            "EnvironmentFile=-/etc/atlas-edge/librespot.env",
+            "WantedBy=multi-user.target",
+        ):
+            assert line in text
 
 
 class TestUdevRule:
