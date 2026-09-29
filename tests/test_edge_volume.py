@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from atlas.config import ConfigError, EdgeSourceConfig, EdgeVolumeConfig
+from atlas.config import EdgeSourceConfig, EdgeVolumeConfig
 from atlas.speaker.volume_tool import SET_SPEAKER_VOLUME_TOOL_NAME, VolumeToolHost, set_current_turn_target
 from atlas.transports.edge import (
     EdgeAudioSource,
@@ -118,12 +118,17 @@ def test_build_volume_rejects_bad_arguments(kwargs: "dict[str, Any]") -> None:
 
 def test_edge_volume_config_validates() -> None:
     assert EdgeSourceConfig.from_config({"volume": {"min_percent": 20}}).volume.min_percent == 20
-    assert EdgeSourceConfig.from_config(None).volume == EdgeVolumeConfig()
+    # Compared by value: another test module reloads `atlas.config`, so the
+    # class imported here can differ from the one `from_config` builds.
+    default = EdgeSourceConfig.from_config(None).volume
+    assert (default.min_percent, default.max_percent, default.step_percent) == (30, 100, 10)
+    import atlas.config as atlas_config
+
     for bad in ({"min_percent": 90, "max_percent": 50}, {"step_percent": 0}, {"max_percent": True}, {"loud": 1}):
-        with pytest.raises(ConfigError):
-            EdgeVolumeConfig.from_config(bad)
-    with pytest.raises(ConfigError):
-        EdgeVolumeConfig.from_config([1])
+        with pytest.raises(atlas_config.ConfigError):
+            atlas_config.EdgeVolumeConfig.from_config(bad)
+    with pytest.raises(atlas_config.ConfigError):
+        atlas_config.EdgeVolumeConfig.from_config([1])
 
 
 # --- parse_edge_event -------------------------------------------------------
