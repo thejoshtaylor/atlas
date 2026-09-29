@@ -16,6 +16,8 @@ export interface Speaker {
   enrolled_phrases: number
   required_phrases: number
   model_id: string | null
+  /** Clips from recorded turns (index 100 or more). Mirrors `SpeakerResponse.retroactive_clips`. */
+  retroactive_clips: number
 }
 
 export const SPEAKERS_QUERY_KEY = ["speakers"] as const

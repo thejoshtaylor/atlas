@@ -27,6 +27,8 @@ import {
 } from "@/lib/speakers"
 import { deriveSpeakersScreenState, formatEnrollmentProgress } from "./deriveSpeakersScreenState"
 import { EnrollmentPanel } from "./EnrollmentPanel"
+import { RetroactiveClips } from "./RetroactiveClips"
+import { VoiceInbox } from "./VoiceInbox"
 
 // D-01 through D-04: an admin manages household members here -- listing
 // enrollment progress, adding a member by name, enrolling one through the
@@ -104,6 +106,7 @@ function SpeakerRow({ speaker }: { speaker: Speaker }) {
         </div>
       </div>
       {deleteError ? <p className="text-label text-destructive">{deleteError}</p> : null}
+      {speaker.retroactive_clips > 0 ? <RetroactiveClips speaker={speaker} /> : null}
       {enrollmentOpen ? <EnrollmentPanel key={enrollSession} speaker={speaker} /> : null}
     </li>
   )
@@ -181,6 +184,8 @@ export function SpeakersRoute() {
           </ul>
         )
       ) : null}
+
+      {screen.kind === "ready" ? <VoiceInbox speakers={screen.speakers} /> : null}
     </div>
   )
 }

@@ -33,10 +33,17 @@ export function deriveSpeakersScreenState(input: { speakers: QueryLike<Speaker[]
 /**
  * "3 of 5 phrases" while enrollment is short of `required_phrases`,
  * "Enrolled" once it reaches it, or "Speaker ID model not set" when
- * `model_id` is null -- a count against no model would be spurious.
+ * `model_id` is null -- a count against no model would be spurious. Clips
+ * from recorded turns follow after " · " ("Enrolled · 2 clips from
+ * recordings"). They never count toward `required_phrases`.
  */
 export function formatEnrollmentProgress(speaker: Speaker): string {
   if (speaker.model_id === null) return "Speaker ID model not set"
-  if (speaker.enrolled_phrases >= speaker.required_phrases) return "Enrolled"
-  return `${speaker.enrolled_phrases} of ${speaker.required_phrases} phrases`
+  const base =
+    speaker.enrolled_phrases >= speaker.required_phrases
+      ? "Enrolled"
+      : `${speaker.enrolled_phrases} of ${speaker.required_phrases} phrases`
+  if (speaker.retroactive_clips <= 0) return base
+  const noun = speaker.retroactive_clips === 1 ? "clip" : "clips"
+  return `${base} · ${speaker.retroactive_clips} ${noun} from recordings`
 }

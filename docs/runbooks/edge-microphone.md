@@ -281,6 +281,23 @@ this section if you do not need this feature.
 
     Confirm the report's `verdict` field reads `PASS`.
 
+**Add a voice from a recorded turn.** You can add a voice that the assistant
+missed. Use a turn that the Pi recorded before. The recording must still exist.
+The `debug.retain_days` setting controls this. The default is 7 days.
+
+1. Open the **Speakers** screen. Find **Recent unrecognized voices**. This list
+   shows recent edge turns that no member matched.
+2. Play the turn. Make sure that you hear only that member. Do not use a turn
+   with the television or another person.
+3. Select **Assign**. Select the member, or select **New member** and type a
+   name. Then select **Assign voice**.
+
+The `speaker_id.model` setting must be set. The mode can be `off`. A member
+keeps at most 20 clips from recordings. The next clip removes the oldest one.
+The five prompted phrases stay. The list **Clips from recordings** shows the
+clips under the member. Each clip has the same weight as a prompted phrase. If
+a clip is wrong, select **Remove**. The turn then returns to the inbox.
+
 A recording of an enrolled member's voice can also pass this check. This is a
 known limit, not a defect. The speaker label only personalizes the reply. It
 never grants permission for anything.
