@@ -140,7 +140,9 @@ class _ChannelAwareStt:
             self.received_frames.append(chunk)
             if chunk == self._marker_chunk:
                 break
-        yield FinalTranscript(text="turn on the light")
+        # 260929-icf: a wake turn is verified, so the transcript opens with
+        # the wake phrase, as a real spoken command does.
+        yield FinalTranscript(text="Hey Atlas, turn on the light.")
 
 
 async def test_one_spoken_command_from_a_pi_shaped_client_reaches_a_reply_on_the_same_socket(
