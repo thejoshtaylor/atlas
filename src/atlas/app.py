@@ -941,6 +941,11 @@ def _make_run_turn_for_source(
     # gets the fact once instead of a log they stop reading.
     refusal_logged = False
 
+    # 260929-icf: this factory serves only the wake sources (camera, edge,
+    # browser_listen), each with its own `verify_transcript` setting. Push-to-
+    # talk and WebRTC do not use it, so they keep `verify_wake=False`.
+    verify_wake = config.wake.resolve(source_name).verify_transcript
+
     async def _run(source: Any) -> None:
         nonlocal refusal_logged
         if await _refuse_turn_if_any_slot_is_degraded(app, source):
@@ -1016,6 +1021,7 @@ def _make_run_turn_for_source(
             # to skip the wake-only check entirely.
             wake_phrase=config.wake.phrase,
             wake_cue=config.wake.cue,
+            verify_wake=verify_wake,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
             # 260922-lim: only the camera's wake-word turn skips the tier
             # race for a plain on/off command -- the browser and WebRTC
@@ -1932,9 +1938,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             barge_in_config=edge_barge_in_config,
             preroll=PrerollBuffer(
                 edge_source.source_format(),
-                # 10-CONTEXT.md: the detector report lag this replay
-                # covers belongs to the wake engine (D-07), the same one
-                # the camera uses -- `config.camera.preroll_ms` is reused
+                # 10-CONTEXT.md: this replay covers the wake phrase and the
+                # detector report lag. Both belong to the wake engine (D-07),
+                # the same one the camera uses -- `config.camera.preroll_ms` is reused
                 # deliberately, the same value `/ws/listen` already
                 # reuses for its own server-side wake replay. This is not
                 # the Pi's own `pre_roll_ms` (D-08), which the Pi applies

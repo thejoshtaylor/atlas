@@ -540,11 +540,11 @@ class CameraConfig:
     encoding: str = "alaw"
     sample_rate: int = 8000
     channels: int = 1
-    # 260923-spd: 300 ms covers the wake detector's ~0.2-0.3 s report lag
-    # (measured against six live camera turns) without replaying the wake
-    # word itself back into STT -- see config.example.yaml's `preroll_ms`
-    # comment for the full rationale.
-    preroll_ms: int = 300
+    # 260929-icf: 1500 ms holds the whole wake phrase (about 0.7 s) plus the
+    # detector report lag (about 0.3 s), so speech-to-text hears the phrase
+    # and `run_turn` can verify it and remove it. The edge and browser_listen
+    # runners use the same value.
+    preroll_ms: int = 1500
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "CameraConfig":
@@ -1569,12 +1569,18 @@ class WakeConfig:
     `BargeInConfig` use (D-04, D-12): a global policy plus an optional
     mapping from source name to a partial override, resolved through
     `resolve()`.
+
+    `verify_transcript` turns on the transcript check in `run_turn`: a wake
+    turn whose transcript does not open with the wake phrase ends with no
+    reply. `wake.sources.<name>.verify_transcript` overrides it for one
+    source.
     """
 
     engine: str = "vosk"
     phrase: str = "hey atlas"
     refractory_s: float = 2.0
     cue: bool = True
+    verify_transcript: bool = True
     openwakeword: OpenWakeWordConfig = field(default_factory=OpenWakeWordConfig)
     vosk: VoskWakeConfig = field(default_factory=VoskWakeConfig)
     sources: dict[str, dict] = field(default_factory=dict)
@@ -1591,6 +1597,9 @@ class WakeConfig:
         cue = raw.get("cue", cls.cue)
         if not isinstance(cue, bool):
             raise ConfigError(f"wake.cue must be true or false, got {cue!r}")
+        verify_transcript = raw.get("verify_transcript", cls.verify_transcript)
+        if not isinstance(verify_transcript, bool):
+            raise ConfigError(f"wake.verify_transcript must be true or false, got {verify_transcript!r}")
         sources_raw = raw.get("sources", {}) or {}
         sources = {
             name: _validate_and_normalize_override(cls, override or {}, f"wake.sources.{name}")
@@ -1601,6 +1610,7 @@ class WakeConfig:
             phrase=raw.get("phrase", cls.phrase),
             refractory_s=refractory_s,
             cue=cue,
+            verify_transcript=verify_transcript,
             openwakeword=OpenWakeWordConfig.from_config(raw.get("openwakeword")),
             vosk=VoskWakeConfig.from_config(raw.get("vosk")),
             sources=sources,

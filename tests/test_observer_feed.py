@@ -225,7 +225,7 @@ def test_barge_in_defaults_to_none_when_the_wrapped_source_never_set_one():
 def _fake_run_turn_config(tmp_path):
     from types import SimpleNamespace
 
-    from atlas.config import SessionConfig
+    from atlas.config import SessionConfig, WakeConfig
 
     return SimpleNamespace(
         session=SessionConfig(dir=str(tmp_path)),
@@ -243,7 +243,8 @@ def _fake_run_turn_config(tmp_path):
             state_domains=None,
         ),
         stt=SimpleNamespace(max_utterance_s=15.0),
-        wake=SimpleNamespace(phrase="hey atlas", cue=True),
+        # 260929-icf: the factory calls `config.wake.resolve(source_name)`.
+        wake=WakeConfig(),
     )
 
 
