@@ -469,6 +469,7 @@ async def test_a_cancelled_follower_leaves_the_merge():
     await asyncio.sleep(0.01)
     task_a.cancel()
     await asyncio.sleep(0)
+    a.finish()  # a cancelled turn always finishes
     c.finish()
     speech_b = await asyncio.wait_for(task_b, _TIMEOUT_S)
 

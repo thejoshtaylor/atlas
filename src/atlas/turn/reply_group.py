@@ -10,7 +10,13 @@ decides how their replies reach the speaker:
 - In a group of two or more turns, each line starts with its speaker's name
   (D-07). A turn that runs alone speaks its own text unchanged.
 - The merge waits at most `merge_wait_s` after the first ready statement
-  (D-08).
+  (D-08). A statement that arrives after the group's first flush plays on
+  its own.
+- A reply that asks a question plays after the statements, in its own write
+  call. A second question waits until the first asking turn finishes its
+  follow-up chain (D-09).
+- A group plays at most one filler, and none once any group speech has
+  started (D-11).
 
 The coordinator is pure asyncio with an injected write function. It never
 imports `turn/controller.py`, because the controller imports this module.
@@ -160,6 +166,8 @@ class ReplyHandle:
         self._speaker._note_playback(ends_at)
 
     async def speak(self, reply_text: str, *, expects_answer: bool, write: WriteFn) -> GroupSpeech:
+        if expects_answer:
+            return await self._speaker._speak_question(self, reply_text, write)
         return await self._speaker._speak_statement(self, reply_text, write)
 
     def finish(self) -> None:
@@ -178,6 +186,9 @@ class GroupSpeaker:
         self.reply_lock = asyncio.Lock()
         self._playback_listener: Callable[[float | None], None] | None = None
         self._waiters: list[_Waiter] = []
+        # Held by the turn whose question is the group's current one, until
+        # that handle's `finish()`. It is free whenever a group resets.
+        self._question_lock = asyncio.Lock()
         self._reset()
 
     def _reset(self) -> None:
@@ -185,6 +196,9 @@ class GroupSpeaker:
         self._registered = 0
         self._batch: _Batch | None = None
         self._flush_started = False
+        self._write_started = False
+        self._filler_claimed = False
+        self._question_holder: ReplyHandle | None = None
 
     def set_playback_listener(self, listener: Callable[[float | None], None] | None) -> None:
         self._playback_listener = listener
@@ -223,6 +237,7 @@ class GroupSpeaker:
     # -- writing ---------------------------------------------------------
 
     async def _write(self, write: WriteFn, text: str, needs_live_tts: bool) -> tuple[Any, float | None]:
+        self._write_started = True
         started_at = self._clock()
         result = await write(text, needs_live_tts)
         first_write_at = getattr(result, "first_write_at", None)
@@ -239,20 +254,95 @@ class GroupSpeaker:
 
     # -- statements ------------------------------------------------------
 
+    async def _write_own_line(self, handle: ReplyHandle, text: str, write: WriteFn, role: Role) -> GroupSpeech:
+        """One reply that plays on its own inside a group: a late statement,
+        a question, or a statement whose lead failed. The line is prefixed
+        because the group has had two or more members."""
+        self._flush_started = True
+        prefixed = self._registered >= 2
+        line = compose_group_line(handle.label, text, prefixed=True) if prefixed else text
+        result, tts_ms = await self._write(write, line, line != text)
+        handle._state = "spoken"
+        self._notify()
+        return GroupSpeech(result, role, 1, prefixed, None, tts_ms)
+
     async def _speak_statement(self, handle: ReplyHandle, text: str, write: WriteFn) -> GroupSpeech:
         if self._registered == 1:
             return await self._write_alone(handle, text, write)
-        statement = _Statement(handle, text, write, asyncio.get_running_loop().create_future())
+        if self._flush_started:
+            return await self._write_own_line(handle, text, write, "late")
+        loop = asyncio.get_running_loop()
+        statement = _Statement(handle, text, write, loop.create_future())
         batch = self._batch
         if batch is None:
             batch = self._batch = _Batch(first_at=self._clock(), leader=statement)
-            batch.done = asyncio.get_running_loop().create_future()
+            batch.done = loop.create_future()
         batch.statements.append(statement)
         handle._state = "pending"
         self._notify()
-        if batch.leader is statement:
-            return await self._lead_flush(batch, statement)
-        return await statement.future
+        try:
+            if batch.leader is statement:
+                return await self._lead_flush(batch, statement)
+            speech = await statement.future
+        except BaseException:
+            if batch.leader is statement:
+                self._fail_batch(batch, statement)
+            else:
+                self._withdraw(batch, statement)
+            raise
+        if speech is None:
+            # The lead failed. This turn's own text still has to be heard.
+            return await self._write_own_line(handle, text, write, "late")
+        return speech
+
+    def _fail_batch(self, batch: _Batch, leader: _Statement) -> None:
+        """The lead raised or was cancelled: release every follower so it
+        writes its own line, and let a later statement start a fresh batch
+        when nothing was flushed yet."""
+        if self._batch is batch and not batch.started:
+            self._batch = None
+        for item in batch.statements:
+            if item is not leader and not item.future.done():
+                item.future.set_result(None)
+        if batch.done is not None and not batch.done.done():
+            batch.done.set_result(None)
+        self._notify()
+
+    def _withdraw(self, batch: _Batch, statement: _Statement) -> None:
+        """A follower was cancelled before the flush: its text leaves the merge."""
+        if not batch.started and statement in batch.statements:
+            batch.statements.remove(statement)
+            statement.handle._state = "idle"
+            self._notify()
+
+    # -- questions -------------------------------------------------------
+
+    async def _speak_question(self, handle: ReplyHandle, text: str, write: WriteFn) -> GroupSpeech:
+        """A reply that asks plays after the statements, in its own write, and
+        the handle keeps the question slot until its `finish()` (D-09)."""
+        if self._registered == 1:
+            await self._take_question_slot(handle)
+            return await self._write_alone(handle, text, write)
+        # An asking handle counts as ready for everyone else's merge. The slot
+        # is taken in arrival order, so the first question plays first.
+        handle._state = "asking"
+        self._notify()
+        await self._take_question_slot(handle)
+        await self._wait_until(lambda: self._others_ready(handle))
+        batch = self._batch
+        if batch is not None and batch.done is not None and not batch.done.done():
+            # Statements come first. Flush them now, then wait for the write.
+            batch.forced = True
+            self._notify()
+            await asyncio.shield(batch.done)
+        return await self._write_own_line(handle, text, write, "question")
+
+    async def _take_question_slot(self, handle: ReplyHandle) -> None:
+        # A handle that asks again in its follow-up chain already holds it.
+        if self._question_holder is handle:
+            return
+        await self._question_lock.acquire()
+        self._question_holder = handle
 
     async def _lead_flush(self, batch: _Batch, leader: _Statement) -> GroupSpeech:
         await self._wait_until(lambda: batch.forced or self._others_ready(leader.handle))
@@ -267,7 +357,7 @@ class GroupSpeaker:
         count = len(statements)
         for item in statements:
             item.handle._state = "spoken"
-            if item is not leader:
+            if item is not leader and not item.future.done():
                 item.future.set_result(GroupSpeech(result, "follow", count, prefixed, merge_wait_ms, tts_ms))
         if batch.done is not None and not batch.done.done():
             batch.done.set_result(None)
@@ -277,6 +367,10 @@ class GroupSpeaker:
     # -- filler, playback, end of group ----------------------------------
 
     def _claim_filler(self) -> bool:
+        """True once per group, and never after a write in the group started."""
+        if self._write_started or self._filler_claimed:
+            return False
+        self._filler_claimed = True
         return True
 
     def _note_playback(self, ends_at: float | None) -> None:
@@ -286,6 +380,9 @@ class GroupSpeaker:
     def _finish(self, handle: ReplyHandle) -> None:
         if handle not in self._live:
             return
+        if self._question_holder is handle:
+            self._question_holder = None
+            self._question_lock.release()
         self._live.remove(handle)
         self._notify()
         if not self._live:
