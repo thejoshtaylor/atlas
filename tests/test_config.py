@@ -1955,6 +1955,11 @@ def test_shipped_config_example_speaker_id_values_match_the_dataclass_defaults(m
     monkeypatch.setenv("XAI_API_KEY", "test-value")
     monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
 
+    # The defaults claim below holds only while the speaker_id variables are
+    # absent (260929-ikm), so an ambient shell export must not leak in.
+    monkeypatch.delenv("SPEAKER_ID_MODE", raising=False)
+    monkeypatch.delenv("SPEAKER_ID_MODEL", raising=False)
+
     example_path = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
     config = load_config(example_path)
 
@@ -1968,3 +1973,49 @@ def test_shipped_config_example_speaker_id_values_match_the_dataclass_defaults(m
     assert config.speaker_id.speech_rms_floor == defaults.speech_rms_floor
     assert config.speaker_id.change_similarity_floor == defaults.change_similarity_floor
     assert config.speaker_id.enrollment_dir == defaults.enrollment_dir
+
+
+@pytest.mark.parametrize(
+    "mode_env, model_env, expected_mode, expected_model, error_substring",
+    [
+        (None, None, "off", None, None),
+        ("record", "campplus", "record", "campplus", None),
+        (None, "", "off", None, None),
+        ("", None, None, None, "speaker_id.mode"),
+    ],
+)
+def test_example_config_speaker_id_mode_and_model_expand_from_env(
+    monkeypatch, mode_env, model_env, expected_mode, expected_model, error_substring
+):
+    """260929-ikm: `speaker_id.mode` and `speaker_id.model` read
+    SPEAKER_ID_MODE and SPEAKER_ID_MODEL, so a hand-applied Secret can turn
+    on enrollment with no change to the committed file. Absent variables keep
+    the public defaults ("off" and null). The mode line stays double-quoted,
+    so an expanded `off` is a string and not the YAML 1.1 boolean False. The
+    model line stays unquoted, so an absent or empty value parses as null
+    and a quoted "null" string never reaches the model allowlist. An empty
+    mode is not replaced by the default, because `:-` fills only an absent
+    variable. It stops startup with a ConfigError that names the key."""
+    from pathlib import Path
+
+    # Imported here, not from the module top: other tests in this file
+    # reload atlas.config, which leaves the top-level ConfigError a stale class.
+    from atlas.config import ConfigError, load_config
+
+    _set_example_config_env(monkeypatch)
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.delenv("SPEAKER_ID_MODE", raising=False)
+    monkeypatch.delenv("SPEAKER_ID_MODEL", raising=False)
+    if mode_env is not None:
+        monkeypatch.setenv("SPEAKER_ID_MODE", mode_env)
+    if model_env is not None:
+        monkeypatch.setenv("SPEAKER_ID_MODEL", model_env)
+
+    example_path = Path(__file__).resolve().parents[1] / "config" / "config.example.yaml"
+    if error_substring is not None:
+        with pytest.raises(ConfigError, match=error_substring):
+            load_config(example_path)
+        return
+    config = load_config(example_path)
+    assert config.speaker_id.mode == expected_mode
+    assert config.speaker_id.model == expected_model
