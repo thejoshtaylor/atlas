@@ -1,5 +1,6 @@
 import * as React from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
+import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { EmptyState } from "@/components/state/EmptyState"
@@ -9,6 +10,7 @@ import { SubmitButton } from "@/components/state/SubmitButton"
 import { ApiError } from "@/lib/api"
 import { createSpeakerMutationOptions, speakersQueryOptions, type Speaker } from "@/lib/speakers"
 import { deriveSpeakersScreenState, formatEnrollmentProgress } from "./deriveSpeakersScreenState"
+import { EnrollmentPanel } from "./EnrollmentPanel"
 
 // D-01 through D-04: an admin manages household members here -- listing
 // enrollment progress, adding a member by name, enrolling one through the
@@ -19,6 +21,13 @@ import { deriveSpeakersScreenState, formatEnrollmentProgress } from "./deriveSpe
 // actually holds the line.
 
 function SpeakerRow({ speaker }: { speaker: Speaker }) {
+  // A fresh `key` on each open (`enrollSession`) remounts `EnrollmentPanel`
+  // with a clean reducer -- "Re-record phrases" starts at phrase 0 again
+  // even if a previous session for this same member was left mid-way.
+  const [enrollmentOpen, setEnrollmentOpen] = React.useState(false)
+  const [enrollSession, setEnrollSession] = React.useState(0)
+  const isEnrolled = speaker.enrolled_phrases >= speaker.required_phrases
+
   return (
     <li className="flex flex-col gap-2 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -26,7 +35,19 @@ function SpeakerRow({ speaker }: { speaker: Speaker }) {
           <span className="truncate text-body font-medium text-foreground">{speaker.display_name}</span>
           <span className="truncate text-label text-muted-foreground">{formatEnrollmentProgress(speaker)}</span>
         </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            setEnrollmentOpen((wasOpen) => !wasOpen)
+            setEnrollSession((count) => count + 1)
+          }}
+        >
+          {isEnrolled ? "Re-record phrases" : "Enroll"}
+        </Button>
       </div>
+      {enrollmentOpen ? <EnrollmentPanel key={enrollSession} speaker={speaker} /> : null}
     </li>
   )
 }
