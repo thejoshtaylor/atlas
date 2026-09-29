@@ -13,6 +13,7 @@ test_speaker_tracker.py` covers the tracker's own unit behavior).
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from atlas.config import SessionConfig
@@ -32,6 +33,11 @@ class _StubSpan:
     def __init__(self, measurement: SpeakerMeasurement) -> None:
         self._measurement = measurement
         self.decide_calls: "list[dict]" = []
+        # 11-06-PLAN.md Task 1 (D-12): `run_turn` reads `speaker_span.
+        # split_event` unconditionally off every span it opens -- never set
+        # by these tests, which drive the gate's own decision, not the
+        # drain's live-detection race.
+        self.split_event = asyncio.Event()
 
     async def decide(self, *, end_of_speech_at, references, timeout_s=SPEAKER_DECISION_TIMEOUT_S):
         self.decide_calls.append(

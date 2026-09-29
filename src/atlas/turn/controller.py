@@ -749,6 +749,10 @@ async def run_turn(
             # already-ended state; it waits for a genuinely new segment.
             finalize_if_already_ended=incoming is None,
             wake_phrase=wake_phrase,
+            # 11-06-PLAN.md Task 1 (D-12): `None` for every turn with no
+            # speaker span (D-07's camera/browser turns, mode "off") --
+            # byte-identical to before this plan.
+            split_event=speaker_span.split_event if speaker_span is not None else None,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -776,6 +780,13 @@ async def run_turn(
                 # drain's wake-only segment left behind.
                 finalize_if_already_ended=False,
                 wake_phrase=wake_phrase,
+                # 11-06-PLAN.md Task 1 (D-12): the same span's own
+                # split_event as the first drain above -- a wake-only first
+                # drain never gets far enough into the command for a second
+                # voice to have spoken yet, but the second drain is where
+                # the command itself, and any second voice inside it, is
+                # actually heard.
+                split_event=speaker_span.split_event if speaker_span is not None else None,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
 
@@ -819,6 +830,19 @@ async def run_turn(
             # speaker's name never reaches the browser's `turn.timing`
             # event contract.
             session_recorder.record_event(speaker_outcome.event)
+            # 11-06-PLAN.md Task 1 (D-12, D-21 the repudiation mitigation):
+            # one `speaker.split` event per part the tracker dropped, so a
+            # dropped part never vanishes with no record -- recorded next to
+            # the `speaker.result` event above, same recorder-only rule.
+            for split_event_payload in speaker_outcome.split_events:
+                session_recorder.record_event(split_event_payload)
+        if speaker_outcome.split_events:
+            # D-15: the count only -- never a name.
+            logger.info(
+                "turn %s: %d speaker part(s) dropped at a change point",
+                timings.turn_id,
+                len(speaker_outcome.split_events),
+            )
         if not speaker_outcome.decision.allowed:
             timings.turn_outcome = "unknown_speaker"
             await _cancel_state_task(state_task)
@@ -1803,6 +1827,7 @@ async def _drain_to_final_transcript(
     speech_signals: "Any | None" = None,
     finalize_if_already_ended: bool = False,
     wake_phrase: str | None = None,
+    split_event: "asyncio.Event | None" = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
 
@@ -1828,6 +1853,19 @@ async def _drain_to_final_transcript(
     `wait_for_end_of_speech`'s own docstring for the full rule; `run_turn`
     passes `incoming is None` for an ordinary wake turn's first drain and
     `False` for the 260922-woc second drain.
+
+    `split_event` (11-06-PLAN.md Task 1, D-12), when not `None`, is
+    `speaker_span.split_event` -- set once by the tracker's own live change
+    detection the instant a second voice's part appears after the kept
+    part in the same segment. A second, independent watch task races it
+    against the ordinary `vad.end` wait above, gated behind the same
+    `heard_speech` word-first rule (the wake cue's echo must not finalize a
+    turn speech-to-text has not heard a word of, exactly like a spurious
+    `vad.end` must not): whichever finalizes first sets `finalize_event`,
+    and the other's own timing mark is simply never written, since
+    `_stop_watch` cancels both tasks on every return path below.
+    `split_event=None` (the default, and every caller that predates this
+    plan) starts no second watch task at all -- byte-identical behavior.
 
     `onset_deadline` (plan 09-06, in `clock()`'s own domain) is a second,
     independent deadline from `max_utterance_s`'s own `deadline` below --
@@ -1879,6 +1917,7 @@ async def _drain_to_final_transcript(
 
     finalize_event: "asyncio.Event | None" = None
     watch_task: "asyncio.Task[None] | None" = None
+    split_watch_task: "asyncio.Task[None] | None" = None
     # Set by the first partial that carries words. A `vad.end` before that
     # finalizes nothing: on the real Pi, the wake cue's echo or a short
     # noise opened and closed a segment before the operator spoke, and
@@ -1927,6 +1966,27 @@ async def _drain_to_final_transcript(
             finalize_event.set()
 
         watch_task = asyncio.create_task(_watch_end_of_speech())
+
+        if split_event is not None:
+
+            async def _watch_split() -> None:
+                # 11-06-PLAN.md Task 1 (D-12): a second voice's own change
+                # point can finalize this drain before the segment's real
+                # `vad.end` ever arrives -- gated behind the same
+                # `heard_speech` word-first rule `_watch_end_of_speech`
+                # above already applies, so the wake cue's own echo can
+                # never trigger this either. Whichever of the two watch
+                # tasks finalizes first wins: the other's own timing mark
+                # is simply never written, since `_stop_watch` cancels both
+                # on every return path below.
+                await heard_speech.wait()
+                await split_event.wait()
+                if not finalize_event.is_set():
+                    timings.speaker_split_at = _time.monotonic()
+                    finalize_event.set()
+
+            split_watch_task = asyncio.create_task(_watch_split())
+
         stream = stt.stream(frames, fmt, finalize=finalize_event)
     else:
         stream = stt.stream(frames, fmt)
@@ -1939,6 +1999,10 @@ async def _drain_to_final_transcript(
             watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watch_task
+        if split_watch_task is not None:
+            split_watch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await split_watch_task
 
     deadline = clock() + max_utterance_s
     pending: Any | None = None

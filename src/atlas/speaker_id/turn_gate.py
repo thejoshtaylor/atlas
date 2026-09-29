@@ -19,10 +19,14 @@ from typing import Any
 
 from atlas.speaker_id.gate import SpeakerGateDecision, SpeakerMode, evaluate_speaker_gate
 from atlas.speaker_id.matching import MatchResult, ReferenceSet
-from atlas.speaker_id.tracker import SpeakerMeasurement, SpeakerTracker, TurnSpeakerSpan
+from atlas.speaker_id.tracker import DroppedPart, SpeakerMeasurement, SpeakerTracker, TurnSpeakerSpan
 from atlas.timing import TurnTimings
 
 SPEAKER_RESULT_EVENT = "speaker.result"
+# D-12: one event per part `TurnSpeakerSpan.decide()` dropped -- a second
+# voice's speech, recorded and then discarded, never a second turn (Phase
+# 12 runs the dropped parts as parallel turns).
+SPEAKER_SPLIT_EVENT = "speaker.split"
 
 
 @dataclass(frozen=True)
@@ -44,13 +48,17 @@ class SpeakerIdTurnContext:
 
 @dataclass(frozen=True)
 class SpeakerTurnOutcome:
-    """What `run_turn` needs back: the gate's own allow/block decision, and
-    the `speaker.result` event to record regardless of which way the
-    decision went (D-13 wants the match recorded even when it did not
-    gate)."""
+    """What `run_turn` needs back: the gate's own allow/block decision, the
+    `speaker.result` event to record regardless of which way the decision
+    went (D-13 wants the match recorded even when it did not gate),
+    `speaker_name` (D-14, set only when `decision.identified`) for the
+    brain hint, and `split_events` (D-12) -- one `speaker.split` event per
+    part `decide()` dropped, empty for every turn with no split."""
 
     decision: SpeakerGateDecision
     event: "dict[str, Any]"
+    speaker_name: "str | None" = None
+    split_events: "tuple[dict[str, Any], ...]" = ()
 
 
 def _detail_for(
@@ -104,6 +112,28 @@ def _build_event(
     }
 
 
+def _build_split_event(
+    part: "DroppedPart", *, turn_started_at: "float | None", threshold: float
+) -> "dict[str, Any]":
+    """One `speaker.split` event (D-12) for a part `decide()` dropped.
+    `speaker_name` is set only when the part's own best score reaches
+    `threshold` -- the identical bar the gate itself applies, so a dropped
+    part's name is never shown more readily than an identified turn's own
+    would be. `offset_s` is `None` without a `turn_started_at` to measure
+    from (a defensive case: `run_turn` always marks it first)."""
+    match = part.match
+    identified = match is not None and match.best_score is not None and match.best_score >= threshold
+    return {
+        "type": SPEAKER_SPLIT_EVENT,
+        "kept": False,
+        "offset_s": (part.started_at - turn_started_at) if turn_started_at is not None else None,
+        "speech_ms": part.speech_ms,
+        "best_speaker_id": match.best_speaker_id if match is not None else None,
+        "speaker_name": match.best_name if (identified and match is not None) else None,
+        "score": match.best_score if match is not None else None,
+    }
+
+
 async def evaluate_turn_speaker(
     context: "SpeakerIdTurnContext | None",
     span: "TurnSpeakerSpan | None",
@@ -118,10 +148,12 @@ async def evaluate_turn_speaker(
     a context at all) and a context whose `tracker` is `None` (mode
     `"off"`) both allow unconditionally and await nothing -- there is no
     span to decide in either case. `end_of_speech_at` prefers
-    `timings.vad_end_at` (the Pi's own real `vad.end`) and falls back to
-    `timings.stt_final_at` for a turn that somehow has no `vad_end_at`
-    recorded -- mirroring the same fallback `turn/early_finalize.py`
-    already establishes for a turn with no edge source at all.
+    `timings.vad_end_at` (the Pi's own real `vad.end`), then falls back to
+    `timings.speaker_split_at` (plan 11-06, D-12: a second voice's own
+    change point finalized the drain instead) and then to
+    `timings.stt_final_at` for a turn that somehow has neither -- mirroring
+    the same fallback `turn/early_finalize.py` already establishes for a
+    turn with no edge source at all.
     """
     if context is None:
         decision = SpeakerGateDecision.allow(effective_mode="off", identified=False)
@@ -139,7 +171,11 @@ async def evaluate_turn_speaker(
         )
         return SpeakerTurnOutcome(decision=decision, event=event)
 
-    end_of_speech_at = timings.vad_end_at if timings.vad_end_at is not None else timings.stt_final_at
+    end_of_speech_at = timings.vad_end_at
+    if end_of_speech_at is None:
+        end_of_speech_at = timings.speaker_split_at
+    if end_of_speech_at is None:
+        end_of_speech_at = timings.stt_final_at
     if span is not None:
         # Task 3 (D-16): `speaker_gate_wait_ms` is the wall-clock time this
         # turn actually spent awaiting `decide()` -- a coarser sibling of
@@ -178,4 +214,17 @@ async def evaluate_turn_speaker(
         window_count=measurement.window_count,
         speaker_id_ms=measurement.speaker_id_ms,
     )
-    return SpeakerTurnOutcome(decision=decision, event=event)
+    # D-14: never set on a turn the gate itself did not identify -- the
+    # brain hint (`turn/controller.py`) only ever composes for a name
+    # this same field carries.
+    speaker_name = (
+        measurement.match.best_name if (measurement.match is not None and decision.identified) else None
+    )
+    # D-12: one `speaker.split` event per part `decide()` dropped -- empty
+    # whenever `dropped_parts` is (every turn before this plan, and every
+    # single-voice segment after it).
+    split_events = tuple(
+        _build_split_event(part, turn_started_at=timings.turn_started_at, threshold=context.threshold)
+        for part in measurement.dropped_parts
+    )
+    return SpeakerTurnOutcome(decision=decision, event=event, speaker_name=speaker_name, split_events=split_events)

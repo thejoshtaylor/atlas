@@ -109,6 +109,13 @@ class TurnTimings:
     # all. Included in `log()` for the same structured-log-line reason.
     speaker_id_ms: float | None = None
     speaker_gate_wait_ms: float | None = None
+    # 11-06-PLAN.md Task 1 (D-12): the arrival time of the split -- a second
+    # voice's own change point ending the drain instead of a real Pi
+    # `vad.end`. Kept out of `_STAGE_ORDER`/`to_event()` for the identical
+    # reason `vad_end_at` is: a turn with no speaker span never sets it, and
+    # the browser timing contract does not move for one that does. Included
+    # in `log()`, matching `vad_end_at`/`speaker_id_ms` immediately above.
+    speaker_split_at: float | None = None
 
     def mark_turn_started(self) -> None:
         """Record the moment the turn began -- the mic toggle, in Phase 1."""
@@ -346,6 +353,7 @@ class TurnTimings:
                 "vad_end_at": self.vad_end_at,
                 "speaker_id_ms": self.speaker_id_ms,
                 "speaker_gate_wait_ms": self.speaker_gate_wait_ms,
+                "speaker_split_at": self.speaker_split_at,
                 "end_of_speech_to_first_audio_ms": self.end_of_speech_to_first_audio_ms,
                 "end_of_speech_to_answer_audio_ms": self.end_of_speech_to_answer_audio_ms,
                 "endpointing_delay_ms": self.endpointing_delay_ms,

@@ -9,6 +9,7 @@ has.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +33,9 @@ class _StubSpan:
     def __init__(self, measurement: SpeakerMeasurement) -> None:
         self._measurement = measurement
         self.decide_calls: "list[dict]" = []
+        # 11-06-PLAN.md Task 1 (D-12): `run_turn` reads `speaker_span.
+        # split_event` unconditionally off every span it opens.
+        self.split_event = asyncio.Event()
 
     async def decide(self, *, end_of_speech_at, references, timeout_s=SPEAKER_DECISION_TIMEOUT_S):
         self.decide_calls.append({"end_of_speech_at": end_of_speech_at, "references": references})

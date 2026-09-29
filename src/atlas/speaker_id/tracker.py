@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from atlas.audio.channels import select_channel
+from atlas.speaker_id.change_point import find_change_points, part_index_for_frame, split_parts
 from atlas.speaker_id.matching import MatchResult, ReferenceSet, mean_embedding
 from atlas.speaker_id.windows import SpeechWindow, SpeechWindowAccumulator
 
@@ -81,6 +82,25 @@ class _Segment:
 
 
 @dataclass(frozen=True)
+class DroppedPart:
+    """One part of a segment that D-12's change detection split off from
+    the kept part -- recorded as a `speaker.split` event
+    (`speaker_id/turn_gate.py`) and then dropped: never a second turn
+    (Phase 12), never aggregated into `decide()`'s own match.
+
+    `first_frame_index`/`last_frame_index` mirror `SpeechWindow`'s own
+    fields, spanning the part's own first and last window. `match` is
+    `None` when `decide()` was given no `references` to score against.
+    """
+
+    first_frame_index: int
+    last_frame_index: int
+    started_at: float
+    speech_ms: float
+    match: "MatchResult | None"
+
+
+@dataclass(frozen=True)
 class SpeakerMeasurement:
     """One `TurnSpeakerSpan.decide()` result.
 
@@ -89,6 +109,11 @@ class SpeakerMeasurement:
     could be embedded at all, and `"decision_timeout"` when the worker did
     not finish within `timeout_s`. `speaker_id_ms` is `None` without an
     `end_of_speech_at` to measure from.
+
+    `dropped_parts` (D-12) is every part of the span's windows that is not
+    the kept part -- empty for a span whose windows never crossed
+    `change_similarity_floor`, which is every measurement before plan
+    11-06 and every single-voice segment after it.
     """
 
     match: "MatchResult | None"
@@ -97,6 +122,42 @@ class SpeakerMeasurement:
     ready_at: "float | None"
     speaker_id_ms: "float | None"
     detail: "str | None"
+    dropped_parts: "tuple[DroppedPart, ...]" = ()
+
+
+def _collect_valid_windows(
+    segments: "list[_Segment]", start_after: "float | None"
+) -> "list[_PendingWindow]":
+    """Every window in `segments` (in window order -- segments are
+    chronological and a segment's own `windows` list is append-order),
+    whose embedding future has already resolved successfully. Filtered by
+    `start_after` when given (D-11: a follow-up span's own window opens
+    inside an already-running segment, so an earlier window in the same
+    segment does not belong to it). Shared by `TurnSpeakerSpan._check_for_split`
+    (live, partial) and `decide()` (final, complete).
+    """
+    valid: "list[_PendingWindow]" = []
+    for segment in segments:
+        for pending in segment.windows:
+            if start_after is not None and pending.window.started_at < start_after:
+                continue
+            future = pending.future
+            if not future.done() or future.cancelled() or future.exception() is not None:
+                continue
+            valid.append(pending)
+    return valid
+
+
+def _kept_part_index(
+    parts: "list[range]", windows: "list[SpeechWindow]", wake_frame_index: "int | None"
+) -> int:
+    """D-12: the part that decides the turn. For a wake turn
+    (`wake_frame_index` not `None`), the part holding the wake frame index
+    (`part_index_for_frame`). For a follow-up turn, the first part --
+    `start_after` has already trimmed away everything before it."""
+    if wake_frame_index is None:
+        return 0
+    return part_index_for_frame(parts, windows, wake_frame_index)
 
 
 class TurnSpeakerSpan:
@@ -107,6 +168,11 @@ class TurnSpeakerSpan:
     anchored to a timestamp and re-filters every segment at `decide()`
     time, since D-11's follow-up window can span more than one segment
     that did not exist yet when the span opened.
+
+    `split_event` (D-12) is set at most once, by `_check_for_split` --
+    called from the tracker's own window-done callback each time one more
+    of this span's windows finishes embedding, so a second voice's turn
+    can end without waiting for `decide()` to be awaited at all.
     """
 
     def __init__(
@@ -115,10 +181,14 @@ class TurnSpeakerSpan:
         *,
         start_segment: "_Segment | None" = None,
         start_after: "float | None" = None,
+        wake_frame_index: "int | None" = None,
     ) -> None:
         self._tracker = tracker
         self._start_segment = start_segment
         self._start_after = start_after
+        self._wake_frame_index = wake_frame_index
+        self.split_event: "asyncio.Event" = asyncio.Event()
+        self.split_detected_at: "float | None" = None
 
     def _segments(self) -> "list[_Segment]":
         if self._start_after is not None:
@@ -132,6 +202,36 @@ class TurnSpeakerSpan:
             # history (`_MAX_SEGMENTS`) -- nothing left to measure from.
             return []
         return self._tracker._segments[index:]
+
+    def _check_for_split(self, now: "float") -> None:
+        """D-12 live detection. Called from `SpeakerTracker._submit_window`'s
+        own window-done callback -- never a separate task (module docstring).
+        Recomputes change points over every window this span holds that has
+        already resolved, and sets `split_event` the first time a part later
+        than the kept part exists. A change entirely before the kept part
+        (someone spoke before the wake phrase) never sets it, because
+        nothing after the wake phrase needs to stop -- `kept_index` already
+        being the LAST part is exactly that case.
+        """
+        if self.split_event.is_set():
+            return
+        valid = _collect_valid_windows(self._segments(), self._start_after)
+        if len(valid) < 2:
+            # Fewer than two embeddings: `find_change_points` cannot report
+            # a change, and there is nothing to compare against yet.
+            return
+        embeddings = [pending.future.result() for pending in valid]
+        change_points = find_change_points(
+            embeddings, similarity_floor=self._tracker.change_similarity_floor
+        )
+        if not change_points:
+            return
+        windows = [pending.window for pending in valid]
+        parts = split_parts(len(valid), change_points)
+        kept_index = _kept_part_index(parts, windows, self._wake_frame_index)
+        if kept_index < len(parts) - 1:
+            self.split_event.set()
+            self.split_detected_at = now
 
     async def decide(
         self,
@@ -177,43 +277,75 @@ class TurnSpeakerSpan:
                 detail="decision_timeout",
             )
 
-        embeddings = []
-        weights = []
-        completed_ats: "list[float]" = []
-        for pending in pending_windows:
-            future = pending.future
-            if future.cancelled() or future.exception() is not None:
-                # Skip a window whose embedding raised (or was cancelled) --
-                # the rest of the turn's speech still measures something.
-                continue
-            embeddings.append(future.result())
-            weights.append(pending.window.speech_ms)
-            if pending.completed_at is not None:
-                completed_ats.append(pending.completed_at)
+        valid = [
+            pending
+            for pending in pending_windows
+            # Skip a window whose embedding raised (or was cancelled) --
+            # the rest of the turn's speech still measures something.
+            if not pending.future.cancelled() and pending.future.exception() is None
+        ]
 
-        if not embeddings:
+        if not valid:
             return SpeakerMeasurement(
                 match=None, speech_ms=0.0, window_count=0, ready_at=None, speaker_id_ms=None,
                 detail="no_speech_measured",
             )
 
-        embedding = mean_embedding(embeddings, weights)
+        embeddings = [pending.future.result() for pending in valid]
+        windows = [pending.window for pending in valid]
+        # D-12: the same split, over the same (now complete) window history
+        # `_check_for_split` already watched live -- a segment with exactly
+        # one voice throughout produces no change points and one part, the
+        # whole span kept, `dropped_parts` empty, byte-identical to every
+        # measurement before this plan.
+        change_points = find_change_points(
+            embeddings, similarity_floor=self._tracker.change_similarity_floor
+        )
+        parts = split_parts(len(valid), change_points)
+        kept_index = _kept_part_index(parts, windows, self._wake_frame_index)
+
+        dropped_parts: "list[DroppedPart]" = []
+        for part_index, part_range in enumerate(parts):
+            if part_index == kept_index:
+                continue
+            part_windows = [windows[i] for i in part_range]
+            part_weights = [w.speech_ms for w in part_windows]
+            part_embedding = mean_embedding([embeddings[i] for i in part_range], part_weights)
+            part_match = references.match(part_embedding) if references is not None else None
+            dropped_parts.append(
+                DroppedPart(
+                    first_frame_index=part_windows[0].first_frame_index,
+                    last_frame_index=part_windows[-1].last_frame_index,
+                    started_at=part_windows[0].started_at,
+                    speech_ms=sum(part_weights),
+                    match=part_match,
+                )
+            )
+
+        kept_range = parts[kept_index]
+        kept_windows = [windows[i] for i in kept_range]
+        kept_weights = [w.speech_ms for w in kept_windows]
+        embedding = mean_embedding([embeddings[i] for i in kept_range], kept_weights)
         match_start = self._tracker._clock()
         match = references.match(embedding) if references is not None else None
         match_elapsed_s = self._tracker._clock() - match_start
 
-        ready_at = max(completed_ats) if completed_ats else None
+        kept_completed_ats = [
+            valid[i].completed_at for i in kept_range if valid[i].completed_at is not None
+        ]
+        ready_at = max(kept_completed_ats) if kept_completed_ats else None
         speaker_id_ms: "float | None" = None
         if end_of_speech_at is not None and ready_at is not None:
             speaker_id_ms = (max(0.0, ready_at - end_of_speech_at) + match_elapsed_s) * 1000.0
 
         return SpeakerMeasurement(
             match=match,
-            speech_ms=sum(weights),
-            window_count=len(embeddings),
+            speech_ms=sum(kept_weights),
+            window_count=len(kept_windows),
             ready_at=ready_at,
             speaker_id_ms=speaker_id_ms,
             detail=None,
+            dropped_parts=tuple(dropped_parts),
         )
 
 
@@ -222,9 +354,10 @@ class SpeakerTracker:
     at wiring time (`speaker_id/wiring.py`), for the whole edge source's
     life -- never per turn.
 
-    `change_similarity_floor` is stored but unused by this plan; plan 11-06
-    (D-12's change-point split) reads it from here so `wiring.py` never
-    changes to add that plan's own wiring.
+    `change_similarity_floor` (D-12) is the floor `TurnSpeakerSpan` reads
+    for both its live detection (`_check_for_split`) and its final split
+    (`decide()`) -- stored here since plan 11-04 so this plan's own wiring
+    needed no change to `wiring.py`.
     """
 
     def __init__(
@@ -254,6 +387,10 @@ class SpeakerTracker:
         self._segments: "list[_Segment]" = []
         self._current_segment: "_Segment | None" = None
         self._wake_mark_frame_index: "int | None" = None
+        # D-12: the one span live detection reports to -- overwritten by the
+        # next `open_turn()` call, since only one turn is ever in flight on
+        # an edge source's own connection at a time.
+        self._active_span: "TurnSpeakerSpan | None" = None
 
     # -- EdgeAudioListener protocol -----------------------------------
 
@@ -314,13 +451,21 @@ class SpeakerTracker:
         range holds that index -- the most recent segment when there is no
         mark. `start_after=t` (a follow-up turn, D-11): anchors the span to
         every window, in any segment now or later, whose `started_at >= t`.
+
+        D-12: the returned span becomes `self._active_span` either way --
+        `_submit_window`'s own window-done callback reports every newly
+        finished window to it, live, for as long as it stays the most
+        recently opened span.
         """
         if start_after is not None:
-            return TurnSpeakerSpan(self, start_after=start_after)
-        frame_index = self._wake_mark_frame_index
-        self._wake_mark_frame_index = None
-        start_segment = self._segment_for_frame(frame_index)
-        return TurnSpeakerSpan(self, start_segment=start_segment)
+            span = TurnSpeakerSpan(self, start_after=start_after)
+        else:
+            frame_index = self._wake_mark_frame_index
+            self._wake_mark_frame_index = None
+            start_segment = self._segment_for_frame(frame_index)
+            span = TurnSpeakerSpan(self, start_segment=start_segment, wake_frame_index=frame_index)
+        self._active_span = span
+        return span
 
     def _segment_for_frame(self, frame_index: "int | None") -> "_Segment | None":
         if not self._segments:
@@ -347,6 +492,10 @@ class SpeakerTracker:
             if done_future.cancelled():
                 return
             pending.completed_at = self._clock()
+            # D-12: live detection runs right here, on the loop, with no
+            # extra task -- the module docstring's own promise.
+            if self._active_span is not None:
+                self._active_span._check_for_split(self._clock())
 
         future.add_done_callback(_mark_completed)
         segment.windows.append(pending)
