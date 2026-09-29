@@ -16,8 +16,10 @@ from atlas.speaker_id.embedding import EmbeddingWorker, SpeakerAudioTooShort
 from atlas.speaker_id.enrollment import ClipStore, EnrollmentError
 from atlas.speaker_id.matching import ReferenceSet
 from atlas.speaker_id.retroactive import (
+    RETROACTIVE_CAP,
     RETROACTIVE_MIN_INDEX,
     assigned_session_ids,
+    delete_retroactive_clip,
     is_edge_turn,
     store_retroactive_clip,
     trim_turn_speech,
@@ -220,3 +222,91 @@ async def test_refresh_does_nothing_without_a_context():
     state = SimpleNamespace(speaker_id_context=None)
 
     await refresh_live_reference(state, repo, speaker_id=1, display_name="Ann", model_id=_MODEL_ID)
+
+
+# -- cap, delete ------------------------------------------------------------
+
+
+async def _seed_clip(clip_store, repo, speaker, index: int, *, session_id: str) -> None:
+    from atlas.speaker_id.retroactive import write_sidecar
+
+    clip_store.write_clip(speaker.id, index, _pcm(3000, 16000))
+    write_sidecar(clip_store, speaker.id, index, session_id=session_id, speech_ms=1000.0)
+    await repo.upsert_embedding(
+        speaker_id=speaker.id,
+        phrase_index=index,
+        model_id=_MODEL_ID,
+        vector=[1.0, 0.0],
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+async def test_delete_embedding_on_the_fake_removes_every_model_row():
+    repo = FakeSpeakerRepository()
+    speaker = await repo.create_speaker(display_name="Ann", linked_user_id=None, created_at=datetime.now(timezone.utc))
+    for index, model_id in ((100, "a"), (100, "b"), (101, "a")):
+        await repo.upsert_embedding(
+            speaker_id=speaker.id,
+            phrase_index=index,
+            model_id=model_id,
+            vector=[1.0],
+            created_at=datetime.now(timezone.utc),
+        )
+
+    assert await repo.delete_embedding(speaker_id=speaker.id, phrase_index=100) == 2
+    assert await repo.delete_embedding(speaker_id=speaker.id, phrase_index=100) == 0
+    assert list(repo._embeddings) == [(speaker.id, 101, "a")]
+
+
+async def test_the_21st_clip_drops_the_oldest_and_never_a_prompted_phrase(tmp_path):
+    assert RETROACTIVE_CAP == 20
+    clip_store = ClipStore(tmp_path / "speakers")
+    repo = FakeSpeakerRepository()
+    speaker = await repo.create_speaker(display_name="Ann", linked_user_id=None, created_at=datetime.now(timezone.utc))
+    for index in [*range(5), *range(100, 120)]:
+        await _seed_clip(clip_store, repo, speaker, index, session_id=f"s-{index}")
+    references = ReferenceSet()
+    state = SimpleNamespace(speaker_id_context=SimpleNamespace(references=references, worker=None))
+    worker = EmbeddingWorker(FakeEmbedder())
+    try:
+        result = await _store(state, clip_store, repo, speaker, worker, session_id="s-new")
+    finally:
+        worker.close()
+
+    assert result.phrase_index == 120
+    assert result.dropped_phrase_indices == (100,)
+    assert not clip_store.clip_path(speaker.id, 100).exists()
+    assert not clip_store.clip_path(speaker.id, 100).with_suffix(".json").exists()
+    kept = sorted(key[1] for key in repo._embeddings)
+    assert kept == [*range(5), *range(101, 121)]
+    assert clip_store.list_clips(speaker.id) == kept
+    assert references.name_for(speaker.id) == "Ann"
+
+
+async def test_delete_removes_the_row_the_files_and_an_only_reference(tmp_path):
+    clip_store = ClipStore(tmp_path / "speakers")
+    repo = FakeSpeakerRepository()
+    speaker = await repo.create_speaker(display_name="Ann", linked_user_id=None, created_at=datetime.now(timezone.utc))
+    references = ReferenceSet()
+    state = SimpleNamespace(speaker_id_context=SimpleNamespace(references=references, worker=None))
+    worker = EmbeddingWorker(FakeEmbedder())
+    try:
+        await _store(state, clip_store, repo, speaker, worker)
+    finally:
+        worker.close()
+    assert references.name_for(speaker.id) == "Ann"
+
+    deleted = await delete_retroactive_clip(
+        state=state, clip_store=clip_store, speaker=speaker, phrase_index=100, speaker_repo=repo, model_id=_MODEL_ID
+    )
+
+    assert deleted is True
+    assert repo._embeddings == {}
+    assert not clip_store.clip_path(speaker.id, 100).exists()
+    assert assigned_session_ids(clip_store) == set()
+    assert references.name_for(speaker.id) is None
+
+    again = await delete_retroactive_clip(
+        state=state, clip_store=clip_store, speaker=speaker, phrase_index=100, speaker_repo=repo, model_id=_MODEL_ID
+    )
+    assert again is False

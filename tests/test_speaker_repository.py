@@ -284,3 +284,26 @@ async def test_upsert_embedding_refuses_an_empty_or_oversized_or_non_finite_vect
             vector=[float("nan")],
             created_at=datetime.now(timezone.utc),
         )
+
+
+@skip_without_postgres
+async def test_delete_embedding_removes_the_phrase_row_for_every_model(sessionmaker):
+    repo = PostgresSpeakerRepository(sessionmaker)
+    speaker = await repo.create_speaker(
+        display_name="Member A", linked_user_id=None, created_at=datetime.now(timezone.utc)
+    )
+    for phrase_index, model_id in ((100, "a"), (100, "b"), (101, "a")):
+        await repo.upsert_embedding(
+            speaker_id=speaker.id,
+            phrase_index=phrase_index,
+            model_id=model_id,
+            vector=[0.1, 0.2],
+            created_at=datetime.now(timezone.utc),
+        )
+
+    assert await repo.delete_embedding(speaker_id=speaker.id, phrase_index=100) == 2
+    assert await repo.delete_embedding(speaker_id=speaker.id, phrase_index=100) == 0
+
+    [remaining] = await repo.list_reference_embeddings("a")
+    assert remaining.phrase_index == 101
+    assert await repo.list_reference_embeddings("b") == []

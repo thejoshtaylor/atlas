@@ -349,6 +349,8 @@ async def test_an_enrolled_voice_is_answered_and_an_unenrolled_voice_is_silenced
 
         turn2_timing = _read_timing(session_dirs[1])
         assert turn2_timing["turn_outcome"] == "unknown_speaker"
+        # 260929-j08: a blocked turn must keep its recording for retroactive enrollment.
+        assert (session_dirs[1] / "audio.pcm").is_file()
 
         # -- Channel isolation: the wake detector and STT never saw -----
         # -- channel 0's fixed 1000 value. -------------------------------

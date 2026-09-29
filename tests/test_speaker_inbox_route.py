@@ -293,3 +293,93 @@ def test_an_operator_gets_403_on_the_inbox_routes(env):
     assert client.get(f"/api/speakers/voice-inbox/{directory.name}/audio").status_code == 403
     response = client.post(f"/api/speakers/voice-inbox/{directory.name}/assign", json={"speaker_id": ann.id})
     assert response.status_code == 403
+
+
+# -- retroactive clips ------------------------------------------------------
+
+
+def _assign(client, session_name: str, speaker_id: int):
+    response = client.post(f"/api/speakers/voice-inbox/{session_name}/assign", json={"speaker_id": speaker_id})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_the_assign_response_names_the_dropped_indices(env):
+    directory = _write_edge_session(env.session_config)
+    ann = env.member("Ann")
+    client = env.client()
+
+    assert _assign(client, directory.name, ann.id)["dropped_phrase_indices"] == []
+
+
+def test_clip_routes_list_play_and_delete_a_clip_and_free_its_turn(env):
+    directory = _write_edge_session(env.session_config)
+    ann = env.member("Ann")
+    client = env.client()
+    _assign(client, directory.name, ann.id)
+    assert _listed_ids(client) == []
+
+    listed = client.get(f"/api/speakers/{ann.id}/retroactive-clips")
+    assert listed.status_code == 200
+    [clip] = listed.json()["clips"]
+    assert clip["phrase_index"] == 100
+    assert clip["session_id"] == directory.name
+    assert clip["speech_ms"] == 2000.0
+    assert clip["created_at"]
+
+    audio = client.get(f"/api/speakers/{ann.id}/retroactive-clips/100/audio")
+    assert audio.status_code == 200
+    assert audio.headers["content-type"] == "audio/wav"
+    assert int(audio.headers["content-length"]) == len(audio.content)
+
+    assert client.delete(f"/api/speakers/{ann.id}/retroactive-clips/100").status_code == 204
+    assert client.get(f"/api/speakers/{ann.id}/retroactive-clips").json() == {"clips": []}
+    assert env.references.name_for(ann.id) is None
+    assert _listed_ids(client) == [directory.name]
+
+
+def test_clip_routes_refuse_prompted_indices_unknown_members_and_missing_clips(env):
+    ann = env.member("Ann")
+    env.clip_store.write_clip(ann.id, 2, b"\x00\x00" * 16000)
+    client = env.client()
+
+    assert client.get(f"/api/speakers/{ann.id}/retroactive-clips/3/audio").status_code == 404
+    assert client.get(f"/api/speakers/{ann.id}/retroactive-clips/100/audio").status_code == 404
+    assert client.delete(f"/api/speakers/{ann.id}/retroactive-clips/2").status_code == 404
+    assert env.clip_store.clip_path(ann.id, 2).is_file()
+    assert client.delete(f"/api/speakers/{ann.id}/retroactive-clips/100").status_code == 404
+    assert client.get("/api/speakers/999/retroactive-clips").status_code == 404
+    assert client.get("/api/speakers/999/retroactive-clips/100/audio").status_code == 404
+    assert client.delete("/api/speakers/999/retroactive-clips/100").status_code == 404
+
+
+def test_an_operator_gets_403_on_the_clip_routes(env):
+    ann = env.member("Ann")
+    client = env.client("operator")
+
+    assert client.get(f"/api/speakers/{ann.id}/retroactive-clips").status_code == 403
+    assert client.get(f"/api/speakers/{ann.id}/retroactive-clips/100/audio").status_code == 403
+    assert client.delete(f"/api/speakers/{ann.id}/retroactive-clips/100").status_code == 403
+
+
+def test_member_counts_split_prompted_phrases_from_retroactive_clips(env):
+    ann = env.member("Ann")
+    for index in (0, 1, 2, 100, 101):
+        asyncio.run(
+            env.repo.upsert_embedding(
+                speaker_id=ann.id,
+                phrase_index=index,
+                model_id=_MODEL_ID,
+                vector=[1.0, 0.0],
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    client = env.client()
+
+    [row] = client.get("/api/speakers").json()
+    assert row["enrolled_phrases"] == 3
+    assert row["retroactive_clips"] == 2
+
+    env.config.speaker_id = _speaker_config(model=None)
+    [row] = client.get("/api/speakers").json()
+    assert (row["enrolled_phrases"], row["retroactive_clips"]) == (0, 0)
