@@ -200,6 +200,37 @@ class RetroactiveAssignResult:
     speaker_id: int
     phrase_index: int
     speech_ms: float
+    dropped_phrase_indices: "tuple[int, ...]" = ()
+
+
+@dataclass(frozen=True)
+class RetroactiveClip:
+    """One retroactive clip. Each field but the index is `None` when the
+    sidecar is missing or unreadable."""
+
+    phrase_index: int
+    session_id: "str | None"
+    speech_ms: "float | None"
+    created_at: "str | None"
+
+
+def list_retroactive_clips(clip_store: ClipStore, speaker_id: int) -> "list[RetroactiveClip]":
+    """The retroactive clips of one member, oldest index first."""
+    clips: "list[RetroactiveClip]" = []
+    for index in retroactive_indices(clip_store, speaker_id):
+        sidecar = read_sidecar(clip_store, speaker_id, index) or {}
+        session_id = sidecar.get("session_id")
+        speech_ms = sidecar.get("speech_ms")
+        created_at = sidecar.get("created_at")
+        clips.append(
+            RetroactiveClip(
+                phrase_index=index,
+                session_id=session_id if isinstance(session_id, str) else None,
+                speech_ms=float(speech_ms) if isinstance(speech_ms, (int, float)) else None,
+                created_at=created_at if isinstance(created_at, str) else None,
+            )
+        )
+    return clips
 
 
 async def store_retroactive_clip(
@@ -217,9 +248,13 @@ async def store_retroactive_clip(
     """Write, embed, and store one retroactive clip. The caller holds
     `retroactive_lock`.
 
-    Order: WAV, embedding row, sidecar, live reference. When the embed or
-    the row fails, the new files go away. This uses no microphone, so it
-    does not touch `speaker_enrollment_in_progress` or `wake_suppressed`.
+    Order: WAV, embedding row, sidecar, cap drop, live reference. When the
+    embed or the row fails, the new files and row go away. The cap drop
+    removes the oldest clips beyond `RETROACTIVE_CAP` in this order: row,
+    live reference, files. A crash at worst leaves an orphan WAV that the
+    clip list shows and the operator can remove. This uses no microphone,
+    so it does not touch `speaker_enrollment_in_progress` or
+    `wake_suppressed`.
     """
     index = next_retroactive_index(await asyncio.to_thread(retroactive_indices, clip_store, speaker.id))
     await asyncio.to_thread(clip_store.write_clip, speaker.id, index, pcm16_mono, sample_rate=SAMPLE_RATE)
@@ -236,14 +271,73 @@ async def store_retroactive_clip(
             write_sidecar, clip_store, speaker.id, index, session_id=session_id, speech_ms=speech_ms
         )
     except SpeakerAudioTooShort:
-        await asyncio.to_thread(remove_clip_files, clip_store, speaker.id, index)
+        await _discard_new_clip(clip_store, speaker_repo, speaker.id, index)
         raise _too_short_error() from None
     except Exception:
-        await asyncio.to_thread(remove_clip_files, clip_store, speaker.id, index)
+        await _discard_new_clip(clip_store, speaker_repo, speaker.id, index)
         raise
 
+    # Only indices from RETROACTIVE_MIN_INDEX up are ever in this list, so a
+    # prompted phrase can never be dropped.
+    kept = sorted({*await asyncio.to_thread(retroactive_indices, clip_store, speaker.id), index})
+    dropped = tuple(kept[: max(0, len(kept) - RETROACTIVE_CAP)])
+    for dropped_index in dropped:
+        await speaker_repo.delete_embedding(speaker_id=speaker.id, phrase_index=dropped_index)
     await refresh_live_reference(
         state, speaker_repo, speaker_id=speaker.id, display_name=speaker.display_name, model_id=model_id
     )
-    logger.info("retroactive clip stored: speaker %s, phrase %s, session %s", speaker.id, index, session_id)
-    return RetroactiveAssignResult(speaker_id=speaker.id, phrase_index=index, speech_ms=speech_ms)
+    for dropped_index in dropped:
+        await asyncio.to_thread(remove_clip_files, clip_store, speaker.id, dropped_index)
+    logger.info(
+        "retroactive clip stored: speaker %s, phrase %s, session %s, dropped %s",
+        speaker.id,
+        index,
+        session_id,
+        len(dropped),
+    )
+    return RetroactiveAssignResult(
+        speaker_id=speaker.id, phrase_index=index, speech_ms=speech_ms, dropped_phrase_indices=dropped
+    )
+
+
+async def _discard_new_clip(
+    clip_store: ClipStore, speaker_repo: "SpeakerRepository", speaker_id: int, index: int
+) -> None:
+    """Undo a failed store: the files first, then the row when it exists."""
+    await asyncio.to_thread(remove_clip_files, clip_store, speaker_id, index)
+    try:
+        await speaker_repo.delete_embedding(speaker_id=speaker_id, phrase_index=index)
+    except Exception:
+        logger.warning("retroactive clip: could not remove the row for speaker %s, phrase %s", speaker_id, index)
+
+
+async def delete_retroactive_clip(
+    *,
+    state: Any,
+    clip_store: ClipStore,
+    speaker: "Speaker",
+    phrase_index: int,
+    speaker_repo: "SpeakerRepository",
+    model_id: "str | None",
+) -> bool:
+    """Remove one retroactive clip: the row, the live reference, then the
+    files. Return `False` when neither the WAV nor the sidecar exists. The
+    caller holds `retroactive_lock`. The caller must also refuse an index
+    under `RETROACTIVE_MIN_INDEX`."""
+
+    def _exists() -> bool:
+        return (
+            clip_store.clip_path(speaker.id, phrase_index).exists()
+            or _sidecar_path(clip_store, speaker.id, phrase_index).exists()
+        )
+
+    if not await asyncio.to_thread(_exists):
+        return False
+    await speaker_repo.delete_embedding(speaker_id=speaker.id, phrase_index=phrase_index)
+    if model_id is not None:
+        await refresh_live_reference(
+            state, speaker_repo, speaker_id=speaker.id, display_name=speaker.display_name, model_id=model_id
+        )
+    await asyncio.to_thread(remove_clip_files, clip_store, speaker.id, phrase_index)
+    logger.info("retroactive clip removed: speaker %s, phrase %s", speaker.id, phrase_index)
+    return True

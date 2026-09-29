@@ -27,6 +27,7 @@ from atlas.config import Config
 from atlas.db.speaker_repository import Speaker, SpeakerRepository
 from atlas.speaker_id.enrollment import EnrollmentError, enroll_phrase
 from atlas.speaker_id.phrases import ENROLLMENT_PHRASES
+from atlas.speaker_id.retroactive import RETROACTIVE_MIN_INDEX
 
 logger = logging.getLogger("atlas.routes.speakers")
 
@@ -70,12 +71,18 @@ class SpeakerResponse(BaseModel):
     display_name: str
     linked_user_id: "int | None"
     created_at: datetime
+    # Prompted phrases only (index under REQUIRED_ENROLLMENT_PHRASES).
     enrolled_phrases: int
     required_phrases: int
     model_id: "str | None"
+    # Clips from recorded turns (index 100 or more). Counted apart, so they
+    # never end prompted enrollment early.
+    retroactive_clips: int = 0
 
 
-def _to_response(speaker: Speaker, *, enrolled_phrases: int, model_id: "str | None") -> SpeakerResponse:
+def _to_response(
+    speaker: Speaker, *, enrolled_phrases: int, model_id: "str | None", retroactive_clips: int = 0
+) -> SpeakerResponse:
     return SpeakerResponse(
         id=speaker.id,
         display_name=speaker.display_name,
@@ -84,7 +91,24 @@ def _to_response(speaker: Speaker, *, enrolled_phrases: int, model_id: "str | No
         enrolled_phrases=enrolled_phrases,
         required_phrases=REQUIRED_ENROLLMENT_PHRASES,
         model_id=model_id,
+        retroactive_clips=retroactive_clips,
     )
+
+
+async def phrase_counts(repo: SpeakerRepository, model_id: "str | None") -> "dict[int, tuple[int, int]]":
+    """`speaker_id -> (prompted phrases, retroactive clips)` under `model_id`.
+    Empty when no model is set."""
+    if model_id is None:
+        return {}
+    counts: "dict[int, tuple[int, int]]" = {}
+    for row in await repo.list_reference_embeddings(model_id):
+        prompted, retroactive = counts.get(row.speaker_id, (0, 0))
+        if row.phrase_index < REQUIRED_ENROLLMENT_PHRASES:
+            prompted += 1
+        elif row.phrase_index >= RETROACTIVE_MIN_INDEX:
+            retroactive += 1
+        counts[row.speaker_id] = (prompted, retroactive)
+    return counts
 
 
 def _no_such_speaker_error() -> HTTPException:
@@ -138,17 +162,23 @@ async def create_speaker_or_409(
 async def list_speakers(
     request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
 ) -> list[SpeakerResponse]:
-    """`enrolled_phrases`/`model_id` (plan 11-07): read from
-    `count_embeddings` under the currently configured model -- with
-    `speaker_id.model` unset, every member reports `enrolled_phrases: 0`
-    and `model_id: null` rather than a spurious count against no model at
-    all."""
+    """`enrolled_phrases`/`model_id` (plan 11-07): read under the currently
+    configured model -- with `speaker_id.model` unset, every member reports
+    `enrolled_phrases: 0` and `model_id: null` rather than a spurious count
+    against no model at all. `enrolled_phrases` counts prompted phrases
+    only. `retroactive_clips` counts clips from recordings, so those clips
+    never end the prompted enrollment panel early (260929-j08)."""
     repo: SpeakerRepository = request.app.state.speaker_repo
     config: Config = request.app.state.config
     model_id = config.speaker_id.model_id
-    counts = await repo.count_embeddings(model_id) if model_id is not None else {}
+    counts = await phrase_counts(repo, model_id)
     return [
-        _to_response(speaker, enrolled_phrases=counts.get(speaker.id, 0), model_id=model_id)
+        _to_response(
+            speaker,
+            enrolled_phrases=counts.get(speaker.id, (0, 0))[0],
+            model_id=model_id,
+            retroactive_clips=counts.get(speaker.id, (0, 0))[1],
+        )
         for speaker in await repo.list_speakers()
     ]
 
@@ -268,11 +298,11 @@ async def record_enrollment_phrase(
     except EnrollmentError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
 
-    counts = await repo.count_embeddings(config.speaker_id.model_id)
+    counts = await phrase_counts(repo, config.speaker_id.model_id)
     return EnrollmentResponse(
         speaker_id=result.speaker_id,
         phrase_index=result.phrase_index,
         speech_ms=result.speech_ms,
-        enrolled_phrases=counts.get(speaker_id, 0),
+        enrolled_phrases=counts.get(speaker_id, (0, 0))[0],
         required_phrases=REQUIRED_ENROLLMENT_PHRASES,
     )

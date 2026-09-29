@@ -79,6 +79,11 @@ class SpeakerRepository(Protocol):
         model id, never leaves a stale duplicate row behind."""
         ...
 
+    async def delete_embedding(self, *, speaker_id: int, phrase_index: int) -> int:
+        """Remove the row for this phrase under every `model_id`, because
+        the clip is gone. Return the number of rows removed."""
+        ...
+
     async def list_reference_embeddings(self, model_id: str) -> "list[ReferenceEmbedding]":
         """Every embedding stored under `model_id`, across every member --
         the input to `speaker_id.matching.ReferenceSet.load` (plan 11-02)."""

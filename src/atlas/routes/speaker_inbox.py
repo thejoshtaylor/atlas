@@ -23,7 +23,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 from atlas.auth.dependencies import CurrentUser, Role, require_role
 from atlas.config import Config
-from atlas.db.speaker_repository import SpeakerRepository
+from atlas.db.speaker_repository import Speaker, SpeakerRepository
 from atlas.session.audio_wrap import wrap_pcm16_as_wav
 
 # Private helpers of `routes/sessions.py`, imported so that one confinement
@@ -46,9 +46,12 @@ from atlas.routes.speakers import (
 from atlas.speaker_id.embedding import SAMPLE_RATE
 from atlas.speaker_id.enrollment import ClipStore, EnrollmentError, _too_short_error
 from atlas.speaker_id.retroactive import (
+    RETROACTIVE_MIN_INDEX,
     RetroactiveAssignResult,
     assigned_session_ids,
+    delete_retroactive_clip,
     is_edge_turn,
+    list_retroactive_clips,
     resolve_embedding_worker,
     retroactive_lock,
     store_retroactive_clip,
@@ -98,6 +101,18 @@ class VoiceAssignResponse(BaseModel):
     speaker_id: int
     phrase_index: int
     speech_ms: float
+    dropped_phrase_indices: "list[int]"
+
+
+class RetroactiveClipResponse(BaseModel):
+    phrase_index: int
+    session_id: "str | None"
+    speech_ms: "float | None"
+    created_at: "str | None"
+
+
+class RetroactiveClipsResponse(BaseModel):
+    clips: "list[RetroactiveClipResponse]"
 
 
 def _http_error(exc: EnrollmentError) -> HTTPException:
@@ -315,5 +330,95 @@ async def assign_voice(
             raise
 
     return VoiceAssignResponse(
-        speaker_id=result.speaker_id, phrase_index=result.phrase_index, speech_ms=result.speech_ms
+        speaker_id=result.speaker_id,
+        phrase_index=result.phrase_index,
+        speech_ms=result.speech_ms,
+        dropped_phrase_indices=list(result.dropped_phrase_indices),
     )
+
+
+# -- retroactive clips of one member ----------------------------------------
+
+
+async def _member_or_404(request: Request, speaker_id: int) -> "Speaker":
+    speaker = await request.app.state.speaker_repo.get_speaker(speaker_id)
+    if speaker is None:
+        raise _no_such_speaker_error()
+    return speaker
+
+
+def _no_such_clip_error() -> HTTPException:
+    return HTTPException(status_code=404, detail="no such clip")
+
+
+def _clip_store_or_409(request: Request) -> ClipStore:
+    clip_store = getattr(request.app.state, "speaker_clip_store", None)
+    if clip_store is None:
+        raise HTTPException(status_code=409, detail="speaker storage is not configured")
+    return clip_store
+
+
+@router.get("/api/speakers/{speaker_id}/retroactive-clips")
+async def list_retroactive_clips_route(
+    speaker_id: int, request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> RetroactiveClipsResponse:
+    await _member_or_404(request, speaker_id)
+    clips = await asyncio.to_thread(list_retroactive_clips, _clip_store_or_409(request), speaker_id)
+    return RetroactiveClipsResponse(
+        clips=[
+            RetroactiveClipResponse(
+                phrase_index=clip.phrase_index,
+                session_id=clip.session_id,
+                speech_ms=clip.speech_ms,
+                created_at=clip.created_at,
+            )
+            for clip in clips
+        ]
+    )
+
+
+@router.get("/api/speakers/{speaker_id}/retroactive-clips/{phrase_index}/audio")
+async def retroactive_clip_audio(
+    speaker_id: int,
+    phrase_index: int,
+    request: Request,
+    _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> Response:
+    if phrase_index < RETROACTIVE_MIN_INDEX:
+        raise _no_such_clip_error()
+    await _member_or_404(request, speaker_id)
+    path = _clip_store_or_409(request).clip_path(speaker_id, phrase_index)
+    try:
+        wav_bytes = await asyncio.to_thread(path.read_bytes)
+    except OSError:
+        raise _no_such_clip_error() from None
+    return Response(
+        content=wav_bytes, media_type="audio/wav", headers={"Content-Length": str(len(wav_bytes))}
+    )
+
+
+@router.delete("/api/speakers/{speaker_id}/retroactive-clips/{phrase_index}", status_code=204)
+async def delete_retroactive_clip_route(
+    speaker_id: int,
+    phrase_index: int,
+    request: Request,
+    _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> None:
+    """Remove one clip. This needs no `speaker_id.model`: the row goes
+    under every model. The source turn returns to the inbox."""
+    if phrase_index < RETROACTIVE_MIN_INDEX:
+        raise _no_such_clip_error()
+    speaker = await _member_or_404(request, speaker_id)
+    clip_store = _clip_store_or_409(request)
+    config: Config = request.app.state.config
+    async with retroactive_lock(request.app.state):
+        removed = await delete_retroactive_clip(
+            state=request.app.state,
+            clip_store=clip_store,
+            speaker=speaker,
+            phrase_index=phrase_index,
+            speaker_repo=request.app.state.speaker_repo,
+            model_id=config.speaker_id.model_id,
+        )
+    if not removed:
+        raise _no_such_clip_error()

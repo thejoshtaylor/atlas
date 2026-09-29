@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from atlas.audio.channels import select_channel
 from atlas.speaker_id.embedding import EmbeddingWorker, SAMPLE_RATE, SpeakerAudioTooShort, SpeakerModelError
-from atlas.speaker_id.wiring import ensure_embedding_worker
+from atlas.speaker_id.wiring import ensure_embedding_worker, refresh_live_reference
 
 if TYPE_CHECKING:
     from atlas.config import SpeakerIdConfig
@@ -394,11 +394,8 @@ async def enroll_phrase(
         created_at=datetime.now(timezone.utc),
     )
 
-    context = getattr(state, "speaker_id_context", None)
-    if context is not None and context.references is not None:
-        rows = await speaker_repo.list_reference_embeddings(model_id)
-        vectors = [row.vector for row in rows if row.speaker_id == speaker.id]
-        if vectors:
-            context.references.upsert_speaker(speaker.id, speaker.display_name, vectors)
+    await refresh_live_reference(
+        state, speaker_repo, speaker_id=speaker.id, display_name=speaker.display_name, model_id=model_id
+    )
 
     return EnrollmentResult(speaker_id=speaker.id, phrase_index=phrase_index, speech_ms=speech_ms)

@@ -236,7 +236,7 @@ async def _seed_clip(clip_store, repo, speaker, index: int, *, session_id: str) 
         speaker_id=speaker.id,
         phrase_index=index,
         model_id=_MODEL_ID,
-        vector=[1.0, 0.0],
+        vector=[1.0] + [0.0] * 7,  # the FakeEmbedder dimension
         created_at=datetime.now(timezone.utc),
     )
 

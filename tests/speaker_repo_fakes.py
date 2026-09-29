@@ -81,6 +81,12 @@ class FakeSpeakerRepository:
             vector=list(vector),
         )
 
+    async def delete_embedding(self, *, speaker_id: int, phrase_index: int) -> int:
+        keys = [k for k in self._embeddings if k[0] == speaker_id and k[1] == phrase_index]
+        for key in keys:
+            del self._embeddings[key]
+        return len(keys)
+
     async def list_reference_embeddings(self, model_id: str) -> "list[ReferenceEmbedding]":
         return [e for e in self._embeddings.values() if e.model_id == model_id]
 

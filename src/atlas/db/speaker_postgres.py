@@ -140,6 +140,18 @@ class PostgresSpeakerRepository:
             await session.execute(statement)
             await session.commit()
 
+    async def delete_embedding(self, *, speaker_id: int, phrase_index: int) -> int:
+        """One `DELETE` for the phrase under every model id. Return its row count."""
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                delete(SpeakerEmbeddingRow).where(
+                    SpeakerEmbeddingRow.speaker_id == speaker_id,
+                    SpeakerEmbeddingRow.phrase_index == phrase_index,
+                )
+            )
+            await session.commit()
+            return int(result.rowcount)
+
     async def list_reference_embeddings(self, model_id: str) -> "list[ReferenceEmbedding]":
         async with self._sessionmaker() as session:
             rows = (
