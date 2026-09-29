@@ -25,6 +25,9 @@ DEFAULT_MUSIC_FIFO = "/run/atlas-edge/music.fifo"
 # the command over near-silence.
 DEFAULT_MUSIC_DUCK_LEVEL = 0.05
 DEFAULT_MUSIC_DUCK_RAMP_MS = 150
+# The ALSA card and mixer control the `volume` message sets through `amixer`.
+DEFAULT_VOLUME_CARD = "Array"
+DEFAULT_VOLUME_CONTROL = "PCM,0"
 
 
 class EdgeConfigError(Exception):
@@ -49,6 +52,18 @@ class EdgeConfig:
     music_fifo: str = DEFAULT_MUSIC_FIFO
     music_duck_level: float = DEFAULT_MUSIC_DUCK_LEVEL
     music_duck_ramp_ms: int = DEFAULT_MUSIC_DUCK_RAMP_MS
+    volume_card: str = DEFAULT_VOLUME_CARD
+    volume_control: str = DEFAULT_VOLUME_CONTROL
+
+
+def _mixer_name(raw: "dict[str, object]", key: str, default: str, path: object) -> str:
+    """A card or control name for `amixer`. It must be a non-empty string
+    that does not start with "-", so it can never become an `amixer`
+    option."""
+    value = raw.get(key, default)
+    if not isinstance(value, str) or not value or value.startswith("-"):
+        raise EdgeConfigError(f"{path}: {key} must be a non-empty string that does not start with '-', not {value!r}")
+    return value
 
 
 def load_config(path: "str | os.PathLike[str]") -> EdgeConfig:
@@ -99,4 +114,6 @@ def load_config(path: "str | os.PathLike[str]") -> EdgeConfig:
         music_fifo=str(raw.get("music_fifo", DEFAULT_MUSIC_FIFO)),
         music_duck_level=music_duck_level,
         music_duck_ramp_ms=music_duck_ramp_ms,
+        volume_card=_mixer_name(raw, "volume_card", DEFAULT_VOLUME_CARD, path),
+        volume_control=_mixer_name(raw, "volume_control", DEFAULT_VOLUME_CONTROL, path),
     )

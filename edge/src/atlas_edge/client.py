@@ -22,7 +22,17 @@ from urllib.parse import urlsplit
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from atlas_edge.protocol import LED_IDLE, Hello, Led, Ping, ProtocolError, parse_server_message, pong
+from atlas_edge.protocol import (
+    LED_IDLE,
+    Hello,
+    Led,
+    Ping,
+    ProtocolError,
+    Volume,
+    parse_server_message,
+    pong,
+    volume_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +94,23 @@ async def _notify_led(on_led: "Callable[[str], Awaitable[None] | None] | None", 
         logger.warning("led callback failed for state %r", state, exc_info=True)
 
 
+async def _answer_volume(
+    on_volume: "Callable[[Volume], Awaitable[int]] | None", request: Volume
+) -> str:
+    """Run `on_volume` for `request` and return the `volume.result` text to
+    send. Any failure becomes an error reply, so the server never waits for
+    an answer that will not come."""
+    if on_volume is None:
+        return volume_result(request.id, error="this device has no volume control")
+    try:
+        level = await on_volume(request)
+    except Exception as exc:
+        reason = str(exc) or type(exc).__name__
+        logger.error("volume request %d failed: %s", request.id, reason)
+        return volume_result(request.id, error=reason)
+    return volume_result(request.id, level=level)
+
+
 async def run_session(
     url: str,
     token: str,
@@ -96,6 +123,7 @@ async def run_session(
     connect: Callable[..., Any] = websockets.connect,
     hello_timeout_s: float = 10.0,
     on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
+    on_volume: "Callable[[Volume], Awaitable[int]] | None" = None,
 ) -> None:
     """One authenticated connection to `/ws/edge`: waits for the server's
     hello, then runs two concurrent loops -- sending whatever
@@ -110,6 +138,11 @@ async def run_session(
     `on_led` receives the state of every `led` message the server sends.
     It also receives `idle` at every session end (close, stop, error, or a
     refused handshake), so the ring goes dark when the link ends.
+
+    `on_volume` receives each `volume` message and returns the level the
+    mixer reports. The session sends the level, or the error text, back as
+    a `volume.result`. A message the Pi cannot parse is logged and dropped,
+    and the session goes on.
     """
     validate_server_url(url, allow_plaintext)
     stop_event = stop if stop is not None else asyncio.Event()
@@ -125,6 +158,7 @@ async def run_session(
             on_live_frame_sent=on_live_frame_sent,
             stop_event=stop_event,
             on_led=on_led,
+            on_volume=on_volume,
         )
     finally:
         await _notify_led(on_led, LED_IDLE)
@@ -141,6 +175,7 @@ async def _run_connection(
     on_live_frame_sent: "Callable[[float, float], Awaitable[None] | None] | None",
     stop_event: asyncio.Event,
     on_led: "Callable[[str], Awaitable[None] | None] | None",
+    on_volume: "Callable[[Volume], Awaitable[int]] | None",
 ) -> None:
     async with connect(url, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         hello_text = await asyncio.wait_for(ws.recv(), timeout=hello_timeout_s)
@@ -166,11 +201,21 @@ async def _run_connection(
                     if inspect.isawaitable(outcome):
                         await outcome
                     continue
-                parsed = parse_server_message(message)
+                try:
+                    parsed = parse_server_message(message)
+                except ProtocolError as exc:
+                    # A bad message never ends the session.
+                    logger.warning("dropped a malformed server message: %s", exc)
+                    continue
                 if isinstance(parsed, Ping):
                     await ws.send(pong(parsed.id, parsed.server_t_ms))
                 elif isinstance(parsed, Led):
                     await _notify_led(on_led, parsed.state)
+                elif isinstance(parsed, Volume):
+                    # Handled here, not in a separate task. The amixer
+                    # timeout bounds the wait, and a separate task would be
+                    # cancelled at session end before its reply went out.
+                    await ws.send(await _answer_volume(on_volume, parsed))
 
         send_task = asyncio.ensure_future(_send_outbound())
         receive_task = asyncio.ensure_future(_receive_inbound())
@@ -250,6 +295,7 @@ async def run_forever(
     rng: Callable[[], float] = random.random,
     stop: "asyncio.Event | None" = None,
     on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
+    on_volume: "Callable[[Volume], Awaitable[int]] | None" = None,
 ) -> None:
     """The Pi dials the server and owns the reconnect loop (D-02): one
     `session(...)` attempt after another, forever, until `stop` is set.
@@ -278,6 +324,8 @@ async def run_forever(
         session_kwargs: dict[str, Any] = {}
         if on_led is not None:
             session_kwargs["on_led"] = on_led
+        if on_volume is not None:
+            session_kwargs["on_volume"] = on_volume
         try:
             await session(
                 config.server_url,

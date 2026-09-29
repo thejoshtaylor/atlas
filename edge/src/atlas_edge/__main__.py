@@ -18,6 +18,10 @@ into `Capture`'s output callback. Music ducks while the server turn state
 is listening, thinking, or replying, and while reply audio plays. An open
 speech segment does not duck it. The VAD fires on music that leaks past the
 echo canceller.
+
+A `volume` message from the server sets the speaker level through
+`VolumeControl` (`volume.py`), which runs `amixer` on the configured card
+and control.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from atlas_edge.playback import Playback
 from atlas_edge.protocol import LED_IDLE, LED_LISTENING, LED_REPLYING, LED_THINKING
 from atlas_edge.service import run_service
 from atlas_edge.vad import SileroGate
+from atlas_edge.volume import VolumeControl
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +143,12 @@ def _default_music(config: EdgeConfig, duck_active: Callable[[], bool]) -> Any:
     )
 
 
+def _default_volume(config: EdgeConfig) -> Any:
+    """Nothing runs at construction, so a dev host with no `amixer` still
+    starts."""
+    return VolumeControl(config.volume_card, config.volume_control)
+
+
 DEFAULT_FACTORIES: Factories = {
     "capture": _default_capture,
     "playback": _default_playback,
@@ -146,6 +157,7 @@ DEFAULT_FACTORIES: Factories = {
     "latency_window": _default_latency_window,
     "led": _default_led,
     "music": _default_music,
+    "volume": _default_volume,
     "runner": run_forever,
 }
 
@@ -232,6 +244,7 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
         led.set_state(state)
 
     music = built["music"](config, duck_active)
+    volume = built["volume"](config)
     if music is not None:
         capture.mixer = music.mix
 
@@ -260,6 +273,7 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
                 runner=built["runner"],
                 stop=stop,
                 on_led=on_led,
+                on_volume=volume.apply,
             )
         finally:
             if music is not None:
