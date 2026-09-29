@@ -13,6 +13,8 @@ disk.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -25,6 +27,8 @@ from atlas.config import Config
 from atlas.db.speaker_repository import Speaker, SpeakerRepository
 from atlas.speaker_id.enrollment import EnrollmentError, enroll_phrase
 from atlas.speaker_id.phrases import ENROLLMENT_PHRASES
+
+logger = logging.getLogger("atlas.routes.speakers")
 
 router = APIRouter(tags=["speakers"])
 
@@ -60,14 +64,20 @@ class SpeakerResponse(BaseModel):
     display_name: str
     linked_user_id: "int | None"
     created_at: datetime
+    enrolled_phrases: int
+    required_phrases: int
+    model_id: "str | None"
 
 
-def _to_response(speaker: Speaker) -> SpeakerResponse:
+def _to_response(speaker: Speaker, *, enrolled_phrases: int, model_id: "str | None") -> SpeakerResponse:
     return SpeakerResponse(
         id=speaker.id,
         display_name=speaker.display_name,
         linked_user_id=speaker.linked_user_id,
         created_at=speaker.created_at,
+        enrolled_phrases=enrolled_phrases,
+        required_phrases=REQUIRED_ENROLLMENT_PHRASES,
+        model_id=model_id,
     )
 
 
@@ -107,8 +117,19 @@ class EnrollmentResponse(BaseModel):
 async def list_speakers(
     request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
 ) -> list[SpeakerResponse]:
+    """`enrolled_phrases`/`model_id` (plan 11-07): read from
+    `count_embeddings` under the currently configured model -- with
+    `speaker_id.model` unset, every member reports `enrolled_phrases: 0`
+    and `model_id: null` rather than a spurious count against no model at
+    all."""
     repo: SpeakerRepository = request.app.state.speaker_repo
-    return [_to_response(speaker) for speaker in await repo.list_speakers()]
+    config: Config = request.app.state.config
+    model_id = config.speaker_id.model_id
+    counts = await repo.count_embeddings(model_id) if model_id is not None else {}
+    return [
+        _to_response(speaker, enrolled_phrases=counts.get(speaker.id, 0), model_id=model_id)
+        for speaker in await repo.list_speakers()
+    ]
 
 
 @router.post("/api/speakers", status_code=201)
@@ -118,6 +139,7 @@ async def create_speaker(
     _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
 ) -> SpeakerResponse:
     repo: SpeakerRepository = request.app.state.speaker_repo
+    config: Config = request.app.state.config
 
     if payload.linked_user_id is not None:
         account_repo = request.app.state.account_repo
@@ -137,7 +159,17 @@ async def create_speaker(
         # `routes/accounts.py`'s own `create_user` IntegrityError handling.
         raise _display_name_conflict_error() from None
 
-    return _to_response(speaker)
+    return _to_response(speaker, enrolled_phrases=0, model_id=config.speaker_id.model_id)
+
+
+def _clip_removal_failed_error() -> HTTPException:
+    return HTTPException(
+        status_code=500,
+        detail=(
+            "the member's rows are removed, but the enrollment clips could not be -- they "
+            "will be removed at the next start"
+        ),
+    )
 
 
 @router.delete("/api/speakers/{speaker_id}", status_code=204)
@@ -147,13 +179,41 @@ async def delete_speaker(
     """A real `DELETE` (D-03) -- the member row and every one of its
     embedding rows are gone for good, not merely flagged. 404 for an
     unknown id; a second delete of the same id also 404s, since the row no
-    longer exists to look up."""
+    longer exists to look up.
+
+    Order: the rows first (`delete_speaker`), then the clip directory
+    (`ClipStore.delete_speaker_dir`, plan 11-07), then the live reference
+    (`ReferenceSet.remove_speaker` when a context exists). Rows go first
+    because a row with no clip can never be re-embedded, while a clip
+    directory with no row is exactly what the startup reconcile (plan
+    11-07 Task 3) removes on its own -- the opposite order would risk a
+    row surviving with no way back to its clips. When the clip directory
+    cannot be removed, the rows and the live reference are still gone; this
+    returns `500` naming that the clips are removed at the next start
+    (D-03), not a failed delete to retry, and logs the member id only.
+    """
     repo: SpeakerRepository = request.app.state.speaker_repo
     existing = await repo.get_speaker(speaker_id)
     if existing is None:
         raise _no_such_speaker_error()
 
     await repo.delete_speaker(speaker_id)
+
+    clip_removal_failed = False
+    clip_store = getattr(request.app.state, "speaker_clip_store", None)
+    if clip_store is not None:
+        try:
+            await asyncio.to_thread(clip_store.delete_speaker_dir, speaker_id)
+        except OSError:
+            clip_removal_failed = True
+            logger.warning("speaker delete: could not remove the clip directory for member %s", speaker_id)
+
+    context = getattr(request.app.state, "speaker_id_context", None)
+    if context is not None and context.references is not None:
+        context.references.remove_speaker(speaker_id)
+
+    if clip_removal_failed:
+        raise _clip_removal_failed_error()
 
 
 @router.get("/api/speakers/enrollment-phrases")

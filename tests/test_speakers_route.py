@@ -84,11 +84,19 @@ def test_create_then_list_returns_the_trimmed_member(tmp_path, monkeypatch):
         assert create_response.status_code == 201, create_response.text
         assert create_response.json()["display_name"] == "Member A"
         assert create_response.json()["linked_user_id"] is None
+        # Plan 11-07: this boot helper configures no `speaker_id:` block at
+        # all -- `speaker_id.model` defaults to `None`, so a freshly created
+        # member reports zero enrolled phrases and a null model id.
+        assert create_response.json()["enrolled_phrases"] == 0
+        assert create_response.json()["required_phrases"] == 5
+        assert create_response.json()["model_id"] is None
 
         list_response = client.get("/api/speakers")
         assert list_response.status_code == 200, list_response.text
         [listed] = list_response.json()
         assert listed["display_name"] == "Member A"
+        assert listed["enrolled_phrases"] == 0
+        assert listed["model_id"] is None
 
 
 @pytest.mark.parametrize("display_name", ["", "   ", "x" * 65, "bad/name", "bad;name"])

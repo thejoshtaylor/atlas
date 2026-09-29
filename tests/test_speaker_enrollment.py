@@ -706,13 +706,15 @@ def _create_admin(client: StarletteTestClient) -> None:
     assert response.status_code == 201, response.text
 
 
-def _boot_with_speaker_enrollment(tmp_path, monkeypatch):
+def _boot_with_speaker_enrollment(tmp_path, monkeypatch, *, speaker_id_overrides: "dict | None" = None):
     """`test_auth_setup._boot_with_empty_accounts`'s app (an empty account
     repository, so `_create_admin` below succeeds), plus `audio_source:
     edge`, an `edge_device_repo` holding device 1, a `speaker_repo`, and
     the `edge`/`speaker_id` config sections enrollment needs -- layered on
     top the same way `tests/test_speakers_route.py::_boot_with_speaker_repo`
-    layers a `speaker_repo` onto that same base."""
+    layers a `speaker_repo` onto that same base. `speaker_id_overrides`
+    merges onto the default `speaker_id:` block (e.g. `{"mode": "off",
+    "model": None}` for the no-model-configured case)."""
     import atlas.app as app_module
     import test_auth_setup
     from atlas.db.repository import Setting
@@ -739,6 +741,21 @@ def _boot_with_speaker_enrollment(tmp_path, monkeypatch):
         return repositories
 
     monkeypatch.setattr(app_module, "_build_repositories", _repositories)
+    speaker_id_config = {
+        "mode": "record",
+        "model": "campplus",
+        "threshold": 0.5,
+        "window_ms": 500,
+        "min_window_ms": 250,
+        "speech_rms_floor": 0.01,
+        "change_similarity_floor": 0.3,
+        "enrollment_dir": str(tmp_path / "speakers"),
+        "enrollment_gap_ms": 300,
+        "enrollment_start_timeout_s": 5.0,
+        "min_enrollment_speech_ms": 1000,
+    }
+    if speaker_id_overrides:
+        speaker_id_config.update(speaker_id_overrides)
     # `_boot_with_empty_accounts` already wrote a base config -- this
     # overwrite replaces `CONFIG_PATH` with one that also carries the
     # `edge`/`speaker_id` sections enrollment needs. `lifespan` reads
@@ -752,19 +769,7 @@ def _boot_with_speaker_enrollment(tmp_path, monkeypatch):
                 tmp_path,
                 extra={
                     "edge": {"asr_channel": 1, "pre_roll_ms": 200, "tail_ms": 300},
-                    "speaker_id": {
-                        "mode": "record",
-                        "model": "campplus",
-                        "threshold": 0.5,
-                        "window_ms": 500,
-                        "min_window_ms": 250,
-                        "speech_rms_floor": 0.01,
-                        "change_similarity_floor": 0.3,
-                        "enrollment_dir": str(tmp_path / "speakers"),
-                        "enrollment_gap_ms": 300,
-                        "enrollment_start_timeout_s": 5.0,
-                        "min_enrollment_speech_ms": 1000,
-                    },
+                    "speaker_id": speaker_id_config,
                 },
             )
         ),
@@ -878,3 +883,137 @@ def test_tracer_an_admin_enrolls_a_phrase_through_a_real_edge_source(tmp_path, m
             )
         finally:
             serve_future.cancel()
+
+
+# --- Task 2: the list's enrollment progress, and a delete that reaches ----
+# --- the clips and the live reference too ---------------------------------
+
+
+def _seed_embedding(speaker_repo: FakeSpeakerRepository, *, speaker_id: int, phrase_index: int) -> None:
+    from atlas.db.speaker_repository import ReferenceEmbedding
+
+    speaker_repo._embeddings[(speaker_id, phrase_index, _CAMPPLUS_MODEL_ID)] = ReferenceEmbedding(
+        speaker_id=speaker_id,
+        display_name=speaker_repo._speakers[speaker_id].display_name,
+        phrase_index=phrase_index,
+        model_id=_CAMPPLUS_MODEL_ID,
+        vector=_reference_vector_for(-2000),
+    )
+
+
+def test_list_reports_enrolled_phrases_and_model_id_for_the_configured_model(tmp_path, monkeypatch):
+    client, speaker_repo, _created_embedders = _boot_with_speaker_enrollment(tmp_path, monkeypatch)
+    # Pre-seed both the member row and its embeddings before `lifespan`
+    # ever runs (`with client:` below), so `build_speaker_context`'s own
+    # boot-time `list_reference_embeddings` read picks them up exactly as
+    # a real restart would.
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A")
+    speaker_repo._speakers[2] = fake_speaker(speaker_id=2, display_name="Member B")
+    speaker_repo._next_id = 3
+    for phrase_index in range(3):
+        _seed_embedding(speaker_repo, speaker_id=1, phrase_index=phrase_index)
+
+    with client:
+        _create_admin(client)
+        listed = {row["id"]: row for row in client.get("/api/speakers").json()}
+        assert listed[1]["enrolled_phrases"] == 3
+        assert listed[1]["model_id"] == _CAMPPLUS_MODEL_ID
+        assert listed[1]["required_phrases"] == 5
+        assert listed[2]["enrolled_phrases"] == 0
+        assert listed[2]["model_id"] == _CAMPPLUS_MODEL_ID
+
+
+def test_list_reports_zero_enrolled_phrases_and_null_model_id_with_no_model_configured(tmp_path, monkeypatch):
+    client, speaker_repo, _created_embedders = _boot_with_speaker_enrollment(
+        tmp_path, monkeypatch, speaker_id_overrides={"mode": "off", "model": None}
+    )
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A")
+    speaker_repo._next_id = 2
+
+    with client:
+        _create_admin(client)
+        [listed] = client.get("/api/speakers").json()
+        assert listed["enrolled_phrases"] == 0
+        assert listed["model_id"] is None
+        assert listed["required_phrases"] == 5
+
+
+def test_delete_removes_the_row_the_clip_directory_and_the_live_reference(tmp_path, monkeypatch):
+    client, speaker_repo, _created_embedders = _boot_with_speaker_enrollment(tmp_path, monkeypatch)
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A")
+    speaker_repo._next_id = 2
+    _seed_embedding(speaker_repo, speaker_id=1, phrase_index=0)
+
+    with client:
+        _create_admin(client)
+
+        import atlas.app as app_module
+
+        speaker_id_context = app_module.app.state.speaker_id_context
+        assert speaker_id_context is not None
+        assert speaker_id_context.references.enrolled_count == 1
+
+        clip_store = app_module.app.state.speaker_clip_store
+        clip_store.write_clip(1, 0, b"\x00\x00" * 100, sample_rate=16000)
+        assert clip_store.speaker_dir(1).is_dir()
+
+        response = client.delete("/api/speakers/1")
+        assert response.status_code == 204, response.text
+
+        assert client.get("/api/speakers").json() == []
+        assert (1, 0, _CAMPPLUS_MODEL_ID) not in speaker_repo._embeddings
+        assert not clip_store.speaker_dir(1).exists()
+        assert speaker_id_context.references.enrolled_count == 0
+        reference_vector = _reference_vector_for(-2000)
+        assert speaker_id_context.references.match(reference_vector).best_speaker_id is None
+
+
+def test_delete_returns_500_when_the_clip_directory_cannot_be_removed_but_rows_are_still_gone(
+    tmp_path, monkeypatch, caplog
+):
+    client, speaker_repo, _created_embedders = _boot_with_speaker_enrollment(tmp_path, monkeypatch)
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A")
+    speaker_repo._next_id = 2
+    _seed_embedding(speaker_repo, speaker_id=1, phrase_index=0)
+
+    with client:
+        _create_admin(client)
+
+        import atlas.app as app_module
+        import logging
+
+        clip_store = app_module.app.state.speaker_clip_store
+
+        def _raise(speaker_id: int) -> None:
+            raise OSError("disk exploded")
+
+        monkeypatch.setattr(clip_store, "delete_speaker_dir", _raise)
+
+        with caplog.at_level(logging.WARNING, logger="atlas.routes.speakers"):
+            response = client.delete("/api/speakers/1")
+        assert response.status_code == 500, response.text
+        assert "removed at the next start" in response.json()["detail"]
+
+        # The rows and the live reference are still gone despite the 500.
+        assert client.get("/api/speakers").json() == []
+        assert (1, 0, _CAMPPLUS_MODEL_ID) not in speaker_repo._embeddings
+        assert app_module.app.state.speaker_id_context.references.enrolled_count == 0
+
+        # The log line names the member id only.
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("1" in r.getMessage() for r in warning_records)
+        assert not any("Member A" in r.getMessage() for r in warning_records)
+
+
+def test_delete_on_an_already_gone_clip_directory_is_not_an_error(tmp_path, monkeypatch):
+    """`ClipStore.delete_speaker_dir` is itself idempotent (Task 1) -- a
+    member enrolled with no clips on disk at all (record mode, seeded
+    embeddings but no real capture ever ran) still deletes cleanly."""
+    client, speaker_repo, _created_embedders = _boot_with_speaker_enrollment(tmp_path, monkeypatch)
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A")
+    speaker_repo._next_id = 2
+
+    with client:
+        _create_admin(client)
+        response = client.delete("/api/speakers/1")
+        assert response.status_code == 204, response.text
