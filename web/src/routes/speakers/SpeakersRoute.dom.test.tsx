@@ -30,6 +30,7 @@ function stubSpeakers(
   options: {
     fetchSpeakers: () => Promise<unknown[]>
     createSpeaker?: (input: unknown) => Promise<unknown>
+    deleteSpeaker?: (input: unknown) => Promise<unknown>
   },
 ) {
   const notStubbed = (name: string) => async () => {
@@ -48,12 +49,16 @@ function stubSpeakers(
       },
     },
     deleteSpeakerMutationOptions: {
-      mutationFn: notStubbed("deleteSpeaker"),
+      mutationFn: options.deleteSpeaker ?? notStubbed("deleteSpeaker"),
       onSuccess: () => {
         void queryClient.invalidateQueries({ queryKey: ["speakers"] })
       },
     },
   }))
+  // Every mounted row builds an `EnrollmentPanel` conditionally, but no
+  // test in this file ever clicks "Enroll"/"Re-record phrases" -- it stays
+  // unmounted, so `@/lib/edgeDevices` needs no stub here (`EnrollmentPanel.
+  // dom.test.tsx` owns that surface directly).
 }
 
 function renderRoute(SpeakersRoute: React.ComponentType, queryClient: QueryClient) {
@@ -150,4 +155,88 @@ test("a 409 from the create route shows the server's own message under the form"
   fireEvent.click(screen.getByRole("button", { name: "Add member" }))
 
   expect(await screen.findByText("a member with this display name already exists")).toBeTruthy()
+})
+
+test("Delete opens an alert dialog naming the member and the voice data it removes; Cancel sends nothing, confirming sends exactly one delete", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const deleteCalls: unknown[] = []
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [sampleSpeaker({ id: 5, display_name: "Chris" })],
+    deleteSpeaker: async (input) => {
+      deleteCalls.push(input)
+    },
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  await screen.findByText("Chris")
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+
+  expect(await screen.findByText("Delete Chris?")).toBeTruthy()
+  expect(
+    screen.getByText(
+      "This removes the member and all of their voice data: the five recordings and the voice matches built from them.",
+    ),
+  ).toBeTruthy()
+
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+  expect(deleteCalls).toEqual([])
+
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+  await screen.findByText("Delete Chris?")
+  fireEvent.click(screen.getByRole("button", { name: "Delete member" }))
+
+  await waitFor(() => expect(deleteCalls).toEqual([{ speakerId: 5 }]))
+})
+
+test("confirming removes the member from the list after the refetch", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let listCalls = 0
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => {
+      listCalls += 1
+      return listCalls === 1 ? [sampleSpeaker({ id: 5, display_name: "Chris" })] : []
+    },
+    deleteSpeaker: async () => undefined,
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  await screen.findByText("Chris")
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+  await screen.findByText("Delete Chris?")
+  fireEvent.click(screen.getByRole("button", { name: "Delete member" }))
+
+  await waitFor(() => expect(screen.queryByText("Chris")).toBeNull())
+})
+
+test("a 500 from the delete route shows the server's own detail under that row, and the row stays", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [sampleSpeaker({ id: 5, display_name: "Chris" })],
+    deleteSpeaker: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(
+        500,
+        "the member's rows are removed, but the enrollment clips could not be -- they will be removed at the next start",
+      )
+    },
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  await screen.findByText("Chris")
+  fireEvent.click(screen.getByRole("button", { name: "Delete" }))
+  await screen.findByText("Delete Chris?")
+  fireEvent.click(screen.getByRole("button", { name: "Delete member" }))
+
+  expect(
+    await screen.findByText(
+      "the member's rows are removed, but the enrollment clips could not be -- they will be removed at the next start",
+    ),
+  ).toBeTruthy()
+  expect(screen.getByText("Chris")).toBeTruthy()
 })
