@@ -298,3 +298,122 @@ async def test_the_live_span_list_is_bounded_and_drops_the_oldest():
 
     assert len(tracker._live_spans) == 8
     assert tracker._live_spans[0] is spans[4]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: the spawn rules
+# ---------------------------------------------------------------------------
+
+
+async def test_parts_a_b_a_give_three_turns():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A, wake=True)
+    await rig.feed(VOICE_B)
+    await rig.feed(VOICE_A)
+
+    assert [context.split_part for context in rig.contexts] == [False, True, True]
+    assert [context.order_frame for context in rig.contexts] == [0, 1, 2]
+    await rig.finish()
+
+
+async def test_a_part_before_the_wake_part_starts_no_turn():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_B)
+    await rig.feed(VOICE_A, wake=True)  # the wake window has not embedded yet at the hit
+
+    assert len(rig.sources) == 1
+    assert rig.contexts[0].split_part is False
+    await rig.finish()
+
+
+@pytest.mark.parametrize(
+    ("mode", "enrolled"),
+    [("record", True), ("off", True), ("enforce", False)],
+    ids=["record", "off", "enforce-nobody-enrolled"],
+)
+async def test_a_part_is_dropped_and_logged_outside_enforce_with_someone_enrolled(mode, enrolled, caplog):
+    rig = _Rig(mode=mode, enrolled=enrolled)
+    rig.tracker.on_vad_start(1, 0.0)
+    with caplog.at_level(logging.INFO, logger="atlas.sources.turn_group"):
+        await rig.feed(VOICE_A, wake=True)
+        await rig.feed(VOICE_B)
+
+    assert len(rig.sources) == 1
+    dropped = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert len(dropped) == 1
+    assert "dropped 1 speaker part" in dropped[0]
+    assert "Example Member" not in dropped[0]
+    await rig.finish()
+
+
+async def test_parts_of_a_segment_with_no_wake_hit_start_no_turn():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A, wake=True)
+    await rig.finish()
+    rig.tracker.on_vad_end(2, 1.0)
+
+    rig.release.clear()
+    rig.tracker.on_vad_start(3, 2.0)  # the next speaker, no wake word
+    await rig.feed(VOICE_B)
+    await rig.feed(VOICE_A)
+
+    assert len(rig.sources) == 1, "a segment with no wake hit starts nothing"
+    await rig.finish()
+
+
+async def test_a_part_over_the_cap_is_dropped_and_recorded_as_turn_cap():
+    rig = _Rig(max_concurrent=2)
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A, wake=True)
+    await rig.feed(VOICE_B)
+    await rig.feed(VOICE_A)
+
+    assert len(rig.sources) == 2
+    assert rig.blocked == [(0.0, BLOCK_TURN_CAP)]
+    await rig.finish()
+
+
+async def test_parts_seen_before_a_late_wake_hit_start_once_when_the_hit_arrives():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A)
+    await rig.feed(VOICE_B)
+    assert rig.sources == [], "no wake hit yet: the part is dropped as unwoken"
+
+    rig.tracker.on_wake_hit(0)
+    rig.group.start_wake_turn(0)
+    await _settle()
+
+    assert [context.split_part for context in rig.contexts] == [False, True]
+    assert rig.contexts[0].speaker_span.split_event.is_set(), "the split already existed"
+    assert rig.contexts[0].speaker_span.split_frame_index == 1
+    await rig.finish()
+
+
+async def test_the_same_part_event_delivered_twice_starts_one_turn():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A, wake=True)
+    await rig.feed(VOICE_B)
+    event = PartEvent(segment_seq=1, part_index=1, first_frame_index=1, started_at=1.0)
+
+    rig.group._on_part(event)
+    rig.group._on_part(event)
+    assert rig.group.start_part_turn(event) is None
+    await _settle()
+
+    assert len(rig.sources) == 2
+    await rig.finish()
+
+
+async def test_a_part_that_holds_its_own_wake_hit_is_a_wake_turn_not_a_part_turn():
+    rig = _Rig()
+    rig.tracker.on_vad_start(1, 0.0)
+    await rig.feed(VOICE_A, wake=True)
+    await rig.feed(VOICE_B, wake=True)  # the second speaker says the wake word too
+
+    assert [context.split_part for context in rig.contexts] == [False, False]
+    await rig.finish()
