@@ -233,6 +233,14 @@ speaker_id:
   # recording of an enrolled voice -- that objection is accepted, not
   # mitigated, by design.
   #
+  # Each member has a "Can control home devices" setting on the Speakers
+  # page. In enforce mode, a member who is identified and does not have it
+  # cannot change devices. That member also cannot schedule a workflow that
+  # changes devices. Atlas speaks a fixed refusal. Questions, reads, and
+  # reminders without device steps still work. In off and record mode, no
+  # permission check runs. A recording or a similar voice of a permitted
+  # member bypasses the check.
+  #
   # off | record | enforce. "off" is the default: a new install has nobody
   # enrolled, so gating every turn on an empty speaker table would
   # silently block the whole house. "record" runs the embedding pipeline

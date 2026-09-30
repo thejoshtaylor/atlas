@@ -375,6 +375,24 @@ A recording of an enrolled member's voice can also pass this check. This is a
 known limit, not a defect. The speaker label only personalizes the reply. It
 never grants permission for anything.
 
+**Limit home control for a member.** You can stop one member from changing
+devices by voice.
+
+1. Sign in to the admin webapp as an admin.
+2. Open the **Speakers** screen.
+3. Find the member. Clear **Can control home devices**.
+
+The change applies to the next turn. You do not restart anything. The setting
+works only when `SPEAKER_ID_MODE` is `enforce`. In `off` and `record` mode, no
+check runs. In `enforce` mode, when the assistant identifies that member, it
+refuses every request that changes a device. It also refuses a scheduled
+workflow that has a device step. It speaks one fixed sentence, for example
+"Alex, you can't control the house." The member can still ask questions, read
+device states, and set reminders that have no device step. A voice match never
+grants permission. It can only take home control away. A recording or a similar
+voice of a permitted member can pass the check. The setting stops casual use.
+It does not stop a determined attacker.
+
 Both models come from the sherpa-onnx project's own release. Step 1 downloads
 them. This repository does not store them. The CAM++ model carries the
 Apache-2.0 license. The TitaNet-small model carries the CC-BY-4.0 license,
