@@ -119,6 +119,7 @@ from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, Segment
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
+from atlas.timers.core import describe_timers
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
 from atlas.turn.controller import _play_wake_cue, _speak, run_turn
@@ -271,6 +272,11 @@ _LEGACY_CONFIG_KEYS: tuple[_LegacyConfigKey, ...] = (
 # resolves the zone a second time.
 _resolved_timezone: "ZoneInfo | None" = None
 
+# Quick task 260930-06x: returns the timer poller's latest snapshot, or `None`
+# before its first poll. `lifespan` sets it when timers are wired and resets it
+# in teardown. `None` here means the context block is left out entirely.
+_timers_view: "Callable[[], tuple[Any, ...] | None] | None" = None
+
 
 def _current_moment() -> datetime:
     """The instant `_state_message` describes, in `_resolved_timezone`.
@@ -379,6 +385,7 @@ _PENDING_RUNS_UNAVAILABLE_LINE = (
     "Scheduled runs: not available this turn. You cannot see which runs "
     "are scheduled, so do not tell the user that there are none."
 )
+_TIMERS_UNAVAILABLE_LINE = "Timers and alarms: not available this turn. Do not tell the user there are none."
 
 
 def _state_message(
@@ -468,6 +475,12 @@ def _state_message(
         lines.append(_PENDING_RUNS_UNAVAILABLE_LINE)
     else:
         lines.append(summarise_pending_runs(pending_runs, now))
+    if _timers_view is not None:
+        timers_snapshot = _timers_view()
+        if timers_snapshot is None:
+            lines.append(_TIMERS_UNAVAILABLE_LINE)
+        else:
+            lines.append(describe_timers(timers_snapshot, now))
     return "\n".join(lines)
 
 
@@ -1326,7 +1339,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # uses -- production opens and closes its own short-lived client,
     # bounded to 5s so an unreachable Home Assistant cannot stall the
     # boot (T-h2f-05).
-    global _resolved_timezone
+    global _resolved_timezone, _timers_view
     injected_ha_client = getattr(app.state, "ha_http_client", None)
     owns_ha_client = injected_ha_client is None
     ha_client = injected_ha_client if injected_ha_client is not None else httpx.AsyncClient(timeout=5.0)
@@ -2108,6 +2121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if timer_repo is not None:
         timer_scheduler = TimerScheduler(timer_repo, _timer_speak, zone=_resolved_timezone)
         timer_scheduler.start()
+        _timers_view = lambda: timer_scheduler.snapshot  # noqa: E731 -- a one-line view, not a function
     app.state.timer_scheduler = timer_scheduler
 
     # Quick task 260924-4is (D1): started last, right before `yield`, so a
@@ -2185,6 +2199,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await workflow_scheduler.stop()
     if timer_scheduler is not None:
         await timer_scheduler.stop()
+    # A later boot in this process must not read a stopped scheduler.
+    _timers_view = None
     await speaker_http_client.aclose()
     # Quick task 260924-4iu (a): `app.state.tts` is a `BatchTtsAdapter`
     # around `XaiTts` for the xAI slot, and `BatchTtsAdapter.__getattr__`

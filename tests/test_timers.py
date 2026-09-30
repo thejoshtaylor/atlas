@@ -207,3 +207,344 @@ def test_lifespan_exposes_set_timer_and_rings_a_due_timer_on_the_camera_source(t
     assert [text for _source, text in spoken] == ["Your timer is done."] * RING_REPEATS
     assert all(source is camera_source for source, _text in spoken)
     assert cues and all(source is camera_source for source in cues)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: alarms, the rest of voice CRUD, and the per-turn context block
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+import os  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from pydantic import ValidationError  # noqa: E402
+
+from atlas.timers import service  # noqa: E402
+from atlas.timers.core import (  # noqa: E402
+    AlarmSpec,
+    TimerChanges,
+    TimerError,
+    TimerNotFoundError,
+    TimerSpec,
+    days_to_mask,
+    describe_timers,
+    next_alarm_at,
+)
+
+NY = ZoneInfo("America/New_York")
+WEEKDAY_MASK = days_to_mask(["mon", "tue", "wed", "thu", "fri"])
+
+
+def _utc(*args):
+    return datetime(*args, tzinfo=timezone.utc)
+
+
+def test_next_alarm_at_skips_to_the_next_allowed_weekday():
+    # Friday 2027-01-08 08:00 local is 13:00Z. Monday is 2027-01-11.
+    now = datetime(2027, 1, 8, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+
+    result = next_alarm_at("07:00", WEEKDAY_MASK, now, NY)
+
+    assert result == datetime(2027, 1, 11, 7, 0, tzinfo=NY).astimezone(timezone.utc)
+
+
+def test_next_alarm_at_once_is_today_before_the_time_and_strictly_after_now():
+    before = datetime(2027, 1, 8, 6, 59, tzinfo=NY).astimezone(timezone.utc)
+    assert next_alarm_at("07:00", 0, before, NY) == datetime(2027, 1, 8, 7, 0, tzinfo=NY).astimezone(
+        timezone.utc
+    )
+    exactly = datetime(2027, 1, 8, 7, 0, tzinfo=NY).astimezone(timezone.utc)
+    assert next_alarm_at("07:00", 0, exactly, NY) > exactly
+
+
+def test_next_alarm_at_dst_gap_and_overlap_ignore_the_process_timezone(monkeypatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("no tzset on this platform")
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    try:
+        gap_now = datetime(2026, 3, 8, 0, 0, tzinfo=NY).astimezone(timezone.utc)
+        assert next_alarm_at("02:30", 0, gap_now, NY) == _utc(2026, 3, 8, 7, 30)
+        overlap_now = datetime(2026, 11, 1, 0, 0, tzinfo=NY).astimezone(timezone.utc)
+        assert next_alarm_at("01:30", 0, overlap_now, NY) == _utc(2026, 11, 1, 5, 30)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+async def test_set_alarm_stores_an_alarm_with_its_next_ring():
+    repo = FakeTimerRepository()
+    now = datetime(2027, 1, 8, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+    host = TimerToolHost(repo, zone=NY, clock=lambda: now)
+
+    result = await host.call_tool(
+        "set_alarm", {"time": "07:00", "days": ["mon", "tue", "wed", "thu", "fri"], "label": "work"}
+    )
+
+    assert not result.is_error
+    assert result.content[0].text == "work alarm set for 7:00 AM on mon tue wed thu fri"
+    [alarm] = await repo.list_timers()
+    assert alarm.kind == "alarm"
+    assert alarm.time_of_day == "07:00"
+    assert alarm.repeat_days == WEEKDAY_MASK
+    assert alarm.due_at == next_alarm_at("07:00", WEEKDAY_MASK, now, NY)
+
+
+async def test_set_alarm_without_a_zone_names_server_timezone():
+    repo = FakeTimerRepository()
+
+    result = await _host(repo, zone=None).call_tool("set_alarm", {"time": "07:00"})
+
+    assert result.is_error
+    assert "server.timezone" in result.content[0].text
+    assert await repo.list_timers() == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"time": "25:00"},
+        {"time": "7:00"},
+        {"time": "07:00", "days": ["mon", "mon"]},
+        {"time": "07:00", "days": ["funday"]},
+    ],
+)
+async def test_set_alarm_refuses_bad_input(arguments):
+    repo = FakeTimerRepository()
+
+    result = await _host(repo, zone=NY).call_tool("set_alarm", arguments)
+
+    assert result.is_error
+    assert await repo.list_timers() == []
+
+
+def test_changes_models_refuse_empty_and_conflicting_changes():
+    with pytest.raises(ValidationError):
+        TimerChanges()
+    with pytest.raises(ValidationError):
+        TimerChanges(remaining_seconds=60, add_seconds=60)
+    with pytest.raises(ValidationError):
+        AlarmSpec(time="07:00", days=["mon", "mon"])
+
+
+async def _alarm_at_seven(repo, *, zone=NY, now=None, days=()):
+    now = now or datetime(2027, 1, 8, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+    return await service.create_alarm(
+        repo, AlarmSpec(time="07:00", days=list(days), label="work"), now=now, zone=zone
+    )
+
+
+async def test_a_one_time_alarm_rings_then_stays_listed_off():
+    repo = FakeTimerRepository()
+    now = datetime(2027, 1, 8, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+    alarm = await _alarm_at_seven(repo, now=now)
+    clock_box = [alarm.due_at]
+    spoken: list[str] = []
+
+    await _scheduler(repo, clock_box, spoken, zone=NY)._poll_once()
+
+    assert spoken == ["It's 7:00 AM. Your work alarm."] * 3
+    [after] = await repo.list_timers()
+    assert after.enabled is False
+    assert after.due_at is None
+
+
+async def test_a_repeating_alarm_moves_to_its_next_ring():
+    repo = FakeTimerRepository()
+    now = datetime(2027, 1, 8, 6, 0, tzinfo=NY).astimezone(timezone.utc)  # Friday
+    alarm = await _alarm_at_seven(repo, now=now, days=["mon", "tue", "wed", "thu", "fri"])
+    clock_box = [alarm.due_at]
+    spoken: list[str] = []
+
+    await _scheduler(repo, clock_box, spoken, zone=NY)._poll_once()
+
+    assert len(spoken) == 3
+    [after] = await repo.list_timers()
+    assert after.enabled is True
+    assert after.due_at == datetime(2027, 1, 11, 7, 0, tzinfo=NY).astimezone(timezone.utc)
+
+
+async def test_a_repeating_alarm_without_a_zone_turns_off_and_warns(caplog):
+    repo = FakeTimerRepository()
+    now = datetime(2027, 1, 8, 6, 0, tzinfo=NY).astimezone(timezone.utc)
+    alarm = await _alarm_at_seven(repo, now=now, days=["mon"])
+    clock_box = [alarm.due_at]
+    spoken: list[str] = []
+
+    with caplog.at_level(logging.WARNING, logger="atlas.timers.scheduler"):
+        await _scheduler(repo, clock_box, spoken, zone=None)._poll_once()
+
+    [after] = await repo.list_timers()
+    assert after.enabled is False
+    assert any("server.timezone" in record.getMessage() for record in caplog.records)
+
+
+async def _running_timer(repo, *, seconds=600, label="pasta"):
+    return await service.create_timer(repo, TimerSpec(duration_seconds=seconds, label=label), now=T0)
+
+
+async def test_update_timer_pause_resume_and_time_edits():
+    repo = FakeTimerRepository()
+    timer = await _running_timer(repo)
+    later = T0 + timedelta(seconds=100.5)
+
+    paused = await service.update_timer(repo, timer.id, TimerChanges(paused=True), now=later, zone=None)
+    assert paused.due_at is None
+    assert paused.remaining_s == 500  # ceil(499.5)
+
+    resumed = await service.update_timer(
+        repo, timer.id, TimerChanges(paused=False), now=later, zone=None
+    )
+    assert resumed.due_at == later + timedelta(seconds=500)
+    assert resumed.remaining_s is None
+
+    extended = await service.update_timer(
+        repo, timer.id, TimerChanges(add_seconds=300), now=later, zone=None
+    )
+    assert extended.due_at == resumed.due_at + timedelta(seconds=300)
+    assert extended.duration_s == 900
+
+    reset = await service.update_timer(
+        repo, timer.id, TimerChanges(remaining_seconds=60), now=later, zone=None
+    )
+    assert reset.due_at == later + timedelta(seconds=60)
+    assert reset.duration_s == 60
+
+    renamed = await service.update_timer(repo, timer.id, TimerChanges(label="tea"), now=later, zone=None)
+    assert renamed.label == "tea"
+
+
+async def test_update_timer_refuses_out_of_range_and_cross_kind_and_unknown():
+    repo = FakeTimerRepository()
+    timer = await _running_timer(repo)
+    alarm = await _alarm_at_seven(repo)
+
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, timer.id, TimerChanges(add_seconds=86400), now=T0, zone=NY)
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, timer.id, TimerChanges(add_seconds=-600), now=T0, zone=NY)
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, timer.id, TimerChanges(time="08:00"), now=T0, zone=NY)
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, timer.id, TimerChanges(enabled=False), now=T0, zone=NY)
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, alarm.id, TimerChanges(paused=True), now=T0, zone=NY)
+    with pytest.raises(TimerError):
+        await service.update_timer(repo, alarm.id, TimerChanges(add_seconds=5), now=T0, zone=NY)
+    with pytest.raises(TimerNotFoundError):
+        await service.update_timer(repo, 999, TimerChanges(label="x"), now=T0, zone=NY)
+    assert (await repo.get_timer(timer.id)) == timer
+
+
+async def test_update_alarm_time_days_and_on_off():
+    repo = FakeTimerRepository()
+    now = datetime(2027, 1, 8, 6, 0, tzinfo=NY).astimezone(timezone.utc)
+    alarm = await _alarm_at_seven(repo, now=now)
+
+    moved = await service.update_timer(repo, alarm.id, TimerChanges(time="08:00"), now=now, zone=NY)
+    assert moved.due_at == datetime(2027, 1, 8, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+    assert moved.time_of_day == "08:00"
+
+    repeating = await service.update_timer(
+        repo, alarm.id, TimerChanges(days=["sat", "sun"]), now=now, zone=NY
+    )
+    assert repeating.repeat_days == days_to_mask(["sat", "sun"])
+    assert repeating.due_at == datetime(2027, 1, 9, 8, 0, tzinfo=NY).astimezone(timezone.utc)
+
+    off = await service.update_timer(repo, alarm.id, TimerChanges(enabled=False), now=now, zone=NY)
+    assert off.enabled is False
+    assert off.due_at is None
+
+    on = await service.update_timer(repo, alarm.id, TimerChanges(enabled=True), now=now, zone=NY)
+    assert on.enabled is True
+    assert on.due_at == next_alarm_at("08:00", days_to_mask(["sat", "sun"]), now, NY)
+
+    renamed = await service.update_timer(repo, alarm.id, TimerChanges(label="gym"), now=now, zone=NY)
+    assert renamed.label == "gym"
+    assert renamed.due_at == on.due_at
+
+    with pytest.raises(TimerError, match="server.timezone"):
+        await service.update_timer(repo, alarm.id, TimerChanges(time="09:00"), now=now, zone=None)
+
+
+async def test_delete_through_the_tool_and_unknown_id():
+    repo = FakeTimerRepository()
+    host = _host(repo)
+    await host.call_tool("set_timer", {"duration_seconds": 60, "label": "pasta"})
+
+    result = await host.call_tool("delete_timer_or_alarm", {"id": 1})
+    assert not result.is_error
+    assert result.content[0].text == "deleted the pasta timer"
+    assert await repo.list_timers() == []
+
+    missing = await host.call_tool("delete_timer_or_alarm", {"id": 1})
+    assert missing.is_error
+
+
+async def test_update_through_the_tool_builds_the_spoken_result_in_code():
+    repo = FakeTimerRepository()
+    host = _host(repo, zone=NY)
+    await host.call_tool("set_timer", {"duration_seconds": 600, "label": "pasta"})
+
+    result = await host.call_tool("update_timer_or_alarm", {"id": 1, "paused": True})
+
+    assert not result.is_error
+    assert result.content[0].text == "pasta timer paused with 10 minutes left"
+    assert result.structured_content == {"id": 1, "kind": "timer"}
+    empty = await host.call_tool("update_timer_or_alarm", {"id": 1})
+    assert empty.is_error
+
+
+def test_describe_timers_renders_exact_deterministic_text():
+    from atlas.db.timer_repository import Timer
+
+    def timer(**kwargs):
+        base = dict(
+            label="",
+            due_at=None,
+            remaining_s=None,
+            duration_s=None,
+            time_of_day=None,
+            repeat_days=0,
+            enabled=True,
+            created_at=T0,
+        )
+        base.update(kwargs)
+        return Timer(**base)
+
+    timers = [
+        timer(id=3, kind="timer", label="pasta", duration_s=600, due_at=T0 + timedelta(seconds=432)),
+        timer(id=4, kind="timer", duration_s=300, remaining_s=120),
+        timer(id=5, kind="alarm", label="work", time_of_day="07:00", repeat_days=WEEKDAY_MASK,
+              due_at=T0 + timedelta(hours=9)),
+        timer(id=6, kind="alarm", time_of_day="06:30", enabled=False),
+    ]
+
+    assert describe_timers(timers, T0) == "\n".join(
+        [
+            "Timers and alarms (use these ids with update_timer_or_alarm and delete_timer_or_alarm, "
+            "never ask the user for an id):",
+            '- id 3: 10 minute timer "pasta", 7 minutes 12 seconds left',
+            "- id 4: 5 minute timer, paused with 2 minutes left",
+            '- id 5: alarm "work" at 7:00 AM, mon tue wed thu fri, on',
+            "- id 6: alarm at 6:30 AM, once, off",
+        ]
+    )
+    assert describe_timers([], T0) == "Timers and alarms: none are set."
+
+
+def test_state_message_carries_the_timers_block(monkeypatch):
+    import atlas.app as app_module
+
+    monkeypatch.setattr(app_module, "_current_moment", lambda: datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc))
+    baseline = app_module._state_message({})
+    assert "Timers and alarms" not in baseline
+
+    monkeypatch.setattr(app_module, "_timers_view", lambda: ())
+    assert app_module._state_message({}).endswith("Timers and alarms: none are set.")
+
+    monkeypatch.setattr(app_module, "_timers_view", lambda: None)
+    assert app_module._state_message({}).endswith(app_module._TIMERS_UNAVAILABLE_LINE)
+
+    monkeypatch.setattr(app_module, "_timers_view", None)
+    assert app_module._state_message({}) == baseline

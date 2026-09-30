@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from atlas.db.timer_repository import Timer, TimerRepository
-from atlas.timers.core import announcement
+from atlas.timers.core import announcement, next_alarm_at
 
 logger = logging.getLogger("atlas.timers.scheduler")
 
@@ -62,7 +62,16 @@ class TimerScheduler:
                 await self._task
 
     def _next_due_at(self, timer: Timer, now: datetime) -> "datetime | None":
-        return None
+        """The next ring of a repeating alarm. None for a timer, a one-time
+        alarm, and a repeating alarm when no zone is set (it turns off)."""
+        if timer.kind != "alarm" or not timer.repeat_days:
+            return None
+        if self._zone is None:
+            logger.warning(
+                "alarm %s repeats but server.timezone is not set; turning it off", timer.id
+            )
+            return None
+        return next_alarm_at(timer.time_of_day or "00:00", timer.repeat_days, now, self._zone)
 
     async def _poll_once(self) -> None:
         now = self._clock()
