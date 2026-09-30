@@ -1106,6 +1106,9 @@ def _make_run_turn_for_source(
             # and pending-action repository (D-08).
             handoff_context=build_handoff_context(app, source_name),
             speaker_id=speaker_id,
+            # 260930-e3r: read per turn, because the scheduler starts after
+            # the runners. "Hey Atlas, stop" ends a ringing timer.
+            timer_ring=getattr(app.state, "timer_scheduler", None),
         )
 
     return _run

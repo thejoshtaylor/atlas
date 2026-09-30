@@ -106,6 +106,7 @@ from atlas.calibration.record import EchoCalibration
 from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
+from atlas.sources.frame_fanout import TurnFrameSource
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
@@ -581,6 +582,8 @@ class SourceRunner:
         # Quick task 260930-e3r: `None` (every caller that predates it) means
         # no bare-stop listening while a timer or alarm rings.
         self._ring_window = ring_window
+        # The parallel path runs the window as one task on a fan-out subscription.
+        self._ring_window_task: "asyncio.Task[None] | None" = None
         self._source = source
         self._wake_detector = wake_detector
         self._decode_for_detector = decode_for_detector
@@ -759,11 +762,32 @@ class SourceRunner:
             cancelled = True
             raise
         finally:
+            if self._ring_window_task is not None:
+                self._ring_window_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._ring_window_task
             if self._turn_group is not None:
                 # Before the executor goes: a live turn's barge-in listener still uses it.
                 self._turn_group.close_frames()
                 await self._turn_group.drain(cancel=cancelled)
             self._detector_executor.shutdown(wait=True, cancel_futures=True)
+
+    def _ensure_ring_window_task(self) -> None:
+        """Parallel path: start the ring-stop window as one task, if none runs."""
+        task = self._ring_window_task
+        if task is not None and not task.done():
+            return
+        assert self._turn_group is not None and self._ring_window is not None
+        subscription = self._turn_group.fanout.subscribe()
+        window = self._ring_window
+
+        async def _listen() -> None:
+            try:
+                await window.run(TurnFrameSource(subscription, self._source))
+            finally:
+                subscription.close()
+
+        self._ring_window_task = asyncio.create_task(_listen())
 
     def _detect(self, chunk: bytes) -> WakeHit | None:
         """Runs on `self._detector_executor`'s single worker thread, never
@@ -802,8 +826,11 @@ class SourceRunner:
         # While a ring plays, the room has no wake word: a bare "stop" ends
         # it. The window reads the source the way a turn does, and it
         # starts no turn.
-        if self._turn_group is None and self._ring_window is not None and self._ring_window.active():
-            await self._ring_window.run(self._source)
+        if self._ring_window is not None and self._ring_window.active():
+            if self._turn_group is None:
+                await self._ring_window.run(self._source)
+            else:
+                self._ensure_ring_window_task()
             return
 
         hit = await asyncio.get_running_loop().run_in_executor(self._detector_executor, self._detect, chunk)

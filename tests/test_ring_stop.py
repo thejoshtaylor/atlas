@@ -365,3 +365,176 @@ async def test_wait_for_playback_end_sleeps_to_the_estimated_end():
     )
 
     assert slept == [1.0, 30.0]
+
+
+# --- "Hey Atlas, stop" through run_turn ----------------------------------------
+
+
+class _FakeRing:
+    """A `RingControl` with no scheduler. It counts `stop_ringing()` calls."""
+
+    def __init__(self, *, ringing: bool = True, text: str = "Your timer is done.") -> None:
+        self._ringing = ringing
+        self._text = text
+        self.stop_calls = 0
+        self._over = asyncio.Event()
+
+    @property
+    def ringing(self) -> bool:
+        return self._ringing
+
+    @property
+    def ring_text(self) -> str | None:
+        return self._text if self._ringing else None
+
+    def stop_ringing(self) -> bool:
+        self.stop_calls += 1
+        was = self._ringing
+        self._ringing = False
+        self._over.set()
+        return was
+
+    async def wait_ring_over(self) -> None:
+        await self._over.wait()
+
+
+class _EventSource:
+    """A `FakeAudioSource` that keeps every event the turn sends."""
+
+    def __init__(self) -> None:
+        from tests.conftest import FakeAudioSource
+
+        self._inner = FakeAudioSource([b"\x00\x01"])
+        self.events: list[dict] = []
+
+    def frames(self):
+        return self._inner.frames()
+
+    def source_format(self):
+        return self._inner.source_format()
+
+    async def send_audio(self, chunk: bytes) -> None:
+        await self._inner.send_audio(chunk)
+
+    async def send_event(self, event: dict) -> None:
+        self.events.append(event)
+
+
+async def _wake_turn(transcript: str, ring: _FakeRing | None):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+    from tests.conftest import BrainReply, FakeBrain, FakeTts
+
+    source = _EventSource()
+    brain = FakeBrain(replies=[BrainReply(text="all done")])
+    tts = FakeTts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        FakeStt([FinalTranscript(transcript)]),
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey atlas",
+        timer_ring=ring,
+    )
+    return source, brain, tts, timings
+
+
+@pytest.mark.parametrize("transcript", ["hey atlas stop", "hey atlas okay", "Hey Atlas, thanks."])
+async def test_a_wake_turn_with_a_stop_word_stops_the_ring_and_speaks_nothing(transcript):
+    ring = _FakeRing()
+
+    source, brain, tts, timings = await _wake_turn(transcript, ring)
+
+    assert ring.stop_calls == 1
+    assert brain.call_count == 0
+    assert tts.received_text == []
+    assert timings.turn_outcome == "ring_stopped"
+    timing_events = [e for e in source.events if e.get("turn_outcome") == "ring_stopped"]
+    assert timing_events
+
+
+async def test_a_wake_turn_with_another_command_leaves_the_ring_alone():
+    ring = _FakeRing()
+
+    _source, brain, tts, timings = await _wake_turn("hey atlas turn off the kitchen light", ring)
+
+    assert ring.stop_calls == 0
+    assert brain.call_count == 1
+    assert tts.received_text == ["all done"]
+    assert timings.turn_outcome != "ring_stopped"
+
+
+async def test_a_stop_word_when_nothing_rings_is_an_ordinary_turn():
+    ring = _FakeRing(ringing=False)
+
+    _source, brain, _tts, timings = await _wake_turn("hey atlas stop", ring)
+
+    assert ring.stop_calls == 0
+    assert brain.call_count == 1
+    assert timings.turn_outcome != "ring_stopped"
+
+
+# --- the parallel runner -------------------------------------------------------
+
+
+class _SlowFrames:
+    """Yields `count` frames, 10 ms apart, so a task the runner starts can run."""
+
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    async def frames(self):
+        for _ in range(self._count):
+            await asyncio.sleep(0.01)
+            yield b"\x00" * 320
+
+    def source_format(self) -> SourceFormat:
+        return SourceFormat("pcm", 16000)
+
+
+class _AlwaysHit:
+    def process(self, chunk: bytes):
+        from tests.conftest import FakeWakeHit
+
+        return FakeWakeHit(score=1.0)
+
+    def close(self) -> None:
+        pass
+
+
+async def test_the_parallel_runner_opens_the_window_during_a_ring_and_starts_no_wake_turn_then():
+    from atlas.sources.turn_group import ParallelTurns
+
+    ring = _FakeRing()
+    turns_at_stop: list[int] = []
+
+    async def run_turn_fn(source):
+        turns_at_stop.append(ring.stop_calls)
+
+    window = RingStopWindow(
+        lambda: ring, make_stt_transcribe(lambda: FakeStt([FinalTranscript("stop")]), max_utterance_s=2.0)
+    )
+    runner = SourceRunner(
+        "edge",
+        _SlowFrames(20),
+        _AlwaysHit(),
+        lambda chunk: chunk,
+        run_turn_fn,
+        parallel=ParallelTurns(max_concurrent=2),
+        ring_window=window,
+    )
+
+    await asyncio.wait_for(runner.run(), BOUND_S)
+
+    assert ring.stop_calls == 1
+    assert turns_at_stop, "wake turns must start again once the ring is stopped"
+    assert all(count == 1 for count in turns_at_stop)
+    assert runner._ring_window_task is not None and runner._ring_window_task.done()
+    assert runner.turn_group is not None
+    assert runner.turn_group.fanout._subscriptions == []

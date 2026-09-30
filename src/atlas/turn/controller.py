@@ -104,6 +104,7 @@ from atlas.providers.tts_xai import SinkFormat
 from atlas.session.recorder import SessionRecorder
 from atlas.speaker_id.tracker import TurnSpeakerSpan
 from atlas.speaker_id.turn_gate import SpeakerIdTurnContext, compose_speaker_hint, evaluate_turn_speaker
+from atlas.timers.ring_stop import RingControl, is_stop_command
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.early_finalize import wait_for_end_of_speech
@@ -433,8 +434,16 @@ async def run_turn(
     handoff_context: "HandoffContext | None" = None,
     speaker_id: "SpeakerIdTurnContext | None" = None,
     turn_context: "TurnContext | None" = None,
+    timer_ring: "RingControl | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
+
+    `timer_ring` (quick task 260930-e3r), when given and a timer or alarm is
+    ringing, lets "Hey Atlas, stop" end the ring. A wake turn whose command is
+    only a stop word stops the ring, calls no brain and speaks no reply. The
+    check runs before the no-command guard, because "okay" is a noise word
+    there. It never applies to a follow-up answer, so "cancel" still answers a
+    pending confirmation.
 
     `max_utterance_s`, `clock`, `poll_interval_s`, `tiers`, `filler_after_ms`,
     `filler_cache`, `macros`, `state_fetch`, and `session_recorder` all
@@ -999,6 +1008,23 @@ async def run_turn(
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
             logger.info("turn %s dropped: transcript does not open with the wake phrase", timings.turn_id)
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # 260930-e3r: "Hey Atlas, stop" ends a ringing timer or alarm. The ring
+        # going silent is the answer, so nothing is spoken and no brain runs.
+        if (
+            incoming is None
+            and timer_ring is not None
+            and timer_ring.ringing
+            and is_stop_command(final_text, ring_text=timer_ring.ring_text)
+        ):
+            timings.turn_outcome = "ring_stopped"
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            timer_ring.stop_ringing()
+            logger.info("turn %s stopped the ringing timer", timings.turn_id)
             await _emit_event(source, timings.to_event())
             timings.log()
             return
