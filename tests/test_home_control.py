@@ -44,7 +44,7 @@ from tests.test_turn_group_speech import _Turn, _run_both
 from tests.test_turn_speaker_gate import _measurement_for, _StubSpan, _StubTracker
 
 _LAMP = {"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"}
-_OTHER_LAMP = {"domain": "light", "service": "turn_on", "entity_id": "light.other_lamp"}
+_OTHER_LAMP = {"domain": "light", "service": "turn_on", "entity_id": "light.example_other_lamp"}
 _STATES = [{"entity_id": "light.example_lamp", "friendly_name": "lamp", "state": "off"}]
 _ALEX_REFUSAL = "Alex, you can't control the house."
 
@@ -397,7 +397,7 @@ async def test_each_turn_in_a_group_gets_its_own_permission_and_the_refusal_name
 
     await _run_both(alex, sam)
 
-    assert [arguments["entity_id"] for _, arguments in home.calls] == ["light.other_lamp"]
+    assert [arguments["entity_id"] for _, arguments in home.calls] == ["light.example_other_lamp"]
     (spoken,) = live_tts.received_text
     assert spoken.count(_ALEX_REFUSAL) == 1
     assert "Alex, Alex" not in spoken
