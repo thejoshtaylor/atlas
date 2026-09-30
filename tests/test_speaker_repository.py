@@ -307,3 +307,29 @@ async def test_delete_embedding_removes_the_phrase_row_for_every_model(sessionma
     [remaining] = await repo.list_reference_embeddings("a")
     assert remaining.phrase_index == 101
     assert await repo.list_reference_embeddings("b") == []
+
+
+@skip_without_postgres
+async def test_a_new_speaker_can_control_home_and_the_flag_round_trips(sessionmaker):
+    repo = PostgresSpeakerRepository(sessionmaker)
+    created = await repo.create_speaker(
+        display_name="Member A", linked_user_id=None, created_at=datetime.now(timezone.utc)
+    )
+    assert created.can_control_home is True
+
+    updated = await repo.set_can_control_home(created.id, False)
+
+    assert updated is not None
+    assert updated.can_control_home is False
+    assert (await repo.get_speaker(created.id)).can_control_home is False
+
+    restored = await repo.set_can_control_home(created.id, True)
+
+    assert restored is not None and restored.can_control_home is True
+
+
+@skip_without_postgres
+async def test_set_can_control_home_returns_none_for_an_unknown_id(sessionmaker):
+    repo = PostgresSpeakerRepository(sessionmaker)
+
+    assert await repo.set_can_control_home(999999, False) is None

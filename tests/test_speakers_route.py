@@ -212,3 +212,104 @@ def test_the_voice_inbox_route_is_registered_and_not_shadowed(tmp_path, monkeypa
         response = client.get("/api/speakers/voice-inbox")
         assert response.status_code == 200, response.text
         assert response.json() == {"items": []}
+
+
+def test_a_new_member_can_control_home_by_default(tmp_path, monkeypatch):
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+
+        assert created["can_control_home"] is True
+        assert client.get("/api/speakers").json()[0]["can_control_home"] is True
+
+
+def _install_speaker_context():
+    import atlas.app as app_module
+    from atlas.speaker_id.turn_gate import SpeakerIdTurnContext
+
+    context = SpeakerIdTurnContext(
+        tracker=None, references=None, mode="enforce", threshold=0.5, model_id=None, worker=None
+    )
+    app_module.app.state.speaker_id_context = context
+    return context
+
+
+def test_an_admin_patch_stores_the_flag_and_updates_the_live_denied_set(tmp_path, monkeypatch):
+    client, repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        context = _install_speaker_context()
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+
+        response = client.patch(f"/api/speakers/{created['id']}", json={"can_control_home": False})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["can_control_home"] is False
+        assert client.get("/api/speakers").json()[0]["can_control_home"] is False
+        assert asyncio.run(repo.get_speaker(created["id"])).can_control_home is False
+        assert context.home_control_denied == {created["id"]}
+
+        restored = client.patch(f"/api/speakers/{created['id']}", json={"can_control_home": True})
+
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["can_control_home"] is True
+        assert context.home_control_denied == set()
+
+
+def test_a_patch_works_when_no_speaker_context_exists(tmp_path, monkeypatch):
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+
+        response = client.patch(f"/api/speakers/{created['id']}", json={"can_control_home": False})
+
+        assert response.status_code == 200, response.text
+
+
+def test_a_patch_on_an_unknown_id_returns_404(tmp_path, monkeypatch):
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        response = client.patch("/api/speakers/999999", json={"can_control_home": False})
+        assert response.status_code == 404, response.text
+
+
+def test_an_operator_session_gets_403_on_patch(tmp_path, monkeypatch):
+    client, repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+        client.cookies.set(SecurityConfig().cookie_name, _operator_cookie())
+
+        response = client.patch(f"/api/speakers/{created['id']}", json={"can_control_home": False})
+
+        assert response.status_code == 403
+        assert asyncio.run(repo.get_speaker(created["id"])).can_control_home is True
+
+
+@pytest.mark.parametrize("body", [{"can_control_home": "no"}, {"can_control_home": False, "extra": 1}, {}])
+def test_a_malformed_patch_body_returns_422(tmp_path, monkeypatch, body):
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+
+        response = client.patch(f"/api/speakers/{created['id']}", json=body)
+
+        assert response.status_code == 422, response.text
+
+
+def test_delete_discards_the_id_from_the_denied_set(tmp_path, monkeypatch):
+    client, _repo = _boot_with_speaker_repo(tmp_path, monkeypatch)
+    with client:
+        _create_admin(client)
+        context = _install_speaker_context()
+        created = client.post("/api/speakers", json={"display_name": "Member A"}).json()
+        client.patch(f"/api/speakers/{created['id']}", json={"can_control_home": False})
+        assert context.home_control_denied == {created["id"]}
+
+        assert client.delete(f"/api/speakers/{created['id']}").status_code == 204
+
+        assert context.home_control_denied == set()

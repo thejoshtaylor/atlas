@@ -5,6 +5,7 @@ import {
   enrollPhraseMutationOptions,
   fetchEnrollmentPhrases,
   fetchSpeakers,
+  updateSpeakerMutationOptions,
 } from "./speakers"
 import { queryClient } from "./queryClient"
 
@@ -69,6 +70,36 @@ describe("speakers.ts -- calls the real routes/speakers.py paths", () => {
     await deleteSpeakerMutationOptions.mutationFn!({ speakerId: 7 }, {} as never)
     expect(calledUrl).toBe("/api/speakers/7")
     expect(calledMethod).toBe("DELETE")
+  })
+
+  test("updateSpeakerMutationOptions PATCHes {can_control_home} to /api/speakers/{id}", async () => {
+    let calledUrl: string | undefined
+    let calledMethod: string | undefined
+    let calledBody: string | undefined
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calledUrl = url
+      calledMethod = init?.method
+      calledBody = init?.body as string
+      return jsonResponse(200, {
+        id: 7,
+        display_name: "Member B",
+        linked_user_id: null,
+        created_at: "2026-09-28T00:00:00Z",
+        enrolled_phrases: 0,
+        required_phrases: 5,
+        model_id: null,
+        retroactive_clips: 0,
+        can_control_home: false,
+      })
+    }) as typeof fetch
+    const updated = await updateSpeakerMutationOptions.mutationFn!(
+      { speakerId: 7, canControlHome: false },
+      {} as never,
+    )
+    expect(calledUrl).toBe("/api/speakers/7")
+    expect(calledMethod).toBe("PATCH")
+    expect(JSON.parse(calledBody!)).toEqual({ can_control_home: false })
+    expect(updated.can_control_home).toBe(false)
   })
 
   test("fetchEnrollmentPhrases calls GET /api/speakers/enrollment-phrases", async () => {

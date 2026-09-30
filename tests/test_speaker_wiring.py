@@ -198,3 +198,21 @@ async def test_enforce_with_an_enrolled_member_logs_no_warning_and_loads_referen
     assert context.references.enrolled_count == 1
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings == []
+
+
+@pytest.mark.parametrize(("mode", "expected"), [("enforce", {1}), ("record", {1}), ("off", set())])
+async def test_the_context_loads_the_members_without_home_control(mode, expected):
+    speaker_repo = FakeSpeakerRepository()
+    speaker_repo._speakers[1] = fake_speaker(speaker_id=1, display_name="Member A", can_control_home=False)
+    speaker_repo._speakers[2] = fake_speaker(speaker_id=2, display_name="Member B")
+    speaker_repo._next_id = 3
+    config = _config(speaker_id={**_MEASURED_SPEAKER_ID, "mode": mode})
+
+    context = await build_speaker_context(
+        config,
+        edge_source=_FakeEdgeSource(),
+        speaker_repo=speaker_repo,
+        embedder_factory=lambda speaker_config: _DummyEmbedder(),
+    )
+
+    assert context.home_control_denied == expected

@@ -22,6 +22,7 @@ function sampleSpeaker(overrides: Record<string, unknown> = {}) {
     required_phrases: 5,
     model_id: "cam++",
     retroactive_clips: 0,
+    can_control_home: true,
     ...overrides,
   }
 }
@@ -32,6 +33,7 @@ function stubSpeakers(
     fetchSpeakers: () => Promise<unknown[]>
     createSpeaker?: (input: unknown) => Promise<unknown>
     deleteSpeaker?: (input: unknown) => Promise<unknown>
+    updateSpeaker?: (input: unknown) => Promise<unknown>
   },
 ) {
   const notStubbed = (name: string) => async () => {
@@ -51,6 +53,12 @@ function stubSpeakers(
     },
     deleteSpeakerMutationOptions: {
       mutationFn: options.deleteSpeaker ?? notStubbed("deleteSpeaker"),
+      onSuccess: () => {
+        void queryClient.invalidateQueries({ queryKey: ["speakers"] })
+      },
+    },
+    updateSpeakerMutationOptions: {
+      mutationFn: options.updateSpeaker ?? notStubbed("updateSpeaker"),
       onSuccess: () => {
         void queryClient.invalidateQueries({ queryKey: ["speakers"] })
       },
@@ -263,4 +271,84 @@ test("a ready screen shows the 'Recent unrecognized voices' section", async () =
   renderRoute(SpeakersRoute, queryClient)
 
   expect(await screen.findByText("Recent unrecognized voices")).toBeTruthy()
+})
+
+test("each member row shows a 'Can control home devices' checkbox, checked when the member may control the home", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [
+      sampleSpeaker({ id: 1, display_name: "Ann", can_control_home: true }),
+      sampleSpeaker({ id: 2, display_name: "Ben", can_control_home: false }),
+    ],
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  await screen.findByText("Ann")
+  const boxes = screen.getAllByRole("checkbox", { name: "Can control home devices" })
+  expect(boxes.length).toBe(2)
+  expect(boxes[0]?.getAttribute("aria-checked")).toBe("true")
+  expect(boxes[1]?.getAttribute("aria-checked")).toBe("false")
+  expect(screen.getAllByText("Applies only when speaker ID is set to enforce.").length).toBe(2)
+})
+
+test("clicking the checkbox sends exactly one update with canControlHome false", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const calls: unknown[] = []
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [sampleSpeaker({ id: 4, display_name: "Ann", can_control_home: true })],
+    updateSpeaker: async (input) => {
+      calls.push(input)
+      return sampleSpeaker({ id: 4, can_control_home: false })
+    },
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  const box = await screen.findByRole("checkbox", { name: "Can control home devices" })
+  fireEvent.click(box)
+
+  await waitFor(() => expect(calls).toEqual([{ speakerId: 4, canControlHome: false }]))
+})
+
+test("the checkbox is disabled while the update is pending", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  let release: () => void = () => {}
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [sampleSpeaker({ id: 4, display_name: "Ann" })],
+    updateSpeaker: () =>
+      new Promise((resolve) => {
+        release = () => resolve(sampleSpeaker({ id: 4, can_control_home: false }))
+      }),
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  const box = await screen.findByRole("checkbox", { name: "Can control home devices" })
+  fireEvent.click(box)
+
+  await waitFor(() => expect(box.hasAttribute("disabled")).toBe(true))
+  release()
+  await waitFor(() => expect(box.hasAttribute("disabled")).toBe(false))
+})
+
+test("a failed update shows the server's message under the row", async () => {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  stubSpeakers(queryClient, {
+    fetchSpeakers: async () => [sampleSpeaker({ id: 4, display_name: "Ann" })],
+    updateSpeaker: async () => {
+      const { ApiError } = await import("@/lib/api")
+      throw new ApiError(404, "no such household member")
+    },
+  })
+  const { SpeakersRoute } = await import("./SpeakersRoute")
+
+  renderRoute(SpeakersRoute, queryClient)
+
+  fireEvent.click(await screen.findByRole("checkbox", { name: "Can control home devices" }))
+
+  expect(await screen.findByText("no such household member")).toBeTruthy()
 })

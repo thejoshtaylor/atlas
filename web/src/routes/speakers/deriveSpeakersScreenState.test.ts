@@ -13,6 +13,7 @@ function sampleSpeaker(overrides: Partial<Speaker> = {}): Speaker {
     required_phrases: 5,
     model_id: "cam++",
     retroactive_clips: 0,
+    can_control_home: true,
     ...overrides,
   }
 }
