@@ -1512,6 +1512,7 @@ async def test_migration_0018_creates_speakers_and_downgrades(monkeypatch):
     assert get_current_revision(migration_url) == "0019"
 
 
+@skip_without_postgres
 async def test_migration_0019_adds_can_control_home_and_downgrades(monkeypatch):
     """Migration 0019 (quick task 260929-p12, D-A): `speakers.can_control_home`
     is a NOT NULL boolean whose server default is true. A member row created

@@ -129,6 +129,14 @@ async def build_speaker_context(
             ]
         )
 
+    # Quick 260929-p12 (D-A): members whose home control is off. The admin
+    # route keeps this set current afterwards.
+    home_control_denied: "set[int]" = set()
+    if speaker_repo is not None:
+        home_control_denied = {
+            speaker.id for speaker in await speaker_repo.list_speakers() if not speaker.can_control_home
+        }
+
     tracker = SpeakerTracker(
         channels=config.edge.channels,
         asr_channel=config.edge.asr_channel,
@@ -160,6 +168,7 @@ async def build_speaker_context(
         threshold=speaker_config.threshold,
         model_id=speaker_config.model_id,
         worker=worker,
+        home_control_denied=home_control_denied,
     )
 
 

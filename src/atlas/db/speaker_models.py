@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Float, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, Text, true
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +48,13 @@ class SpeakerRow(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(nullable=False)
+    # D-A: false stops this member's home writes in enforce mode. The Python
+    # default makes the INSERT send the value, so `create_speaker` can read
+    # the row after commit without an async refresh. A server-only default
+    # leaves the attribute expired, and asyncpg cannot load it lazily.
+    can_control_home: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
 
 
 class SpeakerEmbeddingRow(Base):

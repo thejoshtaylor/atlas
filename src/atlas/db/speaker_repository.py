@@ -29,6 +29,7 @@ class Speaker:
     display_name: str
     linked_user_id: int | None
     created_at: datetime
+    can_control_home: bool = True
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,11 @@ class SpeakerRepository(Protocol):
     async def list_speakers(self) -> "list[Speaker]": ...
 
     async def get_speaker(self, speaker_id: int) -> Speaker | None: ...
+
+    async def set_can_control_home(self, speaker_id: int, can_control_home: bool) -> Speaker | None:
+        """Set the member's home control flag and return the updated member,
+        or `None` when there is no such member."""
+        ...
 
     async def delete_speaker(self, speaker_id: int) -> bool:
         """One `DELETE`, its row count decides the result -- the foreign

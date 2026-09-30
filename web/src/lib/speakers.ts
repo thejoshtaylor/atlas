@@ -18,6 +18,8 @@ export interface Speaker {
   model_id: string | null
   /** Clips from recorded turns (index 100 or more). Mirrors `SpeakerResponse.retroactive_clips`. */
   retroactive_clips: number
+  /** False stops this member's home writes when speaker ID runs in enforce mode. Mirrors `SpeakerResponse.can_control_home`. */
+  can_control_home: boolean
 }
 
 export const SPEAKERS_QUERY_KEY = ["speakers"] as const
@@ -53,6 +55,22 @@ export interface DeleteSpeakerInput {
 
 export const deleteSpeakerMutationOptions: UseMutationOptions<void, unknown, DeleteSpeakerInput> = {
   mutationFn: ({ speakerId }) => apiFetch<void>(`/api/speakers/${speakerId}`, { method: "DELETE" }),
+  onSuccess: () => {
+    void queryClient.invalidateQueries({ queryKey: SPEAKERS_QUERY_KEY })
+  },
+}
+
+export interface UpdateSpeakerInput {
+  speakerId: number
+  canControlHome: boolean
+}
+
+export const updateSpeakerMutationOptions: UseMutationOptions<Speaker, unknown, UpdateSpeakerInput> = {
+  mutationFn: ({ speakerId, canControlHome }) =>
+    apiFetch<Speaker>(`/api/speakers/${speakerId}`, {
+      method: "PATCH",
+      body: { can_control_home: canControlHome },
+    }),
   onSuccess: () => {
     void queryClient.invalidateQueries({ queryKey: SPEAKERS_QUERY_KEY })
   },

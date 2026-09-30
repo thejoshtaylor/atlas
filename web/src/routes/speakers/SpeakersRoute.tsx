@@ -12,6 +12,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { EmptyState } from "@/components/state/EmptyState"
@@ -23,6 +24,7 @@ import {
   createSpeakerMutationOptions,
   deleteSpeakerMutationOptions,
   speakersQueryOptions,
+  updateSpeakerMutationOptions,
   type Speaker,
 } from "@/lib/speakers"
 import { deriveSpeakersScreenState, formatEnrollmentProgress } from "./deriveSpeakersScreenState"
@@ -59,6 +61,19 @@ function SpeakerRow({ speaker }: { speaker: Speaker }) {
       await deleteSpeaker.mutateAsync({ speakerId: speaker.id })
     } catch (error) {
       setDeleteError(error instanceof ApiError ? error.message : "Couldn't delete the member. Try again.")
+    }
+  }
+
+  // 260929-p12 (D-B): whether this member may change home devices by voice.
+  const updateSpeaker = useMutation(updateSpeakerMutationOptions)
+  const [homeControlError, setHomeControlError] = React.useState<string | null>(null)
+
+  const handleToggleHomeControl = async (canControlHome: boolean) => {
+    setHomeControlError(null)
+    try {
+      await updateSpeaker.mutateAsync({ speakerId: speaker.id, canControlHome })
+    } catch (error) {
+      setHomeControlError(error instanceof ApiError ? error.message : "Couldn't change home control. Try again.")
     }
   }
 
@@ -104,6 +119,19 @@ function SpeakerRow({ speaker }: { speaker: Speaker }) {
             </AlertDialogContent>
           </AlertDialog>
         </div>
+      </div>
+      <div className="flex flex-col gap-1">
+        <div className="touch-target flex items-center gap-2">
+          <Checkbox
+            id={`speaker-home-control-${speaker.id}`}
+            checked={speaker.can_control_home}
+            disabled={updateSpeaker.isPending}
+            onCheckedChange={(checked) => void handleToggleHomeControl(checked === true)}
+          />
+          <Label htmlFor={`speaker-home-control-${speaker.id}`}>Can control home devices</Label>
+        </div>
+        <p className="text-label text-muted-foreground">Applies only when speaker ID is set to enforce.</p>
+        {homeControlError ? <p className="text-label text-destructive">{homeControlError}</p> : null}
       </div>
       {deleteError ? <p className="text-label text-destructive">{deleteError}</p> : null}
       {speaker.retroactive_clips > 0 ? <RetroactiveClips speaker={speaker} /> : null}

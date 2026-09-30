@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 from sqlalchemy.exc import IntegrityError
 
 from atlas.auth.dependencies import CurrentUser, Role, require_role
@@ -66,6 +66,14 @@ class SpeakerCreateRequest(BaseModel):
         return validate_display_name(value)
 
 
+class SpeakerUpdateRequest(BaseModel):
+    """`PATCH /api/speakers/{id}` (260929-p12, D-B). One field, strict."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    can_control_home: StrictBool
+
+
 class SpeakerResponse(BaseModel):
     id: int
     display_name: str
@@ -78,6 +86,8 @@ class SpeakerResponse(BaseModel):
     # Clips from recorded turns (index 100 or more). Counted apart, so they
     # never end prompted enrollment early.
     retroactive_clips: int = 0
+    # D-A: false stops this member's home writes in enforce mode.
+    can_control_home: bool = True
 
 
 def _to_response(
@@ -92,6 +102,7 @@ def _to_response(
         required_phrases=REQUIRED_ENROLLMENT_PHRASES,
         model_id=model_id,
         retroactive_clips=retroactive_clips,
+        can_control_home=speaker.can_control_home,
     )
 
 
@@ -204,6 +215,34 @@ async def create_speaker(
     return _to_response(speaker, enrolled_phrases=0, model_id=config.speaker_id.model_id)
 
 
+@router.patch("/api/speakers/{speaker_id}")
+async def update_speaker(
+    speaker_id: int,
+    payload: SpeakerUpdateRequest,
+    request: Request,
+    _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> SpeakerResponse:
+    """Set a member's home control flag (D-B). The live denied set changes in
+    the same request, so the next turn uses the new value with no restart."""
+    repo: SpeakerRepository = request.app.state.speaker_repo
+    config: Config = request.app.state.config
+    speaker = await repo.set_can_control_home(speaker_id, payload.can_control_home)
+    if speaker is None:
+        raise _no_such_speaker_error()
+
+    context = getattr(request.app.state, "speaker_id_context", None)
+    if context is not None:
+        if payload.can_control_home:
+            context.home_control_denied.discard(speaker_id)
+        else:
+            context.home_control_denied.add(speaker_id)
+
+    model_id = config.speaker_id.model_id
+    counts = await phrase_counts(repo, model_id)
+    prompted, retroactive = counts.get(speaker.id, (0, 0))
+    return _to_response(speaker, enrolled_phrases=prompted, model_id=model_id, retroactive_clips=retroactive)
+
+
 def _clip_removal_failed_error() -> HTTPException:
     return HTTPException(
         status_code=500,
@@ -253,6 +292,8 @@ async def delete_speaker(
     context = getattr(request.app.state, "speaker_id_context", None)
     if context is not None and context.references is not None:
         context.references.remove_speaker(speaker_id)
+    if context is not None:
+        context.home_control_denied.discard(speaker_id)
 
     if clip_removal_failed:
         raise _clip_removal_failed_error()

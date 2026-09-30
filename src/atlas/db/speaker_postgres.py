@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from datetime import datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -55,6 +55,7 @@ def _speaker_from_row(row: SpeakerRow) -> Speaker:
         display_name=row.display_name,
         linked_user_id=row.linked_user_id,
         created_at=_to_aware_utc(row.created_at),
+        can_control_home=row.can_control_home,
     )
 
 
@@ -96,6 +97,21 @@ class PostgresSpeakerRepository:
             row = (
                 await session.execute(select(SpeakerRow).where(SpeakerRow.id == speaker_id))
             ).scalar_one_or_none()
+            return None if row is None else _speaker_from_row(row)
+
+    async def set_can_control_home(self, speaker_id: int, can_control_home: bool) -> "Speaker | None":
+        """One `UPDATE ... RETURNING` on the member row. `None` when no row
+        matches."""
+        async with self._sessionmaker() as session:
+            row = (
+                await session.execute(
+                    update(SpeakerRow)
+                    .where(SpeakerRow.id == speaker_id)
+                    .values(can_control_home=can_control_home)
+                    .returning(SpeakerRow)
+                )
+            ).scalar_one_or_none()
+            await session.commit()
             return None if row is None else _speaker_from_row(row)
 
     async def delete_speaker(self, speaker_id: int) -> bool:

@@ -12,6 +12,7 @@ route runs against real Postgres. Cascades embeddings on delete, matching
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +54,14 @@ class FakeSpeakerRepository:
 
     async def get_speaker(self, speaker_id: int) -> "Speaker | None":
         return self._speakers.get(speaker_id)
+
+    async def set_can_control_home(self, speaker_id: int, can_control_home: bool) -> "Speaker | None":
+        speaker = self._speakers.get(speaker_id)
+        if speaker is None:
+            return None
+        updated = dataclasses.replace(speaker, can_control_home=can_control_home)
+        self._speakers[speaker_id] = updated
+        return updated
 
     async def delete_speaker(self, speaker_id: int) -> bool:
         if speaker_id not in self._speakers:
@@ -99,7 +108,11 @@ class FakeSpeakerRepository:
 
 
 def fake_speaker(
-    *, speaker_id: int = 1, display_name: str = "Test Member", linked_user_id: "int | None" = None
+    *,
+    speaker_id: int = 1,
+    display_name: str = "Test Member",
+    linked_user_id: "int | None" = None,
+    can_control_home: bool = True,
 ) -> Speaker:
     """One `Speaker` shaped for a test, matching `edge_fakes.fake_edge_device`'s
     own convenience-constructor precedent."""
@@ -108,4 +121,5 @@ def fake_speaker(
         display_name=display_name,
         linked_user_id=linked_user_id,
         created_at=datetime.now(timezone.utc),
+        can_control_home=can_control_home,
     )
