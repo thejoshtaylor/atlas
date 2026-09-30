@@ -6,6 +6,7 @@ to the poller, to a ring on the house speaker, through the real `lifespan`.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -13,11 +14,21 @@ import pytest
 
 from atlas.mcp_client import McpToolHostLookup
 from atlas.timers.core import announcement, clock_text, spoken_duration
-from atlas.timers.scheduler import RING_REPEATS, TimerScheduler
+from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
 from tests.timer_fakes import FakeTimerRepository
 
 T0 = datetime(2027, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+
+async def _poll_and_stop_after(scheduler, spoken, rings=3):
+    """Poll once, let the ring repeat `rings` times, then stop it."""
+    poll = asyncio.create_task(scheduler._poll_once())
+    async with asyncio.timeout(5):
+        while len(spoken) < rings and not poll.done():
+            await asyncio.sleep(0.005)
+    scheduler.stop_ringing()
+    await asyncio.wait_for(poll, 5)
 
 
 def _host(repo, *, now=T0, zone=None):
@@ -27,8 +38,9 @@ def _host(repo, *, now=T0, zone=None):
 def _scheduler(repo, clock_box, spoken, *, zone=None):
     async def speak(text: str) -> None:
         spoken.append(text)
+        await asyncio.sleep(0.005)
 
-    return TimerScheduler(repo, speak, zone=zone, clock=lambda: clock_box[0])
+    return TimerScheduler(repo, speak, zone=zone, clock=lambda: clock_box[0], ring_gap_s=0.005)
 
 
 async def test_set_timer_stores_a_timer_through_the_tool_lookup():
@@ -46,7 +58,7 @@ async def test_set_timer_stores_a_timer_through_the_tool_lookup():
     assert timer.duration_s == 600
 
 
-async def test_a_timer_rings_three_times_at_its_due_time_and_is_then_gone():
+async def test_a_timer_rings_at_its_due_time_until_stopped_and_is_then_gone():
     repo = FakeTimerRepository()
     await _host(repo).call_tool("set_timer", {"duration_seconds": 600, "label": "pasta"})
     clock_box = [T0 + timedelta(seconds=599)]
@@ -57,12 +69,18 @@ async def test_a_timer_rings_three_times_at_its_due_time_and_is_then_gone():
     assert spoken == []
 
     clock_box[0] = T0 + timedelta(seconds=600)
-    await scheduler._poll_once()
-    assert spoken == ["Your pasta timer is done."] * RING_REPEATS
+    poll = asyncio.create_task(scheduler._poll_once())
+    async with asyncio.timeout(5):
+        while len(spoken) < 3:
+            await asyncio.sleep(0.005)
+    assert scheduler.stop_ringing() is True
+    await asyncio.wait_for(poll, 5)
+    assert set(spoken) == {"Your pasta timer is done."}
     assert await repo.list_timers() == []
 
+    count = len(spoken)
     await scheduler._poll_once()
-    assert len(spoken) == RING_REPEATS
+    assert len(spoken) == count
     assert scheduler.fired_count == 1
 
 
@@ -199,12 +217,23 @@ def test_lifespan_exposes_set_timer_and_rings_a_due_timer_on_the_camera_source(t
         names = [tool["function"]["name"] for tool in app_module.app.state.tools_schema]
         assert "set_timer" in names
         app_module.app.state.tts = object()
-        deadline = time.monotonic() + 8
-        while len(spoken) < RING_REPEATS and time.monotonic() < deadline:
+        runner = app_module.app.state.source_runners[0]
+        assert runner.ring_window is not None
+        scheduler = app_module.app.state.timer_scheduler
+        deadline = time.monotonic() + 15
+        while len(spoken) < 3 and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert len(spoken) >= 3
+        # The test thread is not the loop thread, so the stop goes through the portal.
+        assert client.portal.call(scheduler.stop_ringing) is True
+        time.sleep(0.3)
+        rings_after_stop = len(spoken)
+        time.sleep(1.5)
+        assert len(spoken) == rings_after_stop
+        assert client.portal.call(lambda: scheduler.ringing) is False
         camera_source = app_module.app.state.camera_source
 
-    assert [text for _source, text in spoken] == ["Your timer is done."] * RING_REPEATS
+    assert {text for _source, text in spoken} == {"Your timer is done."}
     assert all(source is camera_source for source, _text in spoken)
     assert cues and all(source is camera_source for source in cues)
 
@@ -341,9 +370,10 @@ async def test_a_one_time_alarm_rings_then_stays_listed_off():
     clock_box = [alarm.due_at]
     spoken: list[str] = []
 
-    await _scheduler(repo, clock_box, spoken, zone=NY)._poll_once()
+    await _poll_and_stop_after(_scheduler(repo, clock_box, spoken, zone=NY), spoken)
 
-    assert spoken == ["It's 7:00 AM. Your work alarm."] * 3
+    assert set(spoken) == {"It's 7:00 AM. Your work alarm."}
+    assert len(spoken) >= 3
     [after] = await repo.list_timers()
     assert after.enabled is False
     assert after.due_at is None
@@ -356,9 +386,9 @@ async def test_a_repeating_alarm_moves_to_its_next_ring():
     clock_box = [alarm.due_at]
     spoken: list[str] = []
 
-    await _scheduler(repo, clock_box, spoken, zone=NY)._poll_once()
+    await _poll_and_stop_after(_scheduler(repo, clock_box, spoken, zone=NY), spoken)
 
-    assert len(spoken) == 3
+    assert len(spoken) >= 3
     [after] = await repo.list_timers()
     assert after.enabled is True
     assert after.due_at == datetime(2027, 1, 11, 7, 0, tzinfo=NY).astimezone(timezone.utc)
@@ -372,7 +402,7 @@ async def test_a_repeating_alarm_without_a_zone_turns_off_and_warns(caplog):
     spoken: list[str] = []
 
     with caplog.at_level(logging.WARNING, logger="atlas.timers.scheduler"):
-        await _scheduler(repo, clock_box, spoken, zone=None)._poll_once()
+        await _poll_and_stop_after(_scheduler(repo, clock_box, spoken, zone=None), spoken)
 
     [after] = await repo.list_timers()
     assert after.enabled is False

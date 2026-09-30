@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -120,9 +121,11 @@ from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
 from atlas.timers.core import describe_timers
+from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
 from atlas.turn.controller import _play_wake_cue, _speak, run_turn
+from atlas.turn.follow_up import estimate_playback_end
 from atlas.wake.base import WakeDetector, WakeError
 from atlas.wake.vosk_engine import VoskWakeDetector
 from atlas.workflow.scheduler import WorkflowScheduler
@@ -921,6 +924,44 @@ def _warm_providers(providers: Iterable[Any], keep_alive: set[asyncio.Task]) -> 
         task.add_done_callback(keep_alive.discard)
         tasks.append(task)
     return tasks
+
+
+async def _wait_for_playback_end(
+    result: "Any | None",
+    sink: "SinkFormat | None",
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Any] = asyncio.sleep,
+    max_wait_s: float = 30.0,
+) -> None:
+    """Wait until the room has heard the audio `_speak` wrote.
+
+    `_speak` returns when the last byte is written. The speaker plays the
+    bytes later. A ring uses this to pace each repetition to real playback.
+    Without it, an edge ring would fill the Pi buffer in one burst, and a
+    stop word would wait behind that audio.
+    """
+    if result is None:
+        return
+    end = estimate_playback_end(result, sink)
+    if end is None:
+        return
+    wait_s = min(end - clock(), max_wait_s)
+    if wait_s > 0:
+        await sleep(wait_s)
+
+
+def _make_ring_stop_window(app: FastAPI, config: Config) -> RingStopWindow:
+    """One ring-stop window for one runner. It reads the scheduler and the
+    STT provider from `app.state` on each use, because the runners are built
+    before the scheduler starts."""
+    return RingStopWindow(
+        lambda: getattr(app.state, "timer_scheduler", None),
+        make_stt_transcribe(
+            lambda: getattr(app.state, "stt", None),
+            max_utterance_s=config.stt.max_utterance_s,
+        ),
+    )
 
 
 def _make_run_turn_for_source(
@@ -1931,6 +1972,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # no restart.
             follow_up_window_s=lambda: app.state.follow_up_window_s,
             follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
+            ring_window=_make_ring_stop_window(app, config),
         )
     elif resolved_audio_source == EDGE_SOURCE_NAME:
         wake_detector = SegmentBoundedWakeDetector(
@@ -1990,6 +2032,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             wake_event_repo=wake_event_repo,
             follow_up_window_s=lambda: app.state.follow_up_window_s,
             follow_up_echo_tail_s=config.follow_up.echo_tail_ms / 1000,
+            ring_window=_make_ring_stop_window(app, config),
         )
     else:
         raise ConfigError(
@@ -2040,7 +2083,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # refusal, a lateness sentence, or a `speak` step's own authored
     # text). A fresh `TurnTimings()` per call, matching
     # `_make_run_turn_for_source`'s own "never shared across turns" rule.
-    async def _speak_scheduled(source: Any, speech_lock: "asyncio.Lock | None", text: str) -> None:
+    async def _speak_scheduled(source: Any, speech_lock: "asyncio.Lock | None", text: str) -> Any:
         # CR-03 (code review): a degraded text-to-speech slot leaves
         # `app.state.tts` as `None`, and this closure had no cover of its
         # own (unlike `routes/macros.py`/`routes/workflows.py`, whose
@@ -2060,9 +2103,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "not speaking a scheduled utterance: %s",
                 degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
             )
-            return
+            return None
         speaking_tts = CachedTts(app.state.filler_caches) if text in source_cache else app.state.tts
-        await _speak(
+        return await _speak(
             source,
             speaking_tts,
             TurnTimings(),
@@ -2084,8 +2127,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             source, lock = app.state.edge_source, None
         else:
             source, lock = app.state.camera_source, app.state.speaker_lock
-        await _play_wake_cue(source, source.sink_format(), lock)
-        await _speak_scheduled(source, lock, text)
+        sink = source.sink_format()
+        await _play_wake_cue(source, sink, lock)
+        result = await _speak_scheduled(source, lock, text)
+        # Each repetition lasts as long as the room hears it (260930-e3r).
+        await _wait_for_playback_end(result, sink)
 
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`

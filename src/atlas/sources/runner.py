@@ -108,6 +108,7 @@ from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
+from atlas.timers.ring_stop import RingStopWindow
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest
 from atlas.wake.base import WakeDetector, WakeHit
@@ -574,8 +575,12 @@ class SourceRunner:
         follow_up_window_s: Callable[[], float] | None = None,
         follow_up_echo_tail_s: float = 0.8,
         parallel: "ParallelTurns | None" = None,
+        ring_window: "RingStopWindow | None" = None,
     ) -> None:
         self._name = name
+        # Quick task 260930-e3r: `None` (every caller that predates it) means
+        # no bare-stop listening while a timer or alarm rings.
+        self._ring_window = ring_window
         self._source = source
         self._wake_detector = wake_detector
         self._decode_for_detector = decode_for_detector
@@ -675,6 +680,10 @@ class SourceRunner:
                 follow_up_source=lambda wrapped, opens_at: FollowUpSource(wrapped, opens_at, clock),
             )
             self._turn_group = TurnGroup(name, source, parallel, hooks)
+
+    @property
+    def ring_window(self) -> "RingStopWindow | None":
+        return self._ring_window
 
     @property
     def turn_group(self) -> "TurnGroup | None":
@@ -788,6 +797,13 @@ class SourceRunner:
         # pre-roll buffer still gets the chunk just above, unconditionally,
         # so a turn started right after enrollment ends still has one.
         if getattr(self._source, "wake_suppressed", False):
+            return
+
+        # While a ring plays, the room has no wake word: a bare "stop" ends
+        # it. The window reads the source the way a turn does, and it
+        # starts no turn.
+        if self._turn_group is None and self._ring_window is not None and self._ring_window.active():
+            await self._ring_window.run(self._source)
             return
 
         hit = await asyncio.get_running_loop().run_in_executor(self._detector_executor, self._detect, chunk)
