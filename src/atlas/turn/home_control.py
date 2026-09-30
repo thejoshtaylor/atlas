@@ -24,6 +24,13 @@ Rules that shape this module:
 - The guard is the outermost wrapper. The claims wrapper sits inside it. The
   controller wraps `unclaimed(tool_host)` for a macro, so `unclaimed()` never
   removes the guard.
+- A scheduled workflow is a side door. `schedule_workflow` and
+  `append_workflow_steps` can carry a `call_service` step, and the job runs
+  later with no speaker. Creation time is the only point where the check can
+  run. The guard refuses these two tools when any step is a home write, or
+  when the steps cannot be read (fail closed).
+- `cancel_workflow_run` stays allowed. Cancelling prevents a change. It is not
+  a home write under D-C.
 - A refusal logs and records the bare tool name only. It never carries a
   member name (Phase 11 D-15 log rule).
 
@@ -45,6 +52,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from atlas.turn.entity_claims import bare_tool_name, is_home_write
+from atlas.workflow.tool import APPEND_WORKFLOW_STEPS_TOOL_NAME, SCHEDULE_WORKFLOW_TOOL_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +79,33 @@ def is_home_control_refusal(result: Any) -> str | None:
     content = getattr(result, "content", None) or []
     text = getattr(content[0], "text", None) if content else None
     return text if isinstance(text, str) else None
+
+
+_WORKFLOW_STEP_KINDS = frozenset({"wait", "call_service", "speak"})
+_WORKFLOW_CREATION_TOOL_NAMES = frozenset({SCHEDULE_WORKFLOW_TOOL_NAME, APPEND_WORKFLOW_STEPS_TOOL_NAME})
+
+
+def workflow_has_home_write(arguments: Any) -> bool:
+    """True when the steps of a workflow call contain a home write, or cannot
+    be read. It reads `arguments["steps"]`. A top-level `kind` and `arguments`
+    pair with no `steps` is the legacy form with one step. The write rule is
+    `is_home_write`, the same rule as everywhere else."""
+    if not isinstance(arguments, dict):
+        return True
+    steps = arguments.get("steps")
+    if steps is None and "kind" in arguments:
+        steps = [{"kind": arguments.get("kind"), "arguments": arguments.get("arguments", {})}]
+    if not isinstance(steps, list):
+        return True
+    for step in steps:
+        if not isinstance(step, dict):
+            return True
+        kind = step.get("kind")
+        if kind not in _WORKFLOW_STEP_KINDS:
+            return True
+        if kind == "call_service" and is_home_write("ha_call_service", step.get("arguments")):
+            return True
+    return False
 
 
 class HomeControlGuardHost:
@@ -101,6 +136,8 @@ class HomeControlGuardHost:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         bare_name = bare_tool_name(name)
         if is_home_write(bare_name, arguments):
+            return self._refuse(bare_name)
+        if bare_name in _WORKFLOW_CREATION_TOOL_NAMES and workflow_has_home_write(arguments):
             return self._refuse(bare_name)
         return await self.inner.call_tool(name, arguments)
 
