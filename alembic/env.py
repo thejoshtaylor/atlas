@@ -27,6 +27,9 @@ from atlas.db import edge_models  # noqa: F401
 # `speaker_embeddings` visible.
 from atlas.db import speaker_models  # noqa: F401
 
+# Quick task 260930-06x: makes `timers` visible.
+from atlas.db import timer_models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

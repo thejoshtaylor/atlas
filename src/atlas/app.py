@@ -77,6 +77,7 @@ from atlas.db.repository import (
     WorkflowRepository,
 )
 from atlas.db.speaker_postgres import PostgresSpeakerRepository
+from atlas.db.timer_postgres import PostgresTimerRepository
 from atlas.speaker_id.embedding import SherpaEmbedder
 from atlas.speaker_id.enrollment import ClipStore
 from atlas.speaker_id.wiring import build_speaker_context, reconcile_enrollment
@@ -118,7 +119,9 @@ from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, Segment
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
-from atlas.turn.controller import _speak, run_turn
+from atlas.timers.scheduler import TimerScheduler
+from atlas.timers.tool import TimerToolHost
+from atlas.turn.controller import _play_wake_cue, _speak, run_turn
 from atlas.wake.base import WakeDetector, WakeError
 from atlas.wake.vosk_engine import VoskWakeDetector
 from atlas.workflow.scheduler import WorkflowScheduler
@@ -703,6 +706,9 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # test's own fake repository dict that predates this key boots
         # unchanged.
         "speaker_repo": PostgresSpeakerRepository(sessionmaker),
+        # Quick task 260930-06x: timers and alarms -- read with `.get(...)`
+        # at the call site, the same tolerant lookup `speaker_repo` uses.
+        "timer_repo": PostgresTimerRepository(sessionmaker),
     }
 
 
@@ -1219,6 +1225,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Postgres implementation; until then this is always `None` outside a
     # test that seeds one.
     app.state.edge_device_repo = repositories.get("edge_device_repo")
+    # Quick task 260930-06x: same tolerant `.get(...)` for timers.
+    timer_repo = repositories.get("timer_repo")
+    app.state.timer_repo = timer_repo
     # Plan 11-03 (D-01, D-03): same tolerant `.get(...)` -- a deployment
     # (or a test's own fake repository dict) with no speaker repository at
     # all boots exactly as it did before this plan.
@@ -1476,6 +1485,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # deployments never see it.
     volume_tool_host = VolumeToolHost() if resolved_audio_source == EDGE_SOURCE_NAME else None
     app.state.volume_tool_host = volume_tool_host
+    timer_tool_host = TimerToolHost(timer_repo, zone=_resolved_timezone) if timer_repo is not None else None
+    app.state.timer_tool_host = timer_tool_host
 
     # Entities are fetched once, after the plugins are up (below) -- the
     # cacheable catalog prompt is rebuilt from this snapshot every time
@@ -1506,6 +1517,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         in_process_hosts = [workflow_tool_host]
         if volume_tool_host is not None:
             in_process_hosts.append(volume_tool_host)
+        if timer_tool_host is not None:
+            in_process_hosts.append(timer_tool_host)
         app.state.tool_host_lookup = McpToolHostLookup([*plugin_manager.hosts, *in_process_hosts])
         app.state.tools_schema = plugin_manager.tools_schema + mcp_tools_to_openai_tools(
             [tool for host in in_process_hosts for tool in host.tools]
@@ -2014,7 +2027,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # refusal, a lateness sentence, or a `speak` step's own authored
     # text). A fresh `TurnTimings()` per call, matching
     # `_make_run_turn_for_source`'s own "never shared across turns" rule.
-    async def _scheduled_speak(text: str) -> None:
+    async def _speak_scheduled(source: Any, speech_lock: "asyncio.Lock | None", text: str) -> None:
         # CR-03 (code review): a degraded text-to-speech slot leaves
         # `app.state.tts` as `None`, and this closure had no cover of its
         # own (unlike `routes/macros.py`/`routes/workflows.py`, whose
@@ -2022,32 +2035,44 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # scheduled step that cannot be spoken is logged by name here,
         # once per firing, rather than raising inside the scheduler.
         #
-        # 260922-cts: this closure always speaks through
-        # `app.state.camera_source` -- there is no other scheduled-speech
-        # sink -- so the cache membership check and the sink handed to
-        # `_speak` both come from that source's own `sink_format()`, never
-        # `app.state.filler_cache` (the flat, browser-only dict). Reading
-        # the browser dict here was the same bug the module docstring's
-        # Fix section names for the filler/macro cache, applied instead to
-        # a scheduled step's own utterance.
-        sink = app.state.camera_source.sink_format()
-        camera_cache = app.state.filler_caches.get((sink.codec, sink.sample_rate), {})
-        if text not in camera_cache and app.state.tts is None:
+        # 260922-cts: the cache membership check and the sink handed to
+        # `_speak` both come from the given source's own `sink_format()`,
+        # never `app.state.filler_cache` (the flat, browser-only dict).
+        # Reading the browser dict here was the same bug the module
+        # docstring's Fix section names for the filler/macro cache.
+        sink = source.sink_format()
+        source_cache = app.state.filler_caches.get((sink.codec, sink.sample_rate), {})
+        if text not in source_cache and app.state.tts is None:
             logger.warning(
                 "not speaking a scheduled utterance: %s",
                 degraded_turn_refusal(getattr(app.state, "provider_slots", None)),
             )
             return
-        speaking_tts = CachedTts(app.state.filler_caches) if text in camera_cache else app.state.tts
+        speaking_tts = CachedTts(app.state.filler_caches) if text in source_cache else app.state.tts
         await _speak(
-            app.state.camera_source,
+            source,
             speaking_tts,
             TurnTimings(),
             text,
             kind="answer",
-            speech_lock=app.state.speaker_lock,
+            speech_lock=speech_lock,
             sink=sink,
         )
+
+    async def _scheduled_speak(text: str) -> None:
+        await _speak_scheduled(app.state.camera_source, app.state.speaker_lock, text)
+
+    # Quick task 260930-06x: a timer or alarm ring plays the wake chime, then
+    # the sentence, on the deployment's active audio source. An edge source
+    # takes no lock, the same rule a live edge turn follows. The chime comes
+    # before the TTS check, so a degraded TTS slot still chimes.
+    async def _timer_speak(text: str) -> None:
+        if resolved_audio_source == EDGE_SOURCE_NAME:
+            source, lock = app.state.edge_source, None
+        else:
+            source, lock = app.state.camera_source, app.state.speaker_lock
+        await _play_wake_cue(source, source.sink_format(), lock)
+        await _speak_scheduled(source, lock, text)
 
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
@@ -2078,6 +2103,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     workflow_scheduler = WorkflowScheduler(workflow_repo, _workflow_executor, config.workflow)
     workflow_scheduler.start()
     app.state.workflow_scheduler = workflow_scheduler
+
+    timer_scheduler: "TimerScheduler | None" = None
+    if timer_repo is not None:
+        timer_scheduler = TimerScheduler(timer_repo, _timer_speak, zone=_resolved_timezone)
+        timer_scheduler.start()
+    app.state.timer_scheduler = timer_scheduler
 
     # Quick task 260924-4is (D1): started last, right before `yield`, so a
     # boot that fails before this point never starts the watcher thread --
@@ -2152,6 +2183,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     wake_detector.close()
     await retention_scheduler.stop()
     await workflow_scheduler.stop()
+    if timer_scheduler is not None:
+        await timer_scheduler.stop()
     await speaker_http_client.aclose()
     # Quick task 260924-4iu (a): `app.state.tts` is a `BatchTtsAdapter`
     # around `XaiTts` for the xAI slot, and `BatchTtsAdapter.__getattr__`
