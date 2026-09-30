@@ -5,6 +5,8 @@ production). No real audio device anywhere in this file."""
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from atlas_edge.playback import Playback
@@ -45,7 +47,7 @@ async def test_an_odd_trailing_byte_is_kept_for_the_next_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_buffer_past_max_buffer_s_drops_the_oldest_audio_and_counts_it() -> None:
+async def test_a_buffer_past_max_buffer_s_drops_the_newest_audio_and_counts_it() -> None:
     sunk: "list[bytes]" = []
     # A frozen clock -- no decay between writes -- so the buffer only grows.
     playback = Playback(
@@ -61,6 +63,39 @@ async def test_a_buffer_past_max_buffer_s_drops_the_oldest_audio_and_counts_it()
 
     assert playback.dropped_bytes > 0
     assert len(b"".join(sunk)) <= 64
+    # The bytes that reach the sink are the tail of the incoming chunk's stereo form.
+    stereo = b"".join(mono_chunk[i : i + 2] * 2 for i in range(0, len(mono_chunk), 2))
+    assert b"".join(sunk) == stereo[-len(b"".join(sunk)) :]
+    assert playback.dropped_bytes == len(stereo) - len(b"".join(sunk))
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_logs_one_warning_per_episode(caplog: pytest.LogCaptureFixture) -> None:
+    now = [0.0]
+    playback = Playback(
+        lambda data: None,
+        sample_rate=16000,
+        channels=2,
+        max_buffer_s=0.001,  # 64 bytes
+        clock=lambda: now[0],
+    )
+    chunk = bytes(256)
+
+    with caplog.at_level(logging.DEBUG, logger="atlas_edge.playback"):
+        for _ in range(50):
+            await playback.write(chunk)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "newest" in warnings[0].getMessage()
+
+        # The buffer drains, and the next overflow is a new episode.
+        now[0] = 10.0
+        await playback.write(chunk)
+        await playback.write(chunk)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
+    assert playback.dropped_bytes > 0
 
 
 @pytest.mark.asyncio

@@ -186,15 +186,17 @@ _LONG_REASON = (
 ) * 12
 
 
-async def test_long_denied_reason_reaches_speech_whole_via_the_tier_path(
+async def test_long_denied_reason_is_apologised_not_spoken_via_the_tier_path(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):
     """A refusal never passes through a model, so no `max_tokens`
-    truncation applies -- `Denied.reason` reaches text-to-speech whole, at
-    any length."""
+    truncation applies. Quick task 260930-e3r (D-03, C-08): a reason over
+    300 characters is not fit to hear, so the house hears the short apology
+    and the full text goes to the log. Every real refusal is far shorter and
+    stays verbatim."""
     from atlas.config import BrainConfig
     from atlas.timing import TurnTimings
-    from atlas.turn.controller import run_turn
+    from atlas.turn.controller import _TOOL_ERROR_REPLY, run_turn
 
     assert len(_LONG_REASON) >= BrainConfig().max_tokens * 4
 
@@ -221,17 +223,17 @@ async def test_long_denied_reason_reaches_speech_whole_via_the_tier_path(
         timings=timings,
     )
 
-    assert tts.received_text == [_LONG_REASON]
+    assert tts.received_text == [_TOOL_ERROR_REPLY]
     assert brain.call_count == 1
 
 
-async def test_long_denied_reason_reaches_speech_whole_via_the_macro_path(
+async def test_long_denied_reason_is_apologised_not_spoken_via_the_macro_path(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):
     """The tier path and the macro path behave identically for the same
-    over-length reason -- neither entrance truncates."""
+    over-length reason -- both speak the short apology (260930-e3r, D-03)."""
     from atlas.timing import TurnTimings
-    from atlas.turn.controller import run_turn
+    from atlas.turn.controller import _TOOL_ERROR_REPLY, run_turn
 
     macro = MacroConfig(
         phrase="good night",
@@ -259,7 +261,7 @@ async def test_long_denied_reason_reaches_speech_whole_via_the_macro_path(
         macros=(macro,),
     )
 
-    assert tts.received_text == [_LONG_REASON]
+    assert tts.received_text == [_TOOL_ERROR_REPLY]
     assert brain.call_count == 0
 
 

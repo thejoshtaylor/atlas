@@ -58,6 +58,8 @@ class Playback:
         self._leftover = b""
         self._buffered_bytes = 0
         self._last_update_at: "float | None" = None
+        # One warning per overflow episode, not one per chunk.
+        self._overflow_warned = False
         self.dropped_bytes = 0
 
     def start(self) -> None:
@@ -90,9 +92,13 @@ class Playback:
         the result through the injected `enqueue` sink. An odd trailing
         byte is kept for the next call, never dropped or misaligned
         mid-sample. When the estimated backlog already forwarded would
-        exceed `max_buffer_s`, the oldest part of this call's own bytes is
-        dropped (counted in `dropped_bytes`) rather than growing the
-        backlog further (T-10-32)."""
+        exceed `max_buffer_s`, the incoming bytes are dropped (counted in
+        `dropped_bytes`) rather than growing the backlog further (T-10-32).
+        A chunk that only partly fits keeps its tail, which is the part that
+        fits. The audio already forwarded is never taken back, so the
+        incoming (newest) reply audio is what the room misses. One warning covers each overflow
+        episode. The next episode starts when the earlier reply has played
+        out."""
         data = self._leftover + mono_pcm16
         usable = len(data) - (len(data) % 2)
         self._leftover = data[usable:]
@@ -102,14 +108,22 @@ class Playback:
         stereo_bytes = b"".join(sample + sample for sample in samples)
 
         self._decay_buffered_estimate()
+        if self._buffered_bytes == 0:
+            # The earlier reply has played out, so a new overflow is a new episode.
+            self._overflow_warned = False
         overflow = (self._buffered_bytes + len(stereo_bytes)) - self._max_buffer_bytes
         if overflow > 0:
             drop = min(overflow, len(stereo_bytes))
-            logger.warning(
-                "playback buffer over %.0fs -- dropping %d bytes of the oldest reply audio",
-                self._max_buffer_bytes / self._bytes_per_second,
-                drop,
-            )
+            if not self._overflow_warned:
+                self._overflow_warned = True
+                logger.warning(
+                    "playback buffer over the %.0fs cap -- dropping the newest reply audio "
+                    "until the buffer drains (first drop: %d bytes)",
+                    self._max_buffer_bytes / self._bytes_per_second,
+                    drop,
+                )
+            else:
+                logger.debug("playback buffer still over the cap -- dropping %d more bytes", drop)
             stereo_bytes = stereo_bytes[drop:]
             self.dropped_bytes += drop
 

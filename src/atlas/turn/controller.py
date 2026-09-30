@@ -136,6 +136,7 @@ from atlas.turn.pending_action import (
     HANDOFF_NOT_ALONE_REPLY,
     handle_confirmation_reply,
 )
+from atlas.turn.tool_errors import condense_argument_error, is_argument_error, is_speakable_error
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.transcript_trim import trim_at_split
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
@@ -153,6 +154,8 @@ _EMPTY_REPLY = "sorry, i don't have anything to say to that"
 # more," never as a confirmation. Silence after a spoken command is
 # indistinguishable from a dropped turn, and an operator who cannot tell a
 # refusal from a crash will stop trusting the refusals.
+# 260930-e3r (D-03): spoken instead of a tool error that is not fit to hear.
+_TOOL_ERROR_REPLY = "sorry, something went wrong with that"
 _DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to tell you about it"
 
 # `mcp/atlas_mcp/ha.py::handle_call_service` answers a non-2xx from Home
@@ -2299,9 +2302,11 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
     order by construction, never completion order (D-05); `asyncio.gather`
     already guarantees `results[i]` answers `reply.tool_calls[i]`.
 
-    Composed here, in code, and never through a second `brain.chat` round:
-    a second inference pass over a mixed-outcome batch could paraphrase a
-    refusal reason, which would break the verbatim-refusal invariant
+    Composed here, in code, and never through a second `brain.chat` round
+    (an argument error is the one exception: `_run_tool_rounds` sends it back
+    to the model before it gets here, and only a refusal reaches this
+    function): a second inference pass over a mixed-outcome batch could
+    paraphrase a refusal reason, which would break the verbatim-refusal invariant
     `test_denied_reason_reaches_the_reply_verbatim` already guards for the
     single-action path (this module's own docstring, D-14). A failed
     action's clause carries the boundary's reason with the MCP SDK's
@@ -2538,6 +2543,9 @@ async def _run_tool_rounds(
     `_TOO_MANY_ROUNDS_REPLY` is unchanged.
     """
     last_ha_refusal: str | None = None
+    # A round whose only errors are argument errors goes back to the model
+    # (260930-e3r, D-03). Every other error round is composed in code with no
+    # second `brain.chat` (D-14), so a refusal never goes through a model.
     for round_num in range(max_tool_rounds):
         reply = await brain.chat(messages, tools=tools_schema)
         timings.mark_brain_first_round()
@@ -2697,12 +2705,30 @@ async def _run_tool_rounds(
                     isError=True, content=[SimpleNamespace(text=HANDOFF_NOT_ALONE_REPLY)]
                 )
 
+        # 260930-e3r (D-03): a malformed call is not a refusal. When every
+        # error in the round is an argument error, each one goes back to the
+        # model as one short line and the model gets another round to fix the
+        # call. A refusal never does (D-14). The last round always composes.
+        if round_num < max_tool_rounds - 1 and not any(isinstance(result, BaseException) for result in results):
+            error_indexes = [i for i, result in enumerate(results) if _is_error(result)]
+            stripped_errors = {
+                i: _strip_sdk_error_wrapper(reply.tool_calls[i].name, _result_text(results[i]))
+                for i in error_indexes
+            }
+            if error_indexes and all(is_argument_error(text) for text in stripped_errors.values()):
+                for i, text in stripped_errors.items():
+                    logger.warning("tool %r got invalid arguments; full text: %s", reply.tool_calls[i].name, text)
+                for i, result in enumerate(results):
+                    content = condense_argument_error(stripped_errors[i]) if i in stripped_errors else _result_text(result)
+                    messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": content})
+                continue
+
         # Collect every result before deciding anything (D-06): a batch
         # containing any error-shaped or raised entry is composed in code,
         # below, and returned directly -- never through a second `brain.chat`
-        # round (D-14). A batch where every call succeeded falls through to
-        # the loop-to-the-next-round behaviour, byte-identical to before this
-        # plan.
+        # round (D-14), except the argument-error retry above. A batch where
+        # every call succeeded falls through to the loop-to-the-next-round
+        # behaviour, byte-identical to before this plan.
         if any(isinstance(result, BaseException) or _is_error(result) for result in results):
             return _compose_mixed_outcome_reply(list(zip(reply.tool_calls, results)))
 
@@ -3057,24 +3083,16 @@ def _result_text(result: Any) -> str:
 _SDK_TOOL_ERROR_PREFIX = "Error executing tool "
 
 
-def _spoken_error_text(tool_name: str, result: Any) -> str:
-    """The reason a tool refused, with the MCP SDK's wrapper removed.
+def _strip_sdk_error_wrapper(tool_name: str, text: str) -> str:
+    """`text` with the MCP SDK's "Error executing tool <name>: " wrapper removed.
 
-    The SDK's `Tool.run` (`mcp/server/mcpserver/tools/base.py`) turns a
-    `ToolError` into `"Error executing tool <name>: <reason>"` and any other
-    crash into exactly `"Error executing tool <name>"`. `<name>` is the
-    child's own bare tool name. `workflow/steps.py::_is_policy_refusal`
-    already reads the same format. Only the reason belongs in speech, so this
-    returns it alone, unchanged. A crash with no reason returns `""`, and the
-    caller speaks its own fallback -- raw SDK text is never spoken.
-
+    A crash with no reason (exactly "Error executing tool <name>") returns "".
     `tool_name` is the name the brain called. Plugin naming can prefix it
     (`<slug>__<bare>`, `plugins/naming.py`) while the SDK text carries the
     bare name, so the part after the last `__` is tried too (the same rule
     as `is_code_only_tool`). Text with no matching prefix is returned as it
-    is. Nested wrappers and validation text are left alone.
+    is. Nested wrappers are left alone.
     """
-    text = _result_text(result)
     candidates = [tool_name]
     if "__" in tool_name:
         bare = tool_name.rsplit("__", 1)[1]
@@ -3087,6 +3105,29 @@ def _spoken_error_text(tool_name: str, result: Any) -> str:
         if text.startswith(crash + ": "):
             return text[len(crash) + 2 :]
     return text
+
+
+def _spoken_error_text(tool_name: str, result: Any) -> str:
+    """The reason a tool refused, with the MCP SDK's wrapper removed.
+
+    The SDK's `Tool.run` (`mcp/server/mcpserver/tools/base.py`) turns a
+    `ToolError` into `"Error executing tool <name>: <reason>"` and any other
+    crash into exactly `"Error executing tool <name>"`. `<name>` is the
+    child's own bare tool name. `workflow/steps.py::_is_policy_refusal`
+    already reads the same format. Only the reason belongs in speech, so this
+    returns it alone, unchanged. A crash with no reason returns `""`, and the
+    caller speaks its own fallback -- raw SDK text is never spoken.
+
+    A reason that is not fit to hear (`is_speakable_error`: a validation
+    dump, a URL, a traceback, a line break or more than 300 characters) is
+    never spoken. The full text goes to the log and the caller speaks
+    `_TOOL_ERROR_REPLY`. Every short policy refusal stays verbatim.
+    """
+    reason = _strip_sdk_error_wrapper(tool_name, _result_text(result))
+    if reason and not is_speakable_error(reason):
+        logger.warning("tool %r returned an error that is not spoken; full text: %s", tool_name, reason)
+        return _TOOL_ERROR_REPLY
+    return reason
 
 
 def _result_payload(result: Any) -> Any:
