@@ -33,7 +33,10 @@ from atlas.turn.home_control import (
     home_control_refusal_text,
     is_home_control_refusal,
     restrict_home_writes,
+    workflow_has_home_write,
 )
+from atlas.turn.pending_action import EXECUTING_TOOL_BY_ACTION
+from atlas_mcp.ha_names import HA_WRITE_TOOL_NAMES
 from atlas.turn.reply_group import GroupSpeaker
 from atlas.turn.turn_context import TurnContext
 from tests.test_turn_claims import _FakeHomeAssistant
@@ -398,3 +401,115 @@ async def test_each_turn_in_a_group_gets_its_own_permission_and_the_refusal_name
     (spoken,) = live_tts.received_text
     assert spoken.count(_ALEX_REFUSAL) == 1
     assert "Alex, Alex" not in spoken
+
+
+# ---- scheduled workflows ---------------------------------------------------
+
+_WAIT_STEP = {"kind": "wait", "arguments": {"duration_s": 60}}
+_SPEAK_STEP = {"kind": "speak", "arguments": {"text": "time is up"}}
+_WRITE_STEP = {"kind": "call_service", "arguments": {"domain": "light", "service": "turn_off", "entity_id": "light.example_lamp"}}
+_READ_STEP = {"kind": "call_service", "arguments": {"domain": "todo", "service": "get_items"}}
+
+
+def _schedule(steps) -> dict:
+    return {"steps": steps, "delay_seconds": 60, "summary": "lamp off later"}
+
+
+@pytest.mark.parametrize("tool_name", ["schedule_workflow", "append_workflow_steps"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        _schedule([_WAIT_STEP, _WRITE_STEP]),
+        {"kind": "call_service", "arguments": _WRITE_STEP["arguments"], "delay_seconds": 5, "summary": "x"},
+        _schedule("not a list"),
+        _schedule([_WAIT_STEP, "not a dict"]),
+        _schedule([{"kind": "loop", "arguments": {}}]),
+        _schedule([{"kind": "call_service", "arguments": "not a dict"}]),
+        "not a dict",
+    ],
+)
+async def test_the_guard_refuses_a_workflow_with_a_home_write_or_unreadable_steps(tool_name, arguments) -> None:
+    inner = _RecordingHost()
+    guard = HomeControlGuardHost(inner, name="Alex")
+
+    result = await guard.call_tool(tool_name, arguments)
+
+    assert inner.calls == []
+    assert is_home_control_refusal(result) == _ALEX_REFUSAL
+
+
+async def test_the_guard_refuses_an_appended_home_write_step() -> None:
+    inner = _RecordingHost()
+    guard = HomeControlGuardHost(inner, name="Alex")
+
+    result = await guard.call_tool("append_workflow_steps", {"run_id": 4, "steps": [_WRITE_STEP]})
+
+    assert inner.calls == []
+    assert is_home_control_refusal(result) == _ALEX_REFUSAL
+
+
+async def test_the_guard_forwards_workflows_without_a_home_write() -> None:
+    inner = _RecordingHost()
+    guard = HomeControlGuardHost(inner, name="Alex")
+
+    calls = [
+        ("schedule_workflow", _schedule([_WAIT_STEP, _SPEAK_STEP])),
+        ("schedule_workflow", _schedule([_READ_STEP])),
+        ("append_workflow_steps", {"run_id": 4, "steps": [_SPEAK_STEP]}),
+        ("cancel_workflow_run", {"run_id": 4}),
+    ]
+    for name, arguments in calls:
+        result = await guard.call_tool(name, arguments)
+        assert is_home_control_refusal(result) is None
+
+    assert inner.calls == calls
+
+
+async def test_a_permitted_member_schedules_a_call_service_workflow() -> None:
+    inner = _RecordingHost()
+    host = restrict_home_writes(inner, allowed=True, name="Alex")
+
+    await host.call_tool("schedule_workflow", _schedule([_WRITE_STEP]))
+
+    assert len(inner.calls) == 1
+
+
+def test_workflow_has_home_write_reads_steps_and_the_legacy_flat_form() -> None:
+    assert workflow_has_home_write(_schedule([_WRITE_STEP])) is True
+    assert workflow_has_home_write(_schedule([_WAIT_STEP, _SPEAK_STEP])) is False
+    assert workflow_has_home_write({"kind": "call_service", "arguments": _WRITE_STEP["arguments"]}) is True
+    assert workflow_has_home_write({"kind": "wait", "arguments": {"duration_s": 5}}) is False
+
+
+class _RecordingWorkflowHost:
+    """A workflow tool host double that records every call."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.tools = object()
+
+    async def call_tool(self, name: str, arguments: Any) -> Any:
+        self.calls.append((name, arguments))
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text="{}")], structured_content={})
+
+
+async def test_run_turn_refuses_a_restricted_members_scheduled_home_write(
+    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+) -> None:
+    workflow = _RecordingWorkflowHost()
+    reply = BrainReply(
+        tool_calls=[ToolCall(name="schedule_workflow", arguments=_schedule([_WAIT_STEP, _WRITE_STEP]))]
+    )
+
+    tts, _ = await _run_single(
+        tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts,
+        speaker_id=_context(_alex_match()), tool_host=workflow,
+        transcript="turn the lamp off in a minute", replies=[reply],
+    )
+
+    assert workflow.calls == []
+    assert tts.received_text == [_ALEX_REFUSAL]
+
+
+def test_a_pending_action_confirmation_never_runs_a_home_write() -> None:
+    assert set(EXECUTING_TOOL_BY_ACTION.values()).isdisjoint(HA_WRITE_TOOL_NAMES)
