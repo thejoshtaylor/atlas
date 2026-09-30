@@ -27,6 +27,7 @@ import { SettingsRoute } from "@/routes/settings/SettingsRoute"
 import { SessionDetailRoute } from "@/routes/sessions/SessionDetailRoute"
 import { SessionsRoute } from "@/routes/sessions/SessionsRoute"
 import { SpeakersRoute } from "@/routes/speakers/SpeakersRoute"
+import { TimersRoute } from "@/routes/timers/TimersRoute"
 import { WakeTuningRoute } from "@/routes/wake-tuning/WakeTuningRoute"
 import { WorkflowEditorRoute } from "@/routes/workflows/WorkflowEditorRoute"
 import { WorkflowsRoute } from "@/routes/workflows/WorkflowsRoute"
@@ -80,6 +81,7 @@ function AppRoutes() {
             <Route path="/workflows" element={<WorkflowsRoute />} />
             <Route path="/workflows/new" element={<WorkflowEditorRoute />} />
             <Route path="/workflows/:id" element={<WorkflowEditorRoute />} />
+            <Route path="/timers" element={<TimersRoute />} />
             <Route path="/dev-mic" element={<DevMicRoute />} />
             <Route path="/listen" element={<ListenRoute />} />
             <Route path="/live" element={<LiveRoute />} />

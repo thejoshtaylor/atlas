@@ -1,5 +1,6 @@
 import * as React from "react"
 import {
+  AlarmClock,
   AudioLines,
   Blocks,
   CalendarClock,
@@ -57,6 +58,7 @@ const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
       { to: "/policy", label: "Safety policy", minimumRole: "operator", icon: ShieldCheck },
       { to: "/macros", label: "Macros", minimumRole: "operator", icon: Workflow },
       { to: "/workflows", label: "Scheduled", minimumRole: "operator", icon: CalendarClock },
+      { to: "/timers", label: "Timers", minimumRole: "operator", icon: AlarmClock },
       { to: "/plugins", label: "Plugins", minimumRole: "admin", icon: Blocks },
       { to: "/providers", label: "Providers", minimumRole: "admin", icon: Cpu },
       { to: "/accounts", label: "Accounts", minimumRole: "admin", icon: Users },

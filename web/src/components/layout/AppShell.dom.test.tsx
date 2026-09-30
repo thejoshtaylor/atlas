@@ -35,7 +35,7 @@ afterEach(() => {
   cleanup()
 })
 
-const OPERATOR_LABELS = ["Safety policy", "Macros", "Scheduled", "Developer mic", "Live", "Sessions", "Wake threshold"]
+const OPERATOR_LABELS = ["Safety policy", "Macros", "Scheduled", "Timers", "Developer mic", "Live", "Sessions", "Wake threshold"]
 const ADMIN_LABELS = ["Accounts", "Edge devices", "Speakers", "Settings", "Plugins", "Providers", "Google accounts"]
 
 function stubSession(role: "viewer" | "operator" | "admin") {

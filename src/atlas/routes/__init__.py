@@ -31,6 +31,7 @@ from atlas.routes.providers import router as providers_router
 from atlas.routes.sessions import router as sessions_router
 from atlas.routes.speaker_inbox import router as speaker_inbox_router
 from atlas.routes.speakers import router as speakers_router
+from atlas.routes.timers import router as timers_router
 from atlas.routes.wake import router as wake_router
 from atlas.routes.wizard import router as wizard_router
 from atlas.routes.workflows import router as workflows_router
@@ -67,6 +68,7 @@ def register_routers(app: FastAPI) -> None:
     gated.include_router(credentials_router)
     gated.include_router(wizard_router)
     gated.include_router(workflows_router)
+    gated.include_router(timers_router)
     gated.include_router(plugins_router)
     gated.include_router(providers_router)
     gated.include_router(sessions_router)
