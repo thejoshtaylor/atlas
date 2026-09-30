@@ -14,7 +14,7 @@ already follow (10-07-PLAN.md), since a speaker's name is not something
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from atlas.speaker_id.gate import SpeakerGateDecision, SpeakerMode, evaluate_speaker_gate
@@ -63,6 +63,11 @@ class SpeakerIdTurnContext:
     threshold: float
     model_id: "str | None"
     worker: "Any | None"
+    # The ids of members whose `can_control_home` is false. The admin route
+    # changes this set in place and `wiring.build_speaker_context` fills it at
+    # boot, so a change applies to the next turn with no restart. The frozen
+    # dataclass only blocks rebinding the field, not changing the set.
+    home_control_denied: "set[int]" = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,9 @@ class SpeakerTurnOutcome:
     event: "dict[str, Any]"
     speaker_name: "str | None" = None
     split_events: "tuple[dict[str, Any], ...]" = ()
+    # False only for an identified member in enforce mode whose home control
+    # is off (`turn/home_control.py`). The default is True.
+    can_control_home: bool = True
 
 
 def _detail_for(
@@ -246,4 +254,19 @@ async def evaluate_turn_speaker(
         _build_split_event(part, turn_started_at=timings.turn_started_at, threshold=context.threshold)
         for part in measurement.dropped_parts
     )
-    return SpeakerTurnOutcome(decision=decision, event=event, speaker_name=speaker_name, split_events=split_events)
+    # No permission check runs in off and record mode, or for a voice the
+    # gate did not identify (D-D). The label can only remove home control,
+    # never grant it.
+    can_control_home = not (
+        decision.effective_mode == "enforce"
+        and decision.identified
+        and measurement.match is not None
+        and measurement.match.best_speaker_id in context.home_control_denied
+    )
+    return SpeakerTurnOutcome(
+        decision=decision,
+        event=event,
+        speaker_name=speaker_name,
+        split_events=split_events,
+        can_control_home=can_control_home,
+    )

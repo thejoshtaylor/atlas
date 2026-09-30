@@ -125,6 +125,7 @@ from atlas.turn.handoff import (
     parse_handoff,
 )
 from atlas.turn.entity_claims import is_claim_refusal, unclaimed
+from atlas.turn.home_control import is_home_control_refusal, restrict_home_writes
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
 from atlas.turn.reply_group import ReplyRoute, current_reply_route, speak_in_group
@@ -962,6 +963,35 @@ async def run_turn(
             timings.log()
             return
 
+        # Per-member home control (260929-p12). In enforce mode, an identified
+        # member whose home control is off cannot run a home write (D-C). The
+        # guard wraps the host the model round and the local on/off path use,
+        # and the host a macro uses (D-E). It sits outside the claims wrapper.
+        # A macro still runs without claims, so it gets the guard over
+        # `unclaimed(tool_host)` (Phase 12 D-16). Off and record mode, and an
+        # unidentified voice, get the host unchanged (D-D). This deliberately
+        # overrides Phase 11 D-15 for home writes only. The label can only
+        # remove home control, never grant it (D-F). `tool_host` stays raw
+        # because the macro path needs it. The permission is derived here
+        # again on every turn, so a follow-up never inherits it.
+        # A grouped reply adds the member label itself, so the refusal then
+        # carries no name.
+        home_control_name = (
+            None
+            if turn_context is not None and turn_context.reply_group is not None
+            else speaker_outcome.speaker_name
+        )
+
+        def _restricted(host: Any) -> Any:
+            return restrict_home_writes(
+                host,
+                allowed=speaker_outcome.can_control_home,
+                name=home_control_name,
+                record_event=session_recorder.record_event if session_recorder is not None else None,
+            )
+
+        guarded_tool_host = _restricted(tool_host)
+
         # 260929-icf: the transcript does not open with the wake phrase, so
         # the wake hit was a false fire. No brain call and no spoken reply.
         if wake_unverified:
@@ -1160,7 +1190,9 @@ async def run_turn(
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
             # D-16: a macro is an operator-written phrase and takes no claim.
-            outcome = await fire_macro(matched_macro, unclaimed(tool_host), tool_owners=tool_owners)
+            outcome = await fire_macro(
+                matched_macro, _restricted(unclaimed(tool_host)), tool_owners=tool_owners
+            )
             timings.turn_outcome = "macro" if outcome.succeeded else "macro_failed"
             # A macro reply is an answer, not a holding phrase -- it is the one
             # utterance in this system that is both the answer and instant. On
@@ -1215,7 +1247,7 @@ async def run_turn(
         # Plan 09-06/09-07: skipped on the amendment or clarification-
         # answer path for the identical reason the macro check above is
         # -- neither is ever an on/off command.
-        if prior_exchange is None and local_intents and tool_host is not None:
+        if prior_exchange is None and local_intents and guarded_tool_host is not None:
             entities: list[dict[str, Any]] = []
             if state_task is not None:
                 state_result = await _read_prefetched(
@@ -1241,7 +1273,7 @@ async def run_turn(
                 await _cancel_state_task(pending_runs_task)
                 tool_result: Any = None
                 try:
-                    tool_result = await tool_host.call_tool(
+                    tool_result = await guarded_tool_host.call_tool(
                         "ha_call_service",
                         {
                             "domain": local_intent.domain,
@@ -1263,8 +1295,14 @@ async def run_turn(
                 else:
                     intent_failed = _is_error(tool_result)
 
+                home_control_refusal = is_home_control_refusal(tool_result) if intent_failed else None
                 claim_refusal = is_claim_refusal(tool_result) if intent_failed else None
-                if claim_refusal:
+                if home_control_refusal:
+                    # D-C: the member may not change the home. The text
+                    # carries a name, so it is spoken live like a claim refusal.
+                    timings.turn_outcome = "home_control_refused"
+                    reply_text = home_control_refusal
+                elif claim_refusal:
                     # D-13, D-15: another turn in the group just changed it.
                     timings.turn_outcome = "claim_refused"
                     reply_text = claim_refusal
@@ -1279,7 +1317,9 @@ async def run_turn(
                 # (CMD-08's own doctrine, applied here the same way the
                 # macro path already applies it above).
                 speaking_tts = (
-                    tts if claim_refusal else _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
+                    tts
+                    if (home_control_refusal or claim_refusal)
+                    else _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
                 )
                 await _speak(
                     source,
@@ -1464,7 +1504,7 @@ async def run_turn(
             if tier.calls_tools:
                 coro = brain_race.run_top_tier(
                     tier,
-                    tool_host,
+                    guarded_tool_host,
                     turn_tools_schema,
                     tier_messages,
                     max_tool_rounds,

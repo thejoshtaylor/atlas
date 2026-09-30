@@ -102,16 +102,36 @@ def _direct_entities(value: Any) -> frozenset[str]:
     return frozenset()
 
 
+def bare_tool_name(name: str) -> str:
+    """The tool name without a plugin collision prefix (`slug__ha_call_service`
+    gives `ha_call_service`)."""
+    return name.rsplit("__", 1)[-1] if "__" in name else name
+
+
+def is_home_write(bare_name: str, arguments: Any) -> bool:
+    """True when a call changes the home: a tool in `HA_WRITE_TOOL_NAMES`,
+    except `ha_call_service` with a `get_` service (a response-only read).
+
+    This is the one write rule. The claims wrapper and the home-control guard
+    both use it. Arguments that are not a dict fail closed: a write name with
+    unreadable arguments counts as a write.
+    """
+    if bare_name not in HA_WRITE_TOOL_NAMES:
+        return False
+    if bare_name == "ha_call_service" and isinstance(arguments, dict):
+        service = arguments.get("service")
+        if isinstance(service, str) and service.startswith("get_"):
+            return False
+    return True
+
+
 def claim_targets(bare_name: str, arguments: dict) -> ClaimTargets | None:
     """The targets a call would change, or `None` when it takes no claim."""
-    if bare_name not in HA_WRITE_TOOL_NAMES or not isinstance(arguments, dict):
+    if not isinstance(arguments, dict) or not is_home_write(bare_name, arguments):
         return None
     entity_ids = _direct_entities(arguments.get("entity_id"))
     expand: tuple[tuple[str, str], ...] = ()
     if bare_name == "ha_call_service":
-        service = arguments.get("service")
-        if isinstance(service, str) and service.startswith("get_"):
-            return None
         expand = tuple(
             (kind, arguments[key].strip())
             for kind, key in _TARGET_ARGUMENTS
@@ -214,7 +234,7 @@ class ClaimingToolHost:
             self._record_event({"type": event_type, "entity_ids": sorted(entity_ids), "turn_key": self._owner})
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        bare_name = name.rsplit("__", 1)[-1] if "__" in name else name
+        bare_name = bare_tool_name(name)
         if self._claimable_names is not None and bare_name not in self._claimable_names:
             return await self.inner.call_tool(name, arguments)
         targets = claim_targets(bare_name, arguments)

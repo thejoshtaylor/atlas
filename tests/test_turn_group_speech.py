@@ -165,9 +165,8 @@ class _Turn:
         self.recorder = SessionRecorder(SessionConfig(dir=str(tmp_path / key)), self.timings)
         self.span = _span_for(*member) if member is not None else None
         self.tracker = _StubTracker(self.span)
-        self.speaker_context = _speaker_context(
-            self.tracker, mode=speaker_mode, home_control_denied=home_control_denied
-        )
+        self._speaker_mode = speaker_mode
+        self._home_control_denied = home_control_denied
         self.handle = speaker.register(key, order_frame, group_id=group_id) if with_handle else None
         self.context = TurnContext(
             turn_key=key,
@@ -175,6 +174,13 @@ class _Turn:
             order_frame=order_frame,
             speaker_span=self.span,
             reply_group=self.handle,
+        )
+
+    @property
+    def speaker_context(self) -> SpeakerIdTurnContext:
+        # Built on read, so a test that swaps `self.tracker` is still honored.
+        return _speaker_context(
+            self.tracker, mode=self._speaker_mode, home_control_denied=self._home_control_denied
         )
 
     async def run(self, **extra) -> None:
