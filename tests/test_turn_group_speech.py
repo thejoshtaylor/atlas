@@ -88,9 +88,17 @@ def _span_for(speaker_id: int, name: str) -> _StubSpan:
     )
 
 
-def _speaker_context(tracker: _StubTracker) -> SpeakerIdTurnContext:
+def _speaker_context(
+    tracker: _StubTracker, *, mode="record", home_control_denied=frozenset()
+) -> SpeakerIdTurnContext:
     return SpeakerIdTurnContext(
-        tracker=tracker, references=_references(), mode="record", threshold=0.5, model_id="model", worker=object()
+        tracker=tracker,
+        references=_references(),
+        mode=mode,
+        threshold=0.5,
+        model_id="model",
+        worker=object(),
+        home_control_denied=set(home_control_denied),
     )
 
 
@@ -141,6 +149,8 @@ class _Turn:
         follow_up=None,
         sink: SinkFormat | None = None,
         run_kwargs: dict | None = None,
+        speaker_mode="record",
+        home_control_denied=frozenset(),
     ) -> None:
         self.run_kwargs = run_kwargs or {}
         self.key = key
@@ -155,6 +165,9 @@ class _Turn:
         self.recorder = SessionRecorder(SessionConfig(dir=str(tmp_path / key)), self.timings)
         self.span = _span_for(*member) if member is not None else None
         self.tracker = _StubTracker(self.span)
+        self.speaker_context = _speaker_context(
+            self.tracker, mode=speaker_mode, home_control_denied=home_control_denied
+        )
         self.handle = speaker.register(key, order_frame, group_id=group_id) if with_handle else None
         self.context = TurnContext(
             turn_key=key,
@@ -177,7 +190,7 @@ class _Turn:
                 max_tool_rounds=3,
                 timings=self.timings,
                 session_recorder=self.recorder,
-                speaker_id=_speaker_context(self.tracker),
+                speaker_id=self.speaker_context,
                 turn_context=self.context,
                 **{**self.run_kwargs, **extra},
             )
