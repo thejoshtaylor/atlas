@@ -14,6 +14,8 @@ the catalog the turn offered (261001-dlp, a user decision that amends D-11 for
 this case only). Along a chain of windows the scope only narrows. A window turn never
 runs a macro, a local on/off intent or a timer intent, because the continued
 exchange skips those paths. A window that hears nothing speaks nothing (D-15).
+After a question the model asked, "yeah" and "okay" are answers and reach the
+brain (261001-dlp). After an ordinary answer they still end the window.
 """
 
 from __future__ import annotations
@@ -32,6 +34,21 @@ ANSWER_WINDOW_SILENT = "answer_window_silent"
 # command about the thing the last answer touched. Any text with the word
 # "off" goes to the brain, never to a silent stop.
 _OFF_RE = re.compile(r"\boff\b", re.IGNORECASE)
+
+# 261001-dlp: whole-utterance affirmatives. After a question the model asked,
+# these are the operator's answer. "okay" and "yeah" would otherwise end the
+# window silently as a stop word or as filler. The timer ring stop in
+# `timers/ring_stop.py` is a separate path and does not change.
+_AFFIRMATIVE_WORDS = frozenset({"yes", "yeah", "yep", "yup", "ok", "okay", "sure"})
+_MAX_AFFIRMATIVE_TOKENS = 3
+_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+def is_affirmative(text: str) -> bool:
+    """True when every word of `text` is an affirmative ("yeah", "Okay.").
+    Case and punctuation do not matter."""
+    tokens = _PUNCT_RE.sub("", text.lower()).split()
+    return 1 <= len(tokens) <= _MAX_AFFIRMATIVE_TOKENS and all(t in _AFFIRMATIVE_WORDS for t in tokens)
 
 
 def is_quiet_stop(text: str) -> bool:
@@ -80,6 +97,7 @@ def build_answer_request(
         proposals_only=proposals_only,
         answer_scope=AnswerScope(tool_names=scope_tools).narrowed_by(answer_scope),
         answer_only_from=answer_only_from,
+        expects_reply=expects_reply,
     )
 
 
@@ -108,16 +126,24 @@ def wake_addressed_command(follow_up: Any, final_text: str, wake_phrase: "str | 
     return strip_wake_phrase(final_text, wake_phrase)
 
 
-def silent_answer_outcome(final: Any, final_text: str, wake_phrase: "str | None") -> "str | None":
+def silent_answer_outcome(
+    final: Any, final_text: str, wake_phrase: "str | None", *, expects_reply: bool = False
+) -> "str | None":
     """The `turn_outcome` for a window turn that must end with no reply, or
     `None` when the turn has a command to run.
 
     Nothing heard ends as `ANSWER_WINDOW_SILENT`. A stop phrase ends as
     `"stopped"`, checked before the filler test, so "okay" and "thanks" end
     the window. Filler or a bare wake word ends as `"no_command"`.
+
+    `expects_reply` is True when the reply that opened this window asked a
+    question. A whole-utterance affirmative ("yeah", "okay") then answers it
+    and runs as a turn. Every other stop phrase still ends the window.
     """
     if final is None or not final_text.strip():
         return ANSWER_WINDOW_SILENT
+    if expects_reply and is_affirmative(final_text):
+        return None
     if is_quiet_stop(final_text):
         return "stopped"
     if is_no_command(final_text, wake_phrase):

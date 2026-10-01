@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from atlas.config import GateConfig, WakeConfig
 from atlas.providers.base import BrainReply
 from atlas.providers.tier_reply import FillerPhrase, TierReply
@@ -19,7 +21,8 @@ from atlas.sources.runner import SourceRunner
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.controller import run_turn
-from atlas.turn.answer_window import build_answer_request
+from atlas.timers.ring_stop import is_stop_command
+from atlas.turn.answer_window import build_answer_request, is_affirmative, silent_answer_outcome
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
 
 from brain_fakes import RecordingFakeBrain
@@ -34,6 +37,7 @@ from test_follow_up_answer_window import (
     _RecordingToolHost,
     _text,
     _tool_names,
+    _window_turn,
 )
 
 _FULL = frozenset({"weather_now", "lights_set", "gmail_fetch_body"})
@@ -241,3 +245,98 @@ def test_no_question_keeps_the_empty_scope_even_with_an_offered_catalog():
 
 def test_the_incoming_scope_narrows_the_offered_catalog():
     assert _scope(answer_scope=AnswerScope(tool_names=frozenset({"a"}))) == AnswerScope(tool_names=frozenset({"a"}))
+
+
+# --- "yeah" and "okay" after a model question (261001-dlp-04) -------------------
+
+
+def test_the_request_records_that_its_reply_asked_a_question():
+    request = build_answer_request(
+        incoming=None,
+        final_text="turn on the",
+        reply_text="what do you want me to turn on?",
+        called_tools=frozenset(),
+        answer_scope=None,
+        proposals_only=False,
+        prior_exchange=None,
+        playback_ends_at=None,
+        answer_only_from=None,
+        expects_reply=True,
+        offered_tools=frozenset({"a"}),
+    )
+    assert request is not None and request.expects_reply is True
+    assert _answer_request().expects_reply is False
+
+
+@pytest.mark.parametrize("text", ["yes", "yeah", "Yep.", "yup", "ok", "Okay.", "sure", "yeah sure"])
+def test_a_whole_utterance_affirmative_is_not_silent_after_a_question(text):
+    assert is_affirmative(text)
+    assert silent_answer_outcome(object(), text, "hey atlas", expects_reply=True) is None
+
+
+@pytest.mark.parametrize("text", ["stop", "never mind", "be quiet", "that's enough", "thanks", "cancel"])
+def test_other_stop_phrases_still_end_the_window_after_a_question(text):
+    assert silent_answer_outcome(object(), text, "hey atlas", expects_reply=True) == "stopped"
+
+
+@pytest.mark.parametrize(("text", "expected"), [("okay", "stopped"), ("Okay.", "stopped"), ("yeah", "no_command")])
+def test_an_affirmative_after_a_plain_answer_ends_the_window_silently(text, expected):
+    assert silent_answer_outcome(object(), text, "hey atlas") == expected
+    assert silent_answer_outcome(object(), text, "hey atlas", expects_reply=False) == expected
+
+
+def test_an_affirmative_with_other_words_is_not_whole_utterance():
+    assert not is_affirmative("yeah turn it off")
+    assert not is_affirmative("")
+
+
+def test_the_ring_stop_still_takes_okay():
+    assert is_stop_command("okay") and is_stop_command("Ok.")
+
+
+@pytest.mark.parametrize("transcript", ["yeah", "ok", "Okay."])
+async def test_an_affirmative_after_a_question_reaches_the_brain(transcript):
+    brain = RecordingFakeBrain(replies=[BrainReply(text="Got it.")])
+
+    timings, tts, _source, _host = await _window_turn(
+        transcript, brain, incoming=_answer_request(expects_reply=True)
+    )
+
+    assert brain.call_count == 1
+    assert timings.turn_outcome == "completed"
+    assert tts.received_text == ["Got it."]
+    assert brain.calls[0].messages[-1] == {"role": "user", "content": transcript}
+
+
+@pytest.mark.parametrize("transcript", ["yeah", "ok", "Okay."])
+async def test_an_affirmative_after_a_plain_answer_ends_silently(transcript):
+    brain = RecordingFakeBrain()
+
+    timings, tts, _source, _host = await _window_turn(transcript, brain, incoming=_answer_request())
+
+    assert brain.call_count == 0
+    assert timings.turn_outcome in {"stopped", "no_command"}
+    assert tts.received_text == []
+
+
+@pytest.mark.parametrize("transcript", ["stop", "never mind"])
+async def test_a_stop_phrase_after_a_question_still_ends_silently(transcript):
+    brain = RecordingFakeBrain()
+
+    timings, tts, _source, _host = await _window_turn(
+        transcript, brain, incoming=_answer_request(expects_reply=True)
+    )
+
+    assert brain.call_count == 0
+    assert timings.turn_outcome == "stopped"
+    assert tts.received_text == []
+
+
+async def test_a_spoken_yeah_answers_a_model_question_through_the_edge():
+    brain = RecordingFakeBrain(replies=[_json("do you want the lamp on?", True), BrainReply(text="Sure thing.")])
+    edge = _Edge([_text("turn on the light"), _text("yeah"), _text("")], brain)
+
+    await edge.run()
+
+    assert brain.call_count == 2
+    assert edge.tts[1].received_text == ["Sure thing."]

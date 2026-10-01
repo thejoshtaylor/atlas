@@ -149,6 +149,10 @@ class FollowUpRequest:
     # `"answer"` window. In enforce mode only that speaker may answer it
     # (12 D-10, applied on the serial edge path).
     answer_only_from: "str | None" = None
+    # 261001-dlp: True when the reply that opened this `"answer"` window asked
+    # the operator a question (the model's own `expects_reply`). A bare "yeah"
+    # or "okay" is then an answer to that question, not a stop or filler.
+    expects_reply: bool = False
 
 
 @dataclass

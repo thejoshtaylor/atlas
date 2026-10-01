@@ -1233,7 +1233,11 @@ async def run_turn(
             else:
                 # Silence, a stop phrase and filler end the window with no
                 # spoken reply.
-                silent_outcome = silent_answer_outcome(final, final_text, wake_phrase)
+                # After a model question, "yeah" or "okay" is the answer, so it
+                # runs as a turn (261001-dlp).
+                silent_outcome = silent_answer_outcome(
+                    final, final_text, wake_phrase, expects_reply=incoming.expects_reply
+                )
                 if silent_outcome is not None:
                     timings.turn_outcome = silent_outcome
                     await _cancel_state_task(state_task)
