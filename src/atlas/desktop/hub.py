@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from starlette.websockets import WebSocketDisconnect
+
 from atlas.db.desktop_repository import DesktopDevice, DesktopDeviceRepository
 from atlas.desktop.protocol import (
     CLOSE_GOING_AWAY,
@@ -40,6 +42,11 @@ from atlas.desktop.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+# What a send raises when the Mac is already gone (sleep, lid close, network
+# drop): Starlette's disconnect, a send after close, or a broken pipe. This is
+# a routine event, not a fault.
+_SEND_FAILED = (WebSocketDisconnect, RuntimeError, OSError)
 
 
 class DesktopNotConnected(Exception):
@@ -73,7 +80,10 @@ class DesktopConnection:
         self._pending_pings[ping_id] = future
         try:
             started = clock()
-            await self.websocket.send_text(build_ping(ping_id))
+            try:
+                await self.websocket.send_text(build_ping(ping_id))
+            except _SEND_FAILED:
+                return None  # the Mac is gone, so the Test reports it as unanswered
             try:
                 answered = await asyncio.wait_for(future, timeout_s)
             except asyncio.TimeoutError:
@@ -165,7 +175,11 @@ class DesktopHub:
         if task is not None:
             self._tasks[device.id] = task
         try:
-            await websocket.send_text(build_hello_ack(device.id))
+            try:
+                await websocket.send_text(build_hello_ack(device.id))
+            except _SEND_FAILED:
+                logger.info("desktop %s: gone before the hello.ack", device.id)
+                return
             await self._mark_seen(device.id)
             logger.info("desktop %s connected, app %s", device.id, hello.app_version)
             await self._receive_loop(websocket, connection)
@@ -241,7 +255,10 @@ class DesktopHub:
                     invalid = True
                 else:
                     if isinstance(parsed, DesktopPing):
-                        await websocket.send_text(build_pong(parsed.id))
+                        try:
+                            await websocket.send_text(build_pong(parsed.id))
+                        except _SEND_FAILED:
+                            return  # the Mac is gone; `serve` cleans up
                     elif isinstance(parsed, DesktopPong):
                         # The edge T-10-25 rule: a pong nobody waits for is
                         # counted like any other bad frame.

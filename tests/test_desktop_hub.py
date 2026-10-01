@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
+from starlette.websockets import WebSocketDisconnect
 
 from atlas.desktop.hub import DesktopHub, DesktopNotConnected
 from atlas.desktop.protocol import (
@@ -37,6 +38,21 @@ HELLO = json.dumps(
         "capabilities": [],
     }
 )
+
+
+class _DyingSocket(FakeDesktopSocket):
+    """A socket whose peer vanished: every send raises, like Starlette does
+    for a Mac that slept or lost its network."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self.exc = exc
+        self.dead = False
+
+    async def send_text(self, data: str) -> None:
+        if self.dead:
+            raise self.exc
+        await super().send_text(data)
 
 
 def _hub(repo=None, **overrides) -> DesktopHub:
@@ -263,6 +279,43 @@ async def test_a_disconnect_while_a_ping_waits_returns_none_at_once() -> None:
 
     assert await asyncio.wait_for(waiting, 1.0) is None
     await _until(task.done)
+
+
+@pytest.mark.parametrize("exc", [WebSocketDisconnect(1006), RuntimeError("closed"), BrokenPipeError()])
+async def test_a_ping_to_a_socket_that_just_died_returns_none(exc) -> None:
+    hub = _hub()
+    socket = _DyingSocket(exc)
+    task = await _connected(hub, socket, fake_desktop_device(id=1))
+
+    socket.dead = True
+    assert await hub.ping(1, timeout_s=1.0) is None
+
+    socket.push_disconnect()
+    await _until(task.done)
+
+
+async def test_a_pong_send_on_a_dead_socket_ends_serve_quietly() -> None:
+    hub = _hub()
+    socket = _DyingSocket(WebSocketDisconnect(1006))
+    task = await _connected(hub, socket, fake_desktop_device(id=1))
+
+    socket.dead = True
+    socket.push_text(json.dumps({"type": "ping", "id": 3}))
+    await _until(task.done)
+
+    assert task.exception() is None
+    assert not hub.is_connected(1)
+
+
+async def test_a_hello_ack_send_on_a_dead_socket_ends_serve_quietly() -> None:
+    hub = _hub()
+    socket = _DyingSocket(RuntimeError("closed"))
+    socket.dead = True
+    task = _start(hub, socket, fake_desktop_device(id=1))
+    await _until(task.done)
+
+    assert task.exception() is None
+    assert not hub.is_connected(1)
 
 
 async def test_ping_for_an_unconnected_mac_raises() -> None:
