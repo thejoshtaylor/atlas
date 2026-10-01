@@ -5,7 +5,7 @@ import Testing
 @testable import AtlasKit
 
 /// A connection wired to a fake transport and a clock the test moves by hand.
-private final class Rig: Sendable {
+final class Rig: Sendable {
     let transport = FakeTransport()
     let clock = TestClock()
     let store = InMemorySecretStore()

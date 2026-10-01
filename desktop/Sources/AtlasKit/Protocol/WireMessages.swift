@@ -12,6 +12,14 @@ enum WireType {
     static let pong = "pong"
     static let error = "error"
     static let wakeConfirmed = "wake.confirmed"
+    static let state = "state"
+    static let transcriptPartial = "transcript.partial"
+    static let transcriptFinal = "transcript.final"
+    static let card = "card"
+    static let turnEnded = "turn.ended"
+    static let timerRinging = "timer.ringing"
+    static let timerStopped = "timer.stopped"
+    static let timerStop = "timer.stop"
 }
 
 private enum Caps {
@@ -227,6 +235,7 @@ public enum ClientMessage: Codable, Sendable, Equatable {
     case hello(Hello)
     case ping(Ping)
     case pong(Pong)
+    case timerStop(TimerStop)
     case unknown(type: String)
 
     public init(from decoder: any Decoder) throws {
@@ -235,6 +244,7 @@ public enum ClientMessage: Codable, Sendable, Equatable {
         case WireType.hello: self = .hello(try Hello(from: decoder))
         case WireType.ping: self = .ping(try Ping(from: decoder))
         case WireType.pong: self = .pong(try Pong(from: decoder))
+        case WireType.timerStop: self = .timerStop(try TimerStop(from: decoder))
         default: self = .unknown(type: type)
         }
     }
@@ -244,6 +254,7 @@ public enum ClientMessage: Codable, Sendable, Equatable {
         case .hello(let value): try value.encode(to: encoder)
         case .ping(let value): try value.encode(to: encoder)
         case .pong(let value): try value.encode(to: encoder)
+        case .timerStop(let value): try value.encode(to: encoder)
         case .unknown(let type):
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(type, forKey: .type)
@@ -259,6 +270,13 @@ public enum ServerMessage: Decodable, Sendable, Equatable {
     case pong(Pong)
     case error(ErrorMessage)
     case wakeConfirmed(WakeConfirmed)
+    case turnState(TurnStateMessage)
+    case transcriptPartial(TranscriptPartial)
+    case transcriptFinal(TranscriptFinal)
+    case card(CardMessage)
+    case turnEnded(TurnEnded)
+    case timerRinging(TimerRinging)
+    case timerStopped(TimerStopped)
     case unknown(type: String)
 
     public init(from decoder: any Decoder) throws {
@@ -269,6 +287,13 @@ public enum ServerMessage: Decodable, Sendable, Equatable {
         case WireType.pong: self = .pong(try Pong(from: decoder))
         case WireType.error: self = .error(try ErrorMessage(from: decoder))
         case WireType.wakeConfirmed: self = .wakeConfirmed(try WakeConfirmed(from: decoder))
+        case WireType.state: self = .turnState(try TurnStateMessage(from: decoder))
+        case WireType.transcriptPartial: self = .transcriptPartial(try TranscriptPartial(from: decoder))
+        case WireType.transcriptFinal: self = .transcriptFinal(try TranscriptFinal(from: decoder))
+        case WireType.card: self = .card(try CardMessage(from: decoder))
+        case WireType.turnEnded: self = .turnEnded(try TurnEnded(from: decoder))
+        case WireType.timerRinging: self = .timerRinging(try TimerRinging(from: decoder))
+        case WireType.timerStopped: self = .timerStopped(try TimerStopped(from: decoder))
         default: self = .unknown(type: type)
         }
     }

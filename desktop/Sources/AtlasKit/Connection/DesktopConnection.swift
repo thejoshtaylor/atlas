@@ -257,8 +257,9 @@ public actor DesktopConnection {
             if pong.id == pendingPingId { pendingPingId = nil }
         case .error(let error):
             log.info("The server sent an error frame with code \(error.code, privacy: .public).")
-        case .wakeConfirmed:
-            log.info("The server sent a wake.confirmed frame.")
+        case .wakeConfirmed, .turnState, .transcriptPartial, .transcriptFinal, .card, .turnEnded,
+            .timerRinging, .timerStopped:
+            // A panel frame. Its body is never logged: it holds spoken words.
             inboundContinuation.yield(message)
         case .unknown:
             break

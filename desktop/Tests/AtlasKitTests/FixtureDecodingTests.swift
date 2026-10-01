@@ -59,15 +59,15 @@ import Testing
     }
 
     @Test func thereAreEnoughFixturesToCheck() throws {
-        #expect(try jsonFiles(in: "messages").count >= 9)
-        #expect(try jsonFiles(in: "invalid").count >= 10)
+        #expect(try jsonFiles(in: "messages").count >= 19)
+        #expect(try jsonFiles(in: "invalid").count >= 18)
     }
 
     @Test func everyValidClientMessageDecodesAndReEncodesToTheSameObject() throws {
         let client = try fixtures(in: "messages").filter {
             $0.direction == "client_to_server" && !$0.unknown
         }
-        #expect(client.count >= 3)
+        #expect(client.count >= 4)
         for fixture in client {
             let decoded = try WireCodec.decodeClient(fixture.text)
             if case .unknown = decoded {
@@ -82,7 +82,7 @@ import Testing
         let server = try fixtures(in: "messages").filter {
             $0.direction == "server_to_client" && !$0.unknown
         }
-        #expect(server.count >= 5)
+        #expect(server.count >= 13)
         for fixture in server {
             let decoded = try WireCodec.decodeServer(fixture.text)
             let reEncoded: NSDictionary
@@ -92,6 +92,13 @@ import Testing
             case .pong(let value): reEncoded = try encodeToObject(value)
             case .error(let value): reEncoded = try encodeToObject(value)
             case .wakeConfirmed(let value): reEncoded = try encodeToObject(value)
+            case .turnState(let value): reEncoded = try encodeToObject(value)
+            case .transcriptPartial(let value): reEncoded = try encodeToObject(value)
+            case .transcriptFinal(let value): reEncoded = try encodeToObject(value)
+            case .card(let value): reEncoded = try encodeToObject(value)
+            case .turnEnded(let value): reEncoded = try encodeToObject(value)
+            case .timerRinging(let value): reEncoded = try encodeToObject(value)
+            case .timerStopped(let value): reEncoded = try encodeToObject(value)
             case .unknown:
                 Issue.record("\(fixture.name) decoded as unknown")
                 continue
@@ -220,6 +227,22 @@ import Testing
         #expect(Set(table.allKeys.compactMap { $0 as? String }) == Set(swift.keys))
         for (key, value) in swift {
             #expect((table[key] as? NSNumber)?.intValue == value, "constant \(key)")
+        }
+    }
+
+    @Test func panelLimitsMatchTheFixture() throws {
+        let table = try readObject(protocolRoot().appending(path: "panel_limits.json"))
+        let swift: [String: Int] = [
+            "id_max": PanelLimits.idMax,
+            "word_max": PanelLimits.wordMax,
+            "transcript_text_max": PanelLimits.transcriptTextMax,
+            "card_text_max": PanelLimits.cardTextMax,
+            "label_max": PanelLimits.labelMax,
+            "ms_max": PanelLimits.msMax,
+        ]
+        #expect(Set(table.allKeys.compactMap { $0 as? String }) == Set(swift.keys))
+        for (key, value) in swift {
+            #expect((table[key] as? NSNumber)?.intValue == value, "limit \(key)")
         }
     }
 
