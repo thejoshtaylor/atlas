@@ -17,7 +17,9 @@ final class AppModel {
     private(set) var menuState: MenuState
     private(set) var snapshot = ConnectionSnapshot(status: .unpaired, everConnected: false, lastFailure: nil)
     /// The host of the pairing in Keychain. Never the token.
-    private(set) var pairedHost: String?
+    private(set) var pairedHost: String? {
+        didSet { if pairedHost != oldValue { refreshHostLocality() } }
+    }
     /// Set when the server revoked this Mac. Cleared at the first Connected.
     private(set) var revokedHost: String?
 
@@ -26,11 +28,23 @@ final class AppModel {
     /// True while the Pair form replaces the step list in the setup window.
     private(set) var showingPairForm = false
 
-    /// Plan 14-11 sets this from Location. Away is a menu label only (D-10).
+    /// Set from Location. Away is a menu label only and never changes the
+    /// connection (D-10).
     var away = false {
         didSet { resolveMenu() }
     }
 
+    /// Accessibility, read live. Local Network comes from the connection.
+    let permissions = PermissionMonitor()
+    /// The Launch at login toggle. On by default, and it applies on Continue (D-19).
+    var launchAtLogin: Bool {
+        didSet { UserDefaults.standard.set(launchAtLogin, forKey: Self.launchAtLoginKey) }
+    }
+    private(set) var loginState: LoginItemState
+    /// True when the paired host is on the home network (a name or an address).
+    private var hostIsLocal = false
+
+    @ObservationIgnored private let loginItem = LoginItem()
     @ObservationIgnored private let store = KeychainStore()
     @ObservationIgnored let connection: DesktopConnection
     @ObservationIgnored private let systemEvents = SystemEvents()
@@ -45,6 +59,9 @@ final class AppModel {
     @ObservationIgnored private var pendingLink: URL?
 
     private static let revokedHostKey = "atlas.revokedHost"
+    private static let launchAtLoginKey = "setup.launchAtLogin"
+    private static let setupSeenKey = "setup.seen"
+    private static let localNetworkGrantedKey = "setup.localNetworkGranted"
 
     private init() {
         let info = Bundle.main.infoDictionary
@@ -58,9 +75,12 @@ final class AppModel {
             store: store,
             helloInfo: hello)
         revokedHost = UserDefaults.standard.string(forKey: Self.revokedHostKey)
+        launchAtLogin = UserDefaults.standard.object(forKey: Self.launchAtLoginKey) as? Bool ?? true
+        loginState = LoginItem().status()
         menuState = MenuState.resolve(
             status: nil, revokedHost: UserDefaults.standard.string(forKey: Self.revokedHostKey),
             away: false, now: Date())
+        permissions.onActivate = { [weak self] in self?.refreshSetupState() }
     }
 
     /// Loads the pairing, starts the connection and listens for it. Runs once.
@@ -215,9 +235,76 @@ final class AppModel {
         SetupWindowController.shared.show(focus: focus)
     }
 
+    /// The window is about to be visible: refresh every step and start polling.
+    func setupWindowWillShow() {
+        refreshSetupState()
+        permissions.startPolling()
+    }
+
     func setupWindowDidClose() {
+        permissions.stopPolling()
         if flowAwaitsChoice { dispatch(.cancelled) }
         showingPairForm = false
+    }
+
+    /// Continue: register the login item from the toggle, close the window and
+    /// remember that setup was seen (D-19). It is safe to press twice.
+    func continueSetup() {
+        loginState = loginItem.apply(toggleOn: launchAtLogin)
+        UserDefaults.standard.set(true, forKey: Self.setupSeenKey)
+        SetupWindowController.shared.close()
+    }
+
+    func openLoginItems() {
+        loginItem.openApproval()
+    }
+
+    private func refreshSetupState() {
+        permissions.refresh()
+        loginState = loginItem.status()
+    }
+
+    private func refreshHostLocality() {
+        guard let host = pairedHost else {
+            hostIsLocal = false
+            return
+        }
+        Task {
+            let local = await Task.detached { PermissionMonitor.isLocalNetworkHost(host) }.value
+            if pairedHost == host { hostIsLocal = local }
+        }
+    }
+
+    // MARK: - Setup steps
+
+    private var localNetwork: LocalNetworkStatus {
+        LocalNetworkStatus.resolve(
+            everConnected: snapshot.everConnected,
+            probe: permissions.localNetworkProbe,
+            lastFailure: snapshot.lastFailure,
+            hostIsLocal: hostIsLocal,
+            previouslyGranted: UserDefaults.standard.bool(forKey: Self.localNetworkGrantedKey))
+    }
+
+    private var pairStepState: PairStepState {
+        if case .connecting(let host, _) = flow.state { return .connecting(host: host) }
+        if case .saving(let target) = flow.state { return .connecting(host: target.host) }
+        if let host = pairedHost { return .paired(host: host) }
+        if revokedHost != nil { return .revoked }
+        return .notPaired
+    }
+
+    var setupInputs: SetupInputs {
+        SetupInputs(
+            pair: pairStepState,
+            axTrusted: permissions.axTrusted,
+            localNetwork: localNetwork,
+            loginItem: loginState,
+            launchAtLogin: launchAtLogin)
+    }
+
+    var setupProgress: SetupProgress {
+        SetupProgress.evaluate(setupInputs)
     }
 
     private var flowAwaitsChoice: Bool {
@@ -231,6 +318,7 @@ final class AppModel {
 
     private func handle(_ next: ConnectionSnapshot) {
         snapshot = next
+        if next.everConnected { UserDefaults.standard.set(true, forKey: Self.localNetworkGrantedKey) }
         let wasPairing: Bool
         switch flow.state {
         case .saving, .connecting: wasPairing = true

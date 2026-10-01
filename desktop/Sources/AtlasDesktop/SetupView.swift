@@ -1,15 +1,15 @@
 import AtlasKit
 import SwiftUI
 
-/// The setup window (D-18): a header and the step list. This plan builds the
-/// Pair step. Plan 14-11 adds Accessibility, Local Network, Location, Launch at
-/// login and the footer.
+/// The setup window (D-18): a header, the five step rows and the Continue
+/// footer. Every state and string comes from `SetupProgress`.
 ///
 /// SwiftUI semantic styles and system colors only. No alert, no warning color.
 struct SetupView: View {
     let model: AppModel
 
     var body: some View {
+        let progress = model.setupProgress
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Set up ATLAS")
@@ -22,42 +22,120 @@ struct SetupView: View {
                 PairFormView(model: model)
             } else {
                 Form {
-                    pairRow
+                    ForEach(progress.steps) { step in
+                        row(step)
+                    }
                 }
                 .formStyle(.grouped)
+                footer(progress)
             }
         }
         .padding(16)
         .frame(width: 520)
     }
 
-    // MARK: Pair row
+    // MARK: Rows
 
-    private enum PairRowState {
-        case notPaired, connecting(String), paired(String), revoked
-
-        var done: Bool {
-            if case .paired = self { return true }
-            return false
+    private func symbol(_ status: SetupStepStatus) -> (name: String, color: Color) {
+        switch status {
+        case .done: ("checkmark.circle.fill", .green)
+        case .notDone: ("circle", .secondary)
+        case .needsAction: ("exclamationmark.circle", .secondary)
         }
     }
 
-    private var pairState: PairRowState {
-        if case .connecting(let host, _) = model.flow.state { return .connecting(host) }
-        if case .saving(let target) = model.flow.state { return .connecting(target.host) }
-        if let host = model.pairedHost { return .paired(host) }
-        if model.revokedHost != nil { return .revoked }
-        return .notPaired
+    @ViewBuilder
+    private func row(_ step: SetupStep) -> some View {
+        let mark = symbol(step.status)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: mark.name)
+                    .foregroundStyle(mark.color)
+                    .font(.title3)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(step.title)
+                        .font(.title3.weight(.semibold))
+                    Text(step.stateText)
+                        .font(.body)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    ForEach(step.notes, id: \.self) { note in
+                        Text(note)
+                            .font(.subheadline)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(step.description)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                control(step)
+            }
+            if step.id == .pair, let text = pairErrorText {
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(step.accessibilityLabel)
     }
 
-    private var pairStateText: String {
-        switch pairState {
-        case .notPaired: "Not paired"
-        case .connecting(let host): "Connecting to " + MenuState.truncateMiddle(host) + "\u{2026}"
-        case .paired(let host): "Paired with " + MenuState.truncateMiddle(host)
-        case .revoked: "Revoked by the server"
+    @ViewBuilder
+    private func control(_ step: SetupStep) -> some View {
+        switch step.id {
+        case .pair:
+            stepButton(step) { model.openPairForm() }
+        case .accessibility:
+            stepButton(step) { model.permissions.requestAccessibility() }
+        case .localNetwork:
+            stepButton(step) { SettingsLinks.open(.localNetwork) }
+        case .location:
+            EmptyView()
+        case .launchAtLogin:
+            VStack(alignment: .trailing, spacing: 8) {
+                Toggle("Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.launchAtLogin = $0 }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(.accentColor)
+                if step.buttonLabel != nil {
+                    stepButton(step) { model.openLoginItems() }
+                }
+            }
         }
     }
+
+    @ViewBuilder
+    private func stepButton(_ step: SetupStep, action: @escaping () -> Void) -> some View {
+        if let label = step.buttonLabel {
+            Button(label, action: action)
+                .buttonStyle(.bordered)
+                .controlSize(.regular)
+        }
+    }
+
+    // MARK: Footer
+
+    private func footer(_ progress: SetupProgress) -> some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Button("Continue") { model.continueSetup() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!progress.continueEnabled)
+            if !progress.continueEnabled {
+                Text("Finish the three required steps to continue.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    // MARK: Pair errors
 
     private var pairErrorText: String? {
         switch model.flow.state {
@@ -77,41 +155,5 @@ struct SetupView: View {
     private var connectingHost: String? {
         if case .connecting(let host, _) = model.flow.state { return host }
         return nil
-    }
-
-    private var pairRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: pairState.done ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(pairState.done ? Color.green : Color.secondary)
-                    .font(.title3)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Pair")
-                        .font(.title3.weight(.semibold))
-                    Text(pairStateText)
-                        .font(.body)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("Connect this Mac to your ATLAS server.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                Button(pairState.done ? "Re-pair\u{2026}" : "Pair\u{2026}") {
-                    model.openPairForm()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
-            }
-            if let text = pairErrorText {
-                Text(text)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Pair, " + pairStateText)
     }
 }

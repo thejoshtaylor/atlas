@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Where the setup window opens. Plan 14-11 adds the other steps.
+/// Where the setup window opens.
 enum SetupFocus: Equatable {
     /// The step list, at the Pair row.
     case pair
@@ -20,6 +20,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
     func show(focus: SetupFocus) {
         let window = self.window ?? makeWindow()
         self.window = window
+        AppModel.shared.setupWindowWillShow()
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
         // The agent app can lose the activation race against the browser that
@@ -30,6 +31,10 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }
+    }
+
+    func close() {
+        window?.close()
     }
 
     private func makeWindow() -> NSWindow {
