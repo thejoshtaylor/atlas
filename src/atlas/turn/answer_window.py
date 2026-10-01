@@ -66,11 +66,19 @@ def is_affirmative(text: str) -> bool:
     return 1 <= len(tokens) <= _MAX_AFFIRMATIVE_TOKENS and all(t in _AFFIRMATIVE_WORDS for t in tokens)
 
 
+# WR-03: "cancel the timer" and "stop the alarm" are stop phrases for a
+# ringing timer. After an interrupt, nothing rings, so the words are a command
+# for the timer intent (or the brain), not a silent stop. Silence would tell
+# the operator that the timer is gone while it still runs.
+_TIMER_RE = re.compile(r"\b(?:timer|timers|alarm|alarms)\b", re.IGNORECASE)
+
+
 def is_quiet_stop(text: str) -> bool:
     """True when `text` is a stop phrase that ends a window or an interrupt
     turn with no reply. Text with the word "off" never counts: it is a
-    command for the brain."""
-    return is_stop_command(text) and not _OFF_RE.search(text)
+    command for the brain. Text that names a timer or an alarm never counts
+    either: it is a command about that timer."""
+    return is_stop_command(text) and not _OFF_RE.search(text) and not _TIMER_RE.search(text)
 
 
 def _named_entities(arguments: Any) -> "frozenset[str]":

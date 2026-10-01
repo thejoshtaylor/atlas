@@ -2884,6 +2884,42 @@ async def test_turn_it_off_after_an_interrupt_still_reaches_the_brain(fake_tts):
     assert timings.turn_outcome != "stopped"
 
 
+@pytest.mark.parametrize("said", ["hey atlas cancel the timer", "hey atlas stop the alarm"])
+async def test_cancel_the_timer_after_an_interrupt_reaches_the_timer_intent_not_a_silent_stop(fake_tts, said):
+    """WR-03: a silent stop would leave the timer running with nothing said."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    heard: list[str] = []
+
+    async def timer_intents(text: str):
+        heard.append(text)
+        return "Timer cancelled."
+
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn()
+    tts = fake_tts(chunks=[b"\x01"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        _SequentialDrainingStt(calls=[[FinalTranscript(text=said)]]),
+        _RecordingBrain(replies=[]),
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey atlas",
+        verify_wake=True,
+        timer_intents=timer_intents,
+    )
+
+    assert len(heard) == 1
+    assert timings.turn_outcome == "timer_intent"
+    assert "".join(tts.received_text) == "Timer cancelled."
+
+
 async def test_a_bare_stop_on_an_ordinary_wake_turn_still_reaches_the_brain(fake_tts):
     source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
     source.barge_in = _AfterInterruptBargeIn(after_interrupt=False)
