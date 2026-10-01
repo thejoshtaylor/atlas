@@ -613,7 +613,7 @@ class EdgeSourceConfig:
 
     `sample_rate: int = 16000` and `channels: int = 2` come straight from
     the hardware: GitHub issue #4's own comment measured the XVF3800
-    firmware v2.0.6 capturing exactly 2 channels at 16 kHz, S16_LE. Neither
+    firmware v2.0.10 capturing exactly 2 channels at 16 kHz, S16_LE. Neither
     is something this file assumes independently of that measurement.
 
     `asr_channel`, `pre_roll_ms`, and `tail_ms` each defaulted to `None`
@@ -621,7 +621,7 @@ class EdgeSourceConfig:
     (10-CONTEXT.md, `10-SPIKE.md`) measured which capture channel carries
     the ASR beam and how long the Pi's Silero VAD onset and offset lag the
     start and end of speech, on the operator's own Pi 4 + Seeed reSpeaker
-    XVF3800 (USB `2886:001a`, firmware v2.0.6, 2ch/16kHz/S16_LE). Plan
+    XVF3800 (USB `2886:001a`, firmware v2.0.10, 2ch/16kHz/S16_LE). Plan
     10-10 writes those measured numbers here as the shipped defaults, each
     still overridable by `edge.asr_channel`/`edge.pre_roll_ms`/
     `edge.tail_ms` in configuration -- and an explicit `null` there still
@@ -1530,6 +1530,22 @@ def _validate_and_normalize_override(cls: type, raw_override: dict, label: str) 
     return normalized
 
 
+def _check_barge_in_wake_fields(values: dict, label: str) -> None:
+    """Check the Phase 13 barge-in keys in `values`, which is the global
+    `barge_in:` block or one per-source override. Raises `ConfigError` naming
+    the key. `fade_ms` has a 50 to 300 range (D-14), so a bad value cannot
+    disable the fade or reach the Pi unchecked. A bool is never an int here,
+    because `True` would pass as 1."""
+    if "wake_word" in values and not isinstance(values["wake_word"], bool):
+        raise ConfigError(f"{label}.wake_word must be true or false, got {values['wake_word']!r}")
+    for key, low, high in (("fade_ms", 50, 300), ("atlas_margin_ms", 0, 5000)):
+        if key not in values:
+            continue
+        value = values[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            raise ConfigError(f"{label}.{key} must be a whole number from {low} to {high}, got {value!r}")
+
+
 _WAKE_ENGINES = ("openwakeword", "vosk")
 
 
@@ -1825,10 +1841,11 @@ class BargeInConfig:
     def from_config(cls, raw: dict | None) -> "BargeInConfig":
         raw = raw or {}
         sources_raw = raw.get("sources", {}) or {}
-        sources = {
-            name: _validate_and_normalize_override(cls, override or {}, f"barge_in.sources.{name}")
-            for name, override in sources_raw.items()
-        }
+        _check_barge_in_wake_fields(raw, "barge_in")
+        sources = {}
+        for name, override in sources_raw.items():
+            _check_barge_in_wake_fields(override or {}, f"barge_in.sources.{name}")
+            sources[name] = _validate_and_normalize_override(cls, override or {}, f"barge_in.sources.{name}")
         correlation_tolerance = float(raw.get("correlation_tolerance", cls.correlation_tolerance))
         if correlation_tolerance < 0:
             raise ConfigError(
@@ -1852,6 +1869,9 @@ class BargeInConfig:
             correlation_enabled=raw.get("correlation_enabled", cls.correlation_enabled),
             correlation_tolerance=correlation_tolerance,
             tracking_adaptation_rate=tracking_adaptation_rate,
+            wake_word=raw.get("wake_word", cls.wake_word),
+            fade_ms=raw.get("fade_ms", cls.fade_ms),
+            atlas_margin_ms=raw.get("atlas_margin_ms", cls.atlas_margin_ms),
             sources=sources,
         )
 

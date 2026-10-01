@@ -807,6 +807,14 @@ def test_example_config_loads_end_to_end(monkeypatch):
     assert config.barge_in.resolve("camera").correlation_enabled is False
     assert config.barge_in.correlation_tolerance == 0.03
     assert config.barge_in.tracking_adaptation_rate == 0.1
+    # Phase 13: the shipped example documents the wake barge-in keys and
+    # turns wake_word on for the edge only. The VAD path stays off there.
+    assert config.barge_in.wake_word is False
+    assert config.barge_in.fade_ms == 120
+    assert config.barge_in.atlas_margin_ms == 1000
+    assert config.barge_in.resolve("edge").wake_word is True
+    assert config.barge_in.resolve("edge").enabled is False
+    assert config.barge_in.resolve("camera").wake_word is False
     assert config.session.retain_days == 7
 
     # Plan 02-11's gap closure: the calibration block loads, and its route
@@ -1543,6 +1551,81 @@ def test_barge_in_config_correlation_enabled_survives_a_per_source_override_roun
     resolved = config.resolve("camera")
     assert resolved.enabled is False
     assert resolved.correlation_enabled is True
+
+
+# --- Phase 13: wake_word, fade_ms and atlas_margin_ms ---
+
+
+def test_barge_in_config_wake_keys_default_when_absent():
+    from atlas.config import BargeInConfig
+
+    config = BargeInConfig.from_config({})
+    assert config.wake_word is False
+    assert config.fade_ms == 120
+    assert config.atlas_margin_ms == 1000
+
+
+def test_barge_in_config_keeps_the_wake_keys_it_is_given():
+    from atlas.config import BargeInConfig
+
+    config = BargeInConfig.from_config({"wake_word": True, "fade_ms": 200, "atlas_margin_ms": 0})
+    assert (config.wake_word, config.fade_ms, config.atlas_margin_ms) == (True, 200, 0)
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0, None])
+def test_barge_in_config_rejects_a_non_bool_wake_word(bad):
+    from atlas.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError, match=r"barge_in\.wake_word"):
+        BargeInConfig.from_config({"wake_word": bad})
+
+
+@pytest.mark.parametrize("bad", [49, 301, True, 120.0, "120"])
+def test_barge_in_config_rejects_a_bad_fade_ms(bad):
+    from atlas.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError, match=r"barge_in\.fade_ms"):
+        BargeInConfig.from_config({"fade_ms": bad})
+
+
+@pytest.mark.parametrize("good", [50, 300])
+def test_barge_in_config_accepts_the_fade_ms_range_edges(good):
+    from atlas.config import BargeInConfig
+
+    assert BargeInConfig.from_config({"fade_ms": good}).fade_ms == good
+
+
+@pytest.mark.parametrize("bad", [-1, 5001, True, 1.5, "1000"])
+def test_barge_in_config_rejects_a_bad_atlas_margin_ms(bad):
+    from atlas.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError, match=r"barge_in\.atlas_margin_ms"):
+        BargeInConfig.from_config({"atlas_margin_ms": bad})
+
+
+def test_a_per_source_fade_ms_outside_the_range_names_the_source_key():
+    from atlas.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError, match=r"barge_in\.sources\.edge\.fade_ms"):
+        BargeInConfig.from_config({"sources": {"edge": {"fade_ms": 400}}})
+
+
+def test_a_per_source_bad_wake_word_and_margin_name_the_source_key():
+    from atlas.config import BargeInConfig, ConfigError
+
+    with pytest.raises(ConfigError, match=r"barge_in\.sources\.edge\.wake_word"):
+        BargeInConfig.from_config({"sources": {"edge": {"wake_word": "on"}}})
+    with pytest.raises(ConfigError, match=r"barge_in\.sources\.edge\.atlas_margin_ms"):
+        BargeInConfig.from_config({"sources": {"edge": {"atlas_margin_ms": 9999}}})
+
+
+def test_a_per_source_wake_word_override_resolves():
+    from atlas.config import BargeInConfig
+
+    config = BargeInConfig.from_config({"sources": {"edge": {"wake_word": True, "fade_ms": 80}}})
+    assert config.resolve("edge").wake_word is True
+    assert config.resolve("edge").fade_ms == 80
+    assert config.resolve("camera").wake_word is False
 
 
 # --- Plan 03-01: DatabaseConfig, SecurityConfig, read_secret_key (D-01, D-02, D-07) ---
