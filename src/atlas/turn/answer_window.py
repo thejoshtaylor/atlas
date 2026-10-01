@@ -41,7 +41,7 @@ def build_answer_request(
     proposals_only: bool,
     prior_exchange: "list[dict[str, Any]] | None",
     playback_ends_at: "float | None",
-    asked_by_speaker: "str | None",
+    answer_only_from: "str | None",
 ) -> "FollowUpRequest | None":
     """The request for the window after this answer, or `None` for no window.
 
@@ -61,7 +61,7 @@ def build_answer_request(
         playback_ends_at=playback_ends_at,
         proposals_only=proposals_only,
         answer_scope=AnswerScope(tool_names=frozenset(called_tools)).narrowed_by(answer_scope),
-        asked_by_speaker=asked_by_speaker,
+        answer_only_from=answer_only_from,
     )
 
 
@@ -101,7 +101,7 @@ def answer_speaker_mismatch(
     is `None` and `follow_up_speaker_mismatch` cannot decide. Other modes
     never restrict, as D-12 requires.
     """
-    if incoming is None or incoming.asked_by_speaker is None or effective_mode != "enforce":
+    if incoming is None or incoming.answer_only_from is None or effective_mode != "enforce":
         return False
     answering = speaker_event.get("speaker_id")
-    return answering is None or str(answering) != incoming.asked_by_speaker
+    return answering is None or str(answering) != incoming.answer_only_from

@@ -998,7 +998,7 @@ async def run_turn(
                 speaker_outcome.event.get("speaker_id"),
                 turn_context.answer_only_from
                 if turn_context is not None
-                else (incoming.asked_by_speaker if incoming is not None else None),
+                else (incoming.answer_only_from if incoming is not None else None),
             )
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -1921,7 +1921,7 @@ async def run_turn(
                 proposals_only=restrict_tools_to_proposals,
                 prior_exchange=prior_exchange,
                 playback_ends_at=estimate_playback_end(speech_result, sink),
-                asked_by_speaker=str(asked_by) if asked_by is not None else None,
+                answer_only_from=str(asked_by) if asked_by is not None else None,
             )
             if answer_request is not None:
                 follow_up.request(answer_request)

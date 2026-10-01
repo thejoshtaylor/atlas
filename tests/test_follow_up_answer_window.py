@@ -167,7 +167,7 @@ def test_build_answer_request_carries_the_exchange_and_the_scope():
         proposals_only=True,
         prior_exchange=[{"role": "user", "content": "earlier"}],
         playback_ends_at=12.5,
-        asked_by_speaker="1",
+        answer_only_from="1",
     )
     assert request == FollowUpRequest(
         kind="answer",
@@ -178,7 +178,7 @@ def test_build_answer_request_carries_the_exchange_and_the_scope():
         playback_ends_at=12.5,
         proposals_only=True,
         answer_scope=AnswerScope(tool_names=frozenset({"weather_now"})),
-        asked_by_speaker="1",
+        answer_only_from="1",
     )
 
 
@@ -192,7 +192,7 @@ def test_build_answer_request_narrows_by_the_scope_it_ran_under_and_never_widens
         proposals_only=False,
         prior_exchange=None,
         playback_ends_at=None,
-        asked_by_speaker=None,
+        answer_only_from=None,
     )
     assert request is not None
     assert request.chain_depth == 3
@@ -207,7 +207,7 @@ def test_build_answer_request_opens_no_window_past_the_chain_cap_or_after_a_blan
         "proposals_only": False,
         "prior_exchange": None,
         "playback_ends_at": None,
-        "asked_by_speaker": None,
+        "answer_only_from": None,
     }
     capped = build_answer_request(
         incoming=_answer_request(chain_depth=MAX_CHAINED_FOLLOW_UPS), reply_text="Fine.", **common
@@ -238,7 +238,7 @@ def test_silent_answer_outcome(final, text, expected):
 
 
 def test_the_asker_only_rule_applies_in_enforce_mode_only():
-    request = _answer_request(asked_by_speaker="1")
+    request = _answer_request(answer_only_from="1")
     assert answer_speaker_mismatch(request, speaker_event={"speaker_id": 2}, effective_mode="enforce")
     assert answer_speaker_mismatch(request, speaker_event={}, effective_mode="enforce")
     assert not answer_speaker_mismatch(request, speaker_event={"speaker_id": 1}, effective_mode="enforce")

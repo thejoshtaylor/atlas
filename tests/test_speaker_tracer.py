@@ -229,6 +229,17 @@ async def test_an_enrolled_voice_is_answered_and_an_unenrolled_voice_is_silenced
     monkeypatch.setattr(app_module, "_build_wake_detector", _fake_build_edge_wake_detector)
     monkeypatch.setattr(app_module, "_build_ffmpeg_supervisor", smoke._fake_build_ffmpeg_supervisor)
 
+    # This tracer proves the wake-turn speaker gate. Its second utterance is a
+    # new wake turn, sent in a burst right after the first reply, so it must
+    # not land in the no-wake-word answer window (13-04) that the first
+    # answer would otherwise open.
+    real_make_run_turn = app_module._make_run_turn_for_source
+    monkeypatch.setattr(
+        app_module,
+        "_make_run_turn_for_source",
+        lambda *args, **kwargs: real_make_run_turn(*args, **{**kwargs, "answer_windows": False}),
+    )
+
     created_embedders: "list[FakeEmbedder]" = []
 
     def _fake_build_speaker_embedder(speaker_config: object) -> FakeEmbedder:

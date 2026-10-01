@@ -437,7 +437,7 @@ async def _run_answer_window(
         chain_depth=1,
         original_transcript="what is the weather",
         question="It is sunny.",
-        asked_by_speaker=asked_by,
+        answer_only_from=asked_by,
     )
     source.follow_up = FollowUpChannel(incoming=incoming)
     brain = fake_brain(replies=[BrainReply(text="Rain.")])

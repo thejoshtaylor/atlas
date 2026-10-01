@@ -146,7 +146,7 @@ class FollowUpRequest:
     # Phase 13 (plan 13-04): the speaker id of the turn that opened an
     # `"answer"` window. In enforce mode only that speaker may answer it
     # (12 D-10, applied on the serial edge path).
-    asked_by_speaker: "str | None" = None
+    answer_only_from: "str | None" = None
 
 
 @dataclass
