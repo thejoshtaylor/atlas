@@ -1,20 +1,21 @@
 import AppKit
 import SwiftUI
 
-/// The menu-bar agent. This is the real Unpaired state (D-20). Plan 14-10
-/// replaces the content with the live connection state.
+/// The menu-bar agent. The icon and the first menu line follow the live
+/// connection (D-20). There is no animation, so Reduce Motion needs no case.
 struct AtlasDesktopApp: App {
+    private let model = AppModel.shared
+
+    init() {
+        AppModel.shared.start()
+    }
+
     var body: some Scene {
         MenuBarExtra {
-            Text("Not paired")
-            Divider()
-            Button("Quit ATLAS") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
+            MenuContent(model: model)
         } label: {
-            Image(systemName: "globe.americas")
-                .accessibilityLabel("ATLAS, Not paired")
+            Image(systemName: model.menuState.iconFilled ? "globe.americas.fill" : "globe.americas")
+                .accessibilityLabel(model.menuState.accessibilityLabel)
         }
         .menuBarExtraStyle(.menu)
     }
