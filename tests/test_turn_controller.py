@@ -11,6 +11,8 @@ import json
 from types import SimpleNamespace
 from typing import Sequence
 
+import pytest
+
 from atlas_mcp.ha import handle_call_service, handle_list_entities
 from atlas_mcp.safety import Denied, Policy
 
@@ -2822,3 +2824,79 @@ async def test_a_clarification_question_that_is_interrupted_leaves_no_follow_up_
 
     assert timings.turn_outcome == "barged_in"
     assert source.follow_up.requested is None
+
+
+# --- Phase 13 (plan 13-05): the turn that an interrupt started ----------------
+
+
+class _AfterInterruptBargeIn:
+    """A monitor double for the turn that follows an interrupt: no interrupt
+    path is live on it, and it records the resume notes `run_turn` makes."""
+
+    def __init__(self, *, after_interrupt: bool = True) -> None:
+        self.enabled = False
+        self.interrupt_requested = False
+        self.after_interrupt = after_interrupt
+        self.playback_started_at: float | None = None
+        self.notes: list[tuple[str, object]] = []
+
+    def mark_playback_started(self, now: float) -> None:
+        self.playback_started_at = now
+
+    def mark_transcript_done(self) -> None:
+        pass
+
+    def note_resume_context(self, transcript: str, scope: object) -> None:
+        self.notes.append((transcript, scope))
+
+
+@pytest.mark.parametrize("said", ["atlas never mind", "atlas be quiet", "atlas stop", "Atlas, that's enough."])
+async def test_a_stop_phrase_after_an_interrupt_ends_silently(fake_tts, said):
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn()
+    stt, brain, tts, timings, source = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text=said)]], verify_wake=True, source=source
+    )
+    assert timings.turn_outcome == "stopped"
+    assert brain.received_messages == []
+    assert tts.received_text == []
+    assert source.sent_audio == []
+
+
+async def test_a_command_after_an_interrupt_reaches_the_brain(fake_tts):
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn()
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="atlas turn off the lights")]], verify_wake=True, source=source
+    )
+    assert brain.received_messages[-1][-1] == {"role": "user", "content": "turn off the lights"}
+    assert timings.turn_outcome != "stopped"
+
+
+async def test_turn_it_off_after_an_interrupt_still_reaches_the_brain(fake_tts):
+    """The word "off" is a command for the brain, never a silent stop."""
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn()
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="atlas turn it off")]], verify_wake=True, source=source
+    )
+    assert len(brain.received_messages) == 1
+    assert timings.turn_outcome != "stopped"
+
+
+async def test_a_bare_stop_on_an_ordinary_wake_turn_still_reaches_the_brain(fake_tts):
+    source = _FrameCountingLiveSource(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn(after_interrupt=False)
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="atlas stop")]], verify_wake=True, source=source
+    )
+    assert len(brain.received_messages) == 1
+    assert timings.turn_outcome != "stopped"
+
+
+async def test_a_bare_stop_with_no_monitor_at_all_still_reaches_the_brain(fake_tts):
+    stt, brain, tts, timings, _ = await _run_wake_turn(
+        fake_tts, [[FinalTranscript(text="atlas stop")]], verify_wake=True
+    )
+    assert len(brain.received_messages) == 1
+    assert timings.turn_outcome != "stopped"

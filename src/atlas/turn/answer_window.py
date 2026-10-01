@@ -31,6 +31,13 @@ ANSWER_WINDOW_SILENT = "answer_window_silent"
 _OFF_RE = re.compile(r"\boff\b", re.IGNORECASE)
 
 
+def is_quiet_stop(text: str) -> bool:
+    """True when `text` is a stop phrase that ends a window or an interrupt
+    turn with no reply. Text with the word "off" never counts: it is a
+    command for the brain."""
+    return is_stop_command(text) and not _OFF_RE.search(text)
+
+
 def build_answer_request(
     *,
     incoming: "FollowUpRequest | None",
@@ -84,7 +91,7 @@ def silent_answer_outcome(final: Any, final_text: str, wake_phrase: "str | None"
     """
     if final is None or not final_text.strip():
         return ANSWER_WINDOW_SILENT
-    if is_stop_command(final_text) and not _OFF_RE.search(final_text):
+    if is_quiet_stop(final_text):
         return "stopped"
     if is_no_command(final_text, wake_phrase):
         return "no_command"

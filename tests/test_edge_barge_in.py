@@ -516,3 +516,215 @@ def test_the_operators_own_wake_word_key_wins_for_the_edge():
     raw["barge_in"] = {"sources": {"edge": {"wake_word": False}}}
     resolved = _resolve_edge_barge_in_config(Config.from_config(raw)).resolve("edge")
     assert resolved.wake_word is False
+
+
+# --- Phase 13 (plan 13-05): the interrupting speech becomes the next turn ---
+
+
+def _stereo(value: int) -> bytes:
+    """One whole stereo frame run that no other value's run equals."""
+    return bytes([value, 0, value, 0]) * 256
+
+
+def _handover_runner(edge_source, run_turn_fn, detector, *, barge_in_config, follow_up_window_s=None):
+    from atlas.audio.ring import PrerollBuffer
+
+    return SourceRunner(
+        "edge",
+        edge_source,
+        detector,
+        lambda chunk: chunk,
+        run_turn_fn,
+        barge_in_config=barge_in_config,
+        preroll=PrerollBuffer(edge_source.source_format(), 1500),
+        follow_up_window_s=follow_up_window_s,
+    )
+
+
+def _interrupted_monitor(runner, kind):
+    monitor = runner._new_barge_in_monitor()
+    monitor._on_interrupt = None
+    monitor.interrupt_requested = True
+    monitor.interrupt_kind = kind
+    return monitor
+
+
+async def test_a_wake_interrupt_hands_its_frames_to_the_next_wake_turn_once_each(edge_source, monkeypatch):
+    """The end-to-end hand-over: turn 1 speaks a held reply, the operator's
+    speech (B, then C where the detector hits) arrives during the hold, and
+    turn 2 reads B and C first, each once, then the live frames."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.follow_up import FollowUpChannel
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    wake_marks: list[None] = []
+    monkeypatch.setattr(edge_source, "mark_wake_hit", lambda: wake_marks.append(None))
+
+    a_frame, b_frame, c_frame, d_frame, e_frame = (_stereo(n) for n in (1, 2, 3, 4, 5))
+    turn_two: dict = {"started": asyncio.Event(), "chunks": [], "sources": []}
+    turn_one_outcome: list[str] = []
+    calls = 0
+
+    async def run_turn_fn(turn_source) -> None:
+        nonlocal calls
+        calls += 1
+        monitor = turn_source.barge_in
+        if calls == 1:
+            monitor.mark_transcript_done()
+            timings = TurnTimings()
+            timings.turn_outcome = "completed"
+            await _speak(
+                turn_source,
+                _BurstFakeTts([b"\x00\x00" * 1600] * 10),
+                timings,
+                "reply text",
+                kind="answer",
+                barge_in=monitor,
+                sink=edge_source.sink_format(),
+            )
+            turn_one_outcome.append(timings.turn_outcome)
+            return
+        turn_two["sources"].append(turn_source)
+        turn_two["started"].set()
+        async for chunk in turn_source.frames():
+            turn_two["chunks"].append(chunk)
+            if len(turn_two["chunks"]) == 4:
+                return
+
+    runner = _handover_runner(
+        edge_source,
+        run_turn_fn,
+        _ScriptedWakeDetector(hit_on_calls={1, 3}),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+        follow_up_window_s=lambda: 8.0,
+    )
+    run_task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.sleep(0)
+        socket.push_bytes(a_frame)
+        await _wait_until(lambda: len(socket.sent_bytes) == 10)
+        socket.push_bytes(b_frame)
+        socket.push_bytes(c_frame)
+        await asyncio.wait_for(turn_two["started"].wait(), timeout=2.0)
+        socket.push_bytes(d_frame)
+        socket.push_bytes(e_frame)
+        await _wait_until(lambda: len(turn_two["chunks"]) == 4)
+        await asyncio.sleep(0.02)
+
+        assert turn_one_outcome == ["barged_in"]
+        assert turn_two["chunks"] == [b_frame, c_frame, d_frame, e_frame]
+        [second_source] = turn_two["sources"]
+        assert second_source.barge_in.after_interrupt is True
+        assert isinstance(second_source.follow_up, FollowUpChannel)
+        assert second_source.follow_up.incoming is None
+        assert len(wake_marks) == 2, "the playback hit marks its own frame for the speaker tracker"
+        assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+    finally:
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_the_listener_gives_every_chunk_it_holds_to_the_pre_roll_or_the_hand_over(edge_source):
+    """RESEARCH Pitfall 2: chunks read before the hit are in the pre-roll the
+    hit takes. Chunks read after it go to the hand-over, in order."""
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+
+    async def never(turn_source) -> None:
+        return None
+
+    runner = _handover_runner(
+        edge_source,
+        never,
+        _ScriptedWakeDetector(hit_on_calls={2}),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+    )
+    monitor = runner._new_barge_in_monitor()
+    monitor.mark_transcript_done()
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        frames = [_stereo(n) for n in (1, 2, 3, 4)]
+        for frame in frames:
+            socket.push_bytes(frame)
+        await _wait_until(lambda: len(monitor.handover) == 4)
+        assert monitor.interrupt_kind == "wake"
+        assert monitor.handover == frames
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_interrupt_turns_stop_after_the_cap_and_the_runner_goes_back_to_wake_listening(edge_source, monkeypatch):
+    from atlas.sources.runner import MAX_CHAINED_INTERRUPT_TURNS
+    from atlas.turn.follow_up import FollowUpChannel
+
+    runner = _handover_runner(
+        edge_source,
+        lambda turn_source: None,
+        _NeverHitDetector(),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+        follow_up_window_s=lambda: 8.0,
+    )
+    ran = []
+
+    async def interrupt_every_turn(turn_source, monitor) -> None:
+        ran.append((turn_source, monitor))
+        monitor._on_interrupt = None
+        monitor.interrupt_requested = True
+        monitor.interrupt_kind = "wake"
+
+    monkeypatch.setattr(runner, "_run_one_turn", interrupt_every_turn)
+    first = _interrupted_monitor(runner, "wake")
+    first.handover = [_stereo(9)]
+
+    last, channel = await runner._continue_after_interrupts(first, FollowUpChannel())
+
+    assert len(ran) == MAX_CHAINED_INTERRUPT_TURNS == 3
+    assert channel is None
+    assert last is ran[-1][1]
+    assert all(monitor.after_interrupt for _, monitor in ran)
+    assert [chunk async for chunk in _first_chunks(ran[0][0], 1)] == [_stereo(9)]
+
+
+async def _first_chunks(turn_source, count):
+    seen = 0
+    async for chunk in turn_source.frames():
+        yield chunk
+        seen += 1
+        if seen == count:
+            return
+
+
+async def test_a_turn_that_is_not_interrupted_starts_no_extra_turn(edge_source, monkeypatch):
+    from atlas.turn.follow_up import FollowUpChannel
+
+    runner = _handover_runner(
+        edge_source,
+        lambda turn_source: None,
+        _NeverHitDetector(),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+    )
+    ran = []
+
+    async def record(turn_source, monitor) -> None:
+        ran.append(monitor)
+
+    monkeypatch.setattr(runner, "_run_one_turn", record)
+    channel = FollowUpChannel()
+    quiet = runner._new_barge_in_monitor()
+    assert await runner._continue_after_interrupts(quiet, channel) == (quiet, channel)
+    energy = _interrupted_monitor(runner, "energy")
+    assert await runner._continue_after_interrupts(energy, channel) == (energy, channel)
+    assert ran == []

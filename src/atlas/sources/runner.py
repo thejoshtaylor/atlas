@@ -132,6 +132,12 @@ MAX_PENDING_WAKE_EVENT_WRITES = 64
 # reason needs no migration.
 REPLY_WAKE_WORD_BLOCK = "reply_wake_word"
 
+# Phase 13 (RESEARCH Pitfall 9): at most this many turns in a row may be
+# started by an interrupt. A television that says the wake word again and again
+# cannot chain turns forever. The wake gate refractory still applies to each
+# hit. After the cap the runner goes back to listening for the wake word.
+MAX_CHAINED_INTERRUPT_TURNS = 3
+
 
 def resolve_wake_threshold(wake_config: WakeConfig) -> float:
     """The score a `WakeHit` must reach to count, for whichever engine
@@ -288,6 +294,13 @@ class BargeInMonitor:
         self.playback = ReplyCursor()
         self.interrupted = asyncio.Event()
         self.interrupt_kind: str | None = None
+        # Phase 13 (D-15, D-16): the frames the listener read from the interrupt
+        # on. The listener appends each one before any await, so a cancelled
+        # await never drops a chunk it already holds (RESEARCH Pitfall 2). The
+        # next turn replays them. `after_interrupt` is True on the monitor of
+        # the turn that an interrupt started.
+        self.handover: list[bytes] = []
+        self.after_interrupt = False
         self._on_interrupt = on_interrupt
         self._above_floor_since: float | None = None
         # Correlation is active only when both a trace to compare against
@@ -981,6 +994,8 @@ class SourceRunner:
                 turn_source.follow_up = follow_up_channel
 
             await self._run_one_turn(turn_source, monitor)
+            # Phase 13: an interrupt hands its speech to the next turn.
+            monitor, follow_up_channel = await self._continue_after_interrupts(monitor, follow_up_channel)
 
             if follow_up_channel is not None:
                 await self._run_follow_ups(follow_up_channel)
@@ -1102,7 +1117,62 @@ class SourceRunner:
             await self._set_led_state(LED_LISTENING)
             await self._run_one_turn(follow_up_source, monitor)
 
+            # An interrupted turn requests no window (plan 13-01), so its own
+            # channel is dropped. The turn that its interrupt starts may open one.
+            monitor, new_channel = await self._continue_after_interrupts(monitor, new_channel)
+            if new_channel is None:
+                return
             channel = new_channel
+
+    async def _continue_after_interrupts(
+        self, monitor: "BargeInMonitor", channel: "FollowUpChannel | None"
+    ) -> "tuple[BargeInMonitor, FollowUpChannel | None]":
+        """While the turn that just ended was interrupted by a wake hit or a
+        VAD start, run the speech that interrupted it as the next turn (D-15,
+        D-16). Returns the last monitor and the channel its turn left, or
+        `None` when `MAX_CHAINED_INTERRUPT_TURNS` ran and the last turn was
+        interrupted again. The camera's energy interrupt starts no turn (D-04)."""
+        turns = 0
+        while monitor.interrupt_kind in ("wake", "vad") and turns < MAX_CHAINED_INTERRUPT_TURNS:
+            kind = monitor.interrupt_kind
+            # One wrapper per turn: it replays the hand-over once (260922-woc).
+            turn_source = PrerollReplayingSource(self._source, list(monitor.handover))
+            next_monitor = self._new_barge_in_monitor()
+            next_monitor.after_interrupt = True
+            turn_source.barge_in = next_monitor
+            channel = self._interrupt_channel(monitor, kind)
+            if channel is not None:
+                turn_source.follow_up = channel
+            send_event = getattr(self._source, "send_event", None)
+            if kind == "wake" and send_event is not None:
+                await send_event({"type": "wake.heard"})
+            await self._set_led_state(LED_LISTENING)
+            # Kind and count only, never audio or text (T-13-26).
+            logger.info(
+                "source %r: a %s interrupt starts a turn (%d hand-over chunks)",
+                self._name,
+                kind,
+                len(monitor.handover),
+            )
+            await self._run_one_turn(turn_source, next_monitor)
+            monitor = next_monitor
+            turns += 1
+        if monitor.interrupt_kind in ("wake", "vad"):
+            logger.warning(
+                "source %r: %d interrupt turns in a row, back to listening for the wake word",
+                self._name,
+                MAX_CHAINED_INTERRUPT_TURNS,
+            )
+            return monitor, None
+        return monitor, channel
+
+    def _interrupt_channel(self, monitor: "BargeInMonitor", kind: str) -> "FollowUpChannel | None":
+        """The channel for the turn an interrupt of `kind` starts: fresh, with
+        nothing incoming, when follow-up windows are on. That turn is an
+        ordinary wake turn and may open a window."""
+        if self._follow_up_window_s is None:
+            return None
+        return FollowUpChannel()
 
     def _follow_up_opens_at(self, requested: FollowUpRequest) -> float:
         # The clock is read only when there is no playback end, as it always was.
@@ -1133,6 +1203,11 @@ class SourceRunner:
             listener_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await listener_task
+            # The listener pushed playback audio into the pre-roll to find a
+            # wake hit. A wake hit already took it for the hand-over. What is
+            # left must not lead the next idle turn's pre-roll.
+            if self._preroll is not None and monitor.wake_interrupts:
+                self._preroll.clear()
 
     async def _watch_barge_in(self, monitor: "BargeInMonitor", frames: "AsyncIterator[bytes] | None" = None) -> None:
         """Become the sole reader of `self._source.frames()` once it is
@@ -1205,12 +1280,32 @@ class SourceRunner:
             )
             try:
                 async for chunk in (frames if frames is not None else self._source.frames()):
-                    if detect_wake and not monitor.interrupt_requested:
+                    # Phase 13 (RESEARCH Pitfall 2): every chunk this listener
+                    # holds goes to the hand-over or the pre-roll before any
+                    # await, so a cancelled await never drops one. A Phase 12
+                    # listener (`frames` given) has no hand-over.
+                    if monitor.interrupt_requested:
+                        if frames is None:
+                            monitor.handover.append(chunk)
+                        continue
+                    if not detect_wake:
+                        continue
+                    if self._preroll is not None:
+                        self._preroll.push(chunk)
+                    try:
                         hit = await asyncio.get_running_loop().run_in_executor(
                             self._detector_executor, self._detect, chunk
                         )
-                        if hit is not None:
-                            self._playback_wake_hit(monitor, hit)
+                    except asyncio.CancelledError:
+                        # A VAD start latched during the await: the chunk is
+                        # part of what the next turn replays.
+                        if monitor.interrupt_requested:
+                            monitor.handover.append(chunk)
+                        raise
+                    if monitor.interrupt_requested:
+                        monitor.handover.append(chunk)
+                    elif hit is not None:
+                        self._playback_wake_hit(monitor, hit)
             finally:
                 if unsubscribe is not None:
                     unsubscribe()
@@ -1255,6 +1350,15 @@ class SourceRunner:
                 hit.score,
             )
             self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
+            # D-15: the pre-roll holds the wake phrase and this chunk. It goes
+            # to the next turn, and the frames read after it are appended by
+            # the frame loop. All of this runs before the next await.
+            monitor.handover = self._preroll.drain() if self._preroll is not None else []
+            # The next turn's speaker span anchors to this frame, as an idle
+            # hit does in `_process_chunk`.
+            mark_wake_hit = getattr(self._source, "mark_wake_hit", None)
+            if mark_wake_hit is not None:
+                mark_wake_hit()
 
     def _record_blocked_hit(self, score: float, reason: str | None, at: float) -> None:
         """A wake hit the gate blocks is recorded, never dropped silently

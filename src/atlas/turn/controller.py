@@ -144,6 +144,7 @@ from atlas.turn.answer_window import (
     answer_speaker_mismatch,
     answer_turn_scope,
     build_answer_request,
+    is_quiet_stop,
     silent_answer_outcome,
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
@@ -1057,6 +1058,19 @@ async def run_turn(
             await _cancel_state_task(pending_runs_task)
             timer_ring.stop_ringing()
             logger.info("turn %s stopped the ringing timer", timings.turn_id)
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # Phase 13 (D-15): the turn that an interrupt started. "Atlas, stop" or
+        # "Atlas, never mind" over a reply ends it with nothing said and no
+        # brain call. Only the turn after an interrupt takes this branch, so a
+        # bare "stop" on an ordinary wake turn still goes to the brain.
+        if incoming is None and getattr(barge_in, "after_interrupt", False) and is_quiet_stop(final_text):
+            timings.turn_outcome = "stopped"
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            logger.info("turn %s: the interrupt was a stop", timings.turn_id)
             await _emit_event(source, timings.to_event())
             timings.log()
             return
