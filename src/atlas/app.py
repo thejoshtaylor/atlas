@@ -340,6 +340,12 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
     Defaults to `""`, which appends nothing at all: every caller that
     predates this plan, and every deployment with no colliding plugins,
     gets a prompt byte-identical to before this parameter existed.
+
+    261001-04b: the speech rule for times lives here, and not in
+    `_state_message`, because the rule names no zone and is the same on
+    every turn. This change alters the cached prefix one time, so the first
+    turn after the deploy misses the cache. After that the prefix is
+    byte-stable again.
     """
     lines = [
         "You control a home over voice through the tools you are given. "
@@ -349,6 +355,10 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
         "listed entity whose friendly name sounds closest (\"living groom light\" "
         "means the living room light) and act on it; ask only if two entities are "
         "equally close.",
+        "Your reply is spoken aloud. Say a time the way a person says it, such as "
+        "\"6 a.m.\", \"7:30 p.m.\" or \"noon\". Never say a 24-hour time or clock "
+        "digits such as \"0600\", \"06:00\" or \"18:30\". Do not say a time zone "
+        "unless the user asks about the time in a different place.",
         "Known entities:",
     ]
     for entity in entities:

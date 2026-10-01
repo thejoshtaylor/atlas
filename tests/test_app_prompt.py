@@ -269,16 +269,34 @@ def test_zone_line_sits_between_the_time_line_and_the_state_block(monkeypatch):
     )
 
 
-def test_catalog_prompt_carries_no_zone_and_no_time_instruction(monkeypatch):
-    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
+def test_catalog_prompt_is_zone_free_and_identical_across_zones(monkeypatch):
+    """The per-turn zone line must never move into the cacheable prefix."""
     entities = _entities_from_fake_states()
 
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
     first = _catalog_prompt(entities)
+    monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("America/Los_Angeles"))
     second = _catalog_prompt(entities)
 
     assert first == second
-    assert "Say every time in" not in first
-    assert "Europe/Berlin" not in first
+    for zone_name in ("Europe/Berlin", "America/Los_Angeles"):
+        assert zone_name not in first
+    assert "Times are local to" not in first
+
+
+def test_catalog_prompt_tells_the_model_to_say_times_the_way_a_person_does():
+    """261001-04b: the reply is spoken, so a time is said as "6 a.m.", never
+    as "0600" or "18:30", and no zone is said unless asked."""
+    prompt = _catalog_prompt(_entities_from_fake_states())
+
+    assert "Your reply is spoken aloud." in prompt
+    assert '"7:30 p.m."' in prompt
+    assert '"0600"' in prompt
+    assert (
+        "Do not say a time zone unless the user asks about the time in a different place."
+        in prompt
+    )
+    assert prompt.index("Your reply is spoken aloud.") < prompt.index("Known entities:")
 
 
 # --- 260928-lv9: timestamp entity states arrive in the resolved zone -----
