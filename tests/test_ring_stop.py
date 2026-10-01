@@ -188,6 +188,28 @@ async def test_the_ring_goes_quiet_at_max_ring_s(caplog):
     assert [r for r in caplog.records if "went quiet" in r.getMessage()]
 
 
+async def test_on_ring_is_told_when_a_ring_starts_and_ends():
+    repo = FakeTimerRepository()
+    await _due_timer(repo)
+    spoken: list[str] = []
+    events: list[bool] = []
+
+    async def on_ring(ringing: bool) -> None:
+        events.append(ringing)
+        if not ringing:
+            raise RuntimeError("a failing LED never stops a ring")
+
+    scheduler = _scheduler(repo, spoken, speak_s=0.005, on_ring=on_ring)
+    poll = asyncio.create_task(scheduler._poll_once())
+    await _until(lambda: len(spoken) >= 1)
+    assert events == [True]
+    scheduler.stop_ringing()
+    await asyncio.wait_for(poll, BOUND_S)
+
+    assert events == [True, False]
+    assert not scheduler.ringing
+
+
 async def test_idle_scheduler_controls_are_no_ops():
     scheduler = _scheduler(FakeTimerRepository(), [])
 

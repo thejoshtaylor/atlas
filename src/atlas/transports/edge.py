@@ -86,14 +86,17 @@ VOLUME_REPLY_TIMEOUT_S = 5.0
 # The longest error text a `volume.result` may carry. The parser cuts it.
 MAX_VOLUME_ERROR_CHARS = 200
 
-# The four states of the `led` message, in turn order. The ring is dark at
+# The states of the `led` message: the four turn states in turn order,
+# then ringing. The ring is dark at
 # `idle`. `EdgeAudioSource.set_led_state` sends each one. The Pi restates
 # the same values in `edge/src/atlas_edge/protocol.py`.
 LED_IDLE = "idle"
 LED_LISTENING = "listening"
 LED_THINKING = "thinking"
 LED_REPLYING = "replying"
-LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING)
+# A timer or alarm rings. Not a turn state: the ring pulses until it ends.
+LED_RINGING = "ringing"
+LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING, LED_RINGING)
 
 # 16 ms of capture per frame at 16 kHz -- keeps Pi-side buffering well
 # under the project's latency budget and divides the 512-sample Silero

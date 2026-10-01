@@ -51,6 +51,7 @@ class TimerScheduler:
         max_ring_s: float = RING_MAX_S,
         ring_gap_s: float = RING_GAP_S,
         monotonic: Callable[[], float] = time.monotonic,
+        on_ring: "Callable[[bool], Awaitable[None]] | None" = None,
     ) -> None:
         self._repository = repository
         self._speak = speak
@@ -61,6 +62,9 @@ class TimerScheduler:
         self._max_ring_s = max_ring_s
         self._ring_gap_s = ring_gap_s
         self._monotonic = monotonic
+        # Called with True when a ring starts and False when it ends, for
+        # example to pulse the edge LED ring. A failure never stops a ring.
+        self._on_ring = on_ring
         self._stopping = False
         self._ring_task: asyncio.Task[None] | None = None
         self._ring_text: str | None = None
@@ -154,9 +158,11 @@ class TimerScheduler:
         self._ring_text = text
         task = asyncio.create_task(self._ring_loop(text, self._monotonic()))
         self._ring_task = task
+        await self._notify_ring(True)
         try:
             await asyncio.wait({task})
         finally:
+            await self._notify_ring(False)
             if not task.done():
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -171,6 +177,16 @@ class TimerScheduler:
             logger.exception("ringing timer %s failed", timer.id, exc_info=error)
         else:
             logger.warning("timer %s went quiet after max_ring_s=%.0f", timer.id, self._max_ring_s)
+
+    async def _notify_ring(self, ringing: bool) -> None:
+        if self._on_ring is None:
+            return
+        try:
+            await self._on_ring(ringing)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("ring notification failed", exc_info=True)
 
     async def _run(self) -> None:
         while not self._stopping:

@@ -16,7 +16,8 @@ shape it:
   the whole reply in milliseconds and then sends `idle`. The controller
   waits for `pending_playback_s` to reach zero before it turns the ring off.
 
-The three colors and the animation timing are module constants. The edge
+A ringing timer or alarm pulses the whole ring in amber until the server
+sends the next state. The colors and the animation timing are module constants. The edge
 config has no LED section.
 """
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import struct
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
@@ -41,6 +43,10 @@ EFFECT_RING = 5
 LISTENING_COLOR = 0x0000FF  # blue
 REPLYING_COLOR = 0x00FF00  # green
 THINKING_COLOR = 0xFFFFFF  # white
+RINGING_COLOR = 0xFF8C00  # warm amber
+# One slow breath of the whole ring while a timer or alarm rings.
+RINGING_PERIOD_S = 2.0
+RINGING_MIN_LEVEL = 0.1
 # Brightness of the head LED and each LED behind it, head first.
 THINKING_TAIL = (1.0, 0.45, 0.2, 0.08)
 FRAME_INTERVAL_S = 1 / 15
@@ -61,6 +67,13 @@ def ring_frame(head: int, color: int = THINKING_COLOR) -> list[int]:
     for offset, level in enumerate(THINKING_TAIL):
         frame[(head - offset) % RING_LEDS] = _scale(color, level)
     return frame
+
+
+def pulse_frame(phase: float, color: int = RINGING_COLOR) -> list[int]:
+    """All 12 LEDs at one brightness. `phase` 0 is the dimmest point, 0.5
+    the brightest. The level follows a cosine, so the pulse is smooth."""
+    level = RINGING_MIN_LEVEL + (1 - RINGING_MIN_LEVEL) * (1 - math.cos(2 * math.pi * phase)) / 2
+    return [_scale(color, level)] * RING_LEDS
 
 
 def _pack_ring(colors: list[int]) -> bytes:
@@ -147,6 +160,18 @@ class LedController:
                 (_EFFECT, bytes([EFFECT_SINGLE_COLOR])),
             )
             self._shown = state
+        elif state == protocol.LED_RINGING:
+            elapsed = 0.0
+            await self._write(
+                ("LED_RING_COLOR", _pack_ring(pulse_frame(0.0))),
+                (_EFFECT, bytes([EFFECT_RING])),
+            )
+            self._shown = state
+            while True:
+                await self._sleep(self._frame_interval_s)
+                elapsed += self._frame_interval_s
+                phase = (elapsed / RINGING_PERIOD_S) % 1.0
+                await self._write(("LED_RING_COLOR", _pack_ring(pulse_frame(phase))))
         else:
             head = 0
             await self._write(

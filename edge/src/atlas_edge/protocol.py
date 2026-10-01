@@ -34,13 +34,15 @@ MSG_VOLUME_RESULT = "volume.result"
 VOLUME_DIRECTIONS = ("up", "down")
 MAX_VOLUME_ERROR_CHARS = 200
 
-# The four LED states, in turn order. The server restates the same values
+# The LED states, the four turn states in turn order and then ringing. The server restates the same values
 # in `src/atlas/transports/edge.py`.
 LED_IDLE = "idle"
 LED_LISTENING = "listening"
 LED_THINKING = "thinking"
 LED_REPLYING = "replying"
-LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING)
+# A timer or alarm rings. Not a turn state: the ring pulses until it ends.
+LED_RINGING = "ringing"
+LED_STATES = (LED_IDLE, LED_LISTENING, LED_THINKING, LED_REPLYING, LED_RINGING)
 
 FRAME_SAMPLES = 256
 

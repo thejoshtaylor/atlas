@@ -81,7 +81,7 @@ def test_a_server_ping_parses_on_the_pi_side_and_the_pong_it_builds_parses_back(
 
 def test_led_states_match_in_value_and_order():
     assert server_protocol.LED_STATES == pi_protocol.LED_STATES
-    assert server_protocol.LED_STATES == ("idle", "listening", "thinking", "replying")
+    assert server_protocol.LED_STATES == ("idle", "listening", "thinking", "replying", "ringing")
 
 
 def test_every_server_led_message_parses_on_the_pi_side():

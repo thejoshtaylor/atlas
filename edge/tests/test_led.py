@@ -18,7 +18,9 @@ from atlas_edge.led import (
     REPLYING_COLOR,
     THINKING_COLOR,
     THINKING_TAIL,
+    RINGING_COLOR,
     LedController,
+    pulse_frame,
     ring_frame,
 )
 from atlas_edge.xvf3800 import XvfNotFound
@@ -318,3 +320,29 @@ async def test_close_stops_the_animation_and_turns_the_ring_off():
     assert writes[-1] == _effect(EFFECT_OFF)
     await asyncio.sleep(0.02)
     assert device.writes() == writes
+
+
+def test_pulse_frame_lights_every_led_dim_then_bright():
+    dim = pulse_frame(0.0)
+    bright = pulse_frame(0.5)
+    assert len(set(dim)) == 1 and len(set(bright)) == 1
+    assert bright[0] == RINGING_COLOR
+    assert 0 < (dim[0] >> 16) < (bright[0] >> 16)
+
+
+def test_ringing_pulses_the_ring_until_the_next_state():
+    async def scenario():
+        device = FakeDevice()
+        controller = _controller(device)
+        controller.set_state("ringing")
+        for _ in range(20):
+            await asyncio.sleep(0)
+        controller.set_state("idle")
+        await controller.wait()
+        return device.writes()
+
+    writes = asyncio.run(scenario())
+    frames = [data for value, data in writes if value == RING]
+    assert _effect(EFFECT_RING) in writes
+    assert len({frame for frame in frames}) > 1
+    assert writes[-1] == _effect(EFFECT_OFF)
