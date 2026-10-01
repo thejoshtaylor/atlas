@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 import json
 
-from test_desktop_tracer import _boot_with_desktop_repo, _create_admin, _fixture_message
-
 from atlas.desktop.bridge import DesktopEventBridge
 from atlas.desktop.hub import DesktopHub
 from atlas.providers.base import FinalTranscript, PartialTranscript
@@ -23,6 +21,10 @@ from atlas.timing import TurnTimings
 from atlas.turn.controller import run_turn
 from tests.conftest import BrainReply
 from tests.desktop_fakes import FakeDesktopSocket, fake_desktop_device
+
+# Imported last on purpose: `test_desktop_tracer` imports `test_auth_setup`, and a
+# `tests.*` import placed after it fails when this file runs on its own.
+from test_desktop_tracer import _boot_with_desktop_repo, _create_admin, _fixture_message  # noqa: E402
 
 HELLO = _fixture_message("hello.json")
 WAKE_FIXTURE = _fixture_message("wake_confirmed.json")

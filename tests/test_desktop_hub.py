@@ -8,6 +8,7 @@ Token literals stay under 8 characters.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -394,3 +395,71 @@ async def test_a_failing_mark_seen_is_logged_and_the_connection_keeps_running(ca
     socket.push_disconnect()
     await _until(task.done)
     assert any("desktop 1: mark_seen failed" in record.getMessage() for record in caplog.records)
+
+
+# --- Phase 15: broadcast to every connected Mac (D-12, D-13) -----------------
+
+
+async def test_broadcast_puts_one_frame_on_every_connected_mac() -> None:
+    hub = _hub()
+    first, second = FakeDesktopSocket(), FakeDesktopSocket()
+    first_task = await _connected(hub, first, fake_desktop_device(id=1))
+    second_task = await _connected(hub, second, fake_desktop_device(id=2))
+
+    reached = hub.broadcast('{"type":"wake.confirmed","turn_id":"t-1"}', frame_type="wake.confirmed")
+
+    assert reached == 2
+    await _until(lambda: "wake.confirmed" in first.sent_types() and "wake.confirmed" in second.sent_types())
+    first.push_disconnect()
+    second.push_disconnect()
+    await asyncio.gather(first_task, second_task)
+
+
+async def test_broadcast_with_no_mac_reaches_none_and_is_not_a_coroutine() -> None:
+    hub = _hub()
+
+    assert not inspect.iscoroutinefunction(DesktopHub.broadcast)
+    assert hub.broadcast("{}", frame_type="wake.confirmed") == 0
+
+
+async def test_a_mac_whose_socket_fails_every_send_does_not_stop_the_other_mac() -> None:
+    hub = _hub()
+    dead, live = _DyingSocket(RuntimeError("gone")), FakeDesktopSocket()
+    dead_task = await _connected(hub, dead, fake_desktop_device(id=1))
+    live_task = await _connected(hub, live, fake_desktop_device(id=2))
+    dead.dead = True
+
+    reached = hub.broadcast('{"type":"wake.confirmed","turn_id":"t-1"}', frame_type="wake.confirmed")
+
+    assert reached == 2  # both outboxes took the frame; the dead Mac's send fails later
+    await _until(lambda: "wake.confirmed" in live.sent_types())
+    # The dead Mac's sender ended; serve itself does not raise.
+    dead.push_disconnect()
+    live.push_disconnect()
+    await asyncio.gather(dead_task, live_task)
+    assert dead.sent_types() == ["hello.ack"]
+
+
+async def test_a_frame_broadcast_before_the_hello_ack_goes_out_after_it() -> None:
+    hub = _hub()
+    socket = FakeDesktopSocket()
+    # Registered but not yet acked: hold the hello.ack send until the broadcast ran.
+    release = asyncio.Event()
+    original_send = socket.send_text
+
+    async def slow_send(data: str) -> None:
+        if not socket.sent:
+            await release.wait()
+        await original_send(data)
+
+    socket.send_text = slow_send  # type: ignore[method-assign]
+    task = _start(hub, socket, fake_desktop_device(id=1))
+    await _until(lambda: hub.is_connected(1))
+
+    assert hub.broadcast('{"type":"wake.confirmed","turn_id":"t-1"}', frame_type="wake.confirmed") == 1
+    release.set()
+
+    await _until(lambda: len(socket.sent) >= 2)
+    assert socket.sent_types() == ["hello.ack", "wake.confirmed"]
+    socket.push_disconnect()
+    await task
