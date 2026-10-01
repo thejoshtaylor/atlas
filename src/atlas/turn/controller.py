@@ -146,6 +146,7 @@ from atlas.turn.answer_window import (
     build_answer_request,
     is_quiet_stop,
     silent_answer_outcome,
+    wake_addressed_command,
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
 from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
@@ -985,10 +986,16 @@ async def run_turn(
             incoming=incoming,
             speaker_event=speaker_outcome.event,
             effective_mode=speaker_outcome.decision.effective_mode,
-        ) or answer_speaker_mismatch(
-            incoming,
-            speaker_event=speaker_outcome.event,
-            effective_mode=speaker_outcome.decision.effective_mode,
+        ) or (
+            # Plan 13-06: a new wake command from another enrolled member is
+            # not an answer to someone else's question. The enrolled-speaker
+            # gate above still ran on this turn.
+            wake_addressed_command(follow_up, final_text, wake_phrase) is None
+            and answer_speaker_mismatch(
+                incoming,
+                speaker_event=speaker_outcome.event,
+                effective_mode=speaker_outcome.decision.effective_mode,
+            )
         ):
             timings.turn_outcome = "follow_up_wrong_speaker"
             await _cancel_state_task(state_task)
@@ -1185,22 +1192,36 @@ async def run_turn(
                 answer_scope = AnswerScope(tool_names=frozenset())
         elif incoming is not None and incoming.kind == "answer":
             # Phase 13 (D-09 to D-15): the window after an ordinary answer.
-            # Silence, a stop phrase and filler end it with no spoken reply.
-            silent_outcome = silent_answer_outcome(final, final_text, wake_phrase)
-            if silent_outcome is not None:
-                timings.turn_outcome = silent_outcome
-                await _cancel_state_task(state_task)
-                await _cancel_state_task(pending_runs_task)
-                logger.info("turn %s: answer window ended with no command (%s)", timings.turn_id, silent_outcome)
-                await _emit_event(source, timings.to_event())
-                timings.log()
-                return
-            # The rest is a continuation, like a clarification's answer: the
-            # previous exchange comes first, and a set `prior_exchange` skips
-            # the macro, timer-intent and local-intent blocks below (T-13-17).
-            prior_exchange = _continuation_messages(incoming)
-            restrict_tools_to_proposals = incoming.proposals_only
-            answer_scope = answer_turn_scope(incoming)
+            # Plan 13-06: when the wake detector heard the wake word in this
+            # window and the transcript opens with the phrase, this is an
+            # ordinary wake turn: full scope, the phrase stripped, and macros
+            # and local intents as on any wake turn. A bare phrase leaves
+            # `final_text` empty and takes the no-speech reply below.
+            addressed = wake_addressed_command(follow_up, final_text, wake_phrase)
+            if addressed is not None:
+                final_text = addressed
+                prior_exchange = None
+                logger.info("turn %s: the wake word was heard in the answer window", timings.turn_id)
+            else:
+                # Silence, a stop phrase and filler end the window with no
+                # spoken reply.
+                silent_outcome = silent_answer_outcome(final, final_text, wake_phrase)
+                if silent_outcome is not None:
+                    timings.turn_outcome = silent_outcome
+                    await _cancel_state_task(state_task)
+                    await _cancel_state_task(pending_runs_task)
+                    logger.info(
+                        "turn %s: answer window ended with no command (%s)", timings.turn_id, silent_outcome
+                    )
+                    await _emit_event(source, timings.to_event())
+                    timings.log()
+                    return
+                # The rest is a continuation, like a clarification's answer: the
+                # previous exchange comes first, and a set `prior_exchange` skips
+                # the macro, timer-intent and local-intent blocks below (T-13-17).
+                prior_exchange = _continuation_messages(incoming)
+                restrict_tools_to_proposals = incoming.proposals_only
+                answer_scope = answer_turn_scope(incoming)
         else:
             prior_exchange = None
 

@@ -34,6 +34,7 @@ from atlas.turn.answer_window import (
     answer_turn_scope,
     build_answer_request,
     silent_answer_outcome,
+    wake_addressed_command,
 )
 from atlas.turn.controller import run_turn
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
@@ -451,3 +452,142 @@ async def test_a_window_with_a_real_request_runs_the_brain_with_the_previous_exc
         {"role": "user", "content": "and tomorrow"},
     ]
     assert tts.received_text == ["Rain."]
+
+
+# --- Plan 13-06: "Atlas, ..." inside a window is an ordinary wake turn --------
+
+
+@pytest.mark.parametrize(
+    ("wake_heard", "text", "phrase", "expected"),
+    [
+        (True, "hey atlas turn on the lights", "hey atlas", "turn on the lights"),
+        (True, "atlas, and tomorrow", "hey atlas", "and tomorrow"),
+        (True, "hey atlas", "hey atlas", ""),
+        (False, "hey atlas turn on the lights", "hey atlas", None),
+        (True, "turn on the lights", "hey atlas", None),
+        (True, "hey atlas turn on the lights", None, None),
+    ],
+)
+def test_wake_addressed_command_needs_both_the_acoustic_hit_and_the_phrase(wake_heard, text, phrase, expected):
+    channel = FollowUpChannel(incoming=_answer_request(), wake_heard=wake_heard)
+    assert wake_addressed_command(channel, text, phrase) == expected
+
+
+def test_wake_addressed_command_with_no_channel_is_none():
+    assert wake_addressed_command(None, "hey atlas turn on the lights", "hey atlas") is None
+
+
+async def _wake_window_turn(
+    transcript: str,
+    brain: Any,
+    *,
+    wake_heard: bool,
+    macros: tuple[MacroConfig, ...] = (),
+) -> tuple[TurnTimings, FakeTts, _RecordingToolHost]:
+    source = FakeAudioSource(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(incoming=_answer_request(), wake_heard=wake_heard)
+    tool_host = _RecordingToolHost()
+    tts = FakeTts(chunks=[b"\x01"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        _text(transcript),
+        brain,
+        tts,
+        tool_host,
+        tools_schema=_SCHEMA,
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=timings,
+        macros=macros,
+        filler_cache={None: {"good night": b"\x01\x02"}},
+        wake_phrase="hey atlas",
+        answer_windows=True,
+    )
+    return timings, tts, tool_host
+
+
+async def test_a_wake_addressed_window_turn_gets_the_full_tool_set_and_the_command_without_the_phrase():
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_LIGHTS]), BrainReply(text="Done.")])
+    timings, _tts, host = await _wake_window_turn("hey atlas turn on the lamp", brain, wake_heard=True)
+
+    assert timings.turn_outcome == "completed"
+    assert _tool_names(brain.calls[0]) == {"weather_now", "lights_set", "gmail_fetch_body"}
+    assert [name for name, _arguments in host.calls] == ["lights_set"]
+    messages = brain.calls[0].messages
+    assert messages[-1] == {"role": "user", "content": "turn on the lamp"}
+    # An ordinary wake turn: the previous exchange is not carried over.
+    assert {"role": "assistant", "content": "It is sunny."} not in messages
+
+
+async def test_the_same_words_with_no_wake_hit_keep_the_narrowed_scope():
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_LIGHTS]), BrainReply(text="No.")])
+    _timings, _tts, host = await _wake_window_turn("hey atlas turn on the lamp", brain, wake_heard=False)
+
+    assert _tool_names(brain.calls[0]) == {"weather_now"}
+    assert host.calls == []
+    # The text is not wake-stripped either: the window never saw a wake hit.
+    assert brain.calls[0].messages[-1] == {"role": "user", "content": "hey atlas turn on the lamp"}
+
+
+async def test_a_bare_wake_phrase_in_a_wake_heard_window_ends_like_an_ordinary_wake_turn():
+    brain = RecordingFakeBrain()
+    timings, tts, host = await _wake_window_turn("hey atlas", brain, wake_heard=True)
+
+    assert timings.turn_outcome != ANSWER_WINDOW_SILENT
+    assert timings.turn_outcome == "empty_transcript"
+    assert tts.received_text, "an ordinary wake turn with no command speaks the no-speech reply"
+    assert brain.call_count == 0
+    assert host.calls == []
+
+
+async def test_a_wake_addressed_window_turn_runs_a_macro_like_any_wake_turn():
+    macro = MacroConfig(
+        phrase="good night",
+        reply="good night",
+        actions=(MacroActionConfig(tool="lights_set", arguments={"entity_id": "light.example_lamp"}),),
+    )
+    brain = RecordingFakeBrain()
+    _timings, _tts, host = await _wake_window_turn("hey atlas good night", brain, wake_heard=True, macros=(macro,))
+
+    assert [name for name, _arguments in host.calls] == ["lights_set"]
+    assert brain.call_count == 0
+
+
+async def _enforce_window_turn(*, asked_by: str, transcript: str, wake_heard: bool) -> tuple[TurnTimings, Any]:
+    from tests.test_turn_speaker_follow_up import _enforce_context, _identified_match
+
+    source = FakeAudioSource(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel(
+        incoming=_answer_request(answer_only_from=asked_by, answer_scope=None), wake_heard=wake_heard
+    )
+    brain = RecordingFakeBrain(replies=[BrainReply(text="Rain.")])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        _text(transcript),
+        brain,
+        FakeTts(chunks=[b"\x01"]),
+        None,
+        tools_schema=[],
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey atlas",
+        speaker_id=_enforce_context(_identified_match(), "enforce"),
+    )
+    return timings, brain
+
+
+async def test_enforce_mode_lets_a_wake_addressed_window_turn_from_another_member_through():
+    timings, brain = await _enforce_window_turn(asked_by="2", transcript="hey atlas and tomorrow", wake_heard=True)
+
+    assert timings.turn_outcome == "completed"
+    assert brain.call_count == 1
+
+
+async def test_enforce_mode_still_blocks_another_member_with_no_wake_hit():
+    timings, brain = await _enforce_window_turn(asked_by="2", transcript="hey atlas and tomorrow", wake_heard=False)
+
+    assert timings.turn_outcome == "follow_up_wrong_speaker"
+    assert brain.call_count == 0

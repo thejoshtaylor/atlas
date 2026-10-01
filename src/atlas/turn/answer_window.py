@@ -22,6 +22,7 @@ from typing import Any
 from atlas.timers.ring_stop import is_stop_command
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpRequest
 from atlas.turn.transcript_guard import is_no_command
+from atlas.turn.wake_echo import strip_wake_phrase
 
 ANSWER_WINDOW_SILENT = "answer_window_silent"
 
@@ -79,6 +80,22 @@ def answer_turn_scope(incoming: FollowUpRequest) -> AnswerScope:
     if incoming.answer_scope is not None:
         return incoming.answer_scope
     return AnswerScope(tool_names=frozenset())
+
+
+def wake_addressed_command(follow_up: Any, final_text: str, wake_phrase: "str | None") -> "str | None":
+    """The command after the wake phrase when this window turn was addressed
+    to Atlas, or `None` for an ordinary window turn (plan 13-06).
+
+    The rule needs two facts together: the wake detector hit inside this
+    window (`follow_up.wake_heard`), and a transcript that opens with the
+    wake phrase. That is the same evidence an ordinary wake turn has with
+    `verify_transcript`. Transcript text alone never qualifies, because a
+    television can say "hey atlas" and any command. An empty string means
+    only the phrase was heard.
+    """
+    if not getattr(follow_up, "wake_heard", False) or not wake_phrase:
+        return None
+    return strip_wake_phrase(final_text, wake_phrase)
 
 
 def silent_answer_outcome(final: Any, final_text: str, wake_phrase: "str | None") -> "str | None":
