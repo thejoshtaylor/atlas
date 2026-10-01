@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "protocol is a boolean and not an integer",
+  "message": {"type": "hello", "protocol": true, "app_version": "0.1.0", "os_version": "26.0", "capabilities": []}
+}

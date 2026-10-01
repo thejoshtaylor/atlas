@@ -1,0 +1,6 @@
+{
+  "direction": "client_to_server",
+  "unknown": true,
+  "description": "A type the server has never heard of. The server ignores it and does not close.",
+  "message": {"type": "example.future", "extra": "value"}
+}

@@ -1,0 +1,5 @@
+{
+  "direction": "server_to_client",
+  "description": "A named refusal. The server sends it before it closes with 4002 or 1008.",
+  "message": {"type": "error", "code": "protocol_mismatch", "detail": "server speaks protocol 1"}
+}

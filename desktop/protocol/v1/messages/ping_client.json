@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "The Mac heartbeat. The server answers with a pong that has the same id.",
+  "message": {"type": "ping", "id": 1}
+}

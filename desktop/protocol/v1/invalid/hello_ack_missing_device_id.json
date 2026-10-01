@@ -1,0 +1,5 @@
+{
+  "direction": "server_to_client",
+  "description": "device_id is missing",
+  "message": {"type": "hello.ack", "protocol": 1, "ping_interval_s": 15}
+}

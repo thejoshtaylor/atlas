@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "capabilities is missing",
+  "message": {"type": "hello", "protocol": 1, "app_version": "0.1.0", "os_version": "26.0"}
+}

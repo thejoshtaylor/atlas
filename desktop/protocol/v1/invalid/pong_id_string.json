@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "id is the string \"3\" and not the integer 3",
+  "message": {"type": "pong", "id": "3"}
+}

@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "the frame has no type key",
+  "message": {"protocol": 1}
+}

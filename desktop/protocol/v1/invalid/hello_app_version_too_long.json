@@ -1,0 +1,5 @@
+{
+  "direction": "client_to_server",
+  "description": "app_version is 33 characters and the limit is 32",
+  "message": {"type": "hello", "protocol": 1, "app_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "os_version": "26.0", "capabilities": []}
+}

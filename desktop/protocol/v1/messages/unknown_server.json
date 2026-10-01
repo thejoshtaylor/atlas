@@ -1,0 +1,6 @@
+{
+  "direction": "server_to_client",
+  "unknown": true,
+  "description": "A type the app has never heard of. The app ignores it and does not close.",
+  "message": {"type": "example.future", "extra": "value"}
+}
