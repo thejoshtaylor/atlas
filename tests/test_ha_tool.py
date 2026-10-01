@@ -574,3 +574,128 @@ async def test_ha_expand_target_is_registered_and_named_code_only():
 
     assert HA_EXPAND_TARGET_TOOL in registered
     assert HA_EXPAND_TARGET_TOOL in HA_CODE_ONLY_TOOL_NAMES
+
+
+# --- 261001-ibf: a connect failure proves nothing was sent --------------------
+
+
+def _failing_client(error: Exception) -> httpx.AsyncClient:
+    def _handle(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(_handle))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError("no route"), httpx.ConnectTimeout("slow connect"), httpx.PoolTimeout("no connection")],
+)
+async def test_a_connect_failure_becomes_the_unreachable_refusal(error, caplog):
+    from atlas_mcp.ha_names import HA_UNREACHABLE_REASON
+
+    client = _failing_client(error)
+
+    with caplog.at_level("WARNING", logger="atlas_mcp.ha"):
+        with pytest.raises(Denied) as exc_info:
+            await handle_call_service(
+                Policy.from_config(None),
+                client,
+                "http://ha.invalid",
+                "test-token",
+                "switch",
+                "turn_off",
+                "switch.example_fan",
+            )
+
+    assert exc_info.value.reason == HA_UNREACHABLE_REASON
+    records = [record for record in caplog.records if record.name == "atlas_mcp.ha"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "switch.turn_off" in message
+    assert "switch.example_fan" in message
+    assert "request sent: no" in message
+    # Neither the token nor the base URL reaches the log.
+    assert "test-token" not in message
+    assert "ha.invalid" not in message
+
+
+async def test_a_read_timeout_is_not_converted():
+    client = _failing_client(httpx.ReadTimeout("no answer"))
+
+    with pytest.raises(httpx.ReadTimeout):
+        await handle_call_service(
+            Policy.from_config(None),
+            client,
+            "http://ha.invalid",
+            "test-token",
+            "switch",
+            "turn_off",
+            "switch.example_fan",
+        )
+
+
+async def test_a_connect_failure_on_the_return_response_retry_is_also_refused():
+    from atlas_mcp.ha_names import HA_UNREACHABLE_REASON
+
+    calls: list[str] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if len(calls) == 1:
+            return httpx.Response(400, json={"message": _REQUIRES_RESPONSES})
+        raise httpx.ConnectError("no route")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handle))
+
+    with pytest.raises(Denied) as exc_info:
+        await handle_call_service(
+            Policy.from_config(None), client, "http://ha.invalid", "t", "todo", "get_items", "todo.example_list"
+        )
+
+    assert exc_info.value.reason == HA_UNREACHABLE_REASON
+    assert len(calls) == 2
+
+
+async def test_a_cancelled_call_logs_the_phase_and_re_raises(caplog):
+    import asyncio
+
+    started = asyncio.Event()
+
+    async def _handle(request: httpx.Request) -> httpx.Response:
+        started.set()
+        await asyncio.sleep(30)
+        return httpx.Response(200, json=[])
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handle))
+    task = asyncio.ensure_future(
+        handle_call_service(
+            Policy.from_config(None), client, "http://ha.invalid", "test-token", "switch", "turn_off", "switch.example_fan"
+        )
+    )
+    await started.wait()
+
+    with caplog.at_level("WARNING", logger="atlas_mcp.ha"):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    records = [record for record in caplog.records if record.name == "atlas_mcp.ha"]
+    assert len(records) == 1
+    assert "cancelled" in records[0].getMessage()
+    assert "switch.example_fan" in records[0].getMessage()
+    assert "test-token" not in records[0].getMessage()
+
+
+def test_the_child_connect_timeout_is_inside_the_parent_deadline(monkeypatch):
+    monkeypatch.setenv("HA_URL", "http://ha.invalid")
+    monkeypatch.setenv("HA_TOKEN", "test-token")
+    # `_startup` writes these module globals. `monkeypatch` restores them.
+    for name in ("_http_client", "_base_url", "_token", "_registry_client", "_default_spotify_source"):
+        monkeypatch.setattr(ha_module, name, getattr(ha_module, name))
+
+    ha_module._startup()
+    timeout = ha_module._http_client.timeout
+
+    assert ha_module._HA_CONNECT_TIMEOUT_S == 2.0
+    assert timeout.connect == 2.0 < 5.0
+    assert timeout.read == timeout.write == timeout.pool == 10.0

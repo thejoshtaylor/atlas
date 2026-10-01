@@ -367,6 +367,6 @@ async def test_a_control_denied_entitys_power_reading_still_answers_and_control_
         timings=control_timings,
     )
 
-    assert control_tts.received_text == ["that one is off limits"]
+    assert control_tts.received_text == ["that switch is off limits"]
     # Nothing left the process for the denied call.
     assert len(fake_ha.requests) == 0

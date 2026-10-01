@@ -860,3 +860,145 @@ def test_spoken_error_text_unit_cases():
     other = "Error executing tool other_tool: nope"
     assert _spoken_error_text("ha_call_service", _denied(other)) == other
     assert _spoken_error_text("ha_call_service", _denied("")) == ""
+
+
+# --- 261001-ibf: a mixed reply names each device that succeeded -------------
+
+_NAMES = {
+    "media_player.example_tv": "Living Room TV",
+    "switch.example_fan": "Example Fan",
+    "light.example_lamp": "the Desk Lamp",
+}
+
+
+def _call(service: str, entity_id: Any, *, name: str = "ha_call_service", **extra: Any) -> ToolCall:
+    domain = entity_id.split(".", 1)[0] if isinstance(entity_id, str) else "light"
+    return ToolCall(
+        name=name, arguments={"domain": domain, "service": service, "entity_id": entity_id, **extra}
+    )
+
+
+def test_a_mixed_reply_names_the_device_that_succeeded():
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [
+        (_call("turn_off", "media_player.example_tv"), _ok()),
+        (_service_call("switch.example_server_socket"), _denied("that switch is off limits")),
+    ]
+
+    assert (
+        _compose_mixed_outcome_reply(pairs, friendly_names=_NAMES)
+        == "turned off the Living Room TV; that switch is off limits"
+    )
+
+
+@pytest.mark.parametrize(
+    ("service", "expected"),
+    [
+        ("turn_on", "turned on the Example Fan"),
+        ("toggle", "toggled the Example Fan"),
+        ("set_speed", "Example Fan: succeeded"),
+    ],
+)
+def test_a_success_clause_follows_the_service(service, expected):
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [(_call(service, "switch.example_fan"), _ok()), (_service_call("switch.example_x"), _denied("no"))]
+
+    assert _compose_mixed_outcome_reply(pairs, friendly_names=_NAMES) == f"{expected}; no"
+
+
+def test_a_name_that_starts_with_the_gets_no_second_article():
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [(_call("turn_off", "light.example_lamp"), _ok()), (_service_call("switch.example_x"), _denied("no"))]
+
+    assert _compose_mixed_outcome_reply(pairs, friendly_names=_NAMES) == "turned off the Desk Lamp; no"
+
+
+def test_several_entities_in_one_call_are_joined():
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [
+        (_call("turn_off", ["switch.example_fan", "media_player.example_tv"]), _ok()),
+        (_service_call("switch.example_x"), _denied("no")),
+    ]
+
+    assert (
+        _compose_mixed_outcome_reply(pairs, friendly_names=_NAMES)
+        == "turned off the Example Fan and Living Room TV; no"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_call",
+    [
+        _call("turn_off", "switch.example_unknown"),
+        _call("turn_off", ["switch.example_fan", "switch.example_unknown"]),
+        _call("turn_off", "switch.example_fan", name="lights_set"),
+        ToolCall(
+            name="ha_call_service",
+            arguments={"domain": "light", "service": "turn_off", "area_id": "living_room"},
+        ),
+        _call("turn_off", "switch.example_fan", area_id="living_room"),
+    ],
+)
+def test_a_success_with_no_known_name_or_an_expanding_target_keeps_the_fixed_clause(tool_call):
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [(tool_call, _ok()), (_service_call("switch.example_x"), _denied("no"))]
+
+    assert _compose_mixed_outcome_reply(pairs, friendly_names=_NAMES) == "succeeded; no"
+
+
+def test_with_no_names_the_reply_is_as_before():
+    from atlas.turn.controller import _compose_mixed_outcome_reply
+
+    pairs = [(_call("turn_off", "switch.example_fan"), _ok()), (_service_call("switch.example_x"), _denied("no"))]
+
+    assert _compose_mixed_outcome_reply(pairs) == "succeeded; no"
+    assert _compose_mixed_outcome_reply(pairs, friendly_names={}) == "succeeded; no"
+
+
+async def test_run_turn_names_the_succeeded_device_from_its_state_fetch(
+    fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    tool_host = _RecordingToolHost(
+        {
+            "media_player.example_tv": _ok(),
+            "switch.example_server_socket": _denied("that switch is off limits"),
+        }
+    )
+
+    async def state_fetch() -> list[dict[str, Any]]:
+        return [
+            {"entity_id": "media_player.example_tv", "friendly_name": "Living Room TV", "state": "on"},
+            {"entity_id": "switch.example_server_socket", "friendly_name": "Server Socket", "state": "on"},
+        ]
+
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    await run_turn(
+        fake_audio_source(frames=[b"\x00\x01"]),
+        fake_stt(events=[FinalTranscript(text="turn off the tv and the server socket")]),
+        fake_brain(
+            replies=[
+                BrainReply(
+                    tool_calls=[
+                        _call("turn_off", "media_player.example_tv"),
+                        _service_call("switch.example_server_socket"),
+                    ]
+                )
+            ]
+        ),
+        tts,
+        tool_host,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        state_fetch=state_fetch,
+    )
+
+    # The refused entity is named by its domain only, in the boundary's text.
+    assert tts.received_text[-1] == "turned off the Living Room TV; that switch is off limits"
+    assert "Server Socket" not in tts.received_text[-1]

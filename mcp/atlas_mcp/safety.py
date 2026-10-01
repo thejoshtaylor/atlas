@@ -242,8 +242,10 @@ def allow_call(
         if entity_id.split(".", 1)[0] != domain:
             raise Denied(f"{entity_id} is not a {domain}")
         if policy.denies_entity(entity_id):
-            # Vague to the speaker, complete in the log.
-            raise Denied("that one is off limits", entity_id=entity_id)
+            # Vague to the speaker, complete in the log. The speaker hears the
+            # domain only ("that switch is off limits"), never the entity. The
+            # log keeps the full id in `Denied.entity_id`.
+            raise Denied(f"that {domain.replace('_', ' ')} is off limits", entity_id=entity_id)
         checked.append(entity_id)
 
     return domain, service, checked

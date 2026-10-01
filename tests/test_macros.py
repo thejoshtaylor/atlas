@@ -173,7 +173,7 @@ async def test_macro_action_denied_by_the_boundary_never_reaches_home_assistant(
 
     assert outcome.succeeded is False
     assert outcome.cacheable is False
-    assert outcome.text == "that one is off limits"
+    assert outcome.text == "that switch is off limits"
     assert len(fake_ha.requests) == 0
 
 
@@ -236,11 +236,11 @@ async def test_macro_partial_failure_names_the_first_failure_in_written_order(fa
     outcome = await fire_macro(macro, tool_host)
 
     # Both actions target denied entities and would raise the identical
-    # Denied.reason ("that one is off limits") -- what this test actually
+    # Denied.reason ("that switch is off limits") -- what this test actually
     # pins down is that only the FIRST action was ever attempted (a single
     # request), proving the second was never dispatched to find out whether
     # it would also have failed.
-    assert outcome.text == "that one is off limits"
+    assert outcome.text == "that switch is off limits"
     assert len(fake_ha.requests) == 0
 
 
@@ -416,7 +416,7 @@ async def test_macro_failure_speaks_live_exactly_once_and_loses_the_cache(
         filler_cache={None: {"good night": b"\x01\x02"}},
     )
 
-    assert tts.received_text == ["that one is off limits"]
+    assert tts.received_text == ["that switch is off limits"]
     assert timings.turn_outcome == "macro_failed"
     assert len(fake_ha.requests) == 0
 

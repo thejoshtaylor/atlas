@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Protocol
 
+from atlas_mcp.ha_names import HA_UNREACHABLE_REASON
+
 from atlas.config import WorkflowConfig
 from atlas.db.models import WorkflowStepRow
 from atlas.turn.controller import _is_error, _result_text, _spoken_error_text
@@ -159,6 +161,11 @@ def _is_policy_refusal(tool_name: str, text: str) -> bool:
     tell an operator a network hiccup was a policy denial (T-05-16's own
     concern, in the opposite direction: a false "denied" is exactly as
     misleading as a silently skipped one)."""
+    # 261001-ibf: the child raises `HA_UNREACHABLE_REASON` as a `Denied` when
+    # the connection to Home Assistant could not be made. It is a transport
+    # failure, not a policy refusal, so a step that meets it is "failed".
+    if text == f"Error executing tool {tool_name}: {HA_UNREACHABLE_REASON}":
+        return False
     return text != f"Error executing tool {tool_name}"
 
 

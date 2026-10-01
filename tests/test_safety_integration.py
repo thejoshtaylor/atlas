@@ -92,9 +92,9 @@ async def test_denied_reason_reaches_the_reply_verbatim(
         timings=timings,
     )
 
-    # The reason string safety.py actually raises, not a substring or a
+    # The reason string safety.py actually raises (the domain, never the entity), not a substring or a
     # paraphrase.
-    assert tts.received_text == ["that one is off limits"]
+    assert tts.received_text == ["that switch is off limits"]
     # The refusal does not make a second round trip to the language model.
     assert brain.call_count == 1
     # Nothing left the process for the denied call.
@@ -148,7 +148,7 @@ async def test_denied_reason_reaches_the_reply_verbatim_through_the_macro_path(
         macros=(macro,),
     )
 
-    assert tts.received_text == ["that one is off limits"]
+    assert tts.received_text == ["that switch is off limits"]
     assert brain.call_count == 0
     assert len(fake_ha.requests) == 0
     assert timings.turn_outcome == "macro_failed"
@@ -379,3 +379,34 @@ async def test_non_ascii_denied_reason_reaches_speech_unchanged(
 
     assert tts.received_text == [reason]
     assert tts.received_text[0] == reason  # byte-for-byte, not a normalized form
+
+
+# --- 261001-ibf: the refusal names the domain, never the entity -------------
+
+
+def test_an_off_limits_switch_is_named_by_its_domain_only():
+    from atlas_mcp.safety import allow_call
+
+    policy = Policy.from_config({"deny_entities": ["switch.example_server_socket"]})
+
+    try:
+        allow_call(policy, "switch", "turn_off", ["switch.example_server_socket"])
+    except Denied as exc:
+        assert exc.reason == "that switch is off limits"
+        assert exc.entity_id == "switch.example_server_socket"
+    else:
+        raise AssertionError("expected a refusal")
+
+
+def test_an_off_limits_media_player_reads_with_a_space_in_its_domain():
+    from atlas_mcp.safety import allow_call
+
+    policy = Policy.from_config({"deny_entities": ["media_player.example_tv"]})
+
+    try:
+        allow_call(policy, "media_player", "turn_off", ["media_player.example_tv"])
+    except Denied as exc:
+        assert exc.reason == "that media player is off limits"
+        assert exc.entity_id == "media_player.example_tv"
+    else:
+        raise AssertionError("expected a refusal")

@@ -287,7 +287,7 @@ async def test_a_denied_entity_causes_no_requests_at_all():
     browser = _FakeBrowser()
     policy = Policy.from_config({"deny_entities": [_ENTITY]})
 
-    with pytest.raises(Denied, match="that one is off limits"):
+    with pytest.raises(Denied, match="that media player is off limits"):
         await _play(scripted, browser, policy=policy)
 
     assert scripted.requests == []

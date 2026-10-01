@@ -23,7 +23,7 @@ import difflib
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 import instructor
 from openai import AsyncOpenAI
@@ -211,6 +211,7 @@ async def run_top_tier(
     handoff_slot: Any | None = None,
     restricted_to: "frozenset[str] | None" = None,
     answer_scope: Any | None = None,
+    friendly_names: "Mapping[str, str] | None" = None,
 ) -> TierReply:
     """The existing, unmodified tool-calling loop, wrapped locally into a
     `TierReply` -- no envelope call.
@@ -236,6 +237,9 @@ async def run_top_tier(
     forwarded the same way: the target check of a turn that answers a
     clarifying question.
 
+    `friendly_names` (261001-ibf, default `None`) is forwarded to
+    `_run_tool_rounds` so a mixed reply can name each device that succeeded.
+
     `TierReply.expects_reply` copies `handoff_slot.expects_reply`, which
     `_run_tool_rounds` sets only from the model's own final-round JSON.
     """
@@ -260,6 +264,7 @@ async def run_top_tier(
         handoff_slot=handoff_slot,
         restricted_to=restricted_to,
         answer_scope=answer_scope,
+        friendly_names=friendly_names,
     )
 
     return TierReply(

@@ -17,3 +17,9 @@ HA_EXPAND_TARGET_TOOL = "ha_expand_target"
 HA_WRITE_TOOL_NAMES: frozenset[str] = frozenset({"ha_call_service", "ha_play_spotify_playlist"})
 
 HA_CODE_ONLY_TOOL_NAMES: frozenset[str] = frozenset({HA_EXPAND_TARGET_TOOL})
+
+# What the Home Assistant tool server raises when a service call never left
+# the process, because the connection could not be made. The text is spoken by
+# nothing: the turn controller matches this exact string to tell "nothing was
+# sent" from every other failure, and only then lets the brain try again.
+HA_UNREACHABLE_REASON = "i couldn't reach home assistant, so nothing was changed"

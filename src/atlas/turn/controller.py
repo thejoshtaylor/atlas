@@ -92,6 +92,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Protocol
 
 from atlas_mcp.google_tools import UNREACHABLE_KEY
+from atlas_mcp.ha_names import HA_UNREACHABLE_REASON
 
 from atlas.audio.channels import stt_view
 from atlas.config import MacroConfig
@@ -138,7 +139,12 @@ from atlas.turn.pending_action import (
     HANDOFF_NOT_ALONE_REPLY,
     handle_confirmation_reply,
 )
-from atlas.turn.tool_errors import condense_argument_error, is_argument_error, is_speakable_error
+from atlas.turn.tool_errors import (
+    MAX_SPOKEN_ERROR_CHARS,
+    condense_argument_error,
+    is_argument_error,
+    is_speakable_error,
+)
 from atlas.turn.transcript_guard import asks_for_information, is_no_command, missing_target_question
 from atlas.turn.transcript_trim import trim_at_split
 from atlas.turn.answer_window import (
@@ -237,6 +243,17 @@ _DONE_SHORTCUT_TOOLS: frozenset[str] = frozenset({"ha_call_service"})
 # only to mark the action as done, the same way a successful action's tool
 # result carries no special wording either.
 _ACTION_SUCCEEDED_CLAUSE = "succeeded"
+# 261001-ibf: past-tense phrases for a Home Assistant service that succeeded,
+# so a mixed reply can say "turned off the Living Room TV" and not only
+# "succeeded". Any other service reads "<name>: succeeded".
+_SERVICE_PAST_TENSE: dict[str, str] = {
+    "turn_on": "turned on",
+    "turn_off": "turned off",
+    "toggle": "toggled",
+}
+# Targets that expand to entities by a registry lookup. A call that uses one
+# names no entity of its own, so its clause stays "succeeded".
+_EXPANDING_TARGET_KEYS = ("area_id", "device_id", "label_id")
 # Spoken for an action whose `tool_host.call_tool` awaitable raised instead
 # of returning a result -- the call itself never reached a verdict, refusal
 # or otherwise. Deliberately a different fixed phrase from a boundary
@@ -1562,14 +1579,15 @@ async def run_turn(
 
             local_intent = match_on_off(final_text, entities) if entities else None
             if local_intent is not None:
-                # A local-intent turn never builds the message list and
-                # never consumes the pending-runs fetch's result -- same
-                # cancel-then-await cleanup the macro path above already
-                # uses for the identical reason. `state_task` is left
-                # alone: it is either already done (the await above
-                # resolved it) or still needed by nothing here, and
-                # `_cancel_state_task` is a no-op on an already-done task.
-                await _cancel_state_task(pending_runs_task)
+                # A local-intent turn that returns never builds the message
+                # list and never consumes the pending-runs fetch's result --
+                # same cancel-then-await cleanup the macro path above uses
+                # for the identical reason. The cancel runs on the return
+                # path only (261001-ibf): the one fall-back path below still
+                # reads that fetch. `state_task` is left alone: it is either
+                # already done (the await above resolved it) or still needed
+                # by nothing here, and `_cancel_state_task` is a no-op on an
+                # already-done task.
                 tool_result: Any = None
                 try:
                     tool_result = await guarded_tool_host.call_tool(
@@ -1594,45 +1612,78 @@ async def run_turn(
                 else:
                     intent_failed = _is_error(tool_result)
 
-                home_control_refusal = is_home_control_refusal(tool_result) if intent_failed else None
-                claim_refusal = is_claim_refusal(tool_result) if intent_failed else None
-                if home_control_refusal:
-                    # D-C: the member may not change the home. The text
-                    # carries a name, so it is spoken live like a claim refusal.
-                    timings.turn_outcome = "home_control_refused"
-                    reply_text = home_control_refusal
-                elif claim_refusal:
-                    # D-13, D-15: another turn in the group just changed it.
-                    timings.turn_outcome = "claim_refused"
-                    reply_text = claim_refusal
-                elif intent_failed:
-                    timings.turn_outcome = "local_intent_failed"
-                    reply_text = _CANNOT_DO_REPLY
+                # 261001-ibf: one WARNING for every error-shaped result, so a
+                # failed local intent is never silent. The raised case above
+                # logged its traceback already.
+                error_shaped = intent_failed and tool_result is not None
+                error_text = (
+                    _strip_sdk_error_wrapper("ha_call_service", _result_text(tool_result))[:MAX_SPOKEN_ERROR_CHARS]
+                    if error_shaped
+                    else ""
+                )
+                if error_shaped:
+                    logger.warning(
+                        "turn %s: local intent %s.%s on %s failed: %s",
+                        timings.turn_id,
+                        local_intent.domain,
+                        local_intent.service,
+                        local_intent.entity_id,
+                        error_text,
+                    )
+                if error_shaped and error_text == HA_UNREACHABLE_REASON:
+                    # The one provable exception to "never retry": the child
+                    # raises this text only when the connection could not be made,
+                    # so no request left the process and no second action is
+                    # possible. The brain path below handles the turn.
+                    logger.warning(
+                        "turn %s: nothing was sent for %s, so the turn falls back to the brain",
+                        timings.turn_id,
+                        local_intent.entity_id,
+                    )
                 else:
-                    timings.turn_outcome = "local_intent"
-                    reply_text = _DONE_REPLY
-                # Never falls back to the brain after a tool call was
-                # attempted -- a policy denial may have been on purpose
-                # (CMD-08's own doctrine, applied here the same way the
-                # macro path already applies it above).
-                speaking_tts = (
-                    tts
-                    if (home_control_refusal or claim_refusal)
-                    else _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
-                )
-                await _speak(
-                    source,
-                    speaking_tts,
-                    timings,
-                    reply_text,
-                    kind="answer",
-                    barge_in=barge_in,
-                    speech_lock=speech_lock,
-                    sink=sink,
-                )
-                await _emit_event(source, timings.to_event())
-                timings.log()
-                return
+                    home_control_refusal = is_home_control_refusal(tool_result) if intent_failed else None
+                    claim_refusal = is_claim_refusal(tool_result) if intent_failed else None
+                    if home_control_refusal:
+                        # D-C: the member may not change the home. The text
+                        # carries a name, so it is spoken live like a claim refusal.
+                        timings.turn_outcome = "home_control_refused"
+                        reply_text = home_control_refusal
+                    elif claim_refusal:
+                        # D-13, D-15: another turn in the group just changed it.
+                        timings.turn_outcome = "claim_refused"
+                        reply_text = claim_refusal
+                    elif intent_failed:
+                        timings.turn_outcome = "local_intent_failed"
+                        reply_text = _CANNOT_DO_REPLY
+                    else:
+                        timings.turn_outcome = "local_intent"
+                        reply_text = _DONE_REPLY
+                    # Never falls back to the brain after a tool call was
+                    # attempted -- a policy denial may have been on purpose
+                    # (CMD-08's own doctrine, applied here the same way the
+                    # macro path already applies it above). The one provable
+                    # exception is `HA_UNREACHABLE_REASON`, handled above.
+                    # A parent-side timeout is not one: it cannot prove that
+                    # the request never reached Home Assistant.
+                    await _cancel_state_task(pending_runs_task)
+                    speaking_tts = (
+                        tts
+                        if (home_control_refusal or claim_refusal)
+                        else _tts_for_precached_fallback(filler_cache, sink, reply_text, tts)
+                    )
+                    await _speak(
+                        source,
+                        speaking_tts,
+                        timings,
+                        reply_text,
+                        kind="answer",
+                        barge_in=barge_in,
+                        speech_lock=speech_lock,
+                        sink=sink,
+                    )
+                    await _emit_event(source, timings.to_event())
+                    timings.log()
+                    return
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         # CMD-09/D-07: a candidate id is what `TierReply.candidates` carries
@@ -1812,6 +1863,7 @@ async def run_turn(
                     handoff_slot=handoff_slot,
                     restricted_to=restricted_to,
                     answer_scope=answer_scope,
+                    friendly_names=friendly_names,
                 )
             else:
                 coro = brain_race.run_triage_tier(tier, tier_messages)
@@ -2777,7 +2829,37 @@ async def _drain_to_final_transcript(
         next_event_task = asyncio.ensure_future(stream.__anext__())
 
 
-def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
+def _succeeded_clause(tool_call: Any, friendly_names: "Mapping[str, str] | None") -> str:
+    """The clause for one action that succeeded in a mixed round.
+
+    A Home Assistant service call whose targets are all plain entity ids with
+    a known friendly name is named: "turned off the Living Room TV". Every
+    other case keeps `_ACTION_SUCCEEDED_CLAUSE`. The names come only from the
+    Home Assistant state fetch of the turn, never from model text.
+    """
+    arguments = getattr(tool_call, "arguments", None)
+    if not friendly_names or bare_tool_name(getattr(tool_call, "name", "")) != HA_CALL_SERVICE_TOOL:
+        return _ACTION_SUCCEEDED_CLAUSE
+    if not isinstance(arguments, dict) or any(arguments.get(key) for key in _EXPANDING_TARGET_KEYS):
+        return _ACTION_SUCCEEDED_CLAUSE
+    entity_id = arguments.get("entity_id")
+    entity_ids = [entity_id] if isinstance(entity_id, str) else entity_id
+    if not isinstance(entity_ids, list) or not entity_ids:
+        return _ACTION_SUCCEEDED_CLAUSE
+    names = [friendly_names.get(item) if isinstance(item, str) else None for item in entity_ids]
+    if not all(isinstance(name, str) and name.strip() for name in names):
+        return _ACTION_SUCCEEDED_CLAUSE
+    joined = " and ".join(name.strip() for name in names)
+    phrase = _SERVICE_PAST_TENSE.get(str(arguments.get("service")))
+    if phrase is None:
+        return f"{joined}: {_ACTION_SUCCEEDED_CLAUSE}"
+    article = "" if joined.casefold().startswith("the ") else "the "
+    return f"{phrase} {article}{joined}"
+
+
+def _compose_mixed_outcome_reply(
+    pairs: "list[tuple[Any, Any]]", *, friendly_names: "Mapping[str, str] | None" = None
+) -> str:
     """One clause per action, in `reply.tool_calls` order, for a round where
     at least one result is error-shaped or a raised exception (CMD-07, D-14).
 
@@ -2806,10 +2888,14 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
     around it.
 
     A successful action's clause is the fixed `_ACTION_SUCCEEDED_CLAUSE`
-    phrase, carrying no name either -- attached to its action by its
-    position in the sentence, the same "named by written order" doctrine
-    `fire_macro`'s own docstring already uses ("the reason names the one
-    written first"), not by a literal label repeated on every clause.
+    phrase, attached to its action by its position in the sentence, the same
+    "named by written order" doctrine `fire_macro`'s own docstring already
+    uses ("the reason names the one written first"). 261001-ibf: when
+    `friendly_names` knows every entity of a Home Assistant call, the clause
+    names them ("turned off the Living Room TV") through `_succeeded_clause`.
+    Names come only from the Home Assistant state fetch of the turn, never
+    from model text. A refused entity is never named: its clause is the
+    boundary's own reason, which names the domain only.
 
     An entry the gather returned as a raised exception is the one case named
     explicitly by this task: the call never reached a verdict at all, so its
@@ -2830,7 +2916,7 @@ def _compose_mixed_outcome_reply(pairs: "list[tuple[Any, Any]]") -> str:
         elif _is_error(result):
             clauses.append(_spoken_error_text(tool_call.name, result) or _DENIED_FALLBACK_REPLY)
         else:
-            clauses.append(_ACTION_SUCCEEDED_CLAUSE)
+            clauses.append(_succeeded_clause(tool_call, friendly_names))
     return "; ".join(clauses)
 
 
@@ -3001,6 +3087,7 @@ async def _run_tool_rounds(
     handoff_slot: "HandoffSlot | None" = None,
     restricted_to: "frozenset[str] | None" = None,
     answer_scope: "AnswerScope | None" = None,
+    friendly_names: "Mapping[str, str] | None" = None,
 ) -> str:
     """Run up to `max_tool_rounds` brain calls, executing any tool calls in between.
 
@@ -3019,6 +3106,10 @@ async def _run_tool_rounds(
     This is the structural backstop the schema restriction alone cannot
     be: a model that names a tool outside the schema it was given still
     never reaches `tool_host.call_tool` for it.
+
+    `friendly_names` (261001-ibf, default `None`) is the turn's entity id to
+    friendly name map. It only lets `_compose_mixed_outcome_reply` name an
+    action that succeeded.
 
     `answer_scope` (R3-IN-05, D-24, default `None`) adds the scope's own
     target check at dispatch: a call whose arguments name an entity
@@ -3252,7 +3343,9 @@ async def _run_tool_rounds(
         # every call succeeded falls through to the loop-to-the-next-round
         # behaviour, byte-identical to before this plan.
         if any(isinstance(result, BaseException) or _is_error(result) for result in results):
-            return _compose_mixed_outcome_reply(list(zip(reply.tool_calls, results)))
+            return _compose_mixed_outcome_reply(
+                list(zip(reply.tool_calls, results)), friendly_names=friendly_names
+            )
 
         # 260924-4it: the first round only, and only when nothing about it
         # needs a model's own words -- a later round may follow an earlier

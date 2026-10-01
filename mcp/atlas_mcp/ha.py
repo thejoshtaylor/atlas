@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
+import time
 from typing import Any
 
 import httpx
@@ -32,9 +34,86 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from atlas_mcp.registry import HaRegistryClient, RegistryError, UnknownRegistryTargetError, expand_target, ws_url_from_http
-from atlas_mcp.ha_names import HA_EXPAND_TARGET_TOOL
+from atlas_mcp.ha_names import HA_EXPAND_TARGET_TOOL, HA_UNREACHABLE_REASON
 from atlas_mcp.ha_spotify import handle_play_spotify_playlist
 from atlas_mcp.safety import Denied, Policy, allow_call, allow_read
+
+logger = logging.getLogger(__name__)
+
+# The connect phase (DNS, TCP and TLS on a new connection) of the shared client.
+# The parent gives up on a tool call after the per-plugin MCP deadline, 5 s by
+# default. A connect stall must fail inside that time, as a result that proves
+# nothing was sent. 10 s would let the parent give up first, with no proof.
+_HA_CONNECT_TIMEOUT_S = 2.0
+_HA_OTHER_TIMEOUT_S = 10.0
+
+# These httpx errors all happen before httpx writes a request byte.
+_NOT_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+class _PhaseTrace:
+    """Records the last phase of one request, so a log line can say where a
+    stalled call stopped. `sent` turns True once httpcore starts to write the
+    request. The callback sees only event names, never the URL or the token."""
+
+    def __init__(self) -> None:
+        self.phase = "not started"
+        self.sent = False
+
+    async def __call__(self, event_name: str, info: dict[str, Any]) -> None:
+        self.phase = event_name
+        if "send_request" in event_name:
+            self.sent = True
+
+
+async def _post_service(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    service_data: dict[str, Any],
+    *,
+    domain: str,
+    service: str,
+) -> httpx.Response:
+    """One service POST. A connect failure becomes `Denied(HA_UNREACHABLE_REASON)`.
+
+    That proves nothing reached Home Assistant, so the caller may try again by
+    another path. No other httpx error is converted: a read timeout, a write
+    error or a protocol error can come after the request was sent.
+
+    One WARNING line is written for a connect failure and for a cancellation
+    (the parent's timeout causes that one). It holds the domain, the service,
+    the entity id, the elapsed seconds, the last phase and whether a request
+    was sent. It never holds the token or the base URL.
+    """
+    trace = _PhaseTrace()
+    started = time.monotonic()
+    entity = service_data.get("entity_id")
+    try:
+        return await client.post(url, headers=headers, json=service_data, extensions={"trace": trace})
+    except _NOT_SENT_ERRORS as exc:
+        logger.warning(
+            "%s.%s on %s: %s after %.2fs in phase %s, request sent: no",
+            domain,
+            service,
+            entity,
+            type(exc).__name__,
+            time.monotonic() - started,
+            trace.phase,
+        )
+        raise Denied(HA_UNREACHABLE_REASON) from exc
+    except asyncio.CancelledError:
+        logger.warning(
+            "%s.%s on %s: cancelled after %.2fs in phase %s, request sent: %s",
+            domain,
+            service,
+            entity,
+            time.monotonic() - started,
+            trace.phase,
+            "yes" if trace.sent else "no",
+        )
+        raise
+
 
 # `handle_call_service`'s three target kinds, in the order they are
 # checked -- a fixed tuple rather than three near-identical `if` blocks, so
@@ -189,13 +268,15 @@ async def handle_call_service(
         service_data["transition"] = transition
     url = f"{base_url}/api/services/{domain}/{service}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    response = await client.post(url, headers=headers, json=service_data)
+    response = await _post_service(client, url, headers, service_data, domain=domain, service=service)
     if response.status_code == 400 and "requires responses" in _ha_message(response).lower():
         # Home Assistant rejected the first request before the service ran.
         # The service cannot run twice, so this retry is safe. The flag is
         # not sent on the first post, or on every post: Home Assistant
         # rejects it on services that give no response at all.
-        response = await client.post(f"{url}?return_response", headers=headers, json=service_data)
+        response = await _post_service(
+            client, f"{url}?return_response", headers, service_data, domain=domain, service=service
+        )
     if response.status_code // 100 != 2:
         # A non-2xx response is surfaced as an error result, never an empty
         # success -- the prior incident on this host hid itself exactly this
@@ -478,7 +559,9 @@ def _startup() -> None:
     # silently). The poller (plan 05-01) holds a claimed step row's lock
     # for the duration of this call (05-RESEARCH.md Assumption A3,
     # Pitfall 3) -- an unbounded client here is a wedged step there.
-    _http_client = httpx.AsyncClient(timeout=10.0)
+    # The connect phase is bounded tighter than the rest, on purpose: see
+    # `_HA_CONNECT_TIMEOUT_S`.
+    _http_client = httpx.AsyncClient(timeout=httpx.Timeout(_HA_OTHER_TIMEOUT_S, connect=_HA_CONNECT_TIMEOUT_S))
     # The registry client authenticates with this same `_token` -- no
     # second credential, no environment variable of its own (SAFE-09). It
     # opens no connection here; `HaRegistryClient.get_snapshot()` fetches
