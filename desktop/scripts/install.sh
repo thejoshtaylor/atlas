@@ -17,6 +17,10 @@
 #   5. "ATLAS Local Signing", a certificate this script creates once
 # The script signs by SHA-1 hash. It never signs ad-hoc and never uses sudo.
 #
+# The local certificate has no Apple team id, so macOS asks once in the
+# Keychain after each rebuild. The Accessibility grant survives. An Apple
+# Development certificate (free, made in Xcode) avoids the Keychain prompt.
+#
 # Env overrides (all optional):
 #   ATLAS_SIGN_IDENTITY   the identity to sign with
 #   ATLAS_IDENTITY_FILE   where the script saves the chosen identity
@@ -149,8 +153,31 @@ trust_local_certificate() {
   security add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$1"
 }
 
+# Let codesign use the new private key without a prompt on each build. The
+# security tool asks for the login password itself, so this script never holds
+# it. The partition list names this one key only. A failure is not fatal: the
+# build still works, and codesign asks for access instead.
+allow_codesign_key() {
+  log "macOS will ask for your login password again. It lets codesign use the new key without a prompt on each build."
+  if ! security set-key-partition-list -S apple-tool:,apple:,codesign: \
+    -s -l "$LOCAL_CERT_NAME" "$LOGIN_KEYCHAIN" >/dev/null; then
+    log "Could not change the key access. codesign will ask for access during each build."
+  fi
+}
+
+# A self-signed certificate has no team id. macOS then ties the Keychain item
+# to the exact build, so it asks again after each rebuild. Print one line that
+# says so when the identity $1 is the local certificate.
+warn_if_local_identity() {
+  local local_hash
+  local_hash="$(identity_matching "$LOCAL_CERT_NAME")"
+  if [ -n "$local_hash" ] && [ "$local_hash" = "$(echo "$1" | tr '[:lower:]' '[:upper:]')" ]; then
+    log "ATLAS uses the local signing certificate. The Keychain will ask once after each rebuild. A free Apple Development certificate, made in Xcode, avoids this."
+  fi
+}
+
 create_local_identity() {
-  local work pass
+  local work pass imported=0
   log "macOS will ask for your login password once. It lets this certificate sign code."
   work="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -180,8 +207,12 @@ CNF
       -passout env:ATLAS_P12_PASS -out "$work/atlas.p12"
     security import "$work/atlas.p12" -k "$LOGIN_KEYCHAIN" -P "$pass" \
       -T /usr/bin/codesign >/dev/null
+    imported=1
   fi
   trust_local_certificate "$work/cert.pem"
+  if [ "$imported" -eq 1 ]; then
+    allow_codesign_key
+  fi
   if [ -z "$(identity_matching "$LOCAL_CERT_NAME")" ]; then
     log "The $LOCAL_CERT_NAME identity is still not valid after the trust step."
     exit 4
@@ -262,6 +293,7 @@ main() {
     create_local_identity
     sha="$(pick_identity)"
   fi
+  warn_if_local_identity "$sha"
   save_identity "$sha"
   build_app
   sign_app "$sha" "$bundle_id"

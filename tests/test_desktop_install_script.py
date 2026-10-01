@@ -28,10 +28,21 @@ _APPLE_DEV_LINE = f'  2) {_APPLE_DEV_HASH} "Apple Development: tester@example.te
 _LOCAL_LINE = f'  3) {_LOCAL_HASH} "ATLAS Local Signing"'
 
 _FAKE_SECURITY = """#!/bin/sh
-if [ "$1" = "find-identity" ]; then
-  printf '%s\\n' "$FAKE_IDENTITIES"
-  exit 0
+if [ -n "$FAKE_SECURITY_LOG" ]; then
+  printf '%s\\n' "$*" >>"$FAKE_SECURITY_LOG"
 fi
+case "$1" in
+  find-identity)
+    printf '%s\\n' "$FAKE_IDENTITIES"
+    exit 0
+    ;;
+  set-key-partition-list)
+    exit "${FAKE_PARTITION_EXIT:-0}"
+    ;;
+  import | add-trusted-cert)
+    exit 0
+    ;;
+esac
 exit 1
 """
 
@@ -67,6 +78,7 @@ def _run(
     sign_identity: str | None = None,
     codesign_output: str = "",
     args: str = "",
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     identity_file = tmp_path / "signing-identity"
     if identity_file_text is not None:
@@ -80,6 +92,8 @@ def _run(
     }
     if sign_identity is not None:
         env["ATLAS_SIGN_IDENTITY"] = sign_identity
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         ["/bin/bash", "-c", f'source "{_SCRIPT}"; {function} {args}'],
         env=env,
@@ -254,3 +268,72 @@ def test_script_has_no_sudo_and_no_transport_exception() -> None:
     text = "\n".join(_code_lines())
     assert "sudo" not in text
     assert "NSAllowsArbitraryLoads" not in text
+
+
+_OPENSSL = Path("/usr/bin/openssl")
+
+
+def _create_local_identity(
+    fake_bin: Path, tmp_path: Path, *, partition_exit: int = 0
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    log = tmp_path / "security.log"
+    result = _run(
+        "create_local_identity",
+        fake_bin,
+        tmp_path,
+        identities=_listing(_LOCAL_LINE),
+        extra_env={"FAKE_SECURITY_LOG": str(log), "FAKE_PARTITION_EXIT": str(partition_exit)},
+    )
+    calls = log.read_text().splitlines() if log.exists() else []
+    return result, calls
+
+
+@pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")
+def test_new_local_identity_gets_a_codesign_partition_list(
+    fake_bin: Path, tmp_path: Path
+) -> None:
+    result, calls = _create_local_identity(fake_bin, tmp_path)
+    assert result.returncode == 0, result.stderr
+    partition = [c for c in calls if c.startswith("set-key-partition-list")]
+    assert len(partition) == 1
+    assert "-S apple-tool:,apple:,codesign:" in partition[0]
+    # Scoped to the one key, in the login keychain, with no password in argv.
+    assert '-l ATLAS Local Signing' in partition[0]
+    assert "login.keychain-db" in partition[0]
+    assert " -k " not in f" {partition[0]} "
+    names = [c.split()[0] for c in calls]
+    assert names.index("import") < names.index("add-trusted-cert")
+    assert names.index("add-trusted-cert") < names.index("set-key-partition-list")
+
+
+@pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")
+def test_failed_partition_list_warns_and_does_not_abort(fake_bin: Path, tmp_path: Path) -> None:
+    result, calls = _create_local_identity(fake_bin, tmp_path, partition_exit=1)
+    assert result.returncode == 0, result.stderr
+    assert any(c.startswith("set-key-partition-list") for c in calls)
+    assert "codesign will ask" in result.stderr
+
+
+def test_local_identity_prints_the_keychain_cost(fake_bin: Path, tmp_path: Path) -> None:
+    result = _run(
+        "warn_if_local_identity",
+        fake_bin,
+        tmp_path,
+        identities=_listing(_LOCAL_LINE),
+        args=_LOCAL_HASH,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Keychain will ask once after each rebuild" in result.stderr
+    assert "Apple Development" in result.stderr
+
+
+def test_team_identity_prints_no_keychain_cost(fake_bin: Path, tmp_path: Path) -> None:
+    result = _run(
+        "warn_if_local_identity",
+        fake_bin,
+        tmp_path,
+        identities=_listing(_APPLE_DEV_LINE, _LOCAL_LINE),
+        args=_APPLE_DEV_HASH,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
