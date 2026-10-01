@@ -131,6 +131,10 @@ class HandoffSlot:
     # R3-IN-05 (D-24): the exact offered name of the tool call whose result
     # became `handoff`. A clarification's answer is scoped to this tool.
     tool_name: "str | None" = None
+    # Phase 13 (D-10): the exact offered names this turn's tool rounds
+    # dispatched. An answer window is scoped to this set. A refused or
+    # code-only call is never added.
+    called_tools: "set[str]" = field(default_factory=set)
 
 
 @dataclass(frozen=True)

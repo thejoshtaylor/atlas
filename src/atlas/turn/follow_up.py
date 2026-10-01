@@ -97,7 +97,10 @@ class FollowUpRequest:
     treated as an answer to a specific question, not a fresh command.
 
     `kind` distinguishes a yes/no confirmation from a which-one
-    clarification -- the two shapes `dispatch_handoff` ever builds one for.
+    clarification -- the two shapes `dispatch_handoff` ever builds one for --
+    and from an `"answer"` (Phase 13, D-09): the listening window `run_turn`
+    requests after an ordinary brain answer on a source that opts in. An
+    answer window may reach only the tools the answered turn dispatched.
     `chain_depth` is this request's own position in a chain of follow-ups
     (1 for the first ask); `pending_action_id` is set only for a
     `"confirmation"` request, naming the exact row a "yes" resolves.
@@ -105,7 +108,7 @@ class FollowUpRequest:
     open-microphone timing and is `None` here.
     """
 
-    kind: Literal["confirmation", "clarification"]
+    kind: Literal["confirmation", "clarification", "answer"]
     chain_depth: int
     original_transcript: str
     question: str
@@ -140,6 +143,10 @@ class FollowUpRequest:
     # it); a confirmation with `None` came from a wake turn and adds no
     # limit beyond `proposals_only`.
     answer_scope: "AnswerScope | None" = None
+    # Phase 13 (plan 13-04): the speaker id of the turn that opened an
+    # `"answer"` window. In enforce mode only that speaker may answer it
+    # (12 D-10, applied on the serial edge path).
+    asked_by_speaker: "str | None" = None
 
 
 @dataclass

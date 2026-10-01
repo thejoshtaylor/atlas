@@ -973,6 +973,7 @@ def _make_run_turn_for_source(
     *,
     room_speaker: bool = True,
     speaker_id: "Any | None" = None,
+    answer_windows: bool = False,
 ) -> Callable[[Any], Any]:
     """Build the one-argument `run_turn` caller `SourceRunner` needs.
 
@@ -996,6 +997,9 @@ def _make_run_turn_for_source(
     `room_speaker=False` is for a source that plays its reply somewhere
     other than the room speaker (the browser listener): its turns must not
     wait on `app.state.speaker_lock` behind a camera reply.
+
+    `answer_windows` (Phase 13, D-09): True only for the edge source. Its
+    turns then open a no-wake-word window after an ordinary answer.
     """
 
     # CR-03: one warning per process for the camera path, not one per wake
@@ -1113,6 +1117,7 @@ def _make_run_turn_for_source(
             timer_ring=getattr(app.state, "timer_scheduler", None),
             # A plain timer or alarm command runs here with no brain call.
             timer_intents=getattr(app.state, "timer_intents", None),
+            answer_windows=answer_windows,
         )
 
     return _run
@@ -2019,7 +2024,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # the camera FIFO, so this turn never waits on
             # `app.state.speaker_lock`.
             _make_run_turn_for_source(
-                app, config, EDGE_SOURCE_NAME, room_speaker=False, speaker_id=speaker_id_context
+                app,
+                config,
+                EDGE_SOURCE_NAME,
+                room_speaker=False,
+                speaker_id=speaker_id_context,
+                answer_windows=True,
             ),
             wake_config=config.wake,
             gate_config=config.gate,

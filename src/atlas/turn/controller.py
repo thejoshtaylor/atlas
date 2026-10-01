@@ -140,6 +140,12 @@ from atlas.turn.pending_action import (
 from atlas.turn.tool_errors import condense_argument_error, is_argument_error, is_speakable_error
 from atlas.turn.transcript_guard import asks_for_information, is_no_command
 from atlas.turn.transcript_trim import trim_at_split
+from atlas.turn.answer_window import (
+    answer_speaker_mismatch,
+    answer_turn_scope,
+    build_answer_request,
+    silent_answer_outcome,
+)
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
 from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
 
@@ -444,8 +450,13 @@ async def run_turn(
     turn_context: "TurnContext | None" = None,
     timer_ring: "RingControl | None" = None,
     timer_intents: "Callable[[str], Awaitable[str | None]] | None" = None,
+    answer_windows: bool = False,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
+
+    `answer_windows` (Phase 13, D-09) is True only for the edge source. After
+    an ordinary brain answer, the turn then leaves a `"answer"` follow-up
+    request, which opens a no-wake-word window scoped to the tools it used.
 
     `timer_intents` (quick task 261001-b7l), when given, runs a plain timer or
     alarm command on the server after the macro check. It returns the reply
@@ -966,9 +977,15 @@ async def run_turn(
         # D-10: in enforce mode only the person Atlas asked may answer. Silent,
         # and the stored pending action expires on its TTL, as for a blocked
         # unknown speaker above. Ids only in the log, never a name.
+        # Phase 13 (D-12): the same rule for an answer window on the serial
+        # edge path, where `turn_context` is `None`.
         if follow_up_speaker_mismatch(
             turn_context,
             incoming=incoming,
+            speaker_event=speaker_outcome.event,
+            effective_mode=speaker_outcome.decision.effective_mode,
+        ) or answer_speaker_mismatch(
+            incoming,
             speaker_event=speaker_outcome.event,
             effective_mode=speaker_outcome.decision.effective_mode,
         ):
@@ -979,7 +996,9 @@ async def run_turn(
                 "turn %s blocked: follow-up answered by speaker %s, asked %s",
                 timings.turn_id,
                 speaker_outcome.event.get("speaker_id"),
-                turn_context.answer_only_from if turn_context is not None else None,
+                turn_context.answer_only_from
+                if turn_context is not None
+                else (incoming.asked_by_speaker if incoming is not None else None),
             )
             await _emit_event(source, timings.to_event())
             timings.log()
@@ -1069,8 +1088,9 @@ async def run_turn(
         # `CANCELLED_REPLY`, never `_NO_SPEECH_REPLY`), and never reaches
         # a macro or the local on/off matcher. Plan 09-07 adds a sibling
         # branch immediately below for `incoming.kind == "clarification"`
-        # -- an `incoming` of any other kind falls through and is treated
-        # as an ordinary turn, exactly as if no follow-up channel existed.
+        # -- and Phase 13 adds the `"answer"` kind below that. An
+        # `incoming` of any other kind falls through and is treated as an
+        # ordinary turn, exactly as if no follow-up channel existed.
         if incoming is not None and incoming.kind == "confirmation":
             await _cancel_state_task(state_task)
             await _cancel_state_task(pending_runs_task)
@@ -1149,6 +1169,24 @@ async def run_turn(
             answer_scope = incoming.answer_scope
             if answer_scope is None and not incoming.proposals_only:
                 answer_scope = AnswerScope(tool_names=frozenset())
+        elif incoming is not None and incoming.kind == "answer":
+            # Phase 13 (D-09 to D-15): the window after an ordinary answer.
+            # Silence, a stop phrase and filler end it with no spoken reply.
+            silent_outcome = silent_answer_outcome(final, final_text, wake_phrase)
+            if silent_outcome is not None:
+                timings.turn_outcome = silent_outcome
+                await _cancel_state_task(state_task)
+                await _cancel_state_task(pending_runs_task)
+                logger.info("turn %s: answer window ended with no command (%s)", timings.turn_id, silent_outcome)
+                await _emit_event(source, timings.to_event())
+                timings.log()
+                return
+            # The rest is a continuation, like a clarification's answer: the
+            # previous exchange comes first, and a set `prior_exchange` skips
+            # the macro, timer-intent and local-intent blocks below (T-13-17).
+            prior_exchange = _continuation_messages(incoming)
+            restrict_tools_to_proposals = incoming.proposals_only
+            answer_scope = answer_turn_scope(incoming)
         else:
             prior_exchange = None
 
@@ -1857,7 +1895,7 @@ async def run_turn(
             else:
                 reply_text = answer_text
                 speaking_tts = tts
-        await _speak(
+        speech_result = await _speak(
             source,
             speaking_tts,
             timings,
@@ -1867,6 +1905,26 @@ async def run_turn(
             speech_lock=speech_lock,
             sink=sink,
         )
+        # Phase 13 (D-09, D-12): the brain answer path only. A macro, a local
+        # intent, a timer, a readback and a clarification all return above,
+        # so none of them opens this window. `"completed"` leaves out an
+        # interrupted reply, a bulk refusal and an empty answer. The serial
+        # path only: a Phase 12 turn group has its own follow-up handling.
+        if answer_windows and follow_up is not None and turn_context is None and timings.turn_outcome == "completed":
+            asked_by = speaker_outcome.event.get("speaker_id")
+            answer_request = build_answer_request(
+                incoming=incoming,
+                final_text=final_text,
+                reply_text=reply_text,
+                called_tools=handoff_slot.called_tools,
+                answer_scope=answer_scope,
+                proposals_only=restrict_tools_to_proposals,
+                prior_exchange=prior_exchange,
+                playback_ends_at=estimate_playback_end(speech_result, sink),
+                asked_by_speaker=str(asked_by) if asked_by is not None else None,
+            )
+            if answer_request is not None:
+                follow_up.request(answer_request)
         await _emit_event(source, timings.to_event())
         timings.log()
     finally:
@@ -2654,6 +2712,9 @@ async def _run_tool_rounds(
             for index, tc in enumerate(reply.tool_calls)
             if not is_code_only_tool(tc.name) and not _refused(tc)
         ]
+        # Phase 13 (D-10): the answer window is scoped to exactly these names.
+        if handoff_slot is not None:
+            handoff_slot.called_tools.update(tc.name for _, tc in dispatchable)
         dispatched_results = await asyncio.gather(
             *(tool_host.call_tool(tc.name, tc.arguments) for _, tc in dispatchable),
             return_exceptions=True,
