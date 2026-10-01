@@ -132,6 +132,7 @@ from atlas.turn.home_control import is_home_control_refusal, restrict_home_write
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.playback_hold import hold_for_playback
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
+from atlas.turn.panel_events import reply_started_event, request_of_this_turn, turn_ended_event
 from atlas.turn.reply_group import ReplyRoute, current_reply_route, speak_in_group
 from atlas.turn.pending_action import (
     BULK_REFUSAL_REPLY,
@@ -744,6 +745,9 @@ async def run_turn(
     # caller that ever sets it) is also what decides whether to attach
     # another one for the next turn in the chain.
     incoming: "FollowUpRequest | None" = follow_up.incoming if follow_up is not None else None
+    # Phase 15 (plan 15-04): the request an earlier turn left in `requested`.
+    # `turn.ended` reports only a request this turn made itself.
+    requested_before = getattr(follow_up, "requested", None)
 
     # 260922-cts: captured the same way, and for the same reason, as
     # `barge_in` immediately above -- off the *unwrapped* source, before
@@ -858,6 +862,11 @@ async def run_turn(
         if turn_context is not None:
             turn_context.bind_recorder(session_recorder.record_event)
 
+    # Phase 15 (plan 15-04): how the turn ended, for the one `turn.ended` in the
+    # `finally` below. `timings.turn_outcome` defaults to "completed" and an
+    # exception leaves it so, hence the two flags (RESEARCH Pitfall 9).
+    ended_failed = False
+    ended_cancelled = False
     try:
         turn_deadline = clock() + max_utterance_s
         # Plan 09-06: a follow-up turn's own onset deadline -- how long
@@ -2217,6 +2226,12 @@ async def run_turn(
                 follow_up.request(answer_request)
         await _emit_event(source, timings.to_event())
         timings.log()
+    except asyncio.CancelledError:
+        ended_cancelled = True
+        raise
+    except Exception:
+        ended_failed = True
+        raise
     finally:
         # 10-07-PLAN.md (D-17): unsubscribed before the recorder closes
         # below -- an edge event arriving after this point must never
@@ -2232,6 +2247,21 @@ async def run_turn(
             close_span()
         if reply_route_token is not None:
             current_reply_route.reset(reply_route_token)
+        # Phase 15 (plan 15-04): the one `turn.ended`, on every exit, after every
+        # other event of the turn and before the recorder closes, so the session
+        # record holds it. A display event never changes how the turn ends.
+        with contextlib.suppress(Exception):
+            await _emit_event(
+                source,
+                turn_ended_event(
+                    outcome=timings.turn_outcome,
+                    failed=ended_failed,
+                    cancelled=ended_cancelled,
+                    request=request_of_this_turn(getattr(follow_up, "requested", None), requested_before),
+                    playback_end_at=timings.reply_playback_end_at,
+                    now=_time.monotonic(),
+                ),
+            )
         # Covers every exit path above, including the two early returns --
         # exactly the turns whose folders an operator will want, and the
         # easiest ones to leak (D-13, T-02-22). A no-op when
@@ -3509,8 +3539,22 @@ async def _speak(
                 timings.first_audio_at = written_at
             if timings.answer_audio_at is None:
                 timings.answer_audio_at = written_at
+        # Phase 15: the follower's own reply starts here, and its audio ends where the lead's does.
+        await _emit_event(source, reply_started_event(reply_text))
+        _note_reply_playback_end(timings, speech.result, sink)
         await _emit_event(source, {"type": "reply.text", "text": reply_text})
     return speech.result
+
+
+def _note_reply_playback_end(timings: TurnTimings, result: SpeechResult, sink: "SinkFormat | None") -> None:
+    """Keep the latest estimated end of this turn's answer audio on `timings`.
+
+    `turn.ended` reads it as `playback_ms_left`. A `None` estimate (nothing
+    was written) leaves the value as it was.
+    """
+    ends_at = estimate_playback_end(result, sink)
+    if ends_at is not None and (timings.reply_playback_end_at is None or ends_at > timings.reply_playback_end_at):
+        timings.reply_playback_end_at = ends_at
 
 
 async def _speak_direct(
@@ -3605,6 +3649,11 @@ async def _speak_direct(
     never written.
     """
 
+    if kind == "answer":
+        # Phase 15 (PANEL-04): the panel's speaking state and the source of its text
+        # card. Sent before the speech lock, so a dead speaker still shows the text.
+        await _emit_event(source, reply_started_event(event_text if event_text is not None else reply_text))
+
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
 
@@ -3698,12 +3747,15 @@ async def _speak_direct(
             timings.turn_outcome = "barged_in"
             await _emit_event(source, _interrupted_event(barge_in, playback, chunks_sent, chunks_total))
 
-    return SpeechResult(
+    result = SpeechResult(
         bytes_sent=bytes_sent,
         first_write_at=first_write_at,
         last_write_at=last_write_at,
         playback_ends_at=playback.playing_until if playback is not None else None,
     )
+    if kind == "answer":
+        _note_reply_playback_end(timings, result, sink)
+    return result
 
 
 def _interrupted_event(barge_in: Any, playback: Any, chunks_sent: int, chunks_total: int) -> dict[str, Any]:

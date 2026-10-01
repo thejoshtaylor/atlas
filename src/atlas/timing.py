@@ -116,6 +116,13 @@ class TurnTimings:
     # the browser timing contract does not move for one that does. Included
     # in `log()`, matching `vad_end_at`/`speaker_id_ms` immediately above.
     speaker_split_at: float | None = None
+    # Phase 15 (plan 15-04): the latest estimated end of this turn's answer
+    # audio, in `time.monotonic()` seconds, set by `turn/controller.py` from
+    # `estimate_playback_end` and read by the `turn.ended` event so the
+    # desktop panel can start its hide timer when the reply really ends.
+    # Kept out of `_STAGE_ORDER`/`to_event()` for the same reason
+    # `vad_end_at` is: the browser timing contract does not move.
+    reply_playback_end_at: float | None = None
 
     def mark_turn_started(self) -> None:
         """Record the moment the turn began -- the mic toggle, in Phase 1."""
