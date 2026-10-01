@@ -715,6 +715,78 @@ async def test_a_wake_interrupt_hands_its_frames_to_the_next_wake_turn_once_each
             await serve_task
 
 
+async def test_a_wake_interrupt_gives_the_next_turn_the_scope_it_falls_back_to(edge_source):
+    """D-A: the turn that a wake interrupt starts is still a wake turn (no
+    incoming request), and its monitor carries the interrupted turn's scope
+    and exchange for the case where its transcript fails verification."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.follow_up import AnswerScope, FollowUpRequest
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    scope = AnswerScope(tool_names=frozenset({"ha_call_service"}), entity_ids=frozenset({"light.example_lamp"}))
+    seen: dict = {"done": asyncio.Event()}
+    calls = 0
+
+    async def run_turn_fn(turn_source) -> None:
+        nonlocal calls
+        calls += 1
+        monitor = turn_source.barge_in
+        if calls == 1:
+            assert monitor.unverified_request is None, "an idle wake turn has no fallback scope"
+            monitor.note_resume_context("turn on the lamp", scope)
+            monitor.mark_transcript_done()
+            timings = TurnTimings()
+            timings.turn_outcome = "completed"
+            await _speak(
+                turn_source,
+                _BurstFakeTts([b"\x00\x00" * 1600] * 10),
+                timings,
+                "Done, the lamp is on.",
+                kind="answer",
+                barge_in=monitor,
+                sink=edge_source.sink_format(),
+            )
+            return
+        seen["request"] = monitor.unverified_request
+        seen["after_interrupt"] = monitor.after_interrupt
+        seen["incoming"] = turn_source.follow_up.incoming
+        seen["done"].set()
+
+    runner = _handover_runner(
+        edge_source,
+        run_turn_fn,
+        _ScriptedWakeDetector(hit_on_calls={1, 2}),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+        follow_up_window_s=lambda: 8.0,
+    )
+    run_task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.sleep(0)
+        socket.push_bytes(_stereo(1))
+        await _wait_until(lambda: len(socket.sent_bytes) == 10)
+        socket.push_bytes(_stereo(2))
+        await asyncio.wait_for(seen["done"].wait(), timeout=2.0)
+
+        assert seen["after_interrupt"] is True
+        assert seen["incoming"] is None
+        assert seen["request"] == FollowUpRequest(
+            kind="answer",
+            chain_depth=1,
+            original_transcript="turn on the lamp",
+            question="Done, the lamp is on.",
+            answer_scope=scope,
+        )
+    finally:
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
 class _RaisingThenScriptedDetector(_ScriptedWakeDetector):
     """Raises on the scripted call numbers, like a decoder that meets a bad chunk."""
 

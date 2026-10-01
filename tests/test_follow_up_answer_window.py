@@ -656,3 +656,160 @@ async def test_enforce_mode_still_blocks_another_member_with_no_wake_hit():
 
     assert timings.turn_outcome == "follow_up_wrong_speaker"
     assert brain.call_count == 0
+
+
+# --- D-A: the turn a wake interrupt started, when verification fails ----------
+#
+# The echo suppressor clips the wake phrase, so the hand-over transcript can
+# lose it. Such a turn runs as an answer window with the interrupted turn's
+# scope. A verified hand-over is an ordinary wake turn with the full scope.
+
+
+def _handover_monitor(scope: "AnswerScope | None", *, after_interrupt: bool = True) -> Any:
+    from atlas.sources.runner import BargeInMonitor
+
+    monitor = BargeInMonitor(floor=0.0, min_duration_s=0.0, guard_window_s=0.0, enabled=False)
+    monitor.after_interrupt = after_interrupt
+    if scope is not None:
+        monitor.unverified_request = FollowUpRequest(
+            kind="answer",
+            chain_depth=1,
+            original_transcript="turn on the lamp",
+            question="Done, the lamp is on.",
+            answer_scope=scope,
+        )
+    return monitor
+
+
+_LAMP_SCOPE = AnswerScope(tool_names=frozenset({"ha_call_service"}), entity_ids=frozenset({"light.example_lamp"}))
+_HA_LAMP_OFF = ToolCall(
+    name="ha_call_service", arguments={"domain": "light", "service": "turn_off", "entity_id": "light.example_lamp"}
+)
+
+
+async def _handover_turn(
+    transcript: str, brain: Any, *, monitor: Any
+) -> tuple[TurnTimings, FakeTts, _RecordingToolHost, FakeAudioSource]:
+    source = FakeAudioSource(frames=[b"\x00\x01"])
+    source.barge_in = monitor
+    source.follow_up = FollowUpChannel()
+    tool_host = _RecordingToolHost()
+    tts = FakeTts(chunks=[b"\x01"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        _text(transcript),
+        brain,
+        tts,
+        tool_host,
+        tools_schema=_HA_SCHEMA,
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=timings,
+        wake_phrase="hey atlas",
+        verify_wake=True,
+        answer_windows=True,
+        local_intents=True,
+    )
+    return timings, tts, tool_host, source
+
+
+async def test_an_unverified_hand_over_runs_with_only_the_interrupted_turns_scope():
+    """UAT 13-2: STT lost the clipped "Hey Atlas". The turn is not dropped as
+    `wake_unverified`. It reaches the brain with the previous exchange first
+    and only the tool, and the entity, that the interrupted turn used."""
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_HA_LAMP_OFF]), BrainReply(text="Off.")])
+    timings, tts, host, _source = await _handover_turn("turn it off", brain, monitor=_handover_monitor(_LAMP_SCOPE))
+
+    assert timings.turn_outcome == "completed"
+    assert _tool_names(brain.calls[0]) == {"ha_call_service"}
+    assert host.calls == [("ha_call_service", _HA_LAMP_OFF.arguments)]
+    assert brain.calls[0].messages[-3:] == [
+        {"role": "user", "content": "turn on the lamp"},
+        {"role": "assistant", "content": "Done, the lamp is on."},
+        {"role": "user", "content": "turn it off"},
+    ]
+    assert tts.received_text == ["Off."]
+
+
+async def test_an_unverified_hand_over_cannot_reach_another_entity():
+    """WR-01 holds: a television over a reply about the lamp cannot unlock a door."""
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_HA_DOOR]), BrainReply(text="I cannot.")])
+    _timings, _tts, host, _source = await _handover_turn(
+        "unlock the door", brain, monitor=_handover_monitor(_LAMP_SCOPE)
+    )
+
+    assert host.calls == []
+
+
+async def test_an_unverified_hand_over_after_a_chat_only_reply_offers_no_tool():
+    brain = RecordingFakeBrain(replies=[BrainReply(text="I can only talk right now.")])
+    timings, _tts, host, _source = await _handover_turn(
+        "turn on the lamp", brain, monitor=_handover_monitor(AnswerScope(tool_names=frozenset()))
+    )
+
+    assert timings.turn_outcome == "completed"
+    assert not _tool_names(brain.calls[0])
+    assert host.calls == []
+
+
+@pytest.mark.parametrize("transcript", ["stop", "Never mind.", "be quiet", "that's enough"])
+async def test_a_stop_phrase_in_an_unverified_hand_over_ends_silently(transcript):
+    brain = RecordingFakeBrain()
+    timings, tts, _host, source = await _handover_turn(transcript, brain, monitor=_handover_monitor(_LAMP_SCOPE))
+
+    assert timings.turn_outcome == "stopped"
+    assert brain.call_count == 0
+    assert tts.received_text == []
+    assert source.sent_audio == []
+
+
+@pytest.mark.parametrize(("transcript", "outcome"), [("um", "no_command"), ("Yeah", "no_command"), ("", ANSWER_WINDOW_SILENT)])
+async def test_filler_or_nothing_in_an_unverified_hand_over_ends_silently(transcript, outcome):
+    brain = RecordingFakeBrain()
+    timings, tts, _host, _source = await _handover_turn(transcript, brain, monitor=_handover_monitor(_LAMP_SCOPE))
+
+    assert timings.turn_outcome == outcome
+    assert brain.call_count == 0
+    assert tts.received_text == []
+
+
+async def test_a_verified_hand_over_keeps_the_full_tool_set():
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_WEATHER]), BrainReply(text="Sunny.")])
+    timings, _tts, _host, _source = await _handover_turn(
+        "hey atlas what is the weather", brain, monitor=_handover_monitor(_LAMP_SCOPE)
+    )
+
+    assert timings.turn_outcome == "completed"
+    assert _tool_names(brain.calls[0]) == {entry["function"]["name"] for entry in _HA_SCHEMA}
+    assert brain.calls[0].messages[-1] == {"role": "user", "content": "what is the weather"}
+    assert {"role": "assistant", "content": "Done, the lamp is on."} not in brain.calls[0].messages
+
+
+async def test_a_verified_stop_after_a_wake_interrupt_still_ends_silently():
+    brain = RecordingFakeBrain()
+    timings, tts, _host, _source = await _handover_turn("hey atlas stop", brain, monitor=_handover_monitor(_LAMP_SCOPE))
+
+    assert timings.turn_outcome == "stopped"
+    assert brain.call_count == 0
+    assert tts.received_text == []
+
+
+@pytest.mark.parametrize(
+    "monitor_args",
+    [
+        {"scope": _LAMP_SCOPE, "after_interrupt": False},
+        {"scope": None, "after_interrupt": True},
+    ],
+    ids=["ordinary-wake-turn", "no-hand-over-request"],
+)
+async def test_any_other_unverified_wake_turn_is_still_dropped(monitor_args):
+    brain = RecordingFakeBrain()
+    timings, tts, host, _source = await _handover_turn(
+        "turn it off", brain, monitor=_handover_monitor(**monitor_args)
+    )
+
+    assert timings.turn_outcome == "wake_unverified"
+    assert brain.call_count == 0
+    assert tts.received_text == []
+    assert host.calls == []

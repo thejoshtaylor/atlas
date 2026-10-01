@@ -112,7 +112,7 @@ from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
-from atlas.turn.answer_window import WAKE_EVIDENCE_WINDOW_S
+from atlas.turn.answer_window import WAKE_EVIDENCE_WINDOW_S, interrupt_resume_request
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
@@ -313,6 +313,9 @@ class BargeInMonitor:
         # note replaces an earlier one.
         self.resume_transcript: str | None = None
         self.resume_scope: AnswerScope | None = None
+        # D-A: on the turn a wake interrupt started, the window request it runs
+        # under if its transcript fails verification.
+        self.unverified_request: FollowUpRequest | None = None
         self._on_interrupt = on_interrupt
         self._above_floor_since: float | None = None
         # Correlation is active only when both a trace to compare against
@@ -1256,6 +1259,8 @@ class SourceRunner:
             turn_source = PrerollReplayingSource(self._source, list(monitor.handover))
             next_monitor = self._new_barge_in_monitor()
             next_monitor.after_interrupt = True
+            if kind == "wake":
+                next_monitor.unverified_request = interrupt_resume_request(monitor)
             turn_source.barge_in = next_monitor
             channel = self._interrupt_channel(monitor, kind)
             if channel is not None:
@@ -1288,7 +1293,8 @@ class SourceRunner:
 
         A wake interrupt starts an ordinary wake turn: a fresh channel with
         nothing incoming, when follow-up windows are on, and that turn may
-        open a window itself.
+        open a window itself. If its transcript fails verification, it runs
+        with the VAD request below instead (`unverified_request`, D-A).
 
         A VAD interrupt has no wake word, so it runs as a no-wake-word answer
         turn with the interrupted turn's scope (RESEARCH Finding 4, D-16). The
@@ -1298,17 +1304,8 @@ class SourceRunner:
         """
         if kind != "vad":
             return FollowUpChannel() if self._follow_up_window_s is not None else None
-        utterances = monitor.playback.utterances
-        scope = monitor.resume_scope if monitor.resume_scope is not None else AnswerScope(tool_names=frozenset())
-        request = FollowUpRequest(
-            kind="answer",
-            chain_depth=1,
-            original_transcript=monitor.resume_transcript or "",
-            question=utterances[-1].text if utterances else "",
-            answer_scope=scope,
-        )
         return FollowUpChannel(
-            incoming=request,
+            incoming=interrupt_resume_request(monitor),
             window_opens_at=self._clock(),
             window_s=self._follow_up_window_s() if self._follow_up_window_s is not None else None,
         )

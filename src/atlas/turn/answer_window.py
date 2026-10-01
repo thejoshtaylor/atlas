@@ -16,6 +16,12 @@ runs a macro, a local on/off intent or a timer intent, because the continued
 exchange skips those paths. A window that hears nothing speaks nothing (D-15).
 After a question the model asked, "yeah" and "okay" are answers and reach the
 brain (261001-dlp). After an ordinary answer they still end the window.
+
+The turn that an interrupt starts uses the same rules when nothing proves the
+operator said the wake word (D-16 for a VAD interrupt; D-A for a wake
+interrupt whose transcript fails verification). It runs as a window turn with
+the interrupted turn's scope. A television cannot gain a tool by talking over
+a reply.
 """
 
 from __future__ import annotations
@@ -168,6 +174,38 @@ def build_answer_request(
         answer_only_from=answer_only_from,
         expects_reply=expects_reply,
     )
+
+
+def interrupt_resume_request(monitor: Any) -> FollowUpRequest:
+    """The window request for the turn that an interrupt of `monitor`'s turn
+    starts, when nothing proves the wake word (D-16, D-A).
+
+    The scope is what the interrupted turn dispatched, narrowed by its own
+    scope (`note_resume_context`). With no note it fails closed to no tool.
+    The exchange is that turn's command and the last utterance it spoke."""
+    utterances = monitor.playback.utterances
+    scope = monitor.resume_scope if monitor.resume_scope is not None else AnswerScope(tool_names=frozenset())
+    return FollowUpRequest(
+        kind="answer",
+        chain_depth=1,
+        original_transcript=monitor.resume_transcript or "",
+        question=utterances[-1].text if utterances else "",
+        answer_scope=scope,
+    )
+
+
+def unverified_handover_request(barge_in: Any) -> "FollowUpRequest | None":
+    """D-A: the window request a wake interrupt's turn runs under when its
+    transcript does not open with the wake phrase, or `None` for every other
+    turn. `None` keeps the ordinary `wake_unverified` drop.
+
+    Only the turn that a wake interrupt started carries one
+    (`SourceRunner._continue_after_interrupts`). A verified transcript never
+    reads it, so that turn keeps the full scope."""
+    if not getattr(barge_in, "after_interrupt", False):
+        return None
+    request = getattr(barge_in, "unverified_request", None)
+    return request if isinstance(request, FollowUpRequest) else None
 
 
 def answer_turn_scope(incoming: FollowUpRequest) -> AnswerScope:

@@ -149,6 +149,7 @@ from atlas.turn.answer_window import (
     is_quiet_stop,
     note_dispatched_call,
     silent_answer_outcome,
+    unverified_handover_request,
     wake_addressed_command,
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
@@ -1089,6 +1090,19 @@ async def run_turn(
             )
 
         guarded_tool_host = _restricted(tool_host)
+
+        # D-A: the turn a wake interrupt started, with no wake phrase in its
+        # transcript (the echo suppressor clipped it). It runs as an answer
+        # window with the interrupted turn's scope, never a wider one.
+        handover = unverified_handover_request(barge_in) if wake_unverified else None
+        if handover is not None:
+            incoming = handover
+            wake_unverified = False
+            tool_count = len(handover.answer_scope.tool_names) if handover.answer_scope is not None else 0
+            logger.info("turn %s: unverified interrupt hand-over runs with %d tool(s)", timings.turn_id, tool_count)
+            if session_recorder is not None:
+                # A count only, never the transcript or a tool name.
+                session_recorder.record_event({"type": "handover.unverified", "tool_count": tool_count})
 
         # 260929-icf: the transcript does not open with the wake phrase, so
         # the wake hit was a false fire. No brain call and no spoken reply.
