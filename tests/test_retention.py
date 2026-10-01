@@ -351,3 +351,84 @@ async def test_no_wake_event_repository_means_no_wake_event_sweep(tmp_path):
     finally:
         await scheduler.stop()
     assert scheduler.sweep_count >= 2
+
+
+# --- quick task 261001-mp8 (D-19): brain_turns expire on the same window ----
+
+
+class _RecordingBrainTurnRepo:
+    def __init__(self, rows: int = 3) -> None:
+        self.cutoffs: list = []
+        self._rows = rows
+
+    async def delete_brain_turns_before(self, cutoff) -> int:
+        self.cutoffs.append(cutoff)
+        removed, self._rows = self._rows, 0
+        return removed
+
+
+class _RaisingBrainTurnRepo:
+    async def delete_brain_turns_before(self, cutoff) -> int:
+        raise RuntimeError("the store is down")
+
+
+async def test_the_schedule_sweeps_brain_turns_on_the_same_window(tmp_path, caplog):
+    repo = _RecordingBrainTurnRepo()
+    scheduler = RetentionScheduler(
+        tmp_path,
+        retain_days=7,
+        interval_s=0.01,
+        clock=lambda: _NOW,
+        sleep=_instant_sleep,
+        brain_turn_repo=repo,
+    )
+
+    with caplog.at_level(logging.INFO, logger="atlas.session.retention"):
+        scheduler.start()
+        try:
+            await _wait_for(lambda: len(repo.cutoffs) >= 2)
+        finally:
+            await scheduler.stop()
+
+    assert repo.cutoffs[0] == _NOW - timedelta(days=7)
+    sweep_lines = [r for r in caplog.records if "brain-turn retention sweep ran" in r.getMessage()]
+    assert len(sweep_lines) >= 2
+    assert "removed=3" in sweep_lines[0].getMessage()
+    assert "removed=0" in sweep_lines[1].getMessage()
+
+
+async def test_a_brain_turn_sweep_that_raises_does_not_stop_the_other_sweeps(tmp_path, caplog):
+    expired = _make_session(tmp_path, _NOW - timedelta(days=30))
+    wake_repo = _RecordingWakeEventRepo()
+    scheduler = RetentionScheduler(
+        tmp_path,
+        retain_days=7,
+        interval_s=0.01,
+        clock=lambda: _NOW,
+        sleep=_instant_sleep,
+        wake_event_repo=wake_repo,
+        brain_turn_repo=_RaisingBrainTurnRepo(),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="atlas.session.retention"):
+        scheduler.start()
+        try:
+            await _wait_for(lambda: not expired.exists() and len(wake_repo.cutoffs) >= 2)
+        finally:
+            await scheduler.stop()
+
+    assert not expired.exists()
+    assert any("brain-turn retention sweep raised" in r.getMessage() for r in caplog.records)
+
+
+async def test_no_brain_turn_repository_means_no_brain_turn_sweep(tmp_path):
+    repo = _RecordingBrainTurnRepo()
+    scheduler = RetentionScheduler(
+        tmp_path, retain_days=7, interval_s=0.01, clock=lambda: _NOW, sleep=_instant_sleep
+    )
+    scheduler.start()
+    try:
+        await _wait_for(lambda: scheduler.sweep_count >= 2)
+    finally:
+        await scheduler.stop()
+    assert repo.cutoffs == []

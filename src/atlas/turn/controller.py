@@ -109,6 +109,7 @@ from atlas.speaker_id.turn_gate import SpeakerIdTurnContext, compose_speaker_hin
 from atlas.timers.ring_stop import RingControl, is_stop_command
 from atlas.timing import TurnTimings
 from atlas.turn import brain_race
+from atlas.turn.brain_turn_log import BrainTurnLog, TurnBrainRecord
 from atlas.turn.early_finalize import wait_for_end_of_speech
 from atlas.turn.follow_up import (
     HA_CALL_SERVICE_TOOL,
@@ -518,8 +519,14 @@ async def run_turn(
     timer_ring: "RingControl | None" = None,
     timer_intents: "Callable[[str], Awaitable[str | None]] | None" = None,
     answer_windows: bool = False,
+    brain_turn_log: "BrainTurnLog | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
+
+    `brain_turn_log` (quick task 261001-mp8) records a turn that reaches the
+    tier race, after it ends and without waiting on the store. Macro, timer,
+    local-intent and early-exit turns are not recorded. `None`, which every
+    existing caller passes, records nothing.
 
     `answer_windows` (Phase 13, D-09) is True only for the edge source. After
     an ordinary brain answer, the turn then leaves a `"answer"` follow-up
@@ -867,6 +874,8 @@ async def run_turn(
     # exception leaves it so, hence the two flags (RESEARCH Pitfall 9).
     ended_failed = False
     ended_cancelled = False
+    brain_record: "TurnBrainRecord | None" = None
+    raw_transcript = ""
     try:
         turn_deadline = clock() + max_utterance_s
         # Plan 09-06: a follow-up turn's own onset deadline -- how long
@@ -961,6 +970,7 @@ async def run_turn(
             # An answer window: the speaker checks and `wake_addressed_command`
             # below must see the composed text.
             final_text = heard_text
+        raw_transcript = heard_text
         wake_unverified = False
         if incoming is None and wake_phrase:
             command = strip_wake_phrase(heard_text, wake_phrase)
@@ -1013,6 +1023,7 @@ async def run_turn(
                 on_text=wake_confirm.observe if wake_confirm is not None else None,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
+            raw_transcript = f"{heard_text} {final_text}".strip()
             # D-04: the command's own segment can end at a change point too.
             # The slice starts at the turn's first frame, so it holds the wake phrase.
             trimmed_text = await trim_at_split(
@@ -1020,6 +1031,7 @@ async def run_turn(
             )
             if trimmed_text is not None:
                 final_text = strip_wake_phrase(trimmed_text, wake_phrase) or trimmed_text
+                raw_transcript = trimmed_text
 
         timings.mark_stt_final()
         # 260924-4iv (item a): one absolute deadline, in `_time.monotonic()`'s
@@ -1873,13 +1885,20 @@ async def run_turn(
             else tools_schema
         )
 
+        if brain_turn_log is not None:
+            brain_record = TurnBrainRecord.start(
+                turn_id=timings.turn_id,
+                transcript=raw_transcript or final_text,
+                command_text=final_text,
+                continuation=prior_exchange is not None,
+            )
         tier_tasks: dict[int, asyncio.Task[TierReply]] = {}
         for tier in tiers:
             tier_messages = list(messages)
             if tier.calls_tools:
                 coro = brain_race.run_top_tier(
                     tier,
-                    guarded_tool_host,
+                    brain_record.wrap(guarded_tool_host) if brain_record is not None else guarded_tool_host,
                     turn_tools_schema,
                     tier_messages,
                     max_tool_rounds,
@@ -1951,6 +1970,8 @@ async def run_turn(
                     task.cancel()
             await asyncio.gather(*tier_tasks.values(), return_exceptions=True)
             timings.turn_outcome = "brain_timeout"
+            if brain_record is not None:
+                brain_record.note_reply(_CANNOT_DO_REPLY)
             timeout_tts = _tts_for_precached_fallback(filler_cache, sink, _CANNOT_DO_REPLY, tts)
             await _speak(
                 source,
@@ -1966,6 +1987,8 @@ async def run_turn(
             timings.log()
             return
         timings.mark_tool_rounds_done()
+        if brain_record is not None:
+            brain_record.note_winner(winner, tier_tasks, tiers)
         # D-16: what this turn dispatched, and no more than its own scope. A
         # VAD interrupt of its reply may reach only these tools.
         dispatched = dispatched_scope(handoff_slot)
@@ -1990,6 +2013,8 @@ async def run_turn(
                 chain_depth=chain_depth,
             )
             timings.turn_outcome = outcome.turn_outcome
+            if brain_record is not None:
+                brain_record.note_reply(outcome.reply_text)
             speech_result = await _speak(
                 source,
                 tts,
@@ -2073,6 +2098,8 @@ async def run_turn(
             timings.turn_outcome = "needs_clarification"
             question = _compose_clarifying_question(winner.candidates, friendly_names)
             clarification_chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
+            if brain_record is not None:
+                brain_record.note_reply(question)
             clarification_speech = await _speak(
                 source,
                 tts,
@@ -2176,6 +2203,8 @@ async def run_turn(
             else:
                 reply_text = answer_text
                 speaking_tts = tts
+        if brain_record is not None:
+            brain_record.note_reply(reply_text)
         speech_result = await _speak(
             source,
             speaking_tts,
@@ -2247,6 +2276,18 @@ async def run_turn(
             close_span()
         if reply_route_token is not None:
             current_reply_route.reset(reply_route_token)
+        # Quick task 261001-mp8: the brain-turn record, on every exit of a turn
+        # that reached the tier race. Not awaited, and a failure cannot reach the turn.
+        if brain_record is not None and brain_turn_log is not None:
+            with contextlib.suppress(Exception):
+                brain_turn_log.submit(
+                    brain_record.finish(
+                        outcome=timings.turn_outcome,
+                        failed=ended_failed,
+                        cancelled=ended_cancelled,
+                        tool_rounds_done_at=timings.tool_rounds_done_at,
+                    )
+                )
         # Phase 15 (plan 15-04): the one `turn.ended`, on every exit, after every
         # other event of the turn and before the recorder closes, so the session
         # record holds it. A display event never changes how the turn ends.

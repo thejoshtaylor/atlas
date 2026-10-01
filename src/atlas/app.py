@@ -86,6 +86,7 @@ from atlas.db.repository import (
     WorkflowRepository,
 )
 from atlas.db.speaker_postgres import PostgresSpeakerRepository
+from atlas.db.brain_turn_postgres import PostgresBrainTurnRepository
 from atlas.db.timer_postgres import PostgresTimerRepository
 from atlas.speaker_id.embedding import SherpaEmbedder
 from atlas.speaker_id.enrollment import ClipStore
@@ -144,6 +145,7 @@ from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
 from atlas.turn.answer_window import ANSWER_WINDOW_SILENT
+from atlas.turn.brain_turn_log import BrainTurnLog
 from atlas.turn.controller import _speak, run_turn
 from atlas.wake.base import WakeDetector, WakeError
 from atlas.wake.vosk_engine import VoskWakeDetector
@@ -770,6 +772,9 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # Quick task 260930-06x: timers and alarms -- read with `.get(...)`
         # at the call site, the same tolerant lookup `speaker_repo` uses.
         "timer_repo": PostgresTimerRepository(sessionmaker),
+        # Quick task 261001-mp8: the brain-turn intent log -- read with
+        # `.get(...)` at the call site, the same tolerant lookup as above.
+        "brain_turn_repo": PostgresBrainTurnRepository(sessionmaker),
     }
 
 
@@ -1128,6 +1133,7 @@ def _make_run_turn_for_source(
             wake_cue=config.wake.cue,
             verify_wake=verify_wake,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
+            brain_turn_log=getattr(app.state, "brain_turn_log", None),
             # 260922-lim: only the camera's wake-word turn skips the tier
             # race for a plain on/off command -- the browser and WebRTC
             # routes below pass nothing, which is `run_turn`'s own
@@ -1352,6 +1358,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Quick task 260930-06x: same tolerant `.get(...)` for timers.
     timer_repo = repositories.get("timer_repo")
     app.state.timer_repo = timer_repo
+    # Quick task 261001-mp8: records each brain turn, off the hot path.
+    brain_turn_repo = repositories.get("brain_turn_repo")
+    app.state.brain_turn_log = BrainTurnLog(brain_turn_repo) if brain_turn_repo is not None else None
     # Plan 11-03 (D-01, D-03): same tolerant `.get(...)` -- a deployment
     # (or a test's own fake repository dict) with no speaker repository at
     # all boots exactly as it did before this plan.
@@ -2152,6 +2161,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # with no owner and no bound. Same sweep, same window -- D-12's
         # "exactly one owner" for deletion, extended to cover it.
         wake_event_repo=wake_event_repo,
+        # Quick task 261001-mp8 (D-19): brain turns hold transcripts, so they
+        # expire on the same window.
+        brain_turn_repo=brain_turn_repo,
     )
     retention_scheduler.start()
     app.state.retention_scheduler = retention_scheduler
@@ -2342,6 +2354,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # `engine.dispose()` below.
     for runner in getattr(app.state, "source_runners", []):
         await runner.drain_pending_wake_events()
+    # Quick task 261001-mp8: same reason, for the brain-turn writes.
+    if getattr(app.state, "brain_turn_log", None) is not None:
+        await app.state.brain_turn_log.drain()
     await camera_source.close()
     # Phase 10: closed only when the edge source was actually built
     # (`resolved_audio_source == EDGE_SOURCE_NAME`) -- `app.state.
@@ -2742,6 +2757,7 @@ async def webrtc_offer(offer: WebrtcOfferPayload) -> WebrtcAnswerPayload:
             workflow_tool_host=app.state.workflow_tool_host,
             tool_owners=app.state.plugin_manager.owners_of_bare_name,
             brain_turn_timeout_s=config.brain.turn_timeout_s,
+            brain_turn_log=getattr(app.state, "brain_turn_log", None),
             state_timeout_ms=config.brain.state_timeout_ms,
             state_domains=config.brain.state_domains,
         )
@@ -2878,6 +2894,7 @@ async def turn_ws(websocket: WebSocket) -> None:
         workflow_tool_host=websocket.app.state.workflow_tool_host,
         tool_owners=websocket.app.state.plugin_manager.owners_of_bare_name,
         brain_turn_timeout_s=config.brain.turn_timeout_s,
+        brain_turn_log=getattr(websocket.app.state, "brain_turn_log", None),
         state_timeout_ms=config.brain.state_timeout_ms,
         state_domains=config.brain.state_domains,
         # Plan 09-04 (Task 3): built fresh for this turn.

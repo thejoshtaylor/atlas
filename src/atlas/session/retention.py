@@ -224,6 +224,7 @@ class RetentionScheduler:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         wake_event_repo: Any | None = None,
+        brain_turn_repo: Any | None = None,
     ) -> None:
         self._root = root
         self._retain_days = retain_days
@@ -231,6 +232,7 @@ class RetentionScheduler:
         self._clock = clock
         self._sleep = sleep
         self._wake_event_repo = wake_event_repo
+        self._brain_turn_repo = brain_turn_repo
         self._stopping = False
         self._task: asyncio.Task[None] | None = None
         # Exposed for tests to prove the loop ran more than once by
@@ -271,6 +273,19 @@ class RetentionScheduler:
             cutoff.isoformat(),
         )
 
+    async def _sweep_brain_turns(self) -> None:
+        """Delete every `brain_turns` row older than `retain_days`. The log
+        line names a count and a cutoff, never a transcript."""
+        if self._brain_turn_repo is None:
+            return
+        cutoff = self._clock() - timedelta(days=self._retain_days)
+        removed = await self._brain_turn_repo.delete_brain_turns_before(cutoff)
+        logger.info(
+            "brain-turn retention sweep ran: removed=%d cutoff=%s",
+            removed,
+            cutoff.isoformat(),
+        )
+
     async def _run(self) -> None:
         while not self._stopping:
             self.sweep_count += 1
@@ -291,6 +306,12 @@ class RetentionScheduler:
                 # that is down must not stop the directory sweep from
                 # running, which is the one that bounds actual audio.
                 logger.exception("wake-event retention sweep raised; the schedule continues")
+            try:
+                await self._sweep_brain_turns()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("brain-turn retention sweep raised; the schedule continues")
             if self._stopping:
                 return
             await self._sleep(self._interval_s)

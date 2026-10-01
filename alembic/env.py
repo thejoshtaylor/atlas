@@ -33,6 +33,9 @@ from atlas.db import speaker_models  # noqa: F401
 # Quick task 260930-06x: makes `timers` visible.
 from atlas.db import timer_models  # noqa: F401
 
+# Quick task 261001-mp8: makes `brain_turns` visible.
+from atlas.db import brain_turn_models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
