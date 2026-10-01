@@ -255,7 +255,7 @@ class RingStopWindow:
             text = listen.result()
             if text and is_stop_command(text, ring_text=ring_text):
                 ring.stop_ringing()
-                logger.info("ring stopped by a spoken stop word")
+                logger.warning("ring stopped by a spoken stop word")
                 return
             logger.debug("ring-stop window heard speech that is not a stop word")
             quick_listens = quick_listens + 1 if self._clock() - started < _QUICK_LISTEN_S else 0

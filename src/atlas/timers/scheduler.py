@@ -99,7 +99,7 @@ class TimerScheduler:
             return False
         assert self._ring_task is not None
         self._ring_task.cancel()
-        logger.info("ring stopped on request")
+        logger.warning("ring stopped on request")
         return True
 
     async def wait_ring_over(self) -> None:
@@ -137,6 +137,8 @@ class TimerScheduler:
                     "timer %s was %.0f s late; cleared without ringing", timer.id, late_s
                 )
                 continue
+            # Warning level, because the deployment shows no info logs.
+            logger.warning("%s %s is ringing", timer.kind, timer.id)
             await self._ring(timer, announcement(timer))
 
     async def _ring_loop(self, text: str, started: float) -> None:
@@ -168,7 +170,7 @@ class TimerScheduler:
         if error is not None:
             logger.exception("ringing timer %s failed", timer.id, exc_info=error)
         else:
-            logger.info("timer %s went quiet after max_ring_s=%.0f", timer.id, self._max_ring_s)
+            logger.warning("timer %s went quiet after max_ring_s=%.0f", timer.id, self._max_ring_s)
 
     async def _run(self) -> None:
         while not self._stopping:
