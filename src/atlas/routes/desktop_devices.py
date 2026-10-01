@@ -22,6 +22,7 @@ from atlas.db.desktop_repository import (
     DesktopDeviceRepository,
 )
 from atlas.desktop.hub import DesktopHub, DesktopNotConnected
+from atlas.desktop.protocol import CLOSE_REVOKED
 
 router = APIRouter(tags=["desktop-devices"])
 
@@ -141,3 +142,21 @@ async def run_desktop_device_test(
     if rtt_ms is None:
         return DesktopTestResponse(answered=False, rtt_ms=None)
     return DesktopTestResponse(answered=True, rtt_ms=int(round(rtt_ms)))
+
+
+@router.delete("/api/desktop-devices/{device_id}", status_code=204)
+async def revoke_desktop_device(
+    device_id: int, request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> Response:
+    """Revoke a Mac (D-01, D-21). The row stays, with `revoked_at` set, so the
+    list still shows it. A revoke of an already revoked Mac is a 204 no-op.
+    The live socket is always closed with 4001, even when this call revoked
+    nothing: the close is idempotent, so a socket that slipped through a
+    race is closed too."""
+    repo: DesktopDeviceRepository = request.app.state.desktop_device_repo
+    hub: DesktopHub = request.app.state.desktop_hub
+    if await repo.get_device(device_id) is None:
+        raise HTTPException(status_code=404, detail="no such Mac")
+    await repo.revoke_device(device_id, revoked_at=datetime.now(timezone.utc))
+    await hub.disconnect_device(device_id, code=CLOSE_REVOKED, reason="revoked")
+    return Response(status_code=204)

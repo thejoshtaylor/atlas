@@ -10,8 +10,11 @@ tests stays under 8 characters (for example `"t-1"`), because
 
 from __future__ import annotations
 
+import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 from atlas.db.desktop_repository import (
     DesktopDevice,
@@ -122,3 +125,45 @@ def fake_desktop_device(**overrides) -> DesktopDevice:
     )
     fields.update(overrides)
     return DesktopDevice(**fields)
+
+
+class FakeDesktopSocket:
+    """A scripted double for the socket `DesktopHub.serve` drives, cut down
+    from `FakeEdgeSocket`: `receive()` returns what the test pushed, in
+    order; `send_text` and `close` are recorded. Built with
+    `close_raises=True`, `close()` still records the code and then raises,
+    like a Starlette socket whose peer is already gone (CR-01, CR-02)."""
+
+    def __init__(self, *, close_raises: bool = False) -> None:
+        self._inbound: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
+        self.sent: list[str] = []
+        self.close_code: "int | None" = None
+        self.close_reason: "str | None" = None
+        self._close_raises = close_raises
+
+    def push_text(self, text: str) -> None:
+        self._inbound.put_nowait({"type": "websocket.receive", "text": text})
+
+    def push_bytes(self, data: bytes) -> None:
+        self._inbound.put_nowait({"type": "websocket.receive", "bytes": data})
+
+    def push_disconnect(self, code: int = 1000) -> None:
+        self._inbound.put_nowait({"type": "websocket.disconnect", "code": code})
+
+    async def receive(self) -> "dict[str, Any]":
+        return await self._inbound.get()
+
+    async def send_text(self, data: str) -> None:
+        self.sent.append(data)
+
+    async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
+        self.close_code = code
+        self.close_reason = reason
+        if self._close_raises:
+            raise RuntimeError("socket already closed")
+
+    def sent_json(self) -> "list[dict[str, Any]]":
+        return [json.loads(frame) for frame in self.sent]
+
+    def sent_types(self) -> "list[str]":
+        return [frame["type"] for frame in self.sent_json()]

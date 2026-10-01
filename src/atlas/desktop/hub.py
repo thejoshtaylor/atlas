@@ -20,7 +20,12 @@ from atlas.desktop.protocol import (
     CLOSE_GOING_AWAY,
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_MISMATCH,
+    CLOSE_REVOKED,
+    CLOSE_SUPERSEDED,
     HELLO_TIMEOUT_S,
+    IDLE_TIMEOUT_S,
+    MAX_INVALID_MESSAGES,
+    MAX_TEXT_FRAME_BYTES,
     PROTOCOL_VERSION,
     TEST_TIMEOUT_S,
     DesktopHello,
@@ -38,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 class DesktopNotConnected(Exception):
-    """No live socket for this Mac, or it dropped while a ping was pending."""
+    """No live socket for this Mac when a ping was asked for."""
 
 
 class DesktopConnection:
@@ -51,23 +56,30 @@ class DesktopConnection:
         self.device_id = device_id
         self.hello = hello
         self.connected_at = connected_at
-        self._pending_pings: dict[int, asyncio.Future[None]] = {}
+        self._pending_pings: dict[int, asyncio.Future[bool]] = {}
         self._next_ping_id = 1
+        # Set by the hub just before it cancels this connection's task
+        # (supersede or revoke), so `serve` can end quietly for that cause
+        # alone and still let any other cancellation, such as a server
+        # shutdown, propagate.
+        self.ended_by_hub = False
 
     async def ping(self, timeout_s: float, clock: Callable[[], float]) -> float | None:
         """Send a ping and wait for the Mac's pong with the same id. Returns
-        the round trip in milliseconds, or `None` on timeout."""
+        the round trip in milliseconds, or `None` on timeout or disconnect."""
         ping_id = self._next_ping_id
         self._next_ping_id += 1
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._pending_pings[ping_id] = future
         try:
             started = clock()
             await self.websocket.send_text(build_ping(ping_id))
             try:
-                await asyncio.wait_for(future, timeout_s)
+                answered = await asyncio.wait_for(future, timeout_s)
             except asyncio.TimeoutError:
                 return None
+            if not answered:
+                return None  # the socket ended while the ping waited
             return (clock() - started) * 1000.0
         finally:
             self._pending_pings.pop(ping_id, None)
@@ -76,14 +88,15 @@ class DesktopConnection:
         future = self._pending_pings.get(ping_id)
         if future is None or future.done():
             return False
-        future.set_result(None)
+        future.set_result(True)
         return True
 
     def fail_pending(self) -> None:
-        """The socket ended: every waiting ping learns the Mac is gone."""
+        """The socket ended: every waiting ping returns None at once, not
+        after its full timeout."""
         for future in list(self._pending_pings.values()):
             if not future.done():
-                future.set_exception(DesktopNotConnected("the Mac disconnected"))
+                future.set_result(False)
 
 
 class DesktopHub:
@@ -94,12 +107,15 @@ class DesktopHub:
         clock: Callable[[], float] = time.monotonic,
         hello_timeout_s: float = HELLO_TIMEOUT_S,
         ping_timeout_s: float = TEST_TIMEOUT_S,
+        idle_timeout_s: float = IDLE_TIMEOUT_S,
     ) -> None:
         self._device_repo = device_repo
         self._clock = clock
         self.hello_timeout_s = hello_timeout_s
         self.ping_timeout_s = ping_timeout_s
+        self.idle_timeout_s = idle_timeout_s
         self._connections: dict[int, DesktopConnection] = {}
+        self._tasks: dict[int, asyncio.Task[Any]] = {}
 
     async def serve(self, websocket: Any, device: DesktopDevice) -> None:
         """Run one Mac connection to its end. The caller has accepted."""
@@ -130,38 +146,114 @@ class DesktopHub:
             await self._close(websocket, CLOSE_PROTOCOL_MISMATCH, "protocol_mismatch")
             return
 
+        # A revoke can land between the handshake check and this hello. Look
+        # the row up again so a revoked Mac is never registered (PAIR-03).
+        if self._device_repo is not None:
+            try:
+                current = await self._device_repo.get_device(device.id)
+            except Exception:
+                logger.exception("desktop %s: revoke re-check failed", device.id)
+                current = None
+            if current is not None and current.revoked_at is not None:
+                await self._close(websocket, CLOSE_REVOKED, "revoked")
+                return
+
+        await self._supersede(device.id)
         connection = DesktopConnection(websocket, device.id, hello, datetime.now(timezone.utc))
         self._connections[device.id] = connection
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks[device.id] = task
         try:
             await websocket.send_text(build_hello_ack(device.id))
             await self._mark_seen(device.id)
             logger.info("desktop %s connected, app %s", device.id, hello.app_version)
             await self._receive_loop(websocket, connection)
+        except asyncio.CancelledError:
+            if not connection.ended_by_hub:
+                raise
+            # The hub cancelled this task on purpose, after it closed the
+            # socket. End the call normally: a cancellation that escaped
+            # into the ASGI app would be logged as an application error.
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
         finally:
+            # A superseded call's cleanup must never clear the connection
+            # that replaced it, so only the registered owner removes entries.
             if self._connections.get(device.id) is connection:
                 del self._connections[device.id]
+                self._tasks.pop(device.id, None)
             connection.fail_pending()
             await self._mark_seen(device.id)
             logger.info("desktop %s disconnected", device.id)
 
+    async def _supersede(self, device_id: int) -> None:
+        """Close the older socket for this Mac, if any, and cancel its task.
+        A dead old socket must never block the new connection (CR-02)."""
+        previous = self._connections.get(device_id)
+        if previous is None:
+            return
+        try:
+            await previous.websocket.close(code=CLOSE_SUPERSEDED, reason="superseded")
+        except Exception:
+            logger.info("desktop %s: previous connection already gone", device_id)
+        previous_task = self._tasks.get(device_id)
+        previous.ended_by_hub = True
+        if previous_task is not None:
+            previous_task.cancel()
+
+    async def disconnect_device(self, device_id: int, *, code: int, reason: str) -> None:
+        """Close the live socket for `device_id` at once (revoke, D-01). A
+        no-op when the Mac is not connected. The task is cancelled even when
+        the close fails, because a dead socket must not keep a revoked Mac
+        registered (CR-01)."""
+        connection = self._connections.get(device_id)
+        if connection is None:
+            return
+        task = self._tasks.get(device_id)
+        try:
+            await connection.websocket.close(code=code, reason=reason)
+        except Exception:
+            logger.warning("desktop %s: close on disconnect failed (already gone)", device_id)
+        connection.ended_by_hub = True
+        if task is not None:
+            task.cancel()
+
     async def _receive_loop(self, websocket: Any, connection: DesktopConnection) -> None:
+        invalid_count = 0
         while True:
-            message = await websocket.receive()
+            try:
+                message = await asyncio.wait_for(websocket.receive(), self.idle_timeout_s)
+            except asyncio.TimeoutError:
+                await self._close(websocket, CLOSE_POLICY_VIOLATION, "idle")
+                return
             if message.get("type") == "websocket.disconnect":
                 return
+            invalid = False
             text = message.get("text")
-            if text is None:
-                continue
-            try:
-                parsed = parse_client_message(text)
-            except DesktopProtocolError:
-                continue
-            if isinstance(parsed, DesktopPing):
-                await websocket.send_text(build_pong(parsed.id))
-            elif isinstance(parsed, DesktopPong):
-                connection.resolve_pong(parsed.id)
-            # Any other type, including one this server has never heard of,
-            # is ignored so an older server keeps working with a newer app.
+            if text is None or len(text.encode("utf-8")) > MAX_TEXT_FRAME_BYTES:
+                invalid = True  # a binary frame, or a text frame over the cap
+            else:
+                try:
+                    parsed = parse_client_message(text)
+                except DesktopProtocolError:
+                    invalid = True
+                else:
+                    if isinstance(parsed, DesktopPing):
+                        await websocket.send_text(build_pong(parsed.id))
+                    elif isinstance(parsed, DesktopPong):
+                        # The edge T-10-25 rule: a pong nobody waits for is
+                        # counted like any other bad frame.
+                        invalid = not connection.resolve_pong(parsed.id)
+                    # Any other type, including one this server has never
+                    # heard of, is ignored so an older server keeps working
+                    # with a newer app.
+            if invalid:
+                invalid_count += 1
+                if invalid_count >= MAX_INVALID_MESSAGES:
+                    await self._close(websocket, CLOSE_POLICY_VIOLATION, "too_many_invalid")
+                    return
 
     async def _mark_seen(self, device_id: int) -> None:
         if self._device_repo is None:
