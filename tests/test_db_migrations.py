@@ -1151,7 +1151,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # The real migration runner `lifespan` calls -- not a fake, not a
         # second reimplementation of it (the plan's own key link).
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0020"
+        assert get_current_revision(migration_url) == "0021"
 
         async def _assert_pre_upgrade_rows_intact() -> list[tuple[str, str]]:
             reread_rules = {r.id: r for r in await policy_repo.list_rules()}
@@ -1182,7 +1182,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         # A second run at head: no-op. The stamped revision is unchanged
         # and nothing is added, removed, or rewritten -- old data or new.
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0020"
+        assert get_current_revision(migration_url) == "0021"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
 
         # A downgrade of this phase's own migration, and a re-upgrade,
@@ -1195,7 +1195,7 @@ async def test_upgrade_over_real_data_keeps_every_row_and_the_credential_still_d
         assert get_current_revision(migration_url) == "0010"
 
         run_migrations(migration_url)
-        assert get_current_revision(migration_url) == "0020"
+        assert get_current_revision(migration_url) == "0021"
         assert await _assert_pre_upgrade_rows_intact() == provider_rows
     finally:
         await engine.dispose()
@@ -1385,7 +1385,7 @@ async def test_migration_0017_creates_edge_devices_and_downgrades(monkeypatch):
     _run_upgrade_head()
 
     migration_url = _migration_url(_TEST_DB_URL)
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
     def _inspect(sync_conn):
         inspector = inspect(sync_conn)
@@ -1428,7 +1428,7 @@ async def test_migration_0017_creates_edge_devices_and_downgrades(monkeypatch):
     # Idempotent: re-upgrading to head must not error and must recreate
     # the table.
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
 
 async def test_migration_0018_creates_speakers_and_downgrades(monkeypatch):
@@ -1463,7 +1463,7 @@ async def test_migration_0018_creates_speakers_and_downgrades(monkeypatch):
     _run_upgrade_head()
 
     migration_url = _migration_url(_TEST_DB_URL)
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
     def _inspect(sync_conn):
         inspector = inspect(sync_conn)
@@ -1509,7 +1509,7 @@ async def test_migration_0018_creates_speakers_and_downgrades(monkeypatch):
     # Idempotent: re-upgrading to head must not error and must recreate
     # both tables.
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
 
 @skip_without_postgres
@@ -1556,7 +1556,7 @@ async def test_migration_0019_adds_can_control_home_and_downgrades(monkeypatch):
         await engine.dispose()
 
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
     def _columns(sync_conn):
         return {column["name"]: column for column in inspect(sync_conn).get_columns("speakers")}
@@ -1582,7 +1582,7 @@ async def test_migration_0019_adds_can_control_home_and_downgrades(monkeypatch):
     assert "can_control_home" not in columns_after_downgrade
 
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
 
 @skip_without_postgres
@@ -1614,7 +1614,7 @@ async def test_migration_0020_creates_timers_and_downgrades(monkeypatch):
     cfg = AlembicConfig("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", migration_url)
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
 
     engine = create_async_engine(_TEST_DB_URL)
     try:
@@ -1642,4 +1642,66 @@ async def test_migration_0020_creates_timers_and_downgrades(monkeypatch):
     assert "timers" not in names_after
 
     _run_upgrade_head()
-    assert get_current_revision(migration_url) == "0020"
+    assert get_current_revision(migration_url) == "0021"
+
+
+@skip_without_postgres
+async def test_migration_0021_creates_desktop_devices_and_downgrades(monkeypatch):
+    """Migration 0021 (Phase 14, plan 14-04): `desktop_devices` exists at
+    head with its two partial unique indexes, and a downgrade drops the
+    table and both indexes."""
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+    from sqlalchemy import inspect
+
+    from atlas.db.engine import get_current_revision
+
+    await _reset_schema(_TEST_DB_URL)
+    monkeypatch.setenv("ATLAS_CONFIG", "config/config.example.yaml")
+    monkeypatch.setenv("XAI_API_KEY", "test-value")
+    monkeypatch.setenv("TAPO_USER", "test-value")
+    monkeypatch.setenv("TAPO_PASSWORD", "test-value")
+    monkeypatch.setenv("SPEAKER_ENSURE_URL", "test-value")
+    monkeypatch.setenv("CAMERA_RTSP_URL", "rtsp://test.invalid:554/stream1")
+    monkeypatch.setenv("SPEAKER_BACKEND", "go2rtc")
+    monkeypatch.setenv("CALIBRATION_ROUTE_ENABLED", "false")
+    monkeypatch.setenv("BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    monkeypatch.setenv("ATLAS_SECRET_KEY", "test-secret-key-not-a-real-generated-value")
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+
+    migration_url = _migration_url(_TEST_DB_URL)
+    cfg = AlembicConfig("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", migration_url)
+    _run_upgrade_head()
+    assert get_current_revision(migration_url) == "0021"
+
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            names = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
+            indexes = await conn.run_sync(
+                lambda c: {i["name"]: i for i in inspect(c).get_indexes("desktop_devices")}
+            )
+        assert "desktop_devices" in names
+        assert "uq_desktop_devices_single_default" in indexes
+        assert "uq_desktop_devices_active_name" in indexes
+        assert indexes["uq_desktop_devices_single_default"]["unique"]
+        assert indexes["uq_desktop_devices_active_name"]["unique"]
+    finally:
+        await engine.dispose()
+
+    # A variable, not a literal, for the same reason the tests above use one.
+    previous_head = "0020"
+    command.downgrade(cfg, previous_head)
+    assert get_current_revision(migration_url) == previous_head
+    engine = create_async_engine(_TEST_DB_URL)
+    try:
+        async with engine.connect() as conn:
+            names_after = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
+    finally:
+        await engine.dispose()
+    assert "desktop_devices" not in names_after
+
+    _run_upgrade_head()
+    assert get_current_revision(migration_url) == "0021"
