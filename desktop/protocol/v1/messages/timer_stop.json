@@ -1,0 +1,8 @@
+{
+  "direction": "client_to_server",
+  "description": "The person pressed Stop on the ring view.",
+  "message": {
+    "type": "timer.stop",
+    "timer_id": 12
+  }
+}

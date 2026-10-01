@@ -1,0 +1,8 @@
+{
+  "id_max": 64,
+  "word_max": 32,
+  "transcript_text_max": 1000,
+  "card_text_max": 600,
+  "label_max": 120,
+  "ms_max": 600000
+}

@@ -1,0 +1,14 @@
+{
+  "direction": "server_to_client",
+  "description": "A text card. Its text is the reply text, sanitized and capped by the server.",
+  "message": {
+    "type": "card",
+    "turn_id": "5f1c2a9e7b3d4c60a8e2f7b1c9d04e3a",
+    "card_id": "5f1c2a9e7b3d4c60a8e2f7b1c9d04e3a-text",
+    "kind": "text",
+    "fallback_text": "It is 21 degrees and sunny.",
+    "data": {
+      "text": "It is 21 degrees and sunny."
+    }
+  }
+}

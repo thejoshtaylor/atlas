@@ -1,0 +1,10 @@
+{
+  "direction": "server_to_client",
+  "description": "A timer is ringing. The Mac shows the ring view until timer.stopped.",
+  "message": {
+    "type": "timer.ringing",
+    "timer_id": 12,
+    "kind": "timer",
+    "label": "pasta"
+  }
+}

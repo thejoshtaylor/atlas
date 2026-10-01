@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from atlas.desktop import protocol
+from atlas.desktop import cards, display_text, protocol
 
 PROTOCOL_DIR = Path(__file__).resolve().parents[1] / "desktop" / "protocol" / "v1"
 
@@ -42,6 +42,7 @@ _CLIENT_MODELS = {
     "hello": protocol.DesktopHello,
     "ping": protocol.DesktopPing,
     "pong": protocol.DesktopPong,
+    "timer.stop": protocol.DesktopTimerStop,
 }
 
 # What each server frame's builder takes, read off the fixture's own fields.
@@ -51,7 +52,27 @@ _SERVER_BUILDERS = {
     "pong": lambda m: protocol.build_pong(m["id"]),
     "error": lambda m: protocol.build_error(m["code"], m["detail"]),
     "wake.confirmed": lambda m: protocol.build_wake_confirmed(m["turn_id"]),
+    "state": lambda m: protocol.build_turn_state(m["turn_id"], m["state"]),
+    "transcript.partial": lambda m: protocol.build_transcript_partial(m["turn_id"], m["text"]),
+    "transcript.final": lambda m: protocol.build_transcript_final(m["turn_id"], m["text"]),
+    "card": lambda m: _build_card(m),
+    "turn.ended": lambda m: protocol.build_turn_ended(
+        m["turn_id"], m["outcome"], m["follow_up_window_ms"], m["playback_ms_left"]
+    ),
+    "timer.ringing": lambda m: protocol.build_timer_ringing(m["timer_id"], m["kind"], m["label"]),
+    "timer.stopped": lambda m: protocol.build_timer_stopped(m["timer_id"]),
 }
+
+
+def _build_card(m: dict) -> str:
+    if m["kind"] == "text":
+        built = cards.build_text_card(m["turn_id"], m["card_id"], m["data"]["text"])
+        assert built is not None
+        return built
+    data = m["data"]
+    return cards.build_timer_card(
+        m["turn_id"], m["card_id"], data["timer_id"], data["timer_kind"], data["label"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -154,4 +175,16 @@ def test_refusal_fixture_equals_the_python_constants():
         "status": protocol.REFUSAL_STATUS,
         "header": protocol.REFUSAL_HEADER,
         "token_value": protocol.REFUSAL_TOKEN,
+    }
+
+
+def test_panel_limits_fixture_equals_the_python_constants():
+    fixture = json.loads((PROTOCOL_DIR / "panel_limits.json").read_text())
+    assert fixture == {
+        "id_max": display_text.ID_MAX,
+        "word_max": display_text.WORD_MAX,
+        "transcript_text_max": display_text.TRANSCRIPT_TEXT_MAX,
+        "card_text_max": display_text.CARD_TEXT_MAX,
+        "label_max": display_text.LABEL_MAX,
+        "ms_max": display_text.MS_MAX,
     }

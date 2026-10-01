@@ -1,0 +1,9 @@
+{
+  "direction": "server_to_client",
+  "description": "text is a number",
+  "message": {
+    "type": "transcript.partial",
+    "turn_id": "5f1c2a9e7b3d4c60a8e2f7b1c9d04e3a",
+    "text": 42
+  }
+}

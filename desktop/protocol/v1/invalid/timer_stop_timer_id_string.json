@@ -1,0 +1,8 @@
+{
+  "direction": "client_to_server",
+  "description": "timer_id is a string",
+  "message": {
+    "type": "timer.stop",
+    "timer_id": "12"
+  }
+}

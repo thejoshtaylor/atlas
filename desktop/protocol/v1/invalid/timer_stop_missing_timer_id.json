@@ -1,0 +1,7 @@
+{
+  "direction": "client_to_server",
+  "description": "timer_id is missing",
+  "message": {
+    "type": "timer.stop"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "direction": "server_to_client",
+  "description": "The turn is over. The panel hides after the playback hint and any follow-up window.",
+  "message": {
+    "type": "turn.ended",
+    "turn_id": "5f1c2a9e7b3d4c60a8e2f7b1c9d04e3a",
+    "outcome": "completed",
+    "follow_up_window_ms": 0,
+    "playback_ms_left": 2400
+  }
+}

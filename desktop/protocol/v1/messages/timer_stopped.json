@@ -1,0 +1,8 @@
+{
+  "direction": "server_to_client",
+  "description": "The timer stopped ringing. The Mac hides the ring view.",
+  "message": {
+    "type": "timer.stopped",
+    "timer_id": 12
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "direction": "server_to_client",
+  "description": "timer_id is a bool",
+  "message": {
+    "type": "timer.ringing",
+    "timer_id": true,
+    "kind": "timer",
+    "label": "pasta"
+  }
+}

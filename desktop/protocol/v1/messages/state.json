@@ -1,0 +1,9 @@
+{
+  "direction": "server_to_client",
+  "description": "The turn moved to a new state. The panel state line follows it.",
+  "message": {
+    "type": "state",
+    "turn_id": "5f1c2a9e7b3d4c60a8e2f7b1c9d04e3a",
+    "state": "thinking"
+  }
+}
