@@ -104,7 +104,7 @@ def _array_sounddevice(name: str = "reSpeaker"):
 def _capture(sd, seconds: float, sample_rate: int = 16000) -> np.ndarray:
     """Record both channels while playing silence.
 
-    The XVF3800 (firmware 2.0.6) delivers no capture data unless a playback
+    The XVF3800 (firmware 2.0.10) delivers no capture data unless a playback
     stream is open on the same device -- a bare sd.rec() blocks forever and
     arecord fails with EIO. Returns int16 of shape (n, 2).
     """

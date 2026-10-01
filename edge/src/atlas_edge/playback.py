@@ -2,7 +2,7 @@
 
 **Deviation from this plan's own text, required by the orchestrator
 (10-SPIKE.md hardware finding 1, and plan 10-08's `Capture`):** the
-XVF3800 (firmware 2.0.6, USB `2886:001a`) delivers capture frames only
+XVF3800 (firmware 2.0.10, USB `2886:001a`) delivers capture frames only
 while a playback stream is open on the same device at the same time.
 Plan 10-08's `Capture` therefore already opens and keeps running, for its
 whole process lifetime, one `RawOutputStream` on the array -- and exposes
@@ -78,6 +78,14 @@ class Playback:
         self._last_update_at = now
         drained = int(elapsed * self._bytes_per_second)
         self._buffered_bytes = max(0, self._buffered_bytes - drained)
+
+    def clear(self, keep_bytes: int = 0) -> None:
+        """A barge-in stop dropped the queued reply, so the estimate falls to
+        the `keep_bytes` still queued (the faded head) and a held odd byte is
+        dropped. `pending_s()` (the LED) must fall with the queue."""
+        self._leftover = b""
+        self._buffered_bytes = max(0, keep_bytes)
+        self._last_update_at = self._clock()
 
     def pending_s(self) -> float:
         """Seconds of reply audio the output callback has not played yet,

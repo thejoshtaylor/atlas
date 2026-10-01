@@ -1,5 +1,5 @@
 """sounddevice capture of the XVF3800 -- full-duplex, per 10-SPIKE.md
-hardware finding 1: the array (firmware 2.0.6, USB `2886:001a`) delivers
+hardware finding 1: the array (firmware 2.0.10, USB `2886:001a`) delivers
 *no capture frames* unless a playback stream is open on the same device at
 the same time (a bare `arecord hw:Array` fails with `EIO`; a bare
 `sd.rec()` blocks forever; spike fix, commit `f61b8ff`). `Capture` therefore
@@ -18,13 +18,16 @@ XVF3800 and no `sounddevice` native library installed.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import deque
 from typing import Any, AsyncIterator, Callable
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
-# The XVF3800 (firmware 2.0.6, USB 2886:001a) ships 2ch/16kHz/S16_LE --
+# The XVF3800 (firmware 2.0.10, USB 2886:001a) ships 2ch/16kHz/S16_LE --
 # GitHub issue #4 and protocol v1's FRAME_SAMPLES (256) both assume this.
 SAMPLE_RATE = 16000
 CHANNELS = 2
@@ -90,10 +93,9 @@ class Capture:
         self._last_status_warn_at = 0.0
         self._last_mixer_warn_at = 0.0
 
-        # Read on the output-stream thread, written from whichever thread
-        # calls `enqueue_playback` -- both `deque.append`/`popleft` are
-        # atomic under the GIL, the same single-producer/single-consumer
-        # assumption the input side's own queue already relies on.
+        # The lock guards the queue between the output callback (PortAudio
+        # thread), `enqueue_playback` and `stop_playback` (event loop thread).
+        self._playback_lock = threading.Lock()
         self._playback_queue: "deque[bytes]" = deque()
 
     @property
@@ -112,7 +114,38 @@ class Capture:
         """Queue raw PCM16 bytes to play out through the shared output
         stream. This is the seam plan 10-09's `Playback` writes reply
         audio through -- the XVF3800 gets exactly one output handle."""
-        self._playback_queue.append(data)
+        with self._playback_lock:
+            self._playback_queue.append(data)
+
+    def stop_playback(self, fade_ms: int) -> int:
+        """Fade out the reply that plays and drop the rest of it (barge-in).
+
+        Ramps the first `fade_ms` of the queued reply from full level to
+        silence, puts that faded head back, and drops everything behind it.
+        Returns the byte length of the faded head, which the caller hands to
+        `Playback.clear`. Audio enqueued after this call plays at full level.
+
+        This is a cut point at stop time, not a ramp in the output callback.
+        A deferred clear would fade or drop the next turn's wake cue
+        (RESEARCH Finding 3). The music mixer is not touched.
+        """
+        frame_bytes = self._channels * _BYTES_PER_SAMPLE
+        wanted = int(self._sample_rate * fade_ms / 1000) * frame_bytes
+        with self._playback_lock:
+            head = bytearray()
+            while len(head) < wanted and self._playback_queue:
+                head += self._playback_queue.popleft()
+            head = head[:wanted]
+            head = head[: len(head) - (len(head) % frame_bytes)]
+            self._playback_queue.clear()
+            if not head:
+                return 0
+            samples = np.frombuffer(bytes(head), dtype="<i2").reshape(-1, self._channels)
+            frames = samples.shape[0]
+            gain = np.linspace(1.0, 0.0, frames) if frames > 1 else np.zeros(1)
+            faded = (samples * gain[:, None]).astype("<i2")
+            self._playback_queue.append(faded.tobytes())
+            return len(head)
 
     def _default_stream_factory(self, kind: str, **kwargs: Any) -> Any:
         import sounddevice as sd
@@ -131,14 +164,17 @@ class Capture:
             self._warn_status(status)
         needed = frames * self._channels * _BYTES_PER_SAMPLE
         buf = bytearray()
-        reply_active = bool(self._playback_queue)
-        while len(buf) < needed and self._playback_queue:
-            buf += self._playback_queue.popleft()
-        if len(buf) > needed:
-            leftover = bytes(buf[needed:])
-            self._playback_queue.appendleft(leftover)
-            buf = buf[:needed]
-        elif len(buf) < needed:
+        # The lock covers only the queue work, so the PortAudio thread holds
+        # it briefly. Padding and the mixer run outside it.
+        with self._playback_lock:
+            reply_active = bool(self._playback_queue)
+            while len(buf) < needed and self._playback_queue:
+                buf += self._playback_queue.popleft()
+            if len(buf) > needed:
+                leftover = bytes(buf[needed:])
+                self._playback_queue.appendleft(leftover)
+                buf = buf[:needed]
+        if len(buf) < needed:
             buf += bytes(needed - len(buf))  # silence when the queue is empty
         block = bytes(buf)
         if self.mixer is not None:

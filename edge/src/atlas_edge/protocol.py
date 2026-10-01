@@ -27,6 +27,12 @@ MSG_LED = "led"
 # Server to Pi: set the speaker volume. Pi to server: the answer.
 MSG_VOLUME = "volume"
 MSG_VOLUME_RESULT = "volume.result"
+# Server to Pi: fade out and drop the queued reply (barge-in).
+MSG_STOP = "stop"
+
+# The longest `fade_ms` this Pi accepts in a `stop` message. The server sends
+# 50-300 (D-14); this upper bound only rejects nonsense.
+MAX_FADE_MS = 1000
 
 # The two steps of a relative `volume` message, and the longest error text a
 # `volume.result` may carry. The server restates the same values in
@@ -100,6 +106,14 @@ class Volume:
     step_percent: "int | None" = None
 
 
+@dataclass(frozen=True)
+class Stop:
+    """The server wants the reply that plays to fade out over `fade_ms`
+    milliseconds and the rest of the queued reply audio dropped (barge-in)."""
+
+    fade_ms: int
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -140,9 +154,16 @@ def _parse_volume(raw: "dict[str, Any]") -> Volume:
     )
 
 
-def parse_server_message(text: str) -> "Hello | Ping | Led | Volume":
-    """Parse one text frame from the server -- `hello`, `ping`, `led`, or
-    `volume`, the only four message types the server ever sends. Raises `ProtocolError` for
+def _parse_stop(raw: "dict[str, Any]") -> Stop:
+    fade_ms = raw.get("fade_ms")
+    if not _is_int(fade_ms) or not (0 <= fade_ms <= MAX_FADE_MS):
+        raise ProtocolError(f"server stop message has a bad fade_ms: {fade_ms!r}")
+    return Stop(fade_ms=fade_ms)
+
+
+def parse_server_message(text: str) -> "Hello | Ping | Led | Volume | Stop":
+    """Parse one text frame from the server -- `hello`, `ping`, `led`,
+    `volume`, or `stop`, the only five message types the server ever sends. Raises `ProtocolError` for
     anything else, including a `hello` naming a protocol version other
     than `PROTOCOL_VERSION` -- this Pi must never guess at a wire shape a
     version mismatch might have changed.
@@ -190,6 +211,9 @@ def parse_server_message(text: str) -> "Hello | Ping | Led | Volume":
 
     if msg_type == MSG_VOLUME:
         return _parse_volume(raw)
+
+    if msg_type == MSG_STOP:
+        return _parse_stop(raw)
 
     raise ProtocolError(f"unsupported server message type: {msg_type!r}")
 

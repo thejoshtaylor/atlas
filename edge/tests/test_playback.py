@@ -138,3 +138,25 @@ async def test_pending_s_is_zero_before_any_write_then_decays_to_zero() -> None:
 
     assert abs(playback.pending_s() - 0.75) < 0.01
     assert playback.pending_s() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_clear_drops_the_estimate_to_the_kept_bytes_and_a_later_write_works() -> None:
+    sunk: "list[bytes]" = []
+    # 16000 Hz x 2 channels x 2 bytes = 64000 bytes per second.
+    playback = Playback(sunk.append, clock=_fake_clock([0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]))
+
+    await playback.write(bytes(32000))  # 64000 stereo bytes: 1.0 s
+    await playback.write(bytes([0x01]))  # an odd leftover byte is held
+    playback.clear(6400)  # keep 0.1 s
+
+    assert playback.pending_s() == pytest.approx(0.1)
+
+    await playback.write(bytes([0x02, 0x03]))  # the old leftover must not misalign this
+    assert sunk[-1] == bytes([0x02, 0x03, 0x02, 0x03])
+
+
+def test_clear_with_no_kept_bytes_empties_the_estimate() -> None:
+    playback = Playback(lambda _data: None, clock=_fake_clock([0.0] * 10))
+    playback.clear()
+    assert playback.pending_s() == 0.0

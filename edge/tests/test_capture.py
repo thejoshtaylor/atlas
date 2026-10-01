@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
 import pytest
 import sounddevice as sd
 
@@ -288,3 +289,85 @@ def test_a_raising_mixer_leaves_the_reply_block_and_does_not_raise():
     outdata = bytearray(needed)
     capture._output_callback(outdata, 256, None, None)
     assert bytes(outdata) == bytes([5]) * needed
+
+
+# --- Capture: stop_playback (barge-in fade and cut) -----------------------
+
+
+def _tone(seconds: float, level: int = 10000) -> bytes:
+    """A constant-level stereo int16 block at 16 kHz."""
+    frames = int(16000 * seconds)
+    return np.full((frames, 2), level, dtype="<i2").tobytes()
+
+
+def _queued(capture) -> bytes:
+    return b"".join(capture._playback_queue)
+
+
+def test_stop_playback_ramps_the_head_to_silence_and_drops_the_rest():
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    capture.enqueue_playback(_tone(1.0))
+
+    kept = capture.stop_playback(100)
+
+    assert kept == 6400  # 1600 frames x 2 channels x 2 bytes
+    queued = _queued(capture)
+    assert len(queued) == 6400
+    frames = np.frombuffer(queued, dtype="<i2").reshape(-1, 2)
+    assert frames[0, 0] >= 9500  # near full level
+    assert abs(int(frames[-1, 0])) <= 100  # near silence
+    assert frames[0, 0] > frames[800, 0] > frames[-1, 0]  # a falling ramp
+    assert np.array_equal(frames[:, 0], frames[:, 1])
+
+
+def test_stop_playback_with_less_queued_than_the_fade_ramps_what_is_there():
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    capture.enqueue_playback(_tone(0.05))  # 800 frames, less than 100 ms
+
+    kept = capture.stop_playback(100)
+
+    assert kept == 800 * 4
+    frames = np.frombuffer(_queued(capture), dtype="<i2").reshape(-1, 2)
+    assert abs(int(frames[-1, 0])) <= 100
+
+
+def test_stop_playback_with_an_empty_queue_returns_zero():
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    assert capture.stop_playback(100) == 0
+    assert _queued(capture) == b""
+
+
+def test_stop_playback_ramps_across_several_queued_chunks():
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    for _ in range(10):
+        capture.enqueue_playback(_tone(0.1))  # ten chunks of 100 ms
+
+    kept = capture.stop_playback(150)
+
+    assert kept == 2400 * 4
+    assert len(_queued(capture)) == kept
+
+
+def test_audio_enqueued_after_stop_playback_plays_at_full_level_after_the_faded_head():
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    capture.enqueue_playback(_tone(1.0))
+    kept = capture.stop_playback(50)  # 800 frames
+    capture.enqueue_playback(_tone(0.1, level=7000))
+
+    outdata = bytearray(1600 * 4)
+    capture._output_callback(outdata, 1600, None, None)
+
+    frames = np.frombuffer(bytes(outdata), dtype="<i2").reshape(-1, 2)
+    head_frames = kept // 4
+    assert abs(int(frames[head_frames - 1, 0])) <= 150
+    assert np.all(frames[head_frames:, 0] == 7000)
+
+
+def test_stop_playback_leaves_the_music_mixer_alone():
+    calls: list = []
+    capture = Capture("reSpeaker", stream_factory=_fake_factory([], {}))
+    capture.mixer = lambda block, active: calls.append(active) or block
+    capture.enqueue_playback(_tone(0.5))
+    capture.stop_playback(100)
+    assert calls == []
+    assert capture.mixer is not None

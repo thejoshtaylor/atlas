@@ -106,6 +106,34 @@ def test_a_bad_led_message_is_refused_on_both_sides():
             pi_protocol.parse_server_message(json.dumps(raw))
 
 
+def test_stop_constants_match():
+    assert server_protocol.MSG_STOP == pi_protocol.MSG_STOP
+    low, high = server_protocol.STOP_FADE_MS_RANGE
+    assert 0 <= low <= high <= pi_protocol.MAX_FADE_MS
+
+
+def test_every_server_stop_message_parses_on_the_pi_side():
+    for fade_ms in (50, 120, 300):
+        parsed = pi_protocol.parse_server_message(server_protocol.build_stop(fade_ms))
+        assert parsed == pi_protocol.Stop(fade_ms=fade_ms)
+
+
+def test_a_bad_stop_message_is_refused_on_the_pi_side():
+    import json
+
+    import pytest
+
+    for raw in (
+        {"type": "stop", "fade_ms": True},
+        {"type": "stop", "fade_ms": -1},
+        {"type": "stop", "fade_ms": 1001},
+        {"type": "stop", "fade_ms": "120"},
+        {"type": "stop"},
+    ):
+        with pytest.raises(pi_protocol.ProtocolError):
+            pi_protocol.parse_server_message(json.dumps(raw))
+
+
 def test_volume_constants_match():
     assert server_protocol.MSG_VOLUME == pi_protocol.MSG_VOLUME
     assert server_protocol.MSG_VOLUME_RESULT == pi_protocol.MSG_VOLUME_RESULT
