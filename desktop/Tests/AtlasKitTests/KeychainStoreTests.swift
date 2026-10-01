@@ -86,4 +86,27 @@ import Testing
         #expect(KeychainReadOutcome(status: -50) == .failed(-50))
         #expect(KeychainReadOutcome(status: -50).label == "failed")
     }
+
+    // WR-02: a failed read must never look like "not paired".
+    @Test func aStoredPairingLoadsAsFound() throws {
+        let store = InMemorySecretStore()
+        let credentials = PairingCredentials(host: "svr.test", token: "t-1")
+        try store.save(credentials)
+        #expect(PairingLoad.read(from: store) == .found(credentials))
+    }
+
+    @Test func anEmptyStoreLoadsAsNotPaired() {
+        #expect(PairingLoad.read(from: InMemorySecretStore()) == .notPaired)
+    }
+
+    @Test func aFailedReadKeepsItsStatusAndIsNeverNotPaired() throws {
+        let store = InMemorySecretStore()
+        let credentials = PairingCredentials(host: "svr.test", token: "t-1")
+        try store.save(credentials)
+        for status in [errSecInteractionNotAllowed, errSecUserCanceled, errSecAuthFailed] {
+            store.failNextLoad = status
+            #expect(PairingLoad.read(from: store) == .failed(status: status))
+        }
+        #expect(PairingLoad.read(from: store) == .found(credentials))
+    }
 }

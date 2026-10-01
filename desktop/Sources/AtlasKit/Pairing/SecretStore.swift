@@ -20,6 +20,7 @@ public final class InMemorySecretStore: SecretStore {
     private struct State {
         var credentials: PairingCredentials?
         var failNextSave: Int32?
+        var failNextLoad: Int32?
         var readStatusOverride: Int32?
     }
 
@@ -33,6 +34,12 @@ public final class InMemorySecretStore: SecretStore {
         set { state.withLock { $0.failNextSave = newValue } }
     }
 
+    /// When set, the next `load` throws `.keychain(status)` and clears this hook.
+    public var failNextLoad: Int32? {
+        get { state.withLock { $0.failNextLoad } }
+        set { state.withLock { $0.failNextLoad = newValue } }
+    }
+
     /// When set, `readStatus` returns it, so tests can play a read that needs a prompt.
     public var readStatusOverride: Int32? {
         get { state.withLock { $0.readStatusOverride } }
@@ -40,7 +47,13 @@ public final class InMemorySecretStore: SecretStore {
     }
 
     public func load() throws -> PairingCredentials? {
-        state.withLock { $0.credentials }
+        try state.withLock { s in
+            if let status = s.failNextLoad {
+                s.failNextLoad = nil
+                throw SecretStoreError.keychain(status)
+            }
+            return s.credentials
+        }
     }
 
     public func save(_ credentials: PairingCredentials) throws {

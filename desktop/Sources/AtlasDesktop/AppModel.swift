@@ -60,6 +60,8 @@ final class AppModel {
     @ObservationIgnored private var credentialsLoaded = false
     @ObservationIgnored private var pendingLink: URL?
 
+    /// Waits between reads of a Keychain that failed. The last one repeats.
+    private static let keychainRetryDelays: [Duration] = [.seconds(5), .seconds(15), .seconds(60), .seconds(300)]
     private static let revokedHostKey = "atlas.revokedHost"
     private static let launchAtLoginKey = "setup.launchAtLogin"
     private static let setupSeenKey = "setup.seen"
@@ -97,30 +99,47 @@ final class AppModel {
         }
         systemEvents.start(forwardingTo: connection)
 
+        Task { await loadSavedPairing() }
+    }
+
+    /// Reads the saved pairing. A read that fails is not "not paired" (a locked
+    /// keychain or a cancelled prompt leaves the pairing in place), so the app
+    /// logs the status, keeps the Pair step closed and tries again. A pair link
+    /// that arrives meanwhile waits, so it cannot replace a pairing unseen.
+    private func loadSavedPairing() async {
         let store = store
-        Task {
+        var attempt = 0
+        var load: PairingLoad
+        while true {
             // A Keychain read can wait on a prompt after a rebuild (D-29), so it
             // never runs on the main thread.
-            let credentials = await Task.detached(priority: .userInitiated) { () -> PairingCredentials? in
-                do {
-                    return try store.load()
-                } catch {
-                    return nil
-                }
+            load = await Task.detached(priority: .userInitiated) {
+                PairingLoad.read(from: store)
             }.value
-            credentialsLoaded = true
-            if let credentials {
+            guard case .failed(let status) = load else { break }
+            let delays = Self.keychainRetryDelays
+            let delay = delays[min(attempt, delays.count - 1)]
+            attempt += 1
+            log.error(
+                "The pairing could not be read from Keychain (status \(status, privacy: .public)). Trying again in \(delay.components.seconds, privacy: .public) s."
+            )
+            try? await Task.sleep(for: delay)
+        }
+        credentialsLoaded = true
+        switch load {
+        case .found(let credentials):
+            if pairedHost == nil {
                 pairedHost = credentials.host
                 log.info("Starting the connection to \(credentials.host, privacy: .public).")
                 enqueue { await $0.start(credentials: credentials) }
-            } else {
-                log.info("No pairing was loaded from Keychain.")
-                openSetup(focus: .pair)
             }
-            if let link = pendingLink {
-                pendingLink = nil
-                receivePairLink(link)
-            }
+        case .notPaired, .failed:
+            log.info("No pairing was loaded from Keychain.")
+            openSetup(focus: .pair)
+        }
+        if let link = pendingLink {
+            pendingLink = nil
+            receivePairLink(link)
         }
     }
 
