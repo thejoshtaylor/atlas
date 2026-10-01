@@ -20,8 +20,10 @@ _LITERAL = re.compile(r'turn_outcome\s*=\s*"([a-z_]+)"')
 
 def _literals() -> set[str]:
     found: set[str] = set()
-    for path in Path(atlas.__file__).parent.rglob("*.py"):
-        found.update(_LITERAL.findall(path.read_text(encoding="utf-8")))
+    # `atlas` has no __init__.py, so it is a namespace package: use __path__.
+    for root in atlas.__path__:
+        for path in Path(root).rglob("*.py"):
+            found.update(_LITERAL.findall(path.read_text(encoding="utf-8")))
     return found
 
 
