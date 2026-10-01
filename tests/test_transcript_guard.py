@@ -61,7 +61,19 @@ _FILLER_ONLY = ("It's", "It’s", "uh, um", "Okay.", "hay", "", "   ")
 
 # Real commands, three words or fewer or longer -- must never be dropped,
 # with no wake_phrase configured and with one configured.
-_COMMANDS = ("turn off the atlas lamp", "what's the weather in paris", "turn on the lights", "stop")
+# The alarm commands are real transcripts the guard once dropped, because
+# "alarm" and "alarms" sound like "atlas".
+_COMMANDS = (
+    "turn off the atlas lamp",
+    "what's the weather in paris",
+    "turn on the lights",
+    "stop",
+    "Cancel all alarms.",
+    "cancel my alarm.",
+    "Off my alarm.",
+    "set alarm",
+    "cancel alarms",
+)
 
 
 @pytest.mark.parametrize("text", _WAKE_ONLY)

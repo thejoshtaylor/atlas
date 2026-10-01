@@ -64,8 +64,13 @@ _NOISE_WORDS: frozenset[str] = frozenset(
 )
 
 _DEFAULT_KEYWORD = "atlas"
-_KEYWORD_SIMILARITY = 0.6
+# 0.75, not 0.6: "alarm" (0.6) and "alarms" (0.73) sound enough like
+# "atlas" at 0.6 that "cancel my alarm" was dropped as wake-only.
+_KEYWORD_SIMILARITY = 0.75
 _MAX_WAKE_ONLY_TOKENS = 3
+# A wake-only echo is a misheard lead-in plus the keyword, so at most two
+# content words. "cancel my alarm" has three and is always a command.
+_MAX_WAKE_ONLY_CONTENT = 2
 _NON_WORD_RE = re.compile(r"[^\w\s]")
 
 # 260924-4it: words that open a genuine information request -- the words
@@ -148,7 +153,7 @@ def is_no_command(text: str, wake_phrase: str | None = None) -> bool:
     if not content:
         return True
 
-    if len(tokens) > _MAX_WAKE_ONLY_TOKENS:
+    if len(tokens) > _MAX_WAKE_ONLY_TOKENS or len(content) > _MAX_WAKE_ONLY_CONTENT:
         return False
 
     phrase_tokens = _tokens(wake_phrase or "")
