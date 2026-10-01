@@ -45,7 +45,8 @@ transcript opens with the wake phrase and returns the text after it.
 
 `is_wake_without_command` and `WakeHold` (261001-glr) use both to keep one
 stream open: a provider that can hold a final asks `WakeHold` whether a final
-is only the wake phrase, and holds it when so.
+is only the wake phrase, and holds it when so. `WakeHold` (261001-ibf) also
+holds a final that looks like an unfinished command.
 """
 
 from __future__ import annotations
@@ -53,6 +54,9 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass, field
+from typing import Callable
+
+from atlas.turn.transcript_guard import looks_unfinished
 
 _PUNCT_RE = re.compile(r"[.,!?;:'\"()\[\]{}\-_/\\]")
 
@@ -194,26 +198,65 @@ class WakeHold:
     It holds a final that is only the wake phrase, so the command is read on
     the same socket. `heard_text` puts the held phrase back in front of the
     command, so wake verification still sees it.
+
+    261001-ibf: it also holds a final that looks like an unfinished command
+    ("Turn off.", "Turn on the."), so the words after the pause arrive on the
+    same socket. The new fields:
+
+    - `unfinished`: turns that hold on. Off by default, so a plain hold
+      behaves as before.
+    - `unfinished_needs_wake`: when True, a text that does not open with the
+      wake phrase is never held as unfinished. Wake turns that verify the
+      phrase use True. Answer windows use False, because the answer there
+      has no wake phrase.
+    - `wake_gate`: when given, a final that is only the wake phrase is held
+      only if the gate returns True. An answer window passes the wake
+      detector hit here, so a television that says the phrase holds nothing.
+    - `fragments`: the unfinished pieces held so far, with the final period
+      or ellipsis removed.
+    - `awaiting_continuation`: True while the last final that went through
+      was held as unfinished. The drain reads it to start a short timer.
     """
 
     phrase: str
     verify: bool
     held: list[str] = field(default_factory=list)
+    unfinished: bool = False
+    unfinished_needs_wake: bool = True
+    wake_gate: Callable[[], bool] | None = None
+    fragments: list[str] = field(default_factory=list)
+    awaiting_continuation: bool = False
 
     def __call__(self, text: str) -> bool:
-        if is_wake_without_command(text, self.phrase, verify=self.verify):
+        if is_wake_without_command(text, self.phrase, verify=self.verify) and (
+            self.wake_gate is None or self.wake_gate()
+        ):
             self.held.append(text)
             return True
-        # An empty final after the wake phrase is still no command.
-        if not text.strip() and self._first_held():
+        # An empty final after the wake phrase, or after an unfinished
+        # command, is still no new words.
+        if not text.strip() and (self._first_held() or self.awaiting_continuation):
             self.held.append(text)
             return True
+        if self.unfinished:
+            composed = self.heard_text(text)
+            command = strip_wake_phrase(composed, self.phrase)
+            if command is None and not self.unfinished_needs_wake:
+                command = composed
+            if command is not None and looks_unfinished(command):
+                self.fragments.append(text.strip().rstrip(".\u2026 "))
+                self.awaiting_continuation = True
+                return True
+        self.awaiting_continuation = False
         return False
 
     def _first_held(self) -> str:
         return next((text for text in self.held if text.strip()), "")
 
     def heard_text(self, final_text: str) -> str:
+        if self.fragments:
+            parts = [self._first_held(), *self.fragments, final_text]
+            return " ".join(part for part in parts if part.strip()).strip()
         first = self._first_held()
         if not first or strip_wake_phrase(final_text, self.phrase) is not None:
             return final_text

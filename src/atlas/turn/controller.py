@@ -95,7 +95,7 @@ from atlas_mcp.google_tools import UNREACHABLE_KEY
 
 from atlas.audio.channels import stt_view
 from atlas.config import MacroConfig
-from atlas.providers.base import BrainError
+from atlas.providers.base import BrainError, FinalTranscript
 from atlas.transports.base import SourceFormat, speech_kind
 from atlas.providers.tier_reply import DEFAULT_FILLER, FILLER_TEXT, FillerPhrase, TierReply
 from atlas.providers.tts_cache import CachedTts
@@ -281,6 +281,13 @@ _DEFAULT_POLL_INTERVAL_S = 0.05
 # word for a 0.6-1.0 s command until that command was finalized, and the watch
 # waited for a word, so the turn hung until `max_utterance_s`.
 _WORDLESS_SEGMENT_GRACE_S = 0.3
+
+# 261001-ibf: how long a held, unfinished command waits for its continuation.
+# Live edge turn (2026-10-01): the operator said "Turn off." and paused before
+# "the swamp cooler". The first half reached the brain alone, and the brain
+# guessed a device. A continuation that starts inside this time joins the held
+# words. With no new speech and no new words, the turn ends with the held text.
+_UNFINISHED_COMMAND_HOLD_S = 1.5
 
 # 10-07-PLAN.md (D-17): the prefix every edge `speech_signals` event is
 # recorded under -- `edge.vad.start`, `edge.vad.end`, `edge.doa`,
@@ -848,11 +855,25 @@ async def run_turn(
                 onset_deadline = follow_up.window_opens_at + follow_up.window_s
         # 261001-glr: a provider that can hold a final keeps one socket
         # across the wake phrase and the command after it.
-        wake_hold = (
-            WakeHold(wake_phrase, verify=verify_wake)
-            if incoming is None and wake_phrase and _holds_wake_finals(stt)
-            else None
-        )
+        # 261001-ibf: the same hold also keeps an unfinished command ("Turn
+        # off.") and, in an answer window the wake detector hit, a bare wake
+        # phrase. The gate is the same evidence `wake_addressed_command` needs
+        # (plan 13-06, WR-02), so a television that says "hey atlas" with no
+        # detector hit holds nothing.
+        wake_hold: WakeHold | None = None
+        if wake_phrase and _holds_wake_finals(stt):
+            if incoming is None:
+                wake_hold = WakeHold(
+                    wake_phrase, verify=verify_wake, unfinished=True, unfinished_needs_wake=verify_wake
+                )
+            elif incoming.kind == "answer":
+                wake_hold = WakeHold(
+                    wake_phrase,
+                    verify=True,
+                    unfinished=True,
+                    unfinished_needs_wake=False,
+                    wake_gate=lambda: bool(getattr(follow_up, "wake_heard", False)),
+                )
         final = await _drain_to_final_transcript(
             source,
             stt,
@@ -862,6 +883,7 @@ async def run_turn(
             poll_interval_s=poll_interval_s,
             onset_deadline=onset_deadline,
             hold_final=wake_hold,
+            unfinished_hold_s=_UNFINISHED_COMMAND_HOLD_S if wake_hold is not None else None,
             wordless_segment_grace_s=_WORDLESS_SEGMENT_GRACE_S if incoming is None else None,
             speech_signals=speech_signals,
             # 10-05-PLAN.md: an ordinary wake turn (`incoming is None`)
@@ -888,7 +910,16 @@ async def run_turn(
 
         # 260929-icf: a wake hit starts this turn only when `incoming is None`
         # and `wake_phrase` is given. Remove the phrase from the transcript.
-        heard_text = wake_hold.heard_text(final_text) if wake_hold is not None else final_text
+        # 261001-ibf: with held fragments, a trimmed text already covers the
+        # whole span of the turn, so composing it again would repeat them.
+        compose_held = wake_hold is not None and (
+            trimmed_text is None or (incoming is None and not wake_hold.fragments)
+        )
+        heard_text = wake_hold.heard_text(final_text) if compose_held else final_text
+        if compose_held and incoming is not None:
+            # An answer window: the speaker checks and `wake_addressed_command`
+            # below must see the composed text.
+            final_text = heard_text
         wake_unverified = False
         if incoming is None and wake_phrase:
             command = strip_wake_phrase(heard_text, wake_phrase)
@@ -2341,6 +2372,7 @@ async def _drain_to_final_transcript(
     split_event: "asyncio.Event | None" = None,
     hold_final: "Callable[[str], bool] | None" = None,
     wordless_segment_grace_s: float | None = None,
+    unfinished_hold_s: float | None = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
 
@@ -2352,6 +2384,19 @@ async def _drain_to_final_transcript(
     held final arrives after a finalize was already sent, the end-of-speech
     watch is re-armed, so the command's own segment end sends one more
     finalize on the same socket.
+
+    `unfinished_hold_s` (261001-ibf), when given with a `hold_final` that has
+    an `awaiting_continuation` flag (`WakeHold`), bounds how long a held,
+    unfinished command waits for its continuation. A newly held final with
+    words starts a deadline of that many seconds. New speech cancels it: a
+    worded event that is not a newly held final, a new `vad.start`, or
+    speech in progress that was not already in progress at the hold (xAI can
+    end its utterance before the VAD hangover ends). When it passes, the stream closes and the drain
+    returns `FinalTranscript(text="")`, so the caller composes the held text.
+    After such a hold, the re-armed end-of-speech watch uses the wordless
+    grace even on a follow-up drain, so a continuation that xAI holds until
+    it is finalized is still finalized. `None` (the default) changes
+    nothing, byte for byte.
 
     `wordless_segment_grace_s` (261001-glr), when given with `speech_signals`,
     lets a `vad.end` that closes a segment which began after this drain
@@ -2466,6 +2511,16 @@ async def _drain_to_final_transcript(
     finalize_requested = False
     held_count = 0
     held_seen = 0
+    # 261001-ibf: the wordless grace the watch uses now. It starts as the
+    # caller's value and becomes the default grace once an unfinished command
+    # is held, because the continuation may be held by xAI until finalized.
+    grace_s = wordless_segment_grace_s
+    continuation_deadline: float | None = None
+    continuation_starts = 0
+    # True when speech was still in progress at the instant of the hold. xAI
+    # can end its own utterance before the edge VAD hangover ends, and that
+    # same segment must not count as new speech.
+    continuation_in_speech = False
 
     def _request_finalize() -> None:
         nonlocal finalize_requested
@@ -2476,7 +2531,7 @@ async def _drain_to_final_transcript(
     if speech_signals is not None:
         finalize_event = asyncio.Event()
 
-        if wordless_segment_grace_s is not None:
+        if wordless_segment_grace_s is not None or unfinished_hold_s is not None:
 
             def _on_segment_event(event: dict[str, Any]) -> None:
                 nonlocal segment_starts
@@ -2499,7 +2554,7 @@ async def _drain_to_final_transcript(
             )
             while not heard_speech.is_set():
                 if (
-                    wordless_segment_grace_s is not None
+                    grace_s is not None
                     and segment_started.is_set()
                     and not speech_signals.in_speech
                 ):
@@ -2509,7 +2564,7 @@ async def _drain_to_final_transcript(
                     # finalize anyway.
                     starts = segment_starts
                     try:
-                        await asyncio.wait_for(heard_speech.wait(), timeout=wordless_segment_grace_s)
+                        await asyncio.wait_for(heard_speech.wait(), timeout=grace_s)
                     except asyncio.TimeoutError:
                         if speech_signals.in_speech:
                             pass  # resumed: wait for that segment's own end
@@ -2613,6 +2668,11 @@ async def _drain_to_final_transcript(
             await stream.aclose()
             await _stop_watch()
             timings.mark_speech_end(last_word_change_arrival)
+            # 261001-ibf: unfinished words held earlier are still the turn's
+            # words, so the caller gets them back. A held wake phrase alone
+            # is still a timeout.
+            if getattr(hold_final, "fragments", None):
+                return FinalTranscript(text="")
             return None
 
         # 09-06: no event has arrived at all yet, and this window's own
@@ -2629,6 +2689,25 @@ async def _drain_to_final_transcript(
             timings.mark_speech_end(last_word_change_arrival)
             return None
 
+        if continuation_deadline is not None:
+            if speech_signals is not None and (
+                segment_starts > continuation_starts
+                or (speech_signals.in_speech and not continuation_in_speech)
+            ):
+                # New speech: the continuation is coming, so the timer stops.
+                continuation_deadline = None
+            elif clock() >= continuation_deadline:
+                logger.info(
+                    "unfinished command: no continuation in %.1fs, ending with the held text", unfinished_hold_s
+                )
+                next_event_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await next_event_task
+                await stream.aclose()
+                await _stop_watch()
+                timings.mark_speech_end(last_word_change_arrival)
+                return FinalTranscript(text="")
+
         done, _pending_tasks = await asyncio.wait({next_event_task}, timeout=poll_interval_s)
         if next_event_task not in done:
             continue
@@ -2640,8 +2719,19 @@ async def _drain_to_final_transcript(
             timings.mark_speech_end(last_word_change_arrival)
             return pending
 
-        if held_count > held_seen:
+        newly_held = held_count > held_seen
+        if newly_held:
             held_seen = held_count
+            if unfinished_hold_s is not None and getattr(hold_final, "awaiting_continuation", False):
+                grace_s = (
+                    wordless_segment_grace_s if wordless_segment_grace_s is not None else _WORDLESS_SEGMENT_GRACE_S
+                )
+                if getattr(event, "text", "").strip():
+                    # Only a held final with words moves the deadline. An empty
+                    # held final carries no new words.
+                    continuation_deadline = clock() + unfinished_hold_s
+                    continuation_starts = segment_starts
+                    continuation_in_speech = bool(speech_signals is not None and speech_signals.in_speech)
             if finalize_requested and watch_task is not None:
                 # The finalize reached xAI, but what came back is only the
                 # wake phrase. The command is still ahead, so watch for its
@@ -2662,6 +2752,10 @@ async def _drain_to_final_transcript(
         # not the command, so it does not count as a heard word.
         heard_text = getattr(event, "text", "")
         heard_words = brain_race._normalize_for_echo_check(heard_text)
+        if heard_words and not newly_held:
+            # New words after a held, unfinished command: the continuation is
+            # here, so the timer stops.
+            continuation_deadline = None
         if heard_words and not (
             wake_phrase
             and (
