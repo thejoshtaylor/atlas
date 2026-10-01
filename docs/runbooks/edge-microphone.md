@@ -232,7 +232,9 @@ Keep these facts in mind:
   server must build from that same repository.
 - The updater refreshes only the unit files that are already in
   `/etc/systemd/system`. Optional units stay off until you install them.
-  The `atlas-librespot` and `atlas-librespot-watchdog` units stay off until you install them in step 17.
+  The `atlas-librespot` unit stays off until you install it in step 17.
+  One unit is an exception. On a Pi that has `atlas-librespot`, the updater
+  installs and enables `atlas-librespot-watchdog`.
 - Build the server image with the `GIT_SHA` build argument set to the full
   commit. Without it, `/health` reports an empty commit and the updater
   does nothing:
@@ -444,9 +446,17 @@ it replies.
 
    The watchdog restarts `atlas-librespot` when its log shows "Connection
    to server closed". librespot 0.8.0 does not connect again after this
-   error. If `atlas-librespot` already runs from an earlier install, copy
-   only `atlas-librespot-watchdog.service`. Then run
-   `sudo systemctl daemon-reload` and the last enable line.
+   error. After the setup in step 12, the updater installs and enables
+   `atlas-librespot-watchdog` on a Pi that has `atlas-librespot` installed.
+   The updater acts only when the server runs a new commit. The lines above
+   install the watchdog now, before the next update.
+
+   If `atlas-librespot` already runs from an earlier install, wait for the
+   next update. Or copy only `atlas-librespot-watchdog.service`. Then run
+   `sudo systemctl daemon-reload` and the last enable line. To keep the
+   watchdog off, run `sudo systemctl disable --now atlas-librespot-watchdog`.
+   Do not delete its unit file. If the file is missing, the updater
+   installs the watchdog again.
 
 4. Sign in once. On a phone on the house network, open Spotify and pick
    the `Atlas` device (or your name from step 2) from the Connect list.

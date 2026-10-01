@@ -11,8 +11,10 @@
 # This unit runs as root. It reads the journal of another unit and it calls
 # systemctl. This is the same reason as atlas-edge-update.service.
 #
-# Install: copy to /etc/systemd/system/atlas-librespot-watchdog.service
-# after you install atlas-librespot. Then run
+# Install: the edge updater (atlas-edge-update.service) copies and enables
+# this unit on a Pi that has atlas-librespot.service in /etc/systemd/system.
+# To install it before the next update, copy it to
+# /etc/systemd/system/atlas-librespot-watchdog.service. Then run
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now atlas-librespot-watchdog
 # See docs/runbooks/edge-microphone.md step 17.
