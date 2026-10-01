@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 /// The pairing in the legacy login keychain: one generic-password item per
@@ -57,12 +58,28 @@ public struct KeychainStore: SecretStore {
         }
     }
 
+    /// A read that must not show UI (D-25, D-29). `kSecUseAuthenticationUIFail`
+    /// alone did not do that on the legacy login keychain: the signing spike saw
+    /// a status of 0 while Keychain dialogs appeared. So this read turns UI off
+    /// two ways: a LocalAuthentication context that forbids interaction, and the
+    /// session-wide Keychain switch, restored on exit. A read that would have
+    /// prompted then returns a status such as errSecInteractionNotAllowed.
+    /// Unit tests cover the status mapping only. The real behavior of both
+    /// switches on the login keychain is checked in the phase UAT.
     public func readStatus() -> Int32 {
+        let context = LAContext()
+        context.interactionNotAllowed = true
         var query = Self.baseQuery(service: service)
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnData as String] = true
-        // An access-list mismatch becomes a status here, never a prompt.
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        query[kSecUseAuthenticationContext as String] = context
+
+        var wasAllowed = DarwinBoolean(true)
+        let hadState = SecKeychainGetUserInteractionAllowed(&wasAllowed) == errSecSuccess
+        SecKeychainSetUserInteractionAllowed(false)
+        defer {
+            if hadState { SecKeychainSetUserInteractionAllowed(wasAllowed.boolValue) }
+        }
         var result: CFTypeRef?
         return SecItemCopyMatching(query as CFDictionary, &result)
     }

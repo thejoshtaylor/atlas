@@ -59,4 +59,31 @@ import Testing
         dump(credentials, to: &dumped)
         #expect(!dumped.contains("t-1"))
     }
+
+    // The mapping of a read status to an outcome. Whether the real login
+    // keychain returns these statuses with no UI is checked in the phase UAT.
+    @Test func aStoredPairingReadsSilently() throws {
+        let store = InMemorySecretStore()
+        try store.save(PairingCredentials(host: "svr.test", token: "t-1"))
+        #expect(store.readOutcome() == .silent)
+    }
+
+    @Test func anEmptyStoreIsNotStoredAndNeverNeedsInteraction() {
+        #expect(InMemorySecretStore().readOutcome() == .notStored)
+    }
+
+    @Test func aReadThatNeededAPromptIsNeverSilent() throws {
+        let store = InMemorySecretStore()
+        try store.save(PairingCredentials(host: "svr.test", token: "t-1"))
+        for status in [errSecInteractionNotAllowed, errSecUserCanceled, errSecAuthFailed, errSecNoAccessForItem] {
+            store.readStatusOverride = status
+            #expect(store.readOutcome() == .needsInteraction(status))
+            #expect(store.readOutcome().label == "needs_interaction")
+        }
+    }
+
+    @Test func anUnknownStatusIsFailedAndKeepsItsCode() {
+        #expect(KeychainReadOutcome(status: -50) == .failed(-50))
+        #expect(KeychainReadOutcome(status: -50).label == "failed")
+    }
 }

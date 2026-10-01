@@ -10,7 +10,8 @@ public protocol SecretStore: Sendable {
     func load() throws -> PairingCredentials?
     func save(_ credentials: PairingCredentials) throws
     func delete() throws
-    /// OSStatus of a read that may never show UI (D-25). 0 means readable.
+    /// OSStatus of a read that may never show UI (D-25). 0 means readable with
+    /// no prompt. Map it with `KeychainReadOutcome`.
     func readStatus() -> Int32
 }
 
@@ -19,6 +20,7 @@ public final class InMemorySecretStore: SecretStore {
     private struct State {
         var credentials: PairingCredentials?
         var failNextSave: Int32?
+        var readStatusOverride: Int32?
     }
 
     private let state = Mutex(State())
@@ -29,6 +31,12 @@ public final class InMemorySecretStore: SecretStore {
     public var failNextSave: Int32? {
         get { state.withLock { $0.failNextSave } }
         set { state.withLock { $0.failNextSave = newValue } }
+    }
+
+    /// When set, `readStatus` returns it, so tests can play a read that needs a prompt.
+    public var readStatusOverride: Int32? {
+        get { state.withLock { $0.readStatusOverride } }
+        set { state.withLock { $0.readStatusOverride = newValue } }
     }
 
     public func load() throws -> PairingCredentials? {
@@ -50,6 +58,9 @@ public final class InMemorySecretStore: SecretStore {
     }
 
     public func readStatus() -> Int32 {
-        state.withLock { $0.credentials == nil ? -25300 : 0 }
+        state.withLock { s in
+            if let forced = s.readStatusOverride { return forced }
+            return s.credentials == nil ? -25300 : 0
+        }
     }
 }

@@ -29,11 +29,14 @@ enum DiagnoseCommand {
         var record = LaunchDiagnostics.collect(mode: "diagnose")
 
         let probeStore = KeychainStore(service: AppIdentity.diagnosticsKeychainService)
-        if options.writeProbe, (try? probeStore.load()) == nil {
+        if options.writeProbe, probeStore.readOutcome() == .notStored {
             // A harmless item, so a later rebuild can prove the access list survived.
+            // The check is a no-UI read, so it never raises a prompt of its own.
             try? probeStore.save(PairingCredentials(host: "probe", token: "probe"))
         }
-        record.keychainProbeStatus = probeStore.readStatus()
+        let probeStatus = probeStore.readStatus()
+        record.keychainProbeStatus = probeStatus
+        record.keychainProbeOutcome = KeychainReadOutcome(status: probeStatus).label
 
         if let host = options.host {
             record.probeHost = host
