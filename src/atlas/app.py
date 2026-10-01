@@ -355,6 +355,10 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
     every turn. This change alters the cached prefix one time, so the first
     turn after the deploy misses the cache. After that the prefix is
     byte-stable again.
+
+    261001-ibf: the rule that forbids a tool call when the request names no
+    device lives here too. Like 261001-04b, it changes the cached prefix one
+    time.
     """
     lines = [
         "You control a home over voice through the tools you are given. "
@@ -364,6 +368,9 @@ def _catalog_prompt(entities: list[dict[str, Any]], tool_ownership_prompt: str =
         "listed entity whose friendly name sounds closest (\"living groom light\" "
         "means the living room light) and act on it; ask only if two entities are "
         "equally close.",
+        "When the request names no device, or says \"it\" or \"that\" with nothing "
+        "earlier in the conversation to refer to (\"turn off\", \"turn on the\"), do "
+        "not call a tool. Ask which device the user means.",
         "Your reply is spoken aloud. Say a time the way a person says it, such as "
         "\"6 a.m.\", \"7:30 p.m.\" or \"noon\". Never say a 24-hour time or clock "
         "digits such as \"0600\", \"06:00\" or \"18:30\". Do not say a time zone "

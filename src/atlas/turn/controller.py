@@ -126,7 +126,7 @@ from atlas.turn.handoff import (
     is_code_only_tool,
     parse_handoff,
 )
-from atlas.turn.entity_claims import is_claim_refusal, unclaimed
+from atlas.turn.entity_claims import bare_tool_name, is_claim_refusal, unclaimed
 from atlas.turn.home_control import is_home_control_refusal, restrict_home_writes
 from atlas.turn.local_intent import match_on_off
 from atlas.turn.playback_hold import hold_for_playback
@@ -139,7 +139,7 @@ from atlas.turn.pending_action import (
     handle_confirmation_reply,
 )
 from atlas.turn.tool_errors import condense_argument_error, is_argument_error, is_speakable_error
-from atlas.turn.transcript_guard import asks_for_information, is_no_command
+from atlas.turn.transcript_guard import asks_for_information, is_no_command, missing_target_question
 from atlas.turn.transcript_trim import trim_at_split
 from atlas.turn.answer_window import (
     answer_speaker_mismatch,
@@ -1426,6 +1426,68 @@ async def run_turn(
                 speech_lock=speech_lock,
                 sink=sink,
             )
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # 261001-ibf: a command that names no device ("Turn off.", "Turn on
+        # the.") is never a tool call. Two live turns let the brain guess a
+        # target and switch real devices. The check is here, in code, before
+        # the local intent and the brain. This runs on every turn, a
+        # continuation turn included. A pronoun ("turn it off") counts as a
+        # target only when the turn continues an earlier exchange whose scope
+        # offers a tool, or follows an interrupt of a reply that was playing
+        # (the operator then means the thing that reply was about).
+        has_referent = (
+            prior_exchange is not None and (answer_scope is None or bool(answer_scope.tool_names))
+        ) or bool(getattr(barge_in, "after_interrupt", False))
+        missing_target = missing_target_question(final_text, has_referent=has_referent)
+        if missing_target is not None:
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            timings.turn_outcome = "missing_target"
+            logger.info("turn %s: the command named no device, asking which one", timings.turn_id)
+            missing_target_depth = (incoming.chain_depth if incoming is not None else 0) + 1
+            missing_target_speech = await _speak(
+                source,
+                tts,
+                timings,
+                missing_target,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+                expects_answer=follow_up is not None and missing_target_depth <= MAX_CHAINED_FOLLOW_UPS,
+            )
+            if (
+                follow_up is not None
+                and timings.turn_outcome != "barged_in"
+                and missing_target_depth <= MAX_CHAINED_FOLLOW_UPS
+            ):
+                asked_from = speaker_outcome.event.get("speaker_id")
+                follow_up.request(
+                    FollowUpRequest(
+                        kind="clarification",
+                        chain_depth=missing_target_depth,
+                        original_transcript=final_text,
+                        question=missing_target,
+                        prior_messages=tuple(prior_exchange) if prior_exchange else (),
+                        playback_ends_at=estimate_playback_end(missing_target_speech, sink),
+                        proposals_only=restrict_tools_to_proposals,
+                        # The answer may name a device and nothing else: only
+                        # the offered `ha_call_service`, narrowed by this
+                        # turn's own scope. A television gets no wider reach.
+                        answer_scope=AnswerScope(
+                            tool_names=frozenset(
+                                name
+                                for entry in tools_schema
+                                if isinstance(name := entry.get("function", {}).get("name"), str)
+                                and bare_tool_name(name) == HA_CALL_SERVICE_TOOL
+                            )
+                        ).narrowed_by(answer_scope),
+                        answer_only_from=str(asked_from) if asked_from is not None else None,
+                    )
+                )
             await _emit_event(source, timings.to_event())
             timings.log()
             return

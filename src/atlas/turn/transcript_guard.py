@@ -31,6 +31,15 @@ hears the same "sorry, i didn't catch that" reply and can say it again.
 `turn_outcome = "no_command"` makes this visible in `timing.json`, so a
 real corpus can tell the difference between a mishearing and a mistuned
 threshold later.
+
+`missing_target_question` is a second guard, for a command that is a verb
+with no device. Two live turns on the deployed edge (2026-10-01) showed why.
+The operator paused after "Turn off." and, in another turn, after "Turn on
+the.". Each fragment reached the brain, the brain guessed a target, and it
+switched real devices. The check is in code, and not only in a prompt, for
+the same reason as rule 2 in `atlas_mcp/safety.py`: a prompt is advice, and
+a television can speak any sentence. The prompt line in `app.py` is only a
+second, weaker layer.
 """
 
 from __future__ import annotations
@@ -132,6 +141,42 @@ _LEAD_IN_WORDS: frozenset[str] = frozenset(
 )
 
 
+# The verbs of a control command. Same three as `local_intent`. "power" is
+# not here because it is often a noun ("is the power on").
+_CONTROL_VERBS: frozenset[str] = frozenset({"turn", "switch", "shut"})
+_PARTICLES: frozenset[str] = frozenset({"on", "off"})
+# Words that add no device to a command.
+_FILLER_WORDS: frozenset[str] = frozenset(
+    {
+        "please",
+        "can",
+        "could",
+        "would",
+        "will",
+        "you",
+        "just",
+        "now",
+        "uh",
+        "um",
+        "hey",
+        "ok",
+        "okay",
+        "back",
+        "again",
+    }
+)
+_FUNCTION_WORDS: frozenset[str] = frozenset(
+    {"the", "a", "an", "to", "and", "of", "or", "my", "your", "our", "for", "with", "in", "at", "into"}
+)
+# A pronoun names a device only when something earlier in the talk does.
+_PRONOUNS: frozenset[str] = frozenset({"it", "that", "this", "them", "those", "these", "one"})
+# A last word that cannot end a sentence: the speaker has more to say.
+_DANGLING_WORDS: frozenset[str] = frozenset(
+    {"the", "a", "an", "to", "and", "of", "or", "my", "your", "for", "with", "in", "at", "into"}
+)
+_ELLIPSES = ("...", "\u2026")
+
+
 def _tokens(text: str) -> list[str]:
     """Lowercase, drop every punctuation mark (including a curly
     apostrophe), and split on whitespace."""
@@ -198,3 +243,72 @@ def asks_for_information(text: str) -> bool:
             return True
 
     return False
+
+
+def _command_remainder(text: str) -> tuple[str, str, list[str]] | None:
+    """The verb, the particle and the words left over, or None.
+
+    None means `text` is not a control command with an on/off particle.
+    "shut" with no particle reads as "off". The words left over are what is
+    still there once the verb, the particle, filler and function words go.
+    """
+    tokens = _tokens(text)
+    verb_index = next((i for i, token in enumerate(tokens) if token in _CONTROL_VERBS), None)
+    if verb_index is None:
+        return None
+    verb = tokens[verb_index]
+    # The accepted typo: "turn of the" for "turn off the". Only right after a verb.
+    if verb_index + 1 < len(tokens) and tokens[verb_index + 1] == "of":
+        tokens[verb_index + 1] = "off"
+    particle_index = next((i for i, token in enumerate(tokens) if token in _PARTICLES), None)
+    if particle_index is None:
+        if verb != "shut":
+            return None
+        particle = "off"
+    else:
+        particle = tokens[particle_index]
+    rest = [
+        token
+        for i, token in enumerate(tokens)
+        if i != verb_index
+        and i != particle_index
+        and token not in _FILLER_WORDS
+        and token not in _FUNCTION_WORDS
+    ]
+    return verb, particle, rest
+
+
+def missing_target_question(text: str, *, has_referent: bool) -> str | None:
+    """The question to ask when `text` is a control command that names no
+    device, or None.
+
+    A bare verb ("Turn off.", "Turn on the.") always gets the question.
+    A command with only a pronoun ("turn it on") gets it when nothing
+    earlier in the talk gives the pronoun a meaning (`has_referent` False).
+    Every other text returns None, "everything" included: it is a target.
+    """
+    parts = _command_remainder(text)
+    if parts is None:
+        return None
+    verb, particle, rest = parts
+    if rest and not (has_referent is False and all(token in _PRONOUNS for token in rest)):
+        return None
+    return f"{verb} {particle} what?"
+
+
+def looks_unfinished(text: str) -> bool:
+    """True when `text` reads as a command the speaker has not finished.
+
+    The cases are an ellipsis at the end, a last word that cannot end a
+    sentence ("turn on the"), and a bare control verb ("Turn off."). A
+    pronoun counts as a target here, so "turn it off" is finished.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.endswith(_ELLIPSES):
+        return True
+    tokens = _tokens(stripped)
+    if tokens and tokens[-1] in _DANGLING_WORDS:
+        return True
+    return missing_target_question(stripped, has_referent=True) is not None

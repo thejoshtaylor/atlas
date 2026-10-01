@@ -55,7 +55,7 @@ async def test_a_no_tool_question_opens_a_window_that_reaches_the_full_offered_c
             BrainReply(text="Done."),
         ]
     )
-    edge = _Edge([_text("turn on the"), _text("the lamp"), _text("")], brain)
+    edge = _Edge([_text("turn something on"), _text("the lamp"), _text("")], brain)
 
     await edge.run()
 
@@ -87,7 +87,7 @@ async def test_a_confident_triage_question_opens_the_same_full_catalog_window():
     )
     source = FakeAudioSource(frames=[b"\x00"])
     requests: list[FollowUpRequest | None] = []
-    turns = [_text("turn on the"), _text("")]
+    turns = [_text("turn something on"), _text("")]
 
     async def run_turn_fn(turn_source: Any) -> None:
         channel = getattr(turn_source, "follow_up", None)
@@ -177,7 +177,7 @@ async def test_a_turn_that_used_a_tool_and_asked_nothing_keeps_the_dispatched_sc
 
 async def test_a_source_without_answer_windows_opens_no_window_for_a_question():
     brain = RecordingFakeBrain(replies=[_json("what do you want me to turn on?", True)])
-    edge = _Edge([_text("turn on the")], brain, answer_windows=False)
+    edge = _Edge([_text("turn something on")], brain, answer_windows=False)
 
     await edge.run()
 

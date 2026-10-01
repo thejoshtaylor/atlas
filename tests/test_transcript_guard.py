@@ -9,7 +9,12 @@ canned "done" reply instead of taking a second model round.
 
 import pytest
 
-from atlas.turn.transcript_guard import asks_for_information, is_no_command
+from atlas.turn.transcript_guard import (
+    asks_for_information,
+    is_no_command,
+    looks_unfinished,
+    missing_target_question,
+)
 
 # 260924-4it: True cases -- the operator may be waiting for spoken
 # information, so the done shortcut must not fire.
@@ -107,3 +112,75 @@ def test_keyword_comes_from_the_configured_wake_phrase() -> None:
 @pytest.mark.parametrize("wake_phrase", ("", None))
 def test_blank_or_missing_wake_phrase_falls_back_to_the_default_keyword(wake_phrase: str | None) -> None:
     assert is_no_command("atlas", wake_phrase) is True
+
+
+# 261001-ibf: a control command that names no device.
+@pytest.mark.parametrize(
+    ("text", "question"),
+    [
+        ("Turn off.", "turn off what?"),
+        ("Turn on the.", "turn on what?"),
+        ("shut off", "shut off what?"),
+        ("switch on", "switch on what?"),
+        ("turn of the", "turn off what?"),
+        ("please turn off", "turn off what?"),
+    ],
+)
+@pytest.mark.parametrize("has_referent", (False, True))
+def test_a_bare_verb_gets_the_question(text: str, question: str, has_referent: bool) -> None:
+    assert missing_target_question(text, has_referent=has_referent) == question
+
+
+@pytest.mark.parametrize("text", ["turn it on", "turn it back on", "Turn that off."])
+def test_a_pronoun_with_no_referent_gets_the_question(text: str) -> None:
+    assert missing_target_question(text, has_referent=False) is not None
+    assert missing_target_question(text, has_referent=True) is None
+
+
+def test_the_pronoun_question_names_the_verb_and_particle() -> None:
+    assert missing_target_question("turn it on", has_referent=False) == "turn on what?"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "lights off",
+        "stop",
+        "pause",
+        "turn off the swamp cooler",
+        "turn on the lights in the",
+        "turn up the volume",
+        "whose turn is it",
+        "is the power on",
+        "turn everything off",
+        "",
+    ],
+)
+@pytest.mark.parametrize("has_referent", (False, True))
+def test_a_command_with_a_target_or_no_verb_gets_no_question(text: str, has_referent: bool) -> None:
+    assert missing_target_question(text, has_referent=has_referent) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Turn off.",
+        "turn on",
+        "switch off",
+        "Turn on the.",
+        "set it to",
+        "turn off the lamp and",
+        "turn on the\u2026",
+        "turn on the...",
+    ],
+)
+def test_looks_unfinished_is_true_for_a_command_that_stops_short(text: str) -> None:
+    assert looks_unfinished(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["turn off the swamp cooler.", "turn it off", "lights off", "stop", "", "Hey Atlas.", "what is the weather"],
+)
+def test_looks_unfinished_is_false_for_a_finished_text(text: str) -> None:
+    assert looks_unfinished(text) is False
