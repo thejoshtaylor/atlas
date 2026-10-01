@@ -389,3 +389,48 @@ def test_team_identity_prints_no_keychain_cost(fake_bin: Path, tmp_path: Path) -
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
+
+
+_FAKE_TOOL = """#!/bin/sh
+{body}
+"""
+
+
+def _preflight(fake_bin: Path, tmp_path: Path, xcode_path: str) -> subprocess.CompletedProcess[str]:
+    bodies = {
+        "sw_vers": "echo 15.0",
+        "uname": "echo arm64",
+        "xcode-select": 'echo "$FAKE_XCODE_PATH"',
+        "xcodebuild": "exit 0",
+        "swift": "exit 0",
+    }
+    for name, body in bodies.items():
+        path = fake_bin / name
+        path.write_text(_FAKE_TOOL.format(body=body))
+        path.chmod(0o755)
+    return _run("preflight", fake_bin, tmp_path, extra_env={"FAKE_XCODE_PATH": xcode_path})
+
+
+@pytest.mark.parametrize(
+    "xcode_path",
+    [
+        "/Applications/Xcode.app/Contents/Developer",
+        "/Applications/Xcode-16.4.app/Contents/Developer",
+        "/Applications/Xcode_16.4.app/Contents/Developer",
+        "/Applications/Xcode-beta.app/Contents/Developer",
+    ],
+)
+def test_preflight_accepts_a_full_xcode_with_any_app_name(
+    fake_bin: Path, tmp_path: Path, xcode_path: str
+) -> None:
+    result = _preflight(fake_bin, tmp_path, xcode_path)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("xcode_path", ["/Library/Developer/CommandLineTools", ""])
+def test_preflight_rejects_the_command_line_tools(
+    fake_bin: Path, tmp_path: Path, xcode_path: str
+) -> None:
+    result = _preflight(fake_bin, tmp_path, xcode_path)
+    assert result.returncode == 2
+    assert "Full Xcode is not selected" in result.stderr

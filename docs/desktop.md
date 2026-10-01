@@ -17,7 +17,7 @@ This guide is a procedure. Every host in it is invented. Replace `atlas.example.
    xcode-select -p
    ```
 
-   The path must end with `Xcode.app/Contents/Developer`. If it does not, open Xcode, then open Settings, Locations, and choose your Xcode in the Command Line Tools list.
+   The path must end with `.app/Contents/Developer`, for example `/Applications/Xcode.app/Contents/Developer` or `/Applications/Xcode-16.4.app/Contents/Developer`. The name of the app can differ. A path that ends with `CommandLineTools` is not enough. If you see that path, open Xcode, then open Settings, Locations, and choose your Xcode in the Command Line Tools list.
 5. Use an ATLAS server that you reach over https, for example `https://atlas.example.com`. The app connects over wss only. It has no setting that allows a plain connection.
 6. Have an admin account on that server. You need it to add a Mac.
 

@@ -69,8 +69,10 @@ preflight() {
     failed=1
   fi
   xcode_path="$(xcode-select -p 2>/dev/null || true)"
+  # Any app bundle is accepted, so Xcode-16.4.app and Xcode-beta.app pass. The
+  # Command Line Tools path ends in /CommandLineTools and does not.
   case "$xcode_path" in
-    *Xcode.app/Contents/Developer) ;;
+    *.app/Contents/Developer) ;;
     *)
       log "Full Xcode is not selected. Install Xcode from the App Store, then select it with xcode-select."
       failed=1
