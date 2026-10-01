@@ -779,7 +779,7 @@ brain:
 tts:
   url: "https://api.x.ai/v1/tts"
   api_key: "${XAI_API_KEY}"
-  voice_id: "eve"
+  voice_id: "leo"
   language: "en"
 
   # This is the format of the reply audio that goes into the speaker FIFO,

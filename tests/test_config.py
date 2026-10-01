@@ -620,6 +620,16 @@ def test_tts_config_defaults_cache_dir_and_precache_when_absent():
     assert tts.precache == ()
 
 
+def test_the_default_tts_voice_is_leo():
+    """261001-mp8 D-01: the shipped xAI voice is "leo". An operator's own
+    voice_id still wins."""
+    from atlas.config import TtsConfig
+
+    assert TtsConfig().voice_id == "leo"
+    assert TtsConfig.from_config({}).voice_id == "leo"
+    assert TtsConfig.from_config({"voice_id": "eve"}).voice_id == "eve"
+
+
 # --- 260923-pyj (D2, D6): tts.codec/tts.sample_rate validation and coercion ---
 
 
@@ -773,6 +783,7 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # reports 0 already covers structurally; this proves the loader itself
     # agrees by not raising on the shipped file.
     assert not hasattr(config, "macros")
+    assert config.tts.voice_id == "leo"
     assert config.tts.cache_dir == "/data/tts-cache"
     assert config.tts.precache == (
         "ok",

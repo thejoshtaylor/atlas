@@ -456,7 +456,7 @@ class TtsConfig:
 
     url: str = "https://api.x.ai/v1/tts"
     api_key: str = ""
-    voice_id: str = "eve"
+    voice_id: str = "leo"
     language: str = "en"
     codec: str = "alaw"
     sample_rate: int = 8000
