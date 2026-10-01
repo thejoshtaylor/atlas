@@ -421,3 +421,73 @@ def test_the_mismatch_helper_only_fires_for_a_follow_up_in_enforce_mode_with_a_d
     assert check(incoming=None) is False
     assert check(context=_asked_context(None)) is False
     assert follow_up_speaker_mismatch(None, incoming=incoming, speaker_event={}, effective_mode="enforce") is False
+
+
+# --- Phase 13 (13-04 D-12): an answer window on the serial edge path ----------
+
+
+async def _run_answer_window(
+    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts, *, asked_by, mode
+):
+    from atlas.providers.base import BrainReply, FinalTranscript
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    incoming = FollowUpRequest(
+        kind="answer",
+        chain_depth=1,
+        original_transcript="what is the weather",
+        question="It is sunny.",
+        asked_by_speaker=asked_by,
+    )
+    source.follow_up = FollowUpChannel(incoming=incoming)
+    brain = fake_brain(replies=[BrainReply(text="Rain.")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+    await run_turn(
+        source,
+        fake_stt(events=[FinalTranscript(text="and tomorrow")]),
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=timings,
+        speaker_id=_enforce_context(_identified_match(), mode),
+    )
+    return brain, tts, timings
+
+
+async def test_enforce_mode_blocks_an_answer_window_answered_by_someone_else(
+    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    brain, tts, timings = await _run_answer_window(
+        tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts, asked_by="2", mode="enforce"
+    )
+
+    assert timings.turn_outcome == "follow_up_wrong_speaker"
+    assert tts.received_text == []
+    assert brain.call_count == 0
+
+
+async def test_enforce_mode_lets_the_asker_answer_an_answer_window(
+    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    brain, tts, timings = await _run_answer_window(
+        tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts, asked_by="1", mode="enforce"
+    )
+
+    assert timings.turn_outcome == "completed"
+    assert tts.received_text == ["Rain."]
+    assert brain.call_count == 1
+
+
+async def test_record_mode_never_restricts_an_answer_window_by_speaker(
+    tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts
+):
+    brain, tts, timings = await _run_answer_window(
+        tmp_path, fake_audio_source, fake_stt, fake_brain, fake_tts, asked_by="2", mode="record"
+    )
+
+    assert timings.turn_outcome == "completed"
+    assert tts.received_text == ["Rain."]

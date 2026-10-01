@@ -52,6 +52,12 @@ BOUND_S = 5.0
         "stop please",
         "hey atlas stop",
         "Atlas, stop the timer.",
+        "never mind",
+        "Never mind.",
+        "nevermind",
+        "be quiet",
+        "Atlas, never mind",
+        "hey atlas be quiet please",
     ],
 )
 def test_stop_commands_match(text):
@@ -99,6 +105,9 @@ def _announcements():
         "thanks for dinner",
         "what time is it",
         "stop stop stop stop stop stop stop",
+        "never mind the lights",
+        "be quiet in the kitchen",
+        "turn on the lights",
     ],
 )
 def test_other_speech_does_not_match(text):

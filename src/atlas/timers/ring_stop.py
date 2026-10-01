@@ -52,6 +52,9 @@ _STOP_PHRASES = tuple(
             tuple(phrase.split())
             for phrase in (
                 "shut up",
+                "never mind",
+                "nevermind",
+                "be quiet",
                 "thank you",
                 "stop it",
                 "stop that",
