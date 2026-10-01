@@ -2,7 +2,7 @@
 
 The ATLAS Mac app is a menu bar app. It pairs with your ATLAS server, keeps a live connection, and shows the state of that connection in the menu bar.
 
-The app does not yet do anything for the assistant. It does not move windows or run actions. Pairing, the connection, and the permissions it will need later are the only parts that work today.
+The app shows a panel with the live transcript and a ringing timer. It does not move windows or run actions. Pairing, the connection, the panel, and the permissions it will need later are the only parts that work today.
 
 This guide is a procedure. Every host in it is invented. Replace `atlas.example.com` with the host of your own server. Do not put a real hostname, token, or signing identity into this file or into a copy of it.
 
@@ -229,7 +229,63 @@ The first line of the menu shows the state.
 
 A version mismatch between the app and the server also reads as Offline. Run `desktop/scripts/install.sh` again after you update the repository.
 
-The menu has these items: Finish Setup… while a required step is open, Pair… when the Mac is not paired or revoked, Set Home Here when Location is allowed, Setup… when the required steps are done, and Quit ATLAS.
+The menu has these items: Stop Ringing while a timer rings, Finish Setup… while a required step is open, Pair… when the Mac is not paired or revoked, Set Home Here when Location is allowed, Setup… when the required steps are done, and Quit ATLAS. Stop Ringing is first, below the state line. See [Panel](#panel).
+
+## Panel
+
+The panel is a small window that shows what ATLAS hears and says. It also shows a ringing timer. The panel needs a paired Mac that is online.
+
+### What opens the panel
+
+Two things open the panel:
+
+- A wake that the server confirms. The server confirms a wake when the transcript starts with the wake phrase. A hit from the wake-word detector alone opens nothing.
+- A timer or an alarm that rings. No wake word is needed.
+
+A wake can come from any microphone in the house. The panel opens on every online Mac, not only on the Mac that is near the microphone.
+
+A source whose transcript is not checked for the wake phrase opens no panel. The browser listen pages open no panel.
+
+### Where it shows
+
+The panel shows in the top-right corner of the display that has the pointer. It shows over full-screen apps and on every Space. It never takes the keyboard focus. You can keep typing in the app that you use.
+
+### What it shows
+
+The panel shows these items:
+
+- The live transcript of what you say. The final transcript does not include the wake phrase.
+- The state line: Listening, Thinking, Speaking, or Done.
+- The spoken reply, as plain text.
+- A short fixed line when ATLAS did not catch the request.
+
+The panel shows all text as plain text. A link in a transcript is not a link.
+
+### When it hides
+
+The panel hides about 4 seconds after the reply audio ends. If ATLAS asks a question, the panel stays open for the follow-up window. Put the pointer on the panel to keep it open. Click Close to hide it at once. The panel also hides when the connection drops.
+
+### Who sees the transcript
+
+Every online Mac shows the transcript of every confirmed wake. This includes a Mac that other people use. This version has no switch for each Mac. Pair only Macs that you want to show these transcripts.
+
+### Timers and alarms
+
+When a timer or an alarm rings, the panel opens with a bell, the word Timer or Alarm, and the label. If the label is empty, the panel shows "Time is up" or "Alarm is ringing". A Mac that connects while a timer rings shows the ring at once.
+
+To stop the ring, use one of these ways:
+
+1. Click Stop in the panel. The first click works while another app is active. The button shows "Stopping…", then the panel shows "Stopped".
+2. Open the ATLAS menu and choose Stop Ringing. This item shows only while a timer rings. It works after you click Close, because Close hides the panel and does not stop the sound.
+3. Say "stop".
+
+All three ways stop the ring on every Mac. If the server does not answer in 3 seconds, the Stop button turns on again. Click it again.
+
+A ring takes over the panel while a turn is open. The turn comes back when the ring stops.
+
+### Accessibility
+
+VoiceOver reads an announcement when the panel opens, when a card shows, and when a timer rings. The ring announcement is "Timer ringing" or "Alarm ringing", then the label. Reduce Motion turns off the fades, the pulse on the state symbol, and the ripple on the ring graphic.
 
 ## Troubleshooting
 

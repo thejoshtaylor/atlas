@@ -23,6 +23,7 @@ _REQUIRED_HEADINGS = (
     "Signing identity",
     "Permissions",
     "Pairing",
+    "Panel",
     "Troubleshooting",
     "Uninstall",
 )
@@ -132,6 +133,17 @@ def _section(text: str, heading: str) -> str:
     rest = text[match.end() :]
     following = re.search(r"^##\s", rest, re.MULTILINE)
     return rest[: following.start()] if following else rest
+
+
+def test_panel_section_explains_privacy_and_the_ring_stop() -> None:
+    body = _section(_guide_text(), "Panel")
+    assert "Stop Ringing" in body
+    assert "every online Mac" in body
+
+
+def test_panel_section_comes_after_pairing() -> None:
+    headings = _headings(_guide_text())
+    assert headings.index("Panel") == headings.index("Pairing") + 1
 
 
 def test_troubleshooting_names_the_recovery_tools() -> None:
