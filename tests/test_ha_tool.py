@@ -14,7 +14,9 @@ import textwrap
 
 import httpx
 import pytest
+from mcp.client import Client
 from mcp.client.stdio import get_default_environment
+from mcp.server.mcpserver.exceptions import ToolError
 
 import atlas_mcp.ha as ha_module
 from atlas_mcp.ha import handle_call_service, handle_get_state
@@ -169,58 +171,61 @@ async def test_a_non_2xx_that_does_not_ask_for_responses_is_not_retried(status_c
     policy = Policy.from_config(None)
     scripted = _ScriptedHa([httpx.Response(status_code, **response_kwargs)])
     try:
-        result = await handle_call_service(
-            policy,
-            scripted.client,
-            "http://ha.invalid",
-            "test-token",
-            "light",
-            "turn_on",
-            "light.example_kitchen",
-        )
+        with pytest.raises(ToolError) as exc_info:
+            await handle_call_service(
+                policy,
+                scripted.client,
+                "http://ha.invalid",
+                "test-token",
+                "light",
+                "turn_on",
+                "light.example_kitchen",
+            )
     finally:
         await scripted.client.aclose()
 
     assert len(scripted.requests) == 1
-    assert set(result) == {"error"}
+    assert str(exc_info.value).startswith(f"home assistant returned {status_code}")
 
 
 async def test_error_result_carries_home_assistants_message():
     policy = Policy.from_config(None)
     scripted = _ScriptedHa([httpx.Response(400, json={"message": "Invalid JSON specified."})])
     try:
-        result = await handle_call_service(
-            policy,
-            scripted.client,
-            "http://ha.invalid",
-            "test-token",
-            "light",
-            "turn_on",
-            "light.example_kitchen",
-        )
+        with pytest.raises(ToolError) as exc_info:
+            await handle_call_service(
+                policy,
+                scripted.client,
+                "http://ha.invalid",
+                "test-token",
+                "light",
+                "turn_on",
+                "light.example_kitchen",
+            )
     finally:
         await scripted.client.aclose()
 
-    assert result == {"error": "home assistant returned 400: Invalid JSON specified."}
+    assert str(exc_info.value) == "home assistant returned 400: Invalid JSON specified."
 
 
 async def test_error_result_cuts_a_non_json_body_to_200_characters():
     policy = Policy.from_config(None)
     scripted = _ScriptedHa([httpx.Response(502, text="x" * 500)])
     try:
-        result = await handle_call_service(
-            policy,
-            scripted.client,
-            "http://ha.invalid",
-            "test-token",
-            "light",
-            "turn_on",
-            "light.example_kitchen",
-        )
+        with pytest.raises(ToolError) as exc_info:
+            await handle_call_service(
+                policy,
+                scripted.client,
+                "http://ha.invalid",
+                "test-token",
+                "light",
+                "turn_on",
+                "light.example_kitchen",
+            )
     finally:
         await scripted.client.aclose()
 
-    assert result == {"error": "home assistant returned 502: " + "x" * 200}
+    assert str(exc_info.value) == "home assistant returned 502: " + "x" * 200
 
 
 async def test_a_failed_retry_returns_the_second_error_and_does_not_retry_again():
@@ -232,20 +237,64 @@ async def test_a_failed_retry_returns_the_second_error_and_does_not_retry_again(
         ]
     )
     try:
-        result = await handle_call_service(
-            policy,
-            scripted.client,
-            "http://ha.invalid",
-            "test-token",
-            "todo",
-            "get_items",
-            "todo.shopping_list",
-        )
+        with pytest.raises(ToolError) as exc_info:
+            await handle_call_service(
+                policy,
+                scripted.client,
+                "http://ha.invalid",
+                "test-token",
+                "todo",
+                "get_items",
+                "todo.shopping_list",
+            )
     finally:
         await scripted.client.aclose()
 
     assert len(scripted.requests) == 2
-    assert result == {"error": "home assistant returned 500: boom"}
+    assert str(exc_info.value) == "home assistant returned 500: boom"
+
+
+@pytest.mark.parametrize(
+    "response,expected_text",
+    [
+        (
+            httpx.Response(400, json={"message": "Service not supported for this entity"}),
+            "Error executing tool ha_call_service: home assistant returned 400: "
+            "Service not supported for this entity",
+        ),
+        (
+            httpx.Response(500, text="500 Internal Server Error"),
+            "Error executing tool ha_call_service: home assistant returned 500: "
+            "500 Internal Server Error",
+        ),
+        (httpx.Response(200, json=[]), None),
+    ],
+    ids=["400", "500", "200-control"],
+)
+async def test_a_home_assistant_rejection_is_an_error_result_at_the_mcp_boundary(
+    monkeypatch, response, expected_text
+):
+    """Issue #8: every MCP caller sees `is_error` for a non-2xx answer."""
+    scripted = _ScriptedHa([response])
+    monkeypatch.setattr(ha_module, "_http_client", scripted.client)
+    monkeypatch.setattr(ha_module, "_base_url", "http://ha.invalid")
+    monkeypatch.setattr(ha_module, "_token", "test-token")
+    monkeypatch.setattr(ha_module, "_policy", Policy.from_config(None))
+    try:
+        async with Client(ha_module.mcp_server) as client:
+            result = await client.call_tool(
+                "ha_call_service",
+                {"domain": "light", "service": "turn_on", "entity_id": "light.example_kitchen"},
+            )
+    finally:
+        await scripted.client.aclose()
+
+    assert len(scripted.requests) == 1
+    if expected_text is None:
+        assert not result.is_error
+    else:
+        assert result.is_error
+        assert result.content[0].text == expected_text
 
 
 async def test_plain_success_posts_once_without_return_response(fake_ha):

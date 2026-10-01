@@ -250,6 +250,11 @@ async def handle_call_service(
     states and the service's own response. The flag is never sent on the
     first post, because Home Assistant rejects it on services that give no
     response.
+
+    A non-2xx answer raises `ToolError` (issue #8). Every MCP caller then
+    sees an error-shaped result: the local on/off path, the brain tool
+    rounds, macros and workflow steps. None of them can mistake a rejected
+    call for a success.
     """
     if transition is not None:
         if domain != "light":
@@ -278,15 +283,16 @@ async def handle_call_service(
             client, f"{url}?return_response", headers, service_data, domain=domain, service=service
         )
     if response.status_code // 100 != 2:
-        # A non-2xx response is surfaced as an error result, never an empty
-        # success -- the prior incident on this host hid itself exactly this
-        # way, because nothing recorded the failure (CMD-01). The message
-        # names Home Assistant's own reason, so the brain can tell what
-        # went wrong instead of only that something did.
+        # A non-2xx response raises, so the SDK sends an error-shaped result
+        # to every caller, never an empty success -- the prior incident on
+        # this host hid itself exactly this way, because nothing recorded the
+        # failure (CMD-01). The message names Home Assistant's own reason, so
+        # the caller can tell what went wrong instead of only that something
+        # did (issue #8).
         message = _ha_message(response)
         if message:
-            return {"error": f"home assistant returned {response.status_code}: {message}"}
-        return {"error": f"home assistant returned {response.status_code}"}
+            raise ToolError(f"home assistant returned {response.status_code}: {message}")
+        raise ToolError(f"home assistant returned {response.status_code}")
     body = response.json()
     if isinstance(body, dict) and "service_response" in body:
         return {"changed": body.get("changed_states", []), "response": body["service_response"]}
@@ -456,6 +462,10 @@ async def ha_call_service(
     'x'" with "Error executing tool" and CMD-08 -- a refused command
     gives a spoken reason naming which case applied -- would be false
     for exactly the cases this phase added.
+
+    A non-2xx Home Assistant answer is a `ToolError` raised by
+    `handle_call_service`. It is not a `Denied`, so it passes this wrapper
+    unchanged and reaches the SDK as an error-shaped result (issue #8).
     """
     assert _http_client is not None, "ha_call_service invoked before startup"
     try:

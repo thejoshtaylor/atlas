@@ -11,8 +11,12 @@ import json
 from types import SimpleNamespace
 from typing import Sequence
 
+import httpx
 import pytest
+from mcp.client import Client
+from mcp.server.mcpserver.exceptions import ToolError
 
+import atlas_mcp.ha as ha_module
 from atlas_mcp.ha import handle_call_service, handle_list_entities
 from atlas_mcp.safety import Denied, Policy
 
@@ -500,27 +504,27 @@ async def test_round_cap_after_a_home_assistant_refusal_does_not_read_back_a_non
     assert timings.turn_outcome == "round_cap"
 
 
-async def test_ha_non_2xx_prefix_matches_what_handle_call_service_returns():
+async def test_ha_non_2xx_prefix_matches_what_handle_call_service_raises():
     """Coupling guard: the controller cannot import `atlas_mcp.ha` (that
-    loads a policy), so it repeats the literal. This runs the real handler."""
-    import httpx
-
+    loads a policy), so it repeats the literal. This runs the real handler,
+    which raises `ToolError` for a non-2xx answer (issue #8)."""
     from atlas.turn.controller import _HA_NON_2XX_PREFIX
 
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="Internal Server Error")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
-        result = await handle_call_service(
-            Policy.from_config(None),
-            client,
-            "http://ha.invalid",
-            "test-token",
-            "media_player",
-            "media_play",
-            "media_player.example_spotify",
-        )
-    assert result["error"].startswith(_HA_NON_2XX_PREFIX)
+        with pytest.raises(ToolError) as exc_info:
+            await handle_call_service(
+                Policy.from_config(None),
+                client,
+                "http://ha.invalid",
+                "test-token",
+                "media_player",
+                "media_play",
+                "media_player.example_spotify",
+            )
+    assert str(exc_info.value).startswith(_HA_NON_2XX_PREFIX)
 
 
 async def test_empty_tool_call_free_reply_falls_back_to_a_spoken_reply(
@@ -2489,6 +2493,78 @@ async def test_a_denied_local_intent_speaks_cannot_do_that_one_and_never_reaches
     )
 
     assert brain.call_count == 0
+    assert source.sent_audio == [b"cant-bytes"]
+    assert tts.call_count == 0
+    assert timings.turn_outcome == "local_intent_failed"
+
+
+class _InProcessHaHost:
+    """Forwards `call_tool` to an open in-process MCP client, so the turn
+    sees the exact result shape the real SDK makes."""
+
+    def __init__(self, client) -> None:
+        self._client = client
+
+    async def call_tool(self, name: str, arguments: dict):
+        return await self._client.call_tool(name, arguments)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, json={"message": "Service not supported for this entity"}),
+        httpx.Response(500, text="500 Internal Server Error"),
+    ],
+    ids=["400", "500"],
+)
+async def test_a_local_intent_that_home_assistant_rejects_speaks_cannot_do_that_one(
+    monkeypatch, fake_audio_source, fake_stt, fake_brain, response
+):
+    """Issue #8: Home Assistant answered non-2xx, so Atlas must not say
+    "done". Runs the real in-process `atlas-ha` server over a fake hub."""
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    requests: list[httpx.Request] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return response
+
+    ha_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    monkeypatch.setattr(ha_module, "_http_client", ha_client)
+    monkeypatch.setattr(ha_module, "_base_url", "http://ha.invalid")
+    monkeypatch.setattr(ha_module, "_token", "test-token")
+    monkeypatch.setattr(ha_module, "_policy", Policy.from_config(None))
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    stt = fake_stt(events=[FinalTranscript(text="turn off the example fan")])
+    brain = fake_brain(replies=[])
+    tts = _CountingTts(chunks=[])
+    timings = TurnTimings()
+    try:
+        async with Client(ha_module.mcp_server) as client:
+            await run_turn(
+                source,
+                stt,
+                brain,
+                tts,
+                _InProcessHaHost(client),
+                tools_schema=[],
+                system_prompt="you control a home",
+                max_tool_rounds=3,
+                timings=timings,
+                state_fetch=_local_intent_state_fetch,
+                filler_cache=_LOCAL_INTENT_FILLER_CACHE,
+                local_intents=True,
+            )
+    finally:
+        await ha_client.aclose()
+
+    assert brain.call_count == 0
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/api/services/switch/turn_off"
     assert source.sent_audio == [b"cant-bytes"]
     assert tts.call_count == 0
     assert timings.turn_outcome == "local_intent_failed"
