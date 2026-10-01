@@ -52,6 +52,9 @@ _EXCLUDED_DIR_NAMES = {
     "dist",
     "build",
     ".vite",
+    # SwiftPM build output (desktop/): the scan walks the filesystem, not git.
+    ".build",
+    ".swiftpm",
     "models",
     "data",
     "sessions",

@@ -55,6 +55,14 @@ models/
 # recording (10-01-PLAN.md Task 2), before anything is captured.
 edge/spike/results/
 
+# Mac app (desktop/): SwiftPM build output. `desktop/build/` is covered by
+# the unanchored `build/` rule above.
+desktop/.build/
+desktop/.swiftpm/
+# The untracked file where desktop/scripts/install.sh remembers the chosen
+# signing identity (D-24: the identity never goes into git).
+desktop/.signing-identity
+
 # OS
 .DS_Store
 

@@ -28,6 +28,9 @@ build/
 .vite/
 *.tsbuildinfo
 
+# The Mac app is built on a Mac, never in the server image.
+desktop/
+
 # Real configuration and secrets. Only .env.example and
 # config/config.example.yaml belong in the image.
 .env

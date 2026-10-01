@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.atlas-assistant.desktop</string>
+    <key>CFBundleName</key>
+    <string>ATLAS</string>
+    <key>CFBundleDisplayName</key>
+    <string>ATLAS</string>
+    <key>CFBundleExecutable</key>
+    <string>AtlasDesktop</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>__BUILD_NUMBER__</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>org.atlas-assistant.desktop.pair</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>atlas</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ATLAS connects to your ATLAS server on your home network.</string>
+    <key>NSLocationUsageDescription</key>
+    <string>ATLAS uses a rough location to tell Home from Away in the menu bar. Your location stays on this Mac.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>ATLAS uses a rough location to tell Home from Away in the menu bar. Your location stays on this Mac.</string>
+</dict>
+</plist>
