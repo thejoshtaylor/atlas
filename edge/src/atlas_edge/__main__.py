@@ -243,6 +243,14 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
             turn_active[0] = False
         led.set_state(state)
 
+    def on_stop(fade_ms: int) -> None:
+        # Fade and cut the queued reply, then drop the LED estimate with it.
+        # The music mixer is left alone: the reply-active duck lifts by
+        # itself when the queue empties. This runs on the event loop thread;
+        # `stop_playback` holds the capture lock only briefly.
+        kept = capture.stop_playback(fade_ms)
+        playback.clear(kept)
+
     music = built["music"](config, duck_active)
     volume = built["volume"](config)
     if music is not None:
@@ -274,6 +282,7 @@ def build_service(config: EdgeConfig, factories: "Factories | None" = None) -> C
                 stop=stop,
                 on_led=on_led,
                 on_volume=volume.apply,
+                on_stop=on_stop,
             )
         finally:
             if music is not None:

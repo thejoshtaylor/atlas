@@ -28,6 +28,7 @@ from atlas_edge.protocol import (
     Led,
     Ping,
     ProtocolError,
+    Stop,
     Volume,
     parse_server_message,
     pong,
@@ -94,6 +95,19 @@ async def _notify_led(on_led: "Callable[[str], Awaitable[None] | None] | None", 
         logger.warning("led callback failed for state %r", state, exc_info=True)
 
 
+async def _notify_stop(on_stop: "Callable[[int], Awaitable[None] | None] | None", fade_ms: int) -> None:
+    """Hand `fade_ms` to `on_stop`. A bad stop callback never ends the
+    session, so this catches every error and logs it."""
+    if on_stop is None:
+        return
+    try:
+        outcome = on_stop(fade_ms)
+        if inspect.isawaitable(outcome):
+            await outcome
+    except Exception:
+        logger.warning("stop callback failed for fade_ms %r", fade_ms, exc_info=True)
+
+
 async def _answer_volume(
     on_volume: "Callable[[Volume], Awaitable[int]] | None", request: Volume
 ) -> str:
@@ -124,6 +138,7 @@ async def run_session(
     hello_timeout_s: float = 10.0,
     on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
     on_volume: "Callable[[Volume], Awaitable[int]] | None" = None,
+    on_stop: "Callable[[int], Awaitable[None] | None] | None" = None,
 ) -> None:
     """One authenticated connection to `/ws/edge`: waits for the server's
     hello, then runs two concurrent loops -- sending whatever
@@ -143,6 +158,9 @@ async def run_session(
     mixer reports. The session sends the level, or the error text, back as
     a `volume.result`. A message the Pi cannot parse is logged and dropped,
     and the session goes on.
+
+    `on_stop` receives the `fade_ms` of each `stop` message (barge-in). With
+    no `on_stop`, a stop is ignored.
     """
     validate_server_url(url, allow_plaintext)
     stop_event = stop if stop is not None else asyncio.Event()
@@ -159,6 +177,7 @@ async def run_session(
             stop_event=stop_event,
             on_led=on_led,
             on_volume=on_volume,
+            on_stop=on_stop,
         )
     finally:
         await _notify_led(on_led, LED_IDLE)
@@ -176,6 +195,7 @@ async def _run_connection(
     stop_event: asyncio.Event,
     on_led: "Callable[[str], Awaitable[None] | None] | None",
     on_volume: "Callable[[Volume], Awaitable[int]] | None",
+    on_stop: "Callable[[int], Awaitable[None] | None] | None",
 ) -> None:
     async with connect(url, additional_headers={"Authorization": f"Bearer {token}"}) as ws:
         hello_text = await asyncio.wait_for(ws.recv(), timeout=hello_timeout_s)
@@ -211,6 +231,8 @@ async def _run_connection(
                     await ws.send(pong(parsed.id, parsed.server_t_ms))
                 elif isinstance(parsed, Led):
                     await _notify_led(on_led, parsed.state)
+                elif isinstance(parsed, Stop):
+                    await _notify_stop(on_stop, parsed.fade_ms)
                 elif isinstance(parsed, Volume):
                     # Handled here, not in a separate task. The amixer
                     # timeout bounds the wait, and a separate task would be
@@ -296,6 +318,7 @@ async def run_forever(
     stop: "asyncio.Event | None" = None,
     on_led: "Callable[[str], Awaitable[None] | None] | None" = None,
     on_volume: "Callable[[Volume], Awaitable[int]] | None" = None,
+    on_stop: "Callable[[int], Awaitable[None] | None] | None" = None,
 ) -> None:
     """The Pi dials the server and owns the reconnect loop (D-02): one
     `session(...)` attempt after another, forever, until `stop` is set.
@@ -326,6 +349,8 @@ async def run_forever(
             session_kwargs["on_led"] = on_led
         if on_volume is not None:
             session_kwargs["on_volume"] = on_volume
+        if on_stop is not None:
+            session_kwargs["on_stop"] = on_stop
         try:
             await session(
                 config.server_url,

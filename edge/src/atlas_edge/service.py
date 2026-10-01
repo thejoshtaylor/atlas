@@ -37,6 +37,7 @@ async def run_service(
     stop: "asyncio.Event | None" = None,
     on_led: "Callable[[str], Any] | None" = None,
     on_volume: "Callable[[Any], Any] | None" = None,
+    on_stop: "Callable[[int], Any] | None" = None,
 ) -> None:
     """Opens `capture` once, then hands `runner` (`run_forever` in
     production) a `make_outbound(hello)` closure that builds a fresh
@@ -55,6 +56,8 @@ async def run_service(
             runner_kwargs["on_led"] = on_led
         if on_volume is not None:
             runner_kwargs["on_volume"] = on_volume
+        if on_stop is not None:
+            runner_kwargs["on_stop"] = on_stop
         await runner(
             config,
             make_outbound=make_outbound,

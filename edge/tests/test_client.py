@@ -414,3 +414,130 @@ async def test_run_forever_forwards_on_led_to_every_session():
     )
 
     assert seen == [on_led, on_led]
+
+
+@pytest.mark.asyncio
+async def test_run_session_hands_a_stop_frame_to_on_stop_once():
+    ws = _FakeWebsocket(_LED_HELLO, incoming=[json.dumps({"type": "stop", "fade_ms": 120})])
+    fades: list[int] = []
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+        on_stop=fades.append,
+    )
+
+    assert fades == [120]
+
+
+@pytest.mark.asyncio
+async def test_an_on_stop_that_raises_does_not_end_the_session():
+    ws = _FakeWebsocket(
+        _LED_HELLO,
+        incoming=[
+            json.dumps({"type": "stop", "fade_ms": 120}),
+            json.dumps({"type": "ping", "id": 5, "server_t_ms": 99}),
+        ],
+    )
+
+    def bad_on_stop(fade_ms: int) -> None:
+        raise RuntimeError("queue on fire")
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+        on_stop=bad_on_stop,
+    )
+
+    assert any(json.loads(item).get("type") == "pong" for item in ws.sent if isinstance(item, str))
+
+
+@pytest.mark.asyncio
+async def test_a_stop_frame_with_no_on_stop_is_ignored_and_the_session_goes_on():
+    ws = _FakeWebsocket(
+        _LED_HELLO,
+        incoming=[
+            json.dumps({"type": "stop", "fade_ms": 120}),
+            json.dumps({"type": "ping", "id": 6, "server_t_ms": 99}),
+        ],
+    )
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+    )
+
+    assert any(json.loads(item).get("type") == "pong" for item in ws.sent if isinstance(item, str))
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_stop_frame_is_dropped_and_the_session_goes_on():
+    ws = _FakeWebsocket(
+        _LED_HELLO,
+        incoming=[
+            json.dumps({"type": "stop", "fade_ms": True}),
+            json.dumps({"type": "ping", "id": 7, "server_t_ms": 99}),
+        ],
+    )
+    fades: list[int] = []
+
+    await run_session(
+        "wss://svr.test/ws/edge",
+        "tok1234",
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        connect=_connect_factory(ws),
+        on_stop=fades.append,
+    )
+
+    assert fades == []
+    assert any(json.loads(item).get("type") == "pong" for item in ws.sent if isinstance(item, str))
+
+
+@pytest.mark.asyncio
+async def test_run_forever_forwards_on_stop_to_every_session_only_when_given():
+    seen: list = []
+    stop = asyncio.Event()
+    on_stop = lambda fade_ms: None  # noqa: E731
+
+    async def session(url, token, *, on_stop=None, **kwargs):  # noqa: ARG001
+        seen.append(on_stop)
+        if len(seen) == 2:
+            stop.set()
+
+    async def bare_session(url, token, **kwargs):
+        assert "on_stop" not in kwargs
+        stop.set()
+
+    async def no_sleep(_seconds):
+        return
+
+    await run_forever(
+        _FakeConfig(),
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        session=session,
+        sleep=no_sleep,
+        stop=stop,
+        on_stop=on_stop,
+    )
+    assert seen == [on_stop, on_stop]
+
+    stop.clear()
+    await run_forever(
+        _FakeConfig(),
+        make_outbound=_no_outbound,
+        on_reply_audio=lambda data: None,
+        session=bare_session,
+        sleep=no_sleep,
+        stop=stop,
+    )

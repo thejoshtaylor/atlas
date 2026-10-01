@@ -42,6 +42,11 @@ class FakeCapture:
         self.started = False
         self.stopped = False
         self.enqueued: "list[bytes]" = []
+        self.stops: "list[int]" = []
+
+    def stop_playback(self, fade_ms: int) -> int:
+        self.stops.append(fade_ms)
+        return 42
 
     def enqueue_playback(self, data: bytes) -> None:
         self.enqueued.append(data)
@@ -61,6 +66,10 @@ class FakePlayback:
     def __init__(self, enqueue) -> None:
         self.enqueue = enqueue
         self.written: "list[bytes]" = []
+        self.cleared: "list[int]" = []
+
+    def clear(self, keep_bytes: int = 0) -> None:
+        self.cleared.append(keep_bytes)
 
     async def write(self, data: bytes) -> None:
         self.written.append(data)
@@ -103,7 +112,7 @@ class FakeLed:
         self.closed = True
 
 
-async def _fake_runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None):
+async def _fake_runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
     await stop.wait()
 
 
@@ -298,7 +307,7 @@ async def test_latency_ticker_yields_only_non_none_drains() -> None:
 async def test_the_service_turns_the_ring_off_first_feeds_led_states_and_closes_the_led() -> None:
     led = FakeLed()
 
-    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None):
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
         on_led("listening")
 
     service_runner = build_service(
@@ -312,10 +321,38 @@ async def test_the_service_turns_the_ring_off_first_feeds_led_states_and_closes_
 
 
 @pytest.mark.asyncio
+async def test_on_stop_fades_the_capture_queue_clears_the_playback_and_leaves_the_music() -> None:
+    capture = FakeCapture()
+    playback = FakePlayback(capture.enqueue_playback)
+    music = FakeMusic(lambda: False)
+    captured: dict = {}
+
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
+        captured["on_stop"] = on_stop
+        on_stop(120)
+
+    service_runner = build_service(
+        object(),
+        _fake_factories(
+            capture=lambda config: capture,
+            playback=lambda config, cap: playback,
+            music=lambda config, duck_active: music,
+            runner=runner,
+        ),
+    )
+    await service_runner(stop=None)
+
+    assert captured["on_stop"] is not None
+    assert capture.stops == [120]
+    assert playback.cleared == [42]
+    assert music.events == ["start", "stop"]  # only the service lifecycle, no stop call
+
+
+@pytest.mark.asyncio
 async def test_the_led_closes_when_the_runner_raises() -> None:
     led = FakeLed()
 
-    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None):
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
         raise RuntimeError("runner failed")
 
     service_runner = build_service(
@@ -357,7 +394,7 @@ async def test_music_is_wired_started_and_stopped_and_ducks_on_turn_state() -> N
         box["music"] = FakeMusic(duck_active)
         return box["music"]
 
-    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None):
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
         music = box["music"]
         seen["started"] = list(music.events)
         seen["initial"] = music.duck_active()
@@ -400,7 +437,7 @@ async def test_music_is_stopped_when_the_runner_raises() -> None:
         box["music"] = FakeMusic(duck_active)
         return box["music"]
 
-    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None):
+    async def runner(config, *, make_outbound, on_reply_audio, on_live_frame_sent, stop, on_led=None, on_volume=None, on_stop=None):
         raise RuntimeError("runner failed")
 
     service_runner = build_service(object(), _fake_factories(music=music_factory, runner=runner))
