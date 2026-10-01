@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, replace
@@ -107,6 +108,7 @@ from atlas.routes.follow_up_settings import FOLLOW_UP_WINDOW_SETTING_KEY
 from atlas.routes.wake import WAKE_THRESHOLD_SETTING_KEY
 from atlas.routes.wizard import resolve_audio_source, resolve_timezone
 from atlas.session.observers import ObserverPublishingSource, ObserverRegistry
+from atlas.session.quiet_feed import QuietStartPublisher
 from atlas.session.recorder import SessionRecorder
 from atlas.session.retention import RetentionScheduler
 from atlas.sources.runner import SourceRunner
@@ -131,6 +133,7 @@ from atlas.timers.intents import handle as handle_timer_intent
 from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
+from atlas.turn.answer_window import ANSWER_WINDOW_SILENT
 from atlas.turn.controller import _speak, run_turn
 from atlas.wake.base import WakeDetector, WakeError
 from atlas.wake.vosk_engine import VoskWakeDetector
@@ -1052,15 +1055,23 @@ def _make_run_turn_for_source(
         # Contract) would point at an id `routes/sessions.py` can never
         # resolve. `session_recorder` is already constructed above, so its
         # real directory name costs nothing extra to read here.
-        app.state.observer_registry.publish(
-            {
-                "type": "turn.started",
-                "source": source_name,
-                "turn_id": timings.turn_id,
-                "session_id": session_recorder.directory.name,
-            }
-        )
-        source = ObserverPublishingSource(source, source_name, app.state.observer_registry)
+        started_event = {
+            "type": "turn.started",
+            "source": source_name,
+            "turn_id": timings.turn_id,
+            "session_id": session_recorder.directory.name,
+        }
+        # Phase 13: a no-wake-word answer window opens after every edge
+        # answer and most hear nothing. Its `turn.started` waits for the first
+        # speech, so a silent window leaves no card on the live page.
+        incoming = getattr(getattr(source, "follow_up", None), "incoming", None)
+        answer_window = incoming is not None and getattr(incoming, "kind", None) == "answer"
+        feed: Any = app.state.observer_registry
+        if answer_window:
+            feed = QuietStartPublisher(feed, started_event)
+        else:
+            feed.publish(started_event)
+        source = ObserverPublishingSource(source, source_name, feed)
         # The ContextVar belongs to this turn's task (Phase 12 D-12). The
         # edge source has at most one connected device, which is the device
         # that heard this turn. Every other source sets None, so the tool
@@ -1119,6 +1130,11 @@ def _make_run_turn_for_source(
             timer_intents=getattr(app.state, "timer_intents", None),
             answer_windows=answer_windows,
         )
+        # A window that heard nothing leaves no session folder. Its recorder
+        # opens at window start because `run_turn` needs it, so the folder is
+        # removed here. A window that heard speech keeps its folder and card.
+        if answer_window and (timings.turn_outcome == ANSWER_WINDOW_SILENT or not feed.started):
+            await asyncio.to_thread(shutil.rmtree, session_recorder.directory, True)
 
     return _run
 
