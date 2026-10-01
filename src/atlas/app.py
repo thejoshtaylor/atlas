@@ -120,7 +120,7 @@ from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, Segment
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
-from atlas.timers.core import describe_timers
+from atlas.timers.core import clock_text, describe_timers
 from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
@@ -379,10 +379,11 @@ _STATE_UNAVAILABLE_LINE = (
     "state or act on a command that depends on it."
 )
 _SPEAK_TIMES_IN_ZONE_LINE = (
-    "Say every time in {zone}. When a tool result or a state below gives a "
+    "Times are local to {zone}. When a tool result or a state below gives a "
     "time in UTC or with a different offset or zone, change it to {zone} "
-    "before you say it. Use a different zone only when the user asks about "
-    "the time in a different place."
+    "before you say it. Do not say the zone's name. Use a different zone, "
+    "and say its name, only when the user asks about the time in a "
+    "different place."
 )
 _PENDING_RUNS_UNAVAILABLE_LINE = (
     "Scheduled runs: not available this turn. You cannot see which runs "
@@ -451,12 +452,16 @@ def _state_message(
     and the model would read them out as given. The line lives here and not
     in `_catalog_prompt` because it names the zone, and the zone is set per
     deployment. The cacheable prefix must stay free of it.
+
+    261001-04b: the time line uses `clock_text`'s 12-hour form, because the
+    model speaks a time in the form it reads. A 24-hour time here made it
+    say "0600". The zone line no longer tells the model to say the zone.
     """
     now = _current_moment()
     zone_name = _resolved_timezone_name()
     lines = [
         f"Current date: {now:%A, %B %d, %Y}",
-        f"Current time: {now:%H:%M} {zone_name}",
+        f"Current time: {clock_text(f'{now:%H:%M}')} {zone_name}",
         _SPEAK_TIMES_IN_ZONE_LINE.format(zone=zone_name),
     ]
     if states is None:

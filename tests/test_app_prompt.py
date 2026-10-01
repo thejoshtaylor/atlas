@@ -183,8 +183,8 @@ def test_state_message_carries_date_weekday_time_and_resolved_timezone(monkeypat
 
     assert "Friday" in message
     assert "September 18, 2026" in message
-    assert "14:30" in message
-    assert "America/Los_Angeles" in message
+    assert "Current time: 2:30 PM America/Los_Angeles" in message
+    assert "14:30" not in message
 
 
 def test_state_message_is_rebuilt_on_every_call_not_cached(monkeypatch):
@@ -201,8 +201,24 @@ def test_state_message_is_rebuilt_on_every_call_not_cached(monkeypatch):
     second = _state_message({})
 
     assert first != second
-    assert "09:30" in first
-    assert "09:31" in second
+    assert "9:30 AM" in first
+    assert "9:31 AM" in second
+    assert "09:30" not in first
+    assert "09:31" not in second
+
+
+def test_state_message_says_the_current_time_on_a_12_hour_clock(monkeypatch):
+    """261001-04b: the model speaks a time in the form it reads, so the
+    time line must never show a 24-hour time."""
+    zone = ZoneInfo("America/Los_Angeles")
+    fixed = _real_datetime(2026, 9, 18, 23, 57, tzinfo=zone)
+    monkeypatch.setattr(app_module, "datetime", _FixedNowDatetime([fixed]))
+    monkeypatch.setattr(app_module, "_resolved_timezone", zone)
+
+    message = _state_message({})
+
+    assert "Current time: 11:57 PM America/Los_Angeles" in message
+    assert "23:57" not in message
 
 
 def test_state_message_falls_back_to_the_process_zone_when_unconfigured(monkeypatch):
@@ -216,18 +232,23 @@ def test_state_message_falls_back_to_the_process_zone_when_unconfigured(monkeypa
 
     assert "Current date:" in message
     assert "Current time:" in message
-    assert "Say every time in " in message
+    assert "Times are local to " in message
 
 
-def test_state_message_tells_the_model_to_say_every_time_in_the_zone(monkeypatch):
+def test_state_message_tells_the_model_to_convert_times_to_the_zone_without_naming_it(monkeypatch):
     """260928-lv9: the line names the zone twice, once for the rule and
-    once for the conversion clause."""
+    once for the conversion clause.
+
+    261001-04b: the line now tells the model not to say the zone's name.
+    """
     monkeypatch.setattr(app_module, "_resolved_timezone", ZoneInfo("Europe/Berlin"))
 
     message = _state_message({})
 
-    assert "Say every time in Europe/Berlin." in message
+    assert "Times are local to Europe/Berlin." in message
     assert "change it to Europe/Berlin before you say it" in message
+    assert "Do not say the zone's name." in message
+    assert "Say every time in" not in message
 
 
 def test_zone_line_sits_between_the_time_line_and_the_state_block(monkeypatch):
@@ -236,14 +257,14 @@ def test_zone_line_sits_between_the_time_line_and_the_state_block(monkeypatch):
     message = _state_message({})
     assert (
         message.index("Current time:")
-        < message.index("Say every time in")
+        < message.index("Times are local to")
         < message.index("Current state:")
     )
 
     unavailable = _state_message(None)
     assert (
         unavailable.index("Current time:")
-        < unavailable.index("Say every time in")
+        < unavailable.index("Times are local to")
         < unavailable.index("Current state: not available")
     )
 
