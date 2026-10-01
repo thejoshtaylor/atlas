@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from atlas.config import SttConfig
-from atlas.providers.base import FinalTranscript, SttError
+from atlas.providers.base import FinalTranscript, PartialTranscript, SttError
 from atlas.providers.registry import STT_REGISTRY
 from atlas.providers.stt_faster_whisper import FasterWhisperStt
 from atlas.providers.stt_xai import FINALIZE_MESSAGE, XaiStt
@@ -136,6 +136,68 @@ async def test_xai_sends_finalize_once_when_the_event_is_set(monkeypatch):
     assert events == [FinalTranscript(text="turn off the fan")]
     finalize_sends = [item for item in fake_ws.sent if item == json.dumps(FINALIZE_MESSAGE)]
     assert len(finalize_sends) == 1
+
+
+_WAKE_SOCKET_EVENTS = [
+    {"type": "transcript.partial", "speech_final": True, "text": "Hey Atlas."},
+    {"type": "transcript.partial", "speech_final": False, "text": "turn on the"},
+    {"type": "transcript.partial", "speech_final": True, "text": "turn on the lights"},
+    {"type": "transcript.partial", "speech_final": True, "text": "never read"},
+]
+
+
+async def _collect(stt, **kwargs):
+    events = []
+    async for event in stt.stream(_NeverEndingFrames()(), SourceFormat("pcm", 16000), **kwargs):
+        events.append(event)
+    return events
+
+
+async def test_xai_hold_final_keeps_reading_after_a_held_final(monkeypatch):
+    fake_ws = _FakeXaiWebsocket(_WAKE_SOCKET_EVENTS)
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", lambda *args, **kwargs: fake_ws)
+
+    events = await asyncio.wait_for(
+        _collect(XaiStt(_stt_cfg()), hold_final=lambda text: text == "Hey Atlas."), timeout=1.0
+    )
+
+    assert events == [
+        FinalTranscript(text="Hey Atlas."),
+        PartialTranscript(text="turn on the"),
+        FinalTranscript(text="turn on the lights"),
+    ]
+
+
+async def test_xai_without_hold_final_stops_at_the_first_final(monkeypatch):
+    fake_ws = _FakeXaiWebsocket(_WAKE_SOCKET_EVENTS)
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", lambda *args, **kwargs: fake_ws)
+
+    events = await asyncio.wait_for(_collect(XaiStt(_stt_cfg())), timeout=1.0)
+
+    assert events == [FinalTranscript(text="Hey Atlas.")]
+
+
+async def test_xai_held_final_then_done_yields_an_empty_final(monkeypatch):
+    fake_ws = _FakeXaiWebsocket(
+        [
+            {"type": "transcript.partial", "speech_final": True, "text": "Hey Atlas."},
+            {"type": "transcript.done", "text": ""},
+        ]
+    )
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", lambda *args, **kwargs: fake_ws)
+
+    events = await asyncio.wait_for(_collect(XaiStt(_stt_cfg()), hold_final=lambda text: True), timeout=1.0)
+
+    assert events == [FinalTranscript(text="Hey Atlas."), FinalTranscript(text="")]
+
+
+def test_hold_final_is_a_keyword_only_xai_parameter(tmp_path):
+    param = inspect.signature(XaiStt(_stt_cfg()).stream).parameters["hold_final"]
+    assert param.kind == inspect.Parameter.KEYWORD_ONLY
+    assert param.default is None
+
+    whisper = FasterWhisperStt(_stt_config(tmp_path), load_model=lambda config: _FakeWhisperModel())
+    assert "hold_final" not in inspect.signature(whisper.stream).parameters
 
 
 async def test_xai_without_finalize_is_unchanged(monkeypatch):

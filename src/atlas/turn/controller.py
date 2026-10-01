@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import re
@@ -151,7 +152,7 @@ from atlas.turn.answer_window import (
     wake_addressed_command,
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
-from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
+from atlas.turn.wake_echo import WakeHold, is_wake_only, is_wake_without_command, strip_wake_phrase
 
 logger = logging.getLogger("atlas.turn.controller")
 
@@ -838,6 +839,13 @@ async def run_turn(
         if incoming is not None and follow_up is not None:
             if follow_up.window_opens_at is not None and follow_up.window_s is not None:
                 onset_deadline = follow_up.window_opens_at + follow_up.window_s
+        # 261001-glr: a provider that can hold a final keeps one socket
+        # across the wake phrase and the command after it.
+        wake_hold = (
+            WakeHold(wake_phrase, verify=verify_wake)
+            if incoming is None and wake_phrase and _holds_wake_finals(stt)
+            else None
+        )
         final = await _drain_to_final_transcript(
             source,
             stt,
@@ -846,6 +854,7 @@ async def run_turn(
             clock=clock,
             poll_interval_s=poll_interval_s,
             onset_deadline=onset_deadline,
+            hold_final=wake_hold,
             speech_signals=speech_signals,
             # 10-05-PLAN.md: an ordinary wake turn (`incoming is None`)
             # whose segment already ended before speech-to-text even opened
@@ -871,7 +880,7 @@ async def run_turn(
 
         # 260929-icf: a wake hit starts this turn only when `incoming is None`
         # and `wake_phrase` is given. Remove the phrase from the transcript.
-        heard_text = final_text
+        heard_text = wake_hold.heard_text(final_text) if wake_hold is not None else final_text
         wake_unverified = False
         if incoming is None and wake_phrase:
             command = strip_wake_phrase(heard_text, wake_phrase)
@@ -884,10 +893,12 @@ async def run_turn(
         if (
             incoming is None
             and wake_phrase
-            and heard_text
-            and not wake_unverified
-            and (not final_text or is_wake_only(final_text, wake_phrase))
+            and wake_hold is None
+            and is_wake_without_command(heard_text, wake_phrase, verify=verify_wake)
         ):
+            # 261001-glr: this second drain now runs only for providers that
+            # cannot hold a final. With `wake_hold`, a result that is still
+            # only the wake phrase falls through to VOICE-08 below.
             # 260922-woc: the operator paused after the wake phrase, and
             # `stt.endpointing_ms` ended the utterance there -- the command
             # is still coming. Drain again, once (no loop): a second
@@ -2222,6 +2233,15 @@ async def _read_prefetched(
         return _UNAVAILABLE
 
 
+def _holds_wake_finals(stt: Any) -> bool:
+    # faster-whisper transcribes once per stream and test doubles do not take
+    # the keyword, so they keep the 260922-woc second drain.
+    try:
+        return "hold_final" in inspect.signature(stt.stream).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 async def _drain_to_final_transcript(
     source: _AudioSource,
     stt: _SttProvider,
@@ -2235,8 +2255,15 @@ async def _drain_to_final_transcript(
     finalize_if_already_ended: bool = False,
     wake_phrase: str | None = None,
     split_event: "asyncio.Event | None" = None,
+    hold_final: "Callable[[str], bool] | None" = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
+
+    `hold_final` (261001-glr), when given, is passed to `stt.stream` so the
+    provider can keep its socket open after a final that is only the wake
+    phrase. A held final is an ordinary non-last event here: it is forwarded
+    as `transcript.partial` and the loop keeps reading. `None` (the default)
+    passes no keyword, so doubles that do not take it are unchanged.
 
     `speech_signals` (10-05-PLAN.md, D-09 through D-13), when not `None`,
     is the edge source's own `SpeechSignals` -- `run_turn` reads it off the
@@ -2332,6 +2359,7 @@ async def _drain_to_final_transcript(
     # speech-to-text has heard a word, xAI's own endpointing (D-13) and
     # the next `vad.end` stay in charge.
     heard_speech = asyncio.Event()
+    stream_kwargs: dict[str, Any] = {}
     if speech_signals is not None:
         finalize_event = asyncio.Event()
 
@@ -2394,9 +2422,10 @@ async def _drain_to_final_transcript(
 
             split_watch_task = asyncio.create_task(_watch_split())
 
-        stream = stt.stream(frames, fmt, finalize=finalize_event)
-    else:
-        stream = stt.stream(frames, fmt)
+        stream_kwargs["finalize"] = finalize_event
+    if hold_final is not None:
+        stream_kwargs["hold_final"] = hold_final
+    stream = stt.stream(frames, fmt, **stream_kwargs)
 
     async def _stop_watch() -> None:
         # Cancelled and awaited on every return path below, so a watch

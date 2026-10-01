@@ -11,11 +11,14 @@ second fake reimplementing it.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from typing import AsyncIterator
 
+from atlas.config import SttConfig
 from atlas.providers.base import BrainReply, FinalTranscript, PartialTranscript
+from atlas.providers.stt_xai import FINALIZE_MESSAGE, XaiStt
 from atlas.session.recorder import _serialize_timings
 from atlas.transports.base import SourceFormat
 from atlas.transports.edge import SpeechSignals
@@ -581,3 +584,207 @@ async def test_word_after_vad_end_finalizes_without_another_segment(fake_brain, 
 
     assert tts.received_text == ["noon"]
     assert timings.vad_end_at is not None
+
+
+# ---------------------------------------------------------------------------
+# 261001-glr: one xAI socket for the wake phrase and the command
+# ---------------------------------------------------------------------------
+
+
+def _xai_cfg() -> SttConfig:
+    return SttConfig(
+        url="wss://api.x.ai/v1/stt",
+        api_key="test-key",
+        endpointing_ms=200,
+        smart_turn=0.7,
+        smart_turn_timeout_ms=1200,
+        vad_threshold=0.08,
+        interim_results=True,
+        language="en",
+    )
+
+
+def _partial(text: str, *, final: bool) -> dict:
+    return {"type": "transcript.partial", "speech_final": final, "text": text}
+
+
+class _ScriptedXaiSocket:
+    """A fake xAI socket that walks a step list, then stays silent.
+
+    A step is an event dict to send, an `asyncio.Event` to wait on, or
+    `("finalize", n)` to wait until the n-th FINALIZE message has arrived.
+    """
+
+    def __init__(self, steps) -> None:
+        self._steps = list(steps)
+        self.sent: list = []
+        self.finalize_count = 0
+        self._finalize_seen: "dict[int, asyncio.Event]" = {}
+
+    def _finalize_event(self, n: int) -> asyncio.Event:
+        return self._finalize_seen.setdefault(n, asyncio.Event())
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def recv(self):
+        return json.dumps({"type": "transcript.created"})
+
+    async def send(self, data):
+        self.sent.append(data)
+        if data == json.dumps(FINALIZE_MESSAGE):
+            self.finalize_count += 1
+            self._finalize_event(self.finalize_count).set()
+
+    async def __aiter__(self):
+        for step in self._steps:
+            if isinstance(step, dict):
+                yield json.dumps(step)
+            elif isinstance(step, asyncio.Event):
+                await step.wait()
+            else:
+                await self._finalize_event(step[1]).wait()
+        await asyncio.Event().wait()
+
+
+class _EventCapturingSource(_SpeechSignalsSource):
+    """`_SpeechSignalsSource` plus `send_event`; `speech_signals` is removed
+    for the camera-like variant."""
+
+    def __init__(self, speech_signals: "SpeechSignals | None") -> None:
+        super().__init__(speech_signals)
+        if speech_signals is None:
+            del self.speech_signals
+        self.events: list[dict] = []
+
+    async def send_event(self, event: dict) -> None:
+        self.events.append(event)
+
+    def final_text(self) -> str:
+        return [e["text"] for e in self.events if e["type"] == "transcript.final"][0]
+
+
+def _patch_connect(monkeypatch, socket: _ScriptedXaiSocket) -> "list[int]":
+    connects: list[int] = []
+
+    def _connect(*args, **kwargs):
+        connects.append(1)
+        return socket
+
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", _connect)
+    return connects
+
+
+async def _run_wake_turn(source, stt, brain, tts, timings, *, timeout_s: float = 3.0, **kwargs):
+    from atlas.turn.controller import run_turn
+
+    await asyncio.wait_for(
+        run_turn(
+            source,
+            stt,
+            brain,
+            tts,
+            None,
+            tools_schema=[],
+            system_prompt="you control a home",
+            max_tool_rounds=3,
+            timings=timings,
+            wake_phrase="hey atlas",
+            verify_wake=True,
+            **kwargs,
+        ),
+        timeout=timeout_s,
+    )
+
+
+async def test_xai_wake_final_is_held_and_the_command_is_read_on_one_socket(monkeypatch, fake_brain, fake_tts):
+    from atlas.timing import TurnTimings
+
+    socket = _ScriptedXaiSocket(
+        [
+            _partial("Hey", final=False),
+            _partial("Hey Atlas.", final=True),
+            _partial("turn on the", final=False),
+            _partial("turn on the lights", final=True),
+        ]
+    )
+    connects = _patch_connect(monkeypatch, socket)
+    source = _EventCapturingSource(None)
+    brain = fake_brain(replies=[BrainReply(text="done")])
+    timings = TurnTimings()
+
+    await _run_wake_turn(source, XaiStt(_xai_cfg()), brain, fake_tts(chunks=[b"\x01\x02"]), timings)
+
+    assert len(connects) == 1
+    assert source.final_text() == "turn on the lights"
+    assert timings.turn_outcome == "completed"
+
+
+async def test_edge_turn_finalizes_the_command_on_the_same_socket(monkeypatch, fake_brain, fake_tts):
+    from atlas.timing import TurnTimings
+
+    signals = SpeechSignals(hangover_s=0.0)
+    signals.publish({"type": "vad.start", "seq": 1})
+    signals.publish({"type": "vad.end", "seq": 1})
+    command_started = asyncio.Event()
+    socket = _ScriptedXaiSocket(
+        [
+            _partial("Hey Atlas.", final=True),
+            command_started,
+            _partial("turn on the lights", final=False),
+            ("finalize", 1),
+            _partial("turn on the lights", final=True),
+        ]
+    )
+    connects = _patch_connect(monkeypatch, socket)
+    source = _EventCapturingSource(signals)
+    brain = fake_brain(replies=[BrainReply(text="done")])
+    timings = TurnTimings()
+
+    async def _command_segment() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        command_started.set()
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+
+    asyncio.ensure_future(_command_segment())
+    await _run_wake_turn(source, XaiStt(_xai_cfg()), brain, fake_tts(chunks=[b"\x01\x02"]), timings)
+
+    assert len(connects) == 1
+    assert socket.finalize_count == 1
+    assert source.final_text() == "turn on the lights"
+    assert timings.vad_end_at is not None
+
+
+async def test_held_wake_final_with_nothing_after_it_times_out(monkeypatch, fake_brain, fake_tts):
+    from atlas.timing import TurnTimings
+
+    socket = _ScriptedXaiSocket([_partial("Hey Atlas.", final=True)])
+    connects = _patch_connect(monkeypatch, socket)
+    source = _EventCapturingSource(None)
+    brain = fake_brain(replies=[])
+    timings = TurnTimings()
+    fake_now = [0.0]
+
+    def clock() -> float:
+        fake_now[0] += 5.0
+        return fake_now[0]
+
+    await _run_wake_turn(
+        source,
+        XaiStt(_xai_cfg()),
+        brain,
+        fake_tts(chunks=[b"\x01\x02"]),
+        timings,
+        max_utterance_s=15,
+        clock=clock,
+        poll_interval_s=0.01,
+    )
+
+    assert timings.turn_outcome == "timeout"
+    assert len(connects) == 1
+    assert brain.call_count == 0

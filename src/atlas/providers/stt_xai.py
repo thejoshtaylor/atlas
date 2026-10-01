@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 from urllib.parse import urlencode
 
 import websockets
@@ -104,6 +104,7 @@ class XaiStt:
         source_format: SourceFormat,
         *,
         finalize: "asyncio.Event | None" = None,
+        hold_final: "Callable[[str], bool] | None" = None,
     ) -> AsyncIterator[PartialTranscript | FinalTranscript]:
         """Open the socket, stream `frames`, and yield transcript events.
 
@@ -117,6 +118,15 @@ class XaiStt:
         `speech_final`) keeps running exactly as it does today -- whichever
         of the two fires first ends the turn (D-13), so a lost VAD event on
         the caller's side never hangs this stream.
+
+        `hold_final`, when given, is asked about the text of each
+        `speech_final`. When it returns True, the final is still yielded as
+        a `FinalTranscript`, but the socket stays open and keeps reading.
+        The caller uses this to keep one session across a wake phrase and
+        the command after it. One socket works because xAI keeps the session
+        open after `speech_final` and after `finalize`, and the next final
+        carries only the speech since the previous one (docs.x.ai
+        speech-to-text, checked 2026-10-01, not yet live-verified).
         """
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
         # MEASURED LIVE, 2026-09-28: xAI never acknowledges the client's
@@ -168,8 +178,12 @@ class XaiStt:
                         #   partial is_final=True  speech_final=True   FINAL
                         #   done                                       text=""
                         if event.get("speech_final"):
+                            text = event.get("text", "")
+                            if hold_final is not None and hold_final(text):
+                                yield FinalTranscript(text=text)
+                                continue
                             saw_final = True
-                            yield FinalTranscript(text=event.get("text", ""))
+                            yield FinalTranscript(text=text)
                             break
                         yield PartialTranscript(text=event.get("text", ""))
                     elif event_type == "transcript.done":

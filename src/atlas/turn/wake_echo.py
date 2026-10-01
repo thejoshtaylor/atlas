@@ -42,12 +42,17 @@ corpus of camera turns says otherwise.
 
 `strip_wake_phrase` (260929-icf) is the second function: it checks that a
 transcript opens with the wake phrase and returns the text after it.
+
+`is_wake_without_command` and `WakeHold` (261001-glr) use both to keep one
+stream open: a provider that can hold a final asks `WakeHold` whether a final
+is only the wake phrase, and holds it when so.
 """
 
 from __future__ import annotations
 
 import difflib
 import re
+from dataclasses import dataclass, field
 
 _PUNCT_RE = re.compile(r"[.,!?;:'\"()\[\]{}\-_/\\]")
 
@@ -132,3 +137,53 @@ def strip_wake_phrase(text: str, phrase: str) -> str | None:
             if difflib.SequenceMatcher(None, candidate, keyword).ratio() >= _KEYWORD_SIMILARITY:
                 return " ".join(raw[end:]).lstrip(" ,.;:!?-")
     return None
+
+
+def is_wake_without_command(text: str, phrase: str, *, verify: bool) -> bool:
+    """True when `text` is the wake phrase and no command follows it.
+
+    With `verify` on, text that does not open with the phrase is not a wake
+    hit, so it is never "wake without command". With `verify` off, the text
+    is judged as it is.
+    """
+    if not text or not phrase:
+        return False
+    command = strip_wake_phrase(text, phrase)
+    if command is None:
+        if verify:
+            return False
+        command = text
+    return not command or is_wake_only(command, phrase)
+
+
+@dataclass
+class WakeHold:
+    """A `hold_final` predicate for `XaiStt.stream`.
+
+    It holds a final that is only the wake phrase, so the command is read on
+    the same socket. `heard_text` puts the held phrase back in front of the
+    command, so wake verification still sees it.
+    """
+
+    phrase: str
+    verify: bool
+    held: list[str] = field(default_factory=list)
+
+    def __call__(self, text: str) -> bool:
+        if is_wake_without_command(text, self.phrase, verify=self.verify):
+            self.held.append(text)
+            return True
+        # An empty final after the wake phrase is still no command.
+        if not text.strip() and self._first_held():
+            self.held.append(text)
+            return True
+        return False
+
+    def _first_held(self) -> str:
+        return next((text for text in self.held if text.strip()), "")
+
+    def heard_text(self, final_text: str) -> str:
+        first = self._first_held()
+        if not first or strip_wake_phrase(final_text, self.phrase) is not None:
+            return final_text
+        return f"{first} {final_text}".strip()
