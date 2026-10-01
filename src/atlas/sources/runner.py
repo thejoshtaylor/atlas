@@ -616,15 +616,26 @@ class FollowUpSource:
     `PrerollReplayingSource` above already follows for its own single tap.
     """
 
-    def __init__(self, wrapped: Any, opens_at: float, clock: Callable[[], float]) -> None:
+    def __init__(
+        self,
+        wrapped: Any,
+        opens_at: float,
+        clock: Callable[[], float],
+        on_chunk: "Callable[[bytes], Awaitable[None]] | None" = None,
+    ) -> None:
         self._wrapped = wrapped
         self._opens_at = opens_at
         self._clock = clock
+        self._on_chunk = on_chunk
 
     async def frames(self) -> AsyncIterator[bytes]:
+        """`on_chunk`, when set, is awaited for each chunk at or after
+        `opens_at`, before it is yielded. It never sees an earlier chunk."""
         async for chunk in self._wrapped.frames():
             if self._clock() < self._opens_at:
                 continue
+            if self._on_chunk is not None:
+                await self._on_chunk(chunk)
             yield chunk
 
     async def send_audio(self, chunk: bytes) -> None:
@@ -1115,12 +1126,20 @@ class SourceRunner:
             requested = channel.requested
             opens_at = self._follow_up_opens_at(requested)
 
-            follow_up_source = FollowUpSource(self._source, opens_at, self._clock)
-            monitor = self._new_barge_in_monitor()
-            follow_up_source.barge_in = monitor
             new_channel = FollowUpChannel(
                 incoming=requested, window_opens_at=opens_at, window_s=self._follow_up_window_s()
             )
+            # Plan 13-06: only an answer window listens for the wake word, and
+            # only on the serial path. A confirmation or clarification window
+            # never runs the detector.
+            on_chunk = (
+                self._answer_window_wake_tap(new_channel)
+                if requested.kind == "answer" and self._turn_group is None
+                else None
+            )
+            follow_up_source = FollowUpSource(self._source, opens_at, self._clock, on_chunk=on_chunk)
+            monitor = self._new_barge_in_monitor()
+            follow_up_source.barge_in = monitor
             follow_up_source.follow_up = new_channel
 
             # A follow-up window listens with no wake word. The Pi keeps the
@@ -1135,6 +1154,44 @@ class SourceRunner:
             if new_channel is None:
                 return
             channel = new_channel
+
+    def _answer_window_wake_tap(self, channel: "FollowUpChannel") -> "Callable[[bytes], Awaitable[None]]":
+        """The per-chunk tap for an answer window: the wake detector keeps
+        running on the window's frames, so "Atlas, ..." said inside the window
+        is still a wake command (plan 13-06). An allowed hit sets
+        `channel.wake_heard`. The controller widens the scope only when the
+        transcript also opens with the wake phrase. The frames start at
+        `opens_at`, so the reply's own echo tail never reaches the detector.
+        Logs scores only."""
+        started = False
+
+        async def tap(chunk: bytes) -> None:
+            nonlocal started
+            loop = asyncio.get_running_loop()
+            if not started:
+                started = True
+                reset = getattr(self._wake_detector, "reset", None)
+                if reset is not None:
+                    await loop.run_in_executor(self._detector_executor, reset)
+            if channel.wake_heard:
+                return
+            hit = await loop.run_in_executor(self._detector_executor, self._detect, chunk)
+            if hit is None:
+                return
+            now = self._clock()
+            decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
+            if not decision.allowed:
+                self._record_blocked_hit(hit.score, decision.reason, now)
+                return
+            channel.wake_heard = True
+            self._last_hit_at = now
+            logger.info("wake hit inside an answer window on source %r (score=%.3f)", self._name, hit.score)
+            self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
+            mark_wake_hit = getattr(self._source, "mark_wake_hit", None)
+            if mark_wake_hit is not None:
+                mark_wake_hit()
+
+        return tap
 
     async def _continue_after_interrupts(
         self, monitor: "BargeInMonitor", channel: "FollowUpChannel | None"

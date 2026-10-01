@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any, AsyncIterator
 from zoneinfo import ZoneInfo
 
+import pytest
 from atlas_mcp.google import handle_calendar_insert_event, handle_calendar_propose_event
 from atlas_mcp.google_boundary import AccountGrant, CalendarGrant
 from atlas_mcp.safety import Denied
@@ -325,6 +326,8 @@ def _runner(
     wake_event_repo: Any = None,
     calibration: "EchoCalibration | None" = None,
     clock=None,
+    detector: Any = None,
+    refractory_s: float = 0.0,
 ) -> SourceRunner:
     kwargs: dict[str, Any] = {}
     if clock is not None:
@@ -332,10 +335,10 @@ def _runner(
     return SourceRunner(
         "camera",
         source,
-        _AlwaysHitWakeDetector(),
+        detector if detector is not None else _AlwaysHitWakeDetector(),
         lambda chunk: chunk,
         run_turn_fn,
-        wake_config=WakeConfig(engine="vosk", refractory_s=0.0),
+        wake_config=WakeConfig(engine="vosk", refractory_s=refractory_s),
         gate_config=GateConfig(),
         follow_up_window_s=follow_up_window_s,
         follow_up_echo_tail_s=follow_up_echo_tail_s,
@@ -644,3 +647,134 @@ async def test_end_to_end_wake_readback_and_no_answer_says_cancelled(fake_stt, f
     rows = list(pending_actions._rows.values())
     assert len(rows) == 1
     assert rows[0].status == "expired"
+
+
+# --- Plan 13-06: the wake detector listens inside an answer window ---------
+
+
+class _CountingWakeDetector:
+    """Hits on every chunk, and counts its own calls and resets."""
+
+    def __init__(self) -> None:
+        self.process_calls = 0
+        self.resets = 0
+
+    def process(self, chunk: bytes) -> Any:
+        from tests.conftest import FakeWakeHit
+
+        self.process_calls += 1
+        return FakeWakeHit(score=1.0)
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def close(self) -> None:
+        pass
+
+
+async def test_follow_up_source_taps_every_chunk_at_or_after_opens_at_and_none_before():
+    clock_values = iter([0.0, 0.4, 0.8, 1.2])
+    tapped: list[bytes] = []
+    yielded_when_tapped: list[int] = []
+    yielded: list[bytes] = []
+
+    async def tap(chunk: bytes) -> None:
+        tapped.append(chunk)
+        yielded_when_tapped.append(len(yielded))
+
+    wrapped = _FixedFramesSource([b"early-1", b"early-2", b"late-1", b"late-2"])
+    source = FollowUpSource(wrapped, opens_at=0.5, clock=lambda: next(clock_values), on_chunk=tap)
+
+    async for chunk in source.frames():
+        yielded.append(chunk)
+
+    assert tapped == [b"late-1", b"late-2"]
+    assert yielded == [b"late-1", b"late-2"]
+    # The tap ran before each chunk was yielded.
+    assert yielded_when_tapped == [0, 1]
+
+
+async def _run_window(
+    kind: str,
+    detector: Any,
+    wake_event_repo: Any,
+    *,
+    refractory_s: float = 0.0,
+    frames: "list[bytes] | None" = None,
+) -> list[bool]:
+    """A wake turn that leaves one `kind` request, then the window turn,
+    which drains its source. Returns `wake_heard` as the window turn saw it."""
+    from tests.conftest import FakeAudioSource
+
+    source = FakeAudioSource(frames=frames if frames is not None else [b"\x00", b"\x01"])
+    seen: list[bool] = []
+    turns: list[int] = []
+
+    async def run_turn_fn(turn_source: Any) -> None:
+        turns.append(1)
+        if len(turns) == 1:
+            turn_source.follow_up.request(
+                FollowUpRequest(
+                    kind=kind,  # type: ignore[arg-type]
+                    chain_depth=1,
+                    original_transcript="what is the weather",
+                    question="it is sunny",
+                    playback_ends_at=0.0,
+                )
+            )
+            return
+        async for _chunk in turn_source.frames():
+            pass
+        seen.append(turn_source.follow_up.wake_heard)
+
+    runner = _runner(
+        source,
+        run_turn_fn,
+        follow_up_window_s=lambda: 6.0,
+        follow_up_echo_tail_s=0.0,
+        wake_event_repo=wake_event_repo,
+        clock=lambda: 0.0,
+        detector=detector,
+        refractory_s=refractory_s,
+    )
+    await runner.run()
+    await runner.drain_pending_wake_events()
+    return seen
+
+
+async def test_a_wake_hit_inside_an_answer_window_marks_the_channel(fake_wake_event_repository):
+    repo = fake_wake_event_repository()
+    detector = _CountingWakeDetector()
+
+    seen = await _run_window("answer", detector, repo, frames=[b"\x00"])
+
+    assert seen == [True]
+    assert detector.resets == 1
+    # The idle hit that started the wake turn, and the allowed hit in the window.
+    assert [event.allowed for event in repo.events] == [True, True]
+
+
+async def test_a_blocked_wake_hit_inside_an_answer_window_leaves_the_channel_unmarked(fake_wake_event_repository):
+    repo = fake_wake_event_repository()
+    detector = _CountingWakeDetector()
+
+    # The idle hit sets the refractory clock, and the scripted clock never
+    # advances, so the hit inside the window falls in the refractory.
+    seen = await _run_window("answer", detector, repo, refractory_s=100.0, frames=[b"\x00"])
+
+    assert seen == [False]
+    assert [(event.allowed, event.block_reason) for event in repo.events] == [(True, None), (False, "refractory")]
+
+
+@pytest.mark.parametrize("kind", ["confirmation", "clarification"])
+async def test_a_confirmation_or_clarification_window_never_runs_the_detector(kind, fake_wake_event_repository):
+    repo = fake_wake_event_repository()
+    detector = _CountingWakeDetector()
+
+    seen = await _run_window(kind, detector, repo, frames=[b"\x00"])
+
+    assert seen == [False]
+    # One call: the idle hit that started the wake turn.
+    assert detector.process_calls == 1
+    assert detector.resets == 0
+    assert len(repo.events) == 1

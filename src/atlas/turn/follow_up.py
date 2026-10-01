@@ -175,6 +175,10 @@ class FollowUpChannel:
     # number.
     window_opens_at: "float | None" = None
     window_s: "float | None" = None
+    # Phase 13 (plan 13-06): set by the runner when the wake detector, with
+    # the wake gate, accepted a hit inside an `"answer"` window. The controller
+    # then lets a transcript that opens with the wake phrase run as a wake turn.
+    wake_heard: bool = False
 
     def request(self, req: FollowUpRequest) -> None:
         self.requested = req
