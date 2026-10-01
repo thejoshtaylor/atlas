@@ -117,6 +117,37 @@ public actor DesktopConnection {
         credentials = nil
     }
 
+    /// Writes one client frame on the live socket. Returns true once the frame
+    /// is written. Returns false, with nothing written, when the Mac is not
+    /// connected or the write fails (the Stop click, CARD-03).
+    ///
+    /// A failed write does not feed the reconnect machine: the receive loop and
+    /// the heartbeat already detect a dead socket. The log names the frame
+    /// kind only, never a body.
+    public func send(_ message: ClientMessage) async -> Bool {
+        guard case .connected = machine.status, let live = channel else { return false }
+        let kind = Self.kind(of: message)
+        do {
+            let text = try WireCodec.encode(message)
+            try await live.send(text: text)
+            return true
+        } catch {
+            log.info("A \(kind, privacy: .public) frame could not be sent.")
+            return false
+        }
+    }
+
+    /// The wire type name, for the log. Never a body.
+    private static func kind(of message: ClientMessage) -> String {
+        switch message {
+        case .hello: WireType.hello
+        case .ping: WireType.ping
+        case .pong: WireType.pong
+        case .timerStop: WireType.timerStop
+        case .unknown(let type): type
+        }
+    }
+
     public func handle(_ event: SystemEvent) {
         switch event {
         case .didWake: apply(.didWake)
@@ -194,7 +225,7 @@ public actor DesktopConnection {
             protocolVersion: ProtocolConstants.protocolVersion,
             appVersion: helloInfo.appVersion,
             osVersion: helloInfo.osVersion,
-            capabilities: [])
+            capabilities: ProtocolConstants.helloCapabilities)
         do {
             let text = try WireCodec.encode(.hello(hello))
             try await opened.send(text: text)

@@ -74,7 +74,49 @@ final class Rig: Sendable {
         #expect(Set(object.keys) == ["type", "protocol", "app_version", "os_version", "capabilities"])
         #expect(object["type"] as? String == "hello")
         #expect(object["protocol"] as? Int == 1)
-        #expect((object["capabilities"] as? [Any])?.isEmpty == true)
+        #expect(object["capabilities"] as? [String] == ["card.text", "card.timer"])
+        #expect(ProtocolConstants.helloCapabilities == ["card.text", "card.timer"])
+    }
+
+    @Test func sendWritesOneClientFrameOnTheLiveSocketAndReturnsTrue() async throws {
+        let rig = Rig()
+        let channel = await rig.connect()
+        let before = channel.sent.count
+
+        let sent = await rig.connection.send(.timerStop(TimerStop(timerId: 12)))
+        #expect(sent)
+        #expect(channel.sent.count == before + 1)
+        let decoded = try WireCodec.decodeClient(try #require(channel.sent.last))
+        #expect(decoded == .timerStop(TimerStop(timerId: 12)))
+    }
+
+    @Test func sendReturnsFalseAndWritesNothingWhenUnpaired() async {
+        let rig = Rig()
+        let sent = await rig.connection.send(.timerStop(TimerStop(timerId: 12)))
+        #expect(!sent)
+        #expect(rig.transport.opens.isEmpty)
+    }
+
+    @Test func sendReturnsFalseAndWritesNothingAfterStop() async {
+        let rig = Rig()
+        let channel = await rig.connect()
+        await rig.connection.stop()
+        let before = channel.sent.count
+        let sent = await rig.connection.send(.timerStop(TimerStop(timerId: 12)))
+        #expect(!sent)
+        #expect(channel.sent.count == before)
+    }
+
+    @Test func aFailedWriteReturnsFalseAndLeavesTheConnectionStateAlone() async {
+        let rig = Rig()
+        let channel = await rig.connect()
+        let before = await rig.connection.currentSnapshot
+        channel.failSends(with: .unreachable)
+
+        let sent = await rig.connection.send(.timerStop(TimerStop(timerId: 12)))
+        #expect(!sent)
+        await settle()
+        #expect(await rig.connection.currentSnapshot == before)
     }
 
     @Test func aHelloAckConnectsAndAServerPingGetsASilentPong() async throws {

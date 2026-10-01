@@ -11,6 +11,11 @@ public enum ProtocolConstants {
     public static let maxTextFrameBytes = 2048
     public static let maxInvalidMessages = 20
     public static let testTimeoutS = 5
+
+    /// The card kinds this app can draw (UI-SPEC "Wire Messages"). Phases 17 and
+    /// 19 add action capabilities (Phase 14 D-09). The server does not read them
+    /// in this phase.
+    public static let helloCapabilities = ["card.text", "card.timer"]
 }
 
 /// How the server marks its own refusal of a Mac token (D-30). The refusal is an
