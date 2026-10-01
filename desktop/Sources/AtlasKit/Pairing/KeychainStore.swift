@@ -23,13 +23,22 @@ public struct KeychainStore: SecretStore {
         ]
     }
 
+    /// Updates the item in place and adds it only when none exists. The old
+    /// pairing is never deleted first, so a failed save (a locked keychain, a
+    /// cancelled prompt) leaves the working pairing as it was.
     public func save(_ credentials: PairingCredentials) throws {
-        try delete()
-        var query = Self.baseQuery(service: service)
-        query[kSecAttrAccount as String] = credentials.host
-        query[kSecValueData as String] = Data(credentials.token.utf8)
-        query[kSecAttrLabel as String] = "ATLAS pairing"
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let match = Self.baseQuery(service: service)
+        let attributes: [String: Any] = [
+            kSecAttrAccount as String: credentials.host,
+            kSecValueData as String: Data(credentials.token.utf8),
+        ]
+        var status = SecItemUpdate(match as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var query = match
+            query.merge(attributes) { _, new in new }
+            query[kSecAttrLabel as String] = "ATLAS pairing"
+            status = SecItemAdd(query as CFDictionary, nil)
+        }
         guard status == errSecSuccess else { throw SecretStoreError.keychain(status) }
     }
 

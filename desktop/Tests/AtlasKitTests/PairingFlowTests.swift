@@ -80,12 +80,22 @@ import Testing
         #expect(effects.isEmpty)
     }
 
-    @Test func replaceStopsTheOldConnectionAndSavesTheNewToken() throws {
+    @Test func replaceSavesTheNewTokenAndKeepsTheOldConnectionUntilTheSaveWorks() throws {
         var flow = PairingFlow()
         let t = try target("new.test")
         _ = flow.handle(.linkOpened(.success(t), currentHost: "old.test"))
-        #expect(flow.handle(.replaceChosen) == [.stopCurrentConnection, .saveToken(t)])
+        #expect(flow.handle(.replaceChosen) == [.saveToken(t)])
         #expect(flow.state == .saving(t))
+        #expect(flow.handle(.saveSucceeded) == [.stopCurrentConnection, .startConnection(t)])
+    }
+
+    @Test func aFailedReplaceSaveNeverStopsTheOldConnection() throws {
+        var flow = PairingFlow()
+        let t = try target("new.test")
+        _ = flow.handle(.linkOpened(.success(t), currentHost: "old.test"))
+        _ = flow.handle(.replaceChosen)
+        #expect(flow.handle(.saveFailed).isEmpty)
+        #expect(flow.state == .failed(.keychainWrite))
     }
 
     @Test func cancelOnTheReplaceSheetAlsoKeepsTheCurrentPairing() throws {

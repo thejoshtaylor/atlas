@@ -71,6 +71,9 @@ public struct PairingFlow: Sendable {
     /// Snapshots from before this pairing started can still be in the stream.
     /// The flow ignores them until the first `connecting` snapshot arrives.
     private var sawAttempt = false
+    /// True while a Replace waits for its save. The old connection keeps
+    /// running until the new token is stored, so a failed save loses nothing.
+    private var replacing = false
 
     public init() {}
 
@@ -92,7 +95,8 @@ public struct PairingFlow: Sendable {
         case .replaceChosen:
             guard case .replace(_, let target) = state else { return [] }
             state = .saving(target)
-            return [.stopCurrentConnection, .saveToken(target)]
+            replacing = true
+            return [.saveToken(target)]
         case .keepCurrent:
             guard case .replace = state else { return [] }
             state = .idle
@@ -107,9 +111,12 @@ public struct PairingFlow: Sendable {
             guard case .saving(let target) = state else { return [] }
             state = .connecting(host: target.host, error: nil)
             sawAttempt = false
-            return [.startConnection(target)]
+            let stopsOld = replacing
+            replacing = false
+            return stopsOld ? [.stopCurrentConnection, .startConnection(target)] : [.startConnection(target)]
         case .saveFailed:
             guard case .saving = state else { return [] }
+            replacing = false
             state = .failed(.keychainWrite)
             return []
         case .connection(let snapshot):
