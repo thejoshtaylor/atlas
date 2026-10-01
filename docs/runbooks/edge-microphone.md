@@ -477,6 +477,76 @@ it replies.
 
 The array plays audio at 16 kHz, so the music has no content above 8 kHz.
 
+## 18. Interrupting a reply and answering without the wake word
+
+You can stop a reply while the assistant speaks. After an answer, you can
+also reply without the wake word. This section describes both. It also
+describes the measurement that decides if any speech can interrupt a reply.
+
+1. To interrupt a reply, say the wake word while the assistant speaks. The
+   reply fades out over `barge_in.fade_ms`. The default is 120 ms. The
+   assistant then listens for your next sentence.
+
+2. To end the reply and do nothing else, say "Atlas, stop", "Atlas, never
+   mind", "Atlas, be quiet", "Atlas, that's enough" or "Atlas, cancel". Any
+   other sentence after the wake word runs as the next command.
+
+3. The assistant can say "Atlas" in its own reply. The server does not
+   count that word as an interrupt. The setting `barge_in.atlas_margin_ms`
+   sets the time around the word that the server ignores. The default is
+   1000 ms.
+
+4. After an ordinary answer, the ring shows that the assistant listens for
+   `follow_up.window_s` seconds. The default is 6 seconds. Music stays
+   quiet while the window is open. Speech in this window needs no wake word.
+
+5. The answer window can use only the tools that the last answer used.
+   After a chat answer with no tool, the window can use no tool. If nobody
+   speaks in the window, the window closes and nothing else happens.
+
+6. Expect about 1 to 1.5 seconds from the first syllable of an interrupt to
+   silence. Do not expect less.
+
+7. Speech without the wake word does not interrupt a reply yet. Only the
+   wake word does. This depends on the echo cancellation measurement. Two
+   measurements on the real array both gave `aec: not_proven`. The first
+   used firmware 2.0.6 (10-SPIKE.md). The second used firmware 2.0.10 on
+   channel 0 (13-SPIKE.md). In both, the speaker's own reply opened voice
+   activity segments. The setting `barge_in.sources.edge.enabled` follows
+   this result and stays `false`.
+
+8. To measure again, for example after a firmware or placement change, do
+   these steps on the Pi. Keep the firmware at 2.0.10. Firmware 2.1.x
+   changes the gain, so a result on 2.1.x is not valid.
+
+   ```bash
+   sudo systemctl stop atlas-edge atlas-librespot atlas-librespot-watchdog
+   cd /opt/atlas-edge/edge
+   uv run python spike/run_spike.py info
+   uv run python spike/run_spike.py aec --asr-channel 0 \
+     --vad-model /var/lib/atlas-edge/silero_vad.onnx \
+     --volume-note "speaker at normal reply level"
+   cat "$(ls -t spike/results/aec-*.json | head -1)"
+   sudo systemctl start atlas-librespot atlas-librespot-watchdog atlas-edge
+   ```
+
+   If a desktop session runs on the Pi, also run
+   `systemctl --user stop pipewire pipewire-pulse` before the measurement.
+   The `info` command must print `[2, 0, 10]`. Set the speaker to its normal
+   reply level. Read aloud for 20 seconds when asked. Stay silent through
+   the first playback. Then talk over the second playback. The result is
+   `proven` only when the first playback opens no segment and the second
+   opens at least one. Keep the volume note free of room names. The result
+   file stays on the Pi. Do not copy any recording into the repository.
+
+9. If the result is `proven`, set `barge_in.sources.edge.enabled` to
+   `true` in the example config and the chart copy. Set
+   `EDGE_BARGE_IN_PROVEN` to `True` in `src/atlas/config.py`. Do these
+   changes in one commit.
+
+The camera does none of this. It has no echo cancellation, so it cannot
+tell the assistant's voice from yours.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -488,3 +558,5 @@ The array plays audio at 16 kHz, so the music has no content above 8 kHz.
 | `enforce` mode lets everyone through | No member is enrolled for the model `speaker_id.model` selects | Enroll at least one member (step 5), or select the model you enrolled members under |
 | `atlas-librespot` restarts again and again, and its log shows "Avahi error: Setting up dns-sd failed" | The unit runs with `DynamicUser=yes`, and D-Bus cannot find that user | Use the unit from step 17, which runs as the `atlas-librespot` user. Create the user first (step 17, sub-step 1) |
 | The Spotify device disappears from the Connect list, and the `atlas-librespot` log shows "Connection to server closed" | Spotify closed the session, and librespot 0.8.0 does not connect again. The process stays up, so systemd does not restart it | Install `atlas-librespot-watchdog` (step 17, sub-step 3). It restarts `atlas-librespot` when this line appears. To recover now, run `sudo systemctl restart atlas-librespot` |
+| The reply does not fade when you say "Atlas" | The Pi runs an older `atlas-edge` that does not know the stop message | Update the Pi (step 12) |
+| The assistant answers the television after a reply | The answer window heard it | The window reaches only the tools of the last answer. In `enforce` mode, speaker identification limits who can answer (step 16) |
