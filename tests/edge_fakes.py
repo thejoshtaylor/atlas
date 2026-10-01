@@ -124,6 +124,9 @@ class FakeEdgeSocket:
         self.sent_text: list[str] = []
         self.sent_bytes: list[bytes] = []
         self.close_calls: list[tuple[int, str | None]] = []
+        # Every send in call order, so a test can assert frame order between
+        # text and binary frames (Phase 13: no reply audio after a stop).
+        self.sent_log: list[tuple[str, Any]] = []
         # 10-REVIEW.md CR-01/CR-02: a real Starlette `WebSocket.close()`
         # raises when the underlying socket is already gone (a dead Pi
         # connection is the ordinary case, not an edge case) -- this lets a
@@ -144,14 +147,29 @@ class FakeEdgeSocket:
 
     async def send_text(self, data: str) -> None:
         self.sent_text.append(data)
+        self.sent_log.append(("text", data))
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent_bytes.append(data)
+        self.sent_log.append(("bytes", data))
 
     async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
         self.close_calls.append((code, reason))
         if self._raise_on_close is not None:
             raise self._raise_on_close
+
+    def binary_after_text_type(self, msg_type: str) -> "int | None":
+        """How many binary frames were sent after the first text frame whose
+        JSON `type` is `msg_type`, or `None` when no such text frame exists."""
+        found = False
+        count = 0
+        for kind, data in self.sent_log:
+            if not found:
+                if kind == "text" and json.loads(data).get("type") == msg_type:
+                    found = True
+            elif kind == "bytes":
+                count += 1
+        return count if found else None
 
     def latest_ping(self) -> "dict[str, Any] | None":
         """The most recent `{"type": "ping", ...}` message `send_text`

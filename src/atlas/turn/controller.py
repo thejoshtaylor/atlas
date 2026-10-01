@@ -128,6 +128,7 @@ from atlas.turn.handoff import (
 from atlas.turn.entity_claims import is_claim_refusal, unclaimed
 from atlas.turn.home_control import is_home_control_refusal, restrict_home_writes
 from atlas.turn.local_intent import match_on_off
+from atlas.turn.playback_hold import hold_for_playback
 from atlas.turn.macros import fire_macro, match as match_macro, normalize
 from atlas.turn.reply_group import ReplyRoute, current_reply_route, speak_in_group
 from atlas.turn.pending_action import (
@@ -307,6 +308,10 @@ class _BargeInMonitor(Protocol):
     declared here as a required field -- a `BargeInMonitor` with
     correlation disabled, and every fake that predates plan 02-12, carries
     no `trace` at all.
+
+    Phase 13 adds four more optional attributes, read the same way with
+    `getattr` and not declared as required fields: `active`, `playback`,
+    `holds_for_playback` and `interrupted`.
     """
 
     enabled: bool
@@ -2823,6 +2828,14 @@ class SpeechResult:
     last_write_at: "float | None"
 
 
+def _barge_in_active(barge_in: Any) -> bool:
+    """True when any interrupt path of `barge_in` is on. A wake-only monitor
+    (`enabled` false, `wake_interrupts` true) must still mark playback and
+    feed the reply cursor. The test doubles in `tests/test_turn_controller.py`
+    carry only `enabled`, so `active` is read with a fallback."""
+    return bool(getattr(barge_in, "active", barge_in.enabled))
+
+
 async def _speak(
     source: _AudioSource,
     tts: _TtsProvider,
@@ -2986,14 +2999,16 @@ async def _speak_direct(
     bytes_sent = 0
     first_write_at: float | None = None
     last_write_at: float | None = None
+    interrupted = False
+    chunks_sent = 0
+    chunks_total = 0
+    # D-02: the monitor's cursor, fed with what is written and when.
+    playback = getattr(barge_in, "playback", None) if barge_in is not None and _barge_in_active(barge_in) else None
 
     async def _synthesize_and_write() -> None:
-        nonlocal bytes_sent, first_write_at, last_write_at
+        nonlocal bytes_sent, first_write_at, last_write_at, interrupted, chunks_sent, chunks_total
         first_audio_marked = False
-        interrupted = False
         speaker_failed = False
-        chunks_sent = 0
-        chunks_total = 0
         async for chunk in tts.synthesize(_one_delta(), sink=sink):
             chunks_total += 1
             if interrupted:
@@ -3008,9 +3023,9 @@ async def _speak_direct(
                     timings.first_audio_at = now
                 if kind == "answer" and timings.answer_audio_at is None:
                     timings.answer_audio_at = now
-                if barge_in is not None and barge_in.enabled:
+                if barge_in is not None and _barge_in_active(barge_in):
                     barge_in.mark_playback_started(now)
-            if barge_in is not None and barge_in.enabled and barge_in.interrupt_requested:
+            if barge_in is not None and _barge_in_active(barge_in) and barge_in.interrupt_requested:
                 interrupted = True
                 timings.turn_outcome = "barged_in"
                 continue
@@ -3036,16 +3051,17 @@ async def _speak_direct(
                 first_write_at = now_write
             last_write_at = now_write
             bytes_sent += len(chunk)
-            if barge_in is not None and barge_in.enabled:
+            if playback is not None:
+                playback.note_audio_written(len(chunk), now_write, sink, utterance_start=(chunks_sent == 1))
+            if barge_in is not None and _barge_in_active(barge_in):
                 trace = getattr(barge_in, "trace", None)
                 if trace is not None:
                     trace.append(chunk)
 
+        if playback is not None:
+            playback.note_utterance_end(reply_text)
         if interrupted:
-            await _emit_event(
-                source,
-                {"type": "reply.interrupted", "chunks_sent": chunks_sent, "chunks_total": chunks_total},
-            )
+            await _emit_event(source, _interrupted_event(barge_in, playback, chunks_sent, chunks_total))
         await _emit_event(source, {"type": "reply.text", "text": reply_text if event_text is None else event_text})
 
     token = speech_kind.set(kind)
@@ -3058,7 +3074,29 @@ async def _speak_direct(
     finally:
         speech_kind.reset(token)
 
+    # Only an answer holds. A held filler would delay the answer's synthesis,
+    # which overlaps the filler today.
+    if kind == "answer" and barge_in is not None and _barge_in_active(barge_in) and not interrupted:
+        if await hold_for_playback(barge_in):
+            timings.turn_outcome = "barged_in"
+            await _emit_event(source, _interrupted_event(barge_in, playback, chunks_sent, chunks_total))
+
     return SpeechResult(bytes_sent=bytes_sent, first_write_at=first_write_at, last_write_at=last_write_at)
+
+
+def _interrupted_event(barge_in: Any, playback: Any, chunks_sent: int, chunks_total: int) -> dict[str, Any]:
+    """The `reply.interrupted` event. `spoken_s` is how many seconds of the
+    reply were already heard, from the monitor cursor. `faded` is True when
+    the monitor holds a turn for playback, which is when the source sends the
+    Pi a fade-out."""
+    spoken_s = round(playback.spoken_s(_time.monotonic()), 3) if playback is not None and chunks_sent else None
+    return {
+        "type": "reply.interrupted",
+        "chunks_sent": chunks_sent,
+        "chunks_total": chunks_total,
+        "spoken_s": spoken_s,
+        "faded": bool(getattr(barge_in, "holds_for_playback", False)),
+    }
 
 
 async def _play_wake_cue(source: _AudioSource, sink: SinkFormat, speech_lock: asyncio.Lock | None) -> None:

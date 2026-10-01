@@ -107,6 +107,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.frame_fanout import TurnFrameSource
+from atlas.sources.reply_timing import ReplyCursor
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
@@ -251,6 +252,9 @@ class BargeInMonitor:
         calibration: EchoCalibration | None = None,
         correlation_tolerance: float = 0.0,
         tracking_adaptation_rate: float = 0.0,
+        wake_interrupts: bool = False,
+        holds_for_playback: bool = False,
+        on_interrupt: "Callable[[], None] | None" = None,
     ) -> None:
         self.floor = floor
         self.min_duration_s = min_duration_s
@@ -263,6 +267,15 @@ class BargeInMonitor:
         self.playback_started_at: float | None = None
         self.interrupt_requested = False
         self.transcript_done = asyncio.Event()
+        # Phase 13: the wake word heard during playback interrupts (D-01), the
+        # turn stays open until the reply has played (RESEARCH Finding 1), and
+        # `playback` is the queue-end cursor `_speak` feeds (D-02).
+        self.wake_interrupts = wake_interrupts
+        self.holds_for_playback = holds_for_playback
+        self.playback = ReplyCursor()
+        self.interrupted = asyncio.Event()
+        self.interrupt_kind: str | None = None
+        self._on_interrupt = on_interrupt
         self._above_floor_since: float | None = None
         # Correlation is active only when both a trace to compare against
         # and a calibration to align/scale by exist -- absent either, this
@@ -275,6 +288,40 @@ class BargeInMonitor:
         # found gain control, never decayed into the fixed case.
         self._tracking_mode = calibration is not None and calibration.agc_verdict != "absent"
         self._estimated_gain = calibration.gain if calibration is not None else 0.0
+
+    @property
+    def active(self) -> bool:
+        """True when any interrupt path is on: the VAD or energy path
+        (`enabled`) or the wake word path (`wake_interrupts`)."""
+        return self.enabled or self.wake_interrupts
+
+    def _latch_interrupt(self, kind: str) -> None:
+        """Set the interrupt once, in this order: the flag, the `on_interrupt`
+        hook, then the `interrupted` event. The hook runs before the event, so
+        the stop task it schedules is queued ahead of the held answer's
+        wake-up. A hook error is logged and never reaches the caller."""
+        if self.interrupt_requested:
+            return
+        self.interrupt_requested = True
+        self.interrupt_kind = kind
+        if self._on_interrupt is not None:
+            try:
+                self._on_interrupt()
+            except Exception:
+                logger.warning("barge-in interrupt hook failed", exc_info=True)
+        self.interrupted.set()
+
+    def process_wake_hit(self, now: float) -> bool:
+        """Latch an interrupt for a wake hit the gate allowed. Returns False
+        when the wake path is off or the monitor is already interrupted.
+
+        No guard window applies, and playback need not have started. A hit
+        while the brain still thinks silences the reply at its first chunk,
+        through the check in `_speak_direct`'s write loop."""
+        if not self.wake_interrupts or self.interrupt_requested:
+            return False
+        self._latch_interrupt("wake")
+        return True
 
     def mark_transcript_done(self) -> None:
         """`run_turn` calls this once, right after draining the final
@@ -331,7 +378,7 @@ class BargeInMonitor:
         if self._above_floor_since is None:
             self._above_floor_since = now
         if (now - self._above_floor_since) >= self.min_duration_s:
-            self.interrupt_requested = True
+            self._latch_interrupt("energy")
 
     def _explained_by_known_output(self, energy: float, now: float) -> bool:
         """D-18's alignment: the sound arriving at the microphone at `now`
@@ -395,7 +442,7 @@ class BargeInMonitor:
             return
         if (now - self.playback_started_at) < self.guard_window_s:
             return
-        self.interrupt_requested = True
+        self._latch_interrupt("vad")
 
 
 class PrerollReplayingSource:
@@ -610,6 +657,9 @@ class SourceRunner:
         # finishes.
         self._wake_event_repo = wake_event_repo
         self._pending_wake_event_tasks: set[asyncio.Task] = set()
+        # Phase 13: each stop send runs as its own task, held here until its
+        # done-callback discards it (the pattern the wake-event writes use).
+        self._pending_stop_tasks: set[asyncio.Task] = set()
         # One line per episode of saturation, not one per wake hit -- the
         # same "the operator gets the fact once instead of a log they stop
         # reading" discipline the degraded-slot refusal already uses.
@@ -950,6 +1000,12 @@ class SourceRunner:
             else:
                 source_format = self._source.source_format()
                 trace = EmittedAudioTrace(encoding=source_format.encoding, sample_rate=source_format.sample_rate)
+        # Wake interrupts and the playback hold need a source that can stop its
+        # own playback (the camera has no `stop_playback`, D-04) on the serial
+        # path. A Phase 12 parallel runner keeps its own wake detection in
+        # `run()`, so it never gets them either.
+        can_stop = getattr(self._source, "stop_playback", None) is not None and self._turn_group is None
+        wake_interrupts = self._barge_in_config.wake_word and can_stop
         return BargeInMonitor(
             floor=self._barge_in_config.energy_floor,
             min_duration_s=self._barge_in_config.min_duration_ms / 1000.0,
@@ -959,7 +1015,19 @@ class SourceRunner:
             calibration=self._calibration if correlation_active else None,
             correlation_tolerance=self._barge_in_config.correlation_tolerance,
             tracking_adaptation_rate=self._barge_in_config.tracking_adaptation_rate,
+            wake_interrupts=wake_interrupts,
+            holds_for_playback=can_stop and (wake_interrupts or self._barge_in_config.enabled),
+            on_interrupt=self._schedule_stop_playback if can_stop else None,
         )
+
+    def _schedule_stop_playback(self) -> None:
+        """Send the Pi its `stop` message from a task. The hook fires in the
+        frame loop for a wake latch and in a speech-signal callback for a VAD
+        latch, and the held turn ends as soon as the latch fires, which
+        cancels the listener. A task sends the stop in every case."""
+        task = asyncio.create_task(self._source.stop_playback(self._barge_in_config.fade_ms))
+        self._pending_stop_tasks.add(task)
+        task.add_done_callback(self._pending_stop_tasks.discard)
 
     async def _run_follow_ups(self, channel: "FollowUpChannel") -> None:
         """After the wake turn (or the previous follow-up turn) left a
@@ -1075,10 +1143,19 @@ class SourceRunner:
         parallel turn passes its own subscription, so this listener is never a
         second reader of the source.
         """
-        if not monitor.enabled:
+        if not monitor.active:
             return
         await monitor.transcript_done.wait()
         speech_signals = getattr(self._source, "speech_signals", None)
+        # Phase 13 (D-01): a listener given its own frames is a Phase 12
+        # parallel turn, and it never runs the wake detector.
+        detect_wake = monitor.wake_interrupts and frames is None
+        if detect_wake:
+            # RESEARCH Pitfall 1: the turn reader consumed the frames since the
+            # hit that started this turn, so a stale partial must not fire.
+            reset = getattr(self._wake_detector, "reset", None)
+            if reset is not None:
+                await asyncio.get_running_loop().run_in_executor(self._detector_executor, reset)
         if speech_signals is not None:
             def _on_speech_signal(event: dict) -> None:
                 # "vad.start" mirrors the edge protocol's own stable event
@@ -1091,12 +1168,20 @@ class SourceRunner:
                 if event.get("type") == "vad.start":
                     monitor.process_speech_start(self._clock())
 
-            unsubscribe = speech_signals.subscribe(_on_speech_signal, replay_segment=False)
+            unsubscribe = (
+                speech_signals.subscribe(_on_speech_signal, replay_segment=False) if monitor.enabled else None
+            )
             try:
-                async for _chunk in (frames if frames is not None else self._source.frames()):
-                    pass
+                async for chunk in (frames if frames is not None else self._source.frames()):
+                    if detect_wake and not monitor.interrupt_requested:
+                        hit = await asyncio.get_running_loop().run_in_executor(
+                            self._detector_executor, self._detect, chunk
+                        )
+                        if hit is not None:
+                            self._playback_wake_hit(monitor, hit)
             finally:
-                unsubscribe()
+                if unsubscribe is not None:
+                    unsubscribe()
             return
         loop = asyncio.get_running_loop()
         async for chunk in (frames if frames is not None else self._source.frames()):
@@ -1104,6 +1189,30 @@ class SourceRunner:
             if energy is None:
                 continue
             monitor.process_energy(energy, self._clock())
+
+    def _playback_wake_hit(self, monitor: "BargeInMonitor", hit: WakeHit) -> None:
+        """A wake hit heard while a reply plays. The same threshold and
+        refractory apply as when idle (D-03). Logs scores and reasons only,
+        never text."""
+        now = self._clock()
+        decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
+        if not decision.allowed:
+            self._record_blocked_hit(hit.score, decision.reason, now)
+            logger.info(
+                "wake hit during playback blocked on source %r (score=%.3f, reason=%s)",
+                self._name,
+                hit.score,
+                decision.reason,
+            )
+            return
+        if monitor.process_wake_hit(now):
+            self._last_hit_at = now
+            logger.info(
+                "wake hit during playback on source %r (score=%.3f): interrupting the reply",
+                self._name,
+                hit.score,
+            )
+            self._schedule_wake_event_write(score=hit.score, allowed=True, block_reason=None)
 
     def _record_blocked_hit(self, score: float, reason: str | None, at: float) -> None:
         """A wake hit the gate blocks is recorded, never dropped silently

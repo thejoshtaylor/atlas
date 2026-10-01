@@ -77,6 +77,10 @@ MSG_LED = "led"
 # Server to Pi: set the speaker volume. Pi to server: the answer.
 MSG_VOLUME = "volume"
 MSG_VOLUME_RESULT = "volume.result"
+# Server to Pi: fade the reply that plays and drop the rest of the queue.
+MSG_STOP = "stop"
+# The range of `fade_ms` in a `stop` message, in milliseconds (Phase 13, D-14).
+STOP_FADE_MS_RANGE = (50, 300)
 
 # The two steps of a relative `volume` message.
 VOLUME_DIRECTIONS = ("up", "down")
@@ -308,6 +312,16 @@ def build_led(state: str) -> str:
     if state not in LED_STATES:
         raise ValueError(f"unknown led state: {state!r}")
     return json.dumps({"type": MSG_LED, "state": state})
+
+
+def build_stop(fade_ms: int) -> str:
+    """The `stop` message that tells the Pi to fade out the reply that plays
+    and drop the rest of its queue (D-13). Raises `ValueError` for a bool, a
+    non-int, or a `fade_ms` outside `STOP_FADE_MS_RANGE`."""
+    low, high = STOP_FADE_MS_RANGE
+    if isinstance(fade_ms, bool) or not isinstance(fade_ms, int) or not low <= fade_ms <= high:
+        raise ValueError(f"stop fade_ms must be an int from {low} to {high}, got {fade_ms!r}")
+    return json.dumps({"type": MSG_STOP, "fade_ms": fade_ms})
 
 
 def build_volume(
@@ -542,6 +556,7 @@ class EdgeAudioSource:
         # Pi turns its ring off by itself at each connect.
         self._led_state: str = LED_IDLE
         self._led_send_warned = False
+        self._stop_send_warned = False
         # Volume requests that wait for the Pi's `volume.result`, by id. The
         # id counter never resets, so a late reply from an old connection
         # cannot match a new request.
@@ -727,6 +742,30 @@ class EdgeAudioSource:
             else:
                 logger.debug("edge source: could not send led state %r", state, exc_info=True)
 
+    async def stop_playback(self, fade_ms: int) -> None:
+        """Tell the Pi to cut the reply that plays (D-13). The Pi fades the
+        head of its queue over `fade_ms` and drops the rest. Never raises,
+        except for cancellation. `fade_ms` is clamped into
+        `STOP_FADE_MS_RANGE`. Unlike the LED, a repeat is always sent. With
+        no device connected, it logs one warning per disconnected episode and
+        sends nothing. A send failure logs one warning per connection."""
+        low, high = STOP_FADE_MS_RANGE
+        fade_ms = min(high, max(low, int(fade_ms)))
+        websocket = self._websocket
+        if websocket is None:
+            if not self._stop_send_warned:
+                self._stop_send_warned = True
+                logger.warning("edge source: stop_playback with no device connected -- nothing to stop")
+            return
+        try:
+            await websocket.send_text(build_stop(fade_ms))
+        except Exception:
+            if not self._stop_send_warned:
+                self._stop_send_warned = True
+                logger.warning("edge source: could not send a stop to the device", exc_info=True)
+            else:
+                logger.debug("edge source: could not send a stop to the device", exc_info=True)
+
     def source_format(self) -> SourceFormat:
         return SourceFormat(
             "pcm",
@@ -798,6 +837,7 @@ class EdgeAudioSource:
         # disconnect, so each connection starts at idle.
         self._led_state = LED_IDLE
         self._led_send_warned = False
+        self._stop_send_warned = False
         invalid_message_count = 0
         # 10-07-PLAN.md: fresh per connection -- a reconnect never inherits
         # a previous connection's own outstanding ping ids or delay figures.

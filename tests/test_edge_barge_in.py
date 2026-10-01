@@ -22,6 +22,7 @@ from atlas.sources.runner import SourceRunner
 from atlas.transports.edge import EdgeAudioSource
 from atlas.turn.controller import _speak
 
+from tests.conftest import FakeWakeHit
 from tests.edge_fakes import FakeEdgeSocket, fake_edge_device
 
 
@@ -42,14 +43,35 @@ class _NeverHitDetector:
         return None
 
 
-def _edge_runner(source: EdgeAudioSource, *, barge_in_config: BargeInConfig) -> SourceRunner:
+class _ScriptedWakeDetector:
+    """Hits on the scripted call numbers (1-based) and records every call and
+    every reset. `reset()` counts, like a real detector's."""
+
+    def __init__(self, hit_on_calls=()) -> None:
+        self._hit_on_calls = set(hit_on_calls)
+        self.calls = 0
+        self.resets = 0
+
+    def process(self, chunk: bytes):
+        self.calls += 1
+        if self.calls in self._hit_on_calls:
+            return FakeWakeHit(score=1.0)
+        return None
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+def _edge_runner(
+    source: EdgeAudioSource, *, barge_in_config: BargeInConfig, detector=None
+) -> SourceRunner:
     async def run_turn_fn(turn_source) -> None:
         return None
 
     return SourceRunner(
         "edge",
         source,
-        _NeverHitDetector(),
+        detector if detector is not None else _NeverHitDetector(),
         lambda chunk: chunk,
         run_turn_fn,
         barge_in_config=barge_in_config,
@@ -85,6 +107,20 @@ class _PacedFakeTts:
         self.received_sinks.append(sink)
         for chunk in self._chunks:
             await asyncio.sleep(self._delay_s)
+            yield chunk
+
+
+class _BurstFakeTts:
+    """Yields every chunk with no sleep, which is how a real batch TTS
+    reaches the Pi: the whole reply goes out in one burst."""
+
+    def __init__(self, chunks) -> None:
+        self._chunks = list(chunks)
+
+    async def synthesize(self, text_deltas, sink=None):
+        async for _ in text_deltas:
+            pass
+        for chunk in self._chunks:
             yield chunk
 
 
@@ -216,6 +252,110 @@ async def test_process_energy_is_never_called_for_a_source_with_speech_signals(e
             socket.push_bytes(loud_frame)
         await asyncio.sleep(0.05)
         assert monitor.interrupt_requested is False
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+# --- Phase 13: the wake word during a held edge reply ---
+
+
+def _stop_frames(socket: FakeEdgeSocket) -> list[dict]:
+    parsed = [json.loads(text) for text in socket.sent_text]
+    return [message for message in parsed if message.get("type") == "stop"]
+
+
+async def test_wake_hit_during_edge_reply_hold_sends_stop_and_ends_barged_in(edge_source):
+    """The tracer: "Atlas" said while an edge reply plays stops it. A real
+    runner over a real source, a burst TTS (1.0 s of audio written at once),
+    one whole stereo frame through the socket, and the detector hits."""
+    from atlas.timing import TurnTimings
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    detector = _ScriptedWakeDetector(hit_on_calls={1})
+    runner = _edge_runner(edge_source, barge_in_config=BargeInConfig(enabled=False, wake_word=True), detector=detector)
+    monitor = runner._new_barge_in_monitor()
+    assert monitor.wake_interrupts
+    assert monitor.holds_for_playback
+    monitor.mark_transcript_done()
+
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        timings = TurnTimings()
+        timings.turn_outcome = "completed"
+        started = loop.time()
+        speak_task = asyncio.create_task(
+            _speak(
+                edge_source,
+                _BurstFakeTts([b"\x00\x00" * 1600] * 10),
+                timings,
+                "reply text",
+                kind="answer",
+                barge_in=monitor,
+                sink=edge_source.sink_format(),
+            )
+        )
+        await _wait_until(lambda: len(socket.sent_bytes) == 10)
+        assert not speak_task.done(), "the answer must hold until the playback end"
+
+        socket.push_bytes(b"\x00\x00\x00\x00" * 256)
+
+        await asyncio.wait_for(speak_task, timeout=0.9)
+        assert loop.time() - started < 0.9
+        assert timings.turn_outcome == "barged_in"
+        await _wait_until(lambda: len(_stop_frames(socket)) >= 1)
+        await asyncio.sleep(0.02)
+        assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+        assert socket.binary_after_text_type("stop") == 0
+        assert detector.resets == 1
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_edge_reply_with_no_wake_hit_holds_until_playback_end(edge_source):
+    """An edge reply nobody interrupts keeps its turn open until the
+    estimated playback end, then ends completed with no stop frame."""
+    from atlas.timing import TurnTimings
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    runner = _edge_runner(edge_source, barge_in_config=BargeInConfig(enabled=False, wake_word=True))
+    monitor = runner._new_barge_in_monitor()
+    monitor.mark_transcript_done()
+
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        timings = TurnTimings()
+        timings.turn_outcome = "completed"
+        started = loop.time()
+        await _speak(
+            edge_source,
+            _BurstFakeTts([b"\x00\x00" * 1600] * 2),
+            timings,
+            "reply text",
+            kind="answer",
+            barge_in=monitor,
+            sink=edge_source.sink_format(),
+        )
+        assert loop.time() - started >= 0.15
+        assert timings.turn_outcome == "completed"
+        assert _stop_frames(socket) == []
     finally:
         watch_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

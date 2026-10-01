@@ -1806,6 +1806,12 @@ class BargeInConfig:
     # one `min_duration_ms` window cannot swing the estimate before the
     # duration threshold itself would fire on a genuine interruption.
     tracking_adaptation_rate: float = 0.1
+    # Phase 13 D-01, D-04: the wake word heard during playback interrupts the
+    # reply. Only a source that can stop its own playback acts on it, so the
+    # camera stays unchanged however this is set.
+    wake_word: bool = False
+    # Phase 13 D-13, D-14: the Pi fades a cut reply over this many milliseconds.
+    fade_ms: int = 120
     sources: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
