@@ -50,6 +50,10 @@ function stubDesktopDevices(
         void queryClient.invalidateQueries({ queryKey: ["desktop-devices"] })
       },
     },
+    // MacRow imports these three. The route tests never drive them.
+    updateDesktopDeviceMutationOptions: { mutationFn: async () => sampleDevice() },
+    revokeDesktopDeviceMutationOptions: { mutationFn: async () => undefined },
+    testDesktopDeviceMutationOptions: { mutationFn: async () => ({ answered: true, rtt_ms: 1 }) },
     buildPairLink: (host: string, token: string) =>
       `atlas://pair?server=${encodeURIComponent(host)}&token=${encodeURIComponent(token)}`,
     pageLocation: () => location,

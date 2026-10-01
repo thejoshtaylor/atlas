@@ -70,3 +70,53 @@ export function buildPairLink(host: string, token: string): string {
 export function pageLocation(): { host: string; protocol: string } {
   return { host: window.location.host, protocol: window.location.protocol }
 }
+
+export interface UpdateDesktopDeviceInput {
+  deviceId: number
+  /** Only the keys given are sent, so one control never overwrites another. */
+  changes: { name?: string; edge_device_id?: number | null; is_default?: boolean }
+}
+
+/** Renames a Mac, maps it to a room, or sets it as the default (PAIR-03). */
+export const updateDesktopDeviceMutationOptions: UseMutationOptions<
+  DesktopDevice,
+  unknown,
+  UpdateDesktopDeviceInput
+> = {
+  mutationFn: ({ deviceId, changes }) =>
+    apiFetch<DesktopDevice>(`/api/desktop-devices/${deviceId}`, { method: "PATCH", body: changes }),
+  onSuccess: () => {
+    void queryClient.invalidateQueries({ queryKey: DESKTOP_DEVICES_QUERY_KEY })
+  },
+}
+
+export interface RevokeDesktopDeviceInput {
+  deviceId: number
+}
+
+export const revokeDesktopDeviceMutationOptions: UseMutationOptions<void, unknown, RevokeDesktopDeviceInput> = {
+  mutationFn: ({ deviceId }) => apiFetch<void>(`/api/desktop-devices/${deviceId}`, { method: "DELETE" }),
+  onSuccess: () => {
+    void queryClient.invalidateQueries({ queryKey: DESKTOP_DEVICES_QUERY_KEY })
+  },
+}
+
+export interface TestDesktopDeviceInput {
+  deviceId: number
+}
+
+/** `answered` is false when the Mac gave no answer inside the server's 5 second wait. */
+export interface TestDesktopDeviceResult {
+  answered: boolean
+  rtt_ms: number | null
+}
+
+// A test changes nothing the list shows, so it does not invalidate (D-15).
+export const testDesktopDeviceMutationOptions: UseMutationOptions<
+  TestDesktopDeviceResult,
+  unknown,
+  TestDesktopDeviceInput
+> = {
+  mutationFn: ({ deviceId }) =>
+    apiFetch<TestDesktopDeviceResult>(`/api/desktop-devices/${deviceId}/test`, { method: "POST" }),
+}

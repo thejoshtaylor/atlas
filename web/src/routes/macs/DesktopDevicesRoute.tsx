@@ -1,6 +1,5 @@
 import * as React from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -14,51 +13,16 @@ import {
   createDesktopDeviceMutationOptions,
   desktopDevicesQueryOptions,
   pageLocation,
-  type DesktopDevice,
   type DesktopDeviceCreated,
 } from "@/lib/desktopDevices"
 import { deriveDesktopDevicesScreenState } from "./deriveDesktopDevicesScreenState"
-import { lastSeenLine } from "./formatLastSeen"
+import { MacRow } from "./MacRow"
 
 // An admin pairs a Mac that runs the ATLAS menu bar app, sees its token
 // once, and watches which Mac is online (PAIR-01, PAIR-04). The route sits
 // behind the admin `RequireRole` block in `App.tsx`. That is presentation
 // only. `require_role(Role.ADMIN)` in `routes/desktop_devices.py` holds
 // the line.
-
-function statusBadge(device: DesktopDevice): { label: string; variant: "default" | "secondary" | "outline" } {
-  if (device.revoked) return { label: "Revoked", variant: "outline" }
-  if (device.connected) return { label: "Online", variant: "default" }
-  return { label: "Offline", variant: "secondary" }
-}
-
-function DesktopDeviceRow({ device, now }: { device: DesktopDevice; now: Date }) {
-  const badge = statusBadge(device)
-  const seen = lastSeenLine(device, now)
-
-  return (
-    <li className="flex flex-col px-4 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 flex-col">
-          <div className="flex min-w-0 items-center gap-2">
-            <span
-              className={`truncate text-body font-semibold ${device.revoked ? "text-muted-foreground" : "text-foreground"}`}
-            >
-              {device.name}
-            </span>
-            {device.is_default ? <Badge variant="outline">Default</Badge> : null}
-          </div>
-          <span className="truncate text-label text-muted-foreground" title={seen.title ?? undefined}>
-            {seen.text}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center">
-          <Badge variant={badge.variant}>{badge.label}</Badge>
-        </div>
-      </div>
-    </li>
-  )
-}
 
 type CopyState = "idle" | "copied" | "failed"
 
@@ -210,7 +174,7 @@ export function DesktopDevicesRoute() {
         ) : (
           <ul className="panel-list">
             {screen.devices.map((device) => (
-              <DesktopDeviceRow key={device.id} device={device} now={now} />
+              <MacRow key={device.id} device={device} now={now} controlsDisabled={controlsDisabled} />
             ))}
           </ul>
         )

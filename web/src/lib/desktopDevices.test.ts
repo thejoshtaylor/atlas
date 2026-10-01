@@ -4,6 +4,9 @@ import {
   createDesktopDeviceMutationOptions,
   desktopDevicesQueryOptions,
   fetchDesktopDevices,
+  revokeDesktopDeviceMutationOptions,
+  testDesktopDeviceMutationOptions,
+  updateDesktopDeviceMutationOptions,
 } from "./desktopDevices"
 import { queryClient } from "./queryClient"
 
@@ -82,5 +85,72 @@ describe("desktopDevices.ts", () => {
   test("buildPairLink encodes the host and the token", () => {
     expect(buildPairLink("svr.test:8443", "t-1")).toBe("atlas://pair?server=svr.test%3A8443&token=t-1")
     expect(buildPairLink("svr.test", "a&b=c")).toBe("atlas://pair?server=svr.test&token=a%26b%3Dc")
+  })
+
+  test("update PATCHes only the changes given and invalidates the list", async () => {
+    const calls: { url: string; method?: string; body?: string }[] = []
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method, body: init?.body as string })
+      return jsonResponse(200, { id: 3, name: "x" })
+    }) as typeof fetch
+    const invalidated: unknown[] = []
+    const originalInvalidate = queryClient.invalidateQueries.bind(queryClient)
+    queryClient.invalidateQueries = ((filters: unknown) => {
+      invalidated.push(filters)
+      return Promise.resolve()
+    }) as typeof queryClient.invalidateQueries
+    try {
+      await updateDesktopDeviceMutationOptions.mutationFn!({ deviceId: 3, changes: { is_default: true } }, {} as never)
+      await updateDesktopDeviceMutationOptions.mutationFn!(
+        { deviceId: 3, changes: { edge_device_id: null } },
+        {} as never,
+      )
+      await (updateDesktopDeviceMutationOptions.onSuccess as (...a: unknown[]) => unknown)()
+    } finally {
+      queryClient.invalidateQueries = originalInvalidate
+    }
+    expect(calls[0]).toEqual({ url: "/api/desktop-devices/3", method: "PATCH", body: '{"is_default":true}' })
+    expect(JSON.parse(calls[1]!.body!)).toEqual({ edge_device_id: null })
+    expect(invalidated).toEqual([{ queryKey: ["desktop-devices"] }])
+  })
+
+  test("revoke sends DELETE and invalidates the list", async () => {
+    let calledUrl: string | undefined
+    let calledMethod: string | undefined
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calledUrl = url
+      calledMethod = init?.method
+      return new Response(null, { status: 204 })
+    }) as typeof fetch
+    const invalidated: unknown[] = []
+    const originalInvalidate = queryClient.invalidateQueries.bind(queryClient)
+    queryClient.invalidateQueries = ((filters: unknown) => {
+      invalidated.push(filters)
+      return Promise.resolve()
+    }) as typeof queryClient.invalidateQueries
+    try {
+      await revokeDesktopDeviceMutationOptions.mutationFn!({ deviceId: 4 }, {} as never)
+      await (revokeDesktopDeviceMutationOptions.onSuccess as (...a: unknown[]) => unknown)()
+    } finally {
+      queryClient.invalidateQueries = originalInvalidate
+    }
+    expect(calledUrl).toBe("/api/desktop-devices/4")
+    expect(calledMethod).toBe("DELETE")
+    expect(invalidated).toEqual([{ queryKey: ["desktop-devices"] }])
+  })
+
+  test("test POSTs to /test, returns the result and does not invalidate", async () => {
+    let calledUrl: string | undefined
+    let calledMethod: string | undefined
+    global.fetch = (async (url: string, init?: RequestInit) => {
+      calledUrl = url
+      calledMethod = init?.method
+      return jsonResponse(200, { answered: true, rtt_ms: 42 })
+    }) as typeof fetch
+    const result = await testDesktopDeviceMutationOptions.mutationFn!({ deviceId: 5 }, {} as never)
+    expect(calledUrl).toBe("/api/desktop-devices/5/test")
+    expect(calledMethod).toBe("POST")
+    expect(result).toEqual({ answered: true, rtt_ms: 42 })
+    expect(testDesktopDeviceMutationOptions.onSuccess).toBeUndefined()
   })
 })
