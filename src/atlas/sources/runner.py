@@ -112,7 +112,7 @@ from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
-from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, FollowUpChannel, FollowUpRequest
+from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
 
@@ -301,6 +301,11 @@ class BargeInMonitor:
         # the turn that an interrupt started.
         self.handover: list[bytes] = []
         self.after_interrupt = False
+        # D-16: what a VAD interrupt's no-wake-word turn may reach. `run_turn`
+        # notes the turn's command and the tools it dispatched, and a later
+        # note replaces an earlier one.
+        self.resume_transcript: str | None = None
+        self.resume_scope: AnswerScope | None = None
         self._on_interrupt = on_interrupt
         self._above_floor_since: float | None = None
         # Correlation is active only when both a trace to compare against
@@ -336,6 +341,13 @@ class BargeInMonitor:
             except Exception:
                 logger.warning("barge-in interrupt hook failed", exc_info=True)
         self.interrupted.set()
+
+    def note_resume_context(self, transcript: str, scope: AnswerScope) -> None:
+        """`run_turn` calls this with the turn's command text and the scope
+        of the tools it dispatched. A second call replaces the first, so the
+        last note is the one a VAD interrupt resumes from."""
+        self.resume_transcript = transcript
+        self.resume_scope = scope
 
     def reply_wake_word_at(self, now: float) -> bool:
         """True when `now` falls inside the estimated play time of the wake
@@ -1167,12 +1179,34 @@ class SourceRunner:
         return monitor, channel
 
     def _interrupt_channel(self, monitor: "BargeInMonitor", kind: str) -> "FollowUpChannel | None":
-        """The channel for the turn an interrupt of `kind` starts: fresh, with
-        nothing incoming, when follow-up windows are on. That turn is an
-        ordinary wake turn and may open a window."""
-        if self._follow_up_window_s is None:
-            return None
-        return FollowUpChannel()
+        """The channel for the turn an interrupt of `kind` starts.
+
+        A wake interrupt starts an ordinary wake turn: a fresh channel with
+        nothing incoming, when follow-up windows are on, and that turn may
+        open a window itself.
+
+        A VAD interrupt has no wake word, so it runs as a no-wake-word answer
+        turn with the interrupted turn's scope (RESEARCH Finding 4, D-16). The
+        scope is the tools that turn dispatched, and it fails closed to none.
+        The window opens now, because the hand-over already starts at the VAD
+        start. It is dead code while `enabled` is false (`EDGE_BARGE_IN_PROVEN`).
+        """
+        if kind != "vad":
+            return FollowUpChannel() if self._follow_up_window_s is not None else None
+        utterances = monitor.playback.utterances
+        scope = monitor.resume_scope if monitor.resume_scope is not None else AnswerScope(tool_names=frozenset())
+        request = FollowUpRequest(
+            kind="answer",
+            chain_depth=1,
+            original_transcript=monitor.resume_transcript or "",
+            question=utterances[-1].text if utterances else "",
+            answer_scope=scope,
+        )
+        return FollowUpChannel(
+            incoming=request,
+            window_opens_at=self._clock(),
+            window_s=self._follow_up_window_s() if self._follow_up_window_s is not None else None,
+        )
 
     def _follow_up_opens_at(self, requested: FollowUpRequest) -> float:
         # The clock is read only when there is no playback end, as it always was.

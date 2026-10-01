@@ -1257,6 +1257,11 @@ async def run_turn(
             timings.log()
             return
 
+        # Phase 13 (D-16): a turn that ends here in a macro, a timer or a local
+        # intent dispatched no tool of its own, so a VAD interrupt of its reply
+        # resumes with no tool at all. The brain path replaces this note below.
+        _note_resume(barge_in, final_text, AnswerScope(tool_names=frozenset()).narrowed_by(answer_scope))
+
         # The macro check runs here, before a single tier task is created:
         # placed after the dispatch below, the model round trip would already
         # have been paid and MACRO-02 would be false while every other
@@ -1703,6 +1708,11 @@ async def run_turn(
             timings.log()
             return
         timings.mark_tool_rounds_done()
+        # D-16: what this turn dispatched, and no more than its own scope. A
+        # VAD interrupt of its reply may reach only these tools.
+        _note_resume(
+            barge_in, final_text, AnswerScope(tool_names=frozenset(handoff_slot.called_tools)).narrowed_by(answer_scope)
+        )
 
         if handoff_slot.handoff is not None:
             # Plan 09-04 (D-08): the tool round stored a handoff instead of
@@ -2907,6 +2917,15 @@ class SpeechResult:
     # The monitor cursor's queue end, which counts a filler still playing
     # ahead of this utterance (Phase 13, RESEARCH Pitfall 3).
     playback_ends_at: "float | None" = None
+
+
+def _note_resume(barge_in: Any, transcript: str, scope: "AnswerScope") -> None:
+    """Tell the source's monitor what this turn did, so a VAD interrupt can
+    resume from it with no more reach than this turn had (Phase 13, D-16).
+    A monitor with no `note_resume_context` is skipped."""
+    note = getattr(barge_in, "note_resume_context", None)
+    if note is not None:
+        note(transcript, scope)
 
 
 def _barge_in_active(barge_in: Any) -> bool:

@@ -728,3 +728,107 @@ async def test_a_turn_that_is_not_interrupted_starts_no_extra_turn(edge_source, 
     energy = _interrupted_monitor(runner, "energy")
     assert await runner._continue_after_interrupts(energy, channel) == (energy, channel)
     assert ran == []
+
+
+def test_a_second_resume_note_replaces_the_first(edge_source):
+    from atlas.turn.follow_up import AnswerScope
+
+    runner = _handover_runner(
+        edge_source, lambda turn_source: None, _NeverHitDetector(), barge_in_config=BargeInConfig(enabled=False)
+    )
+    monitor = runner._new_barge_in_monitor()
+    assert monitor.resume_transcript is None and monitor.resume_scope is None
+    monitor.note_resume_context("first", AnswerScope(tool_names=frozenset({"a"})))
+    monitor.note_resume_context("second", AnswerScope(tool_names=frozenset()))
+    assert monitor.resume_transcript == "second"
+    assert monitor.resume_scope == AnswerScope(tool_names=frozenset())
+
+
+async def _vad_interrupted_edge_turn(edge_source, *, noted_scope):
+    """Turn 1 speaks a held reply and (optionally) notes its scope. A
+    `vad.start` interrupts it, and frames B and C follow. Returns what turn 2
+    saw: its incoming request and its first two chunks."""
+    from atlas.timing import TurnTimings
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    b_frame, c_frame = _stereo(2), _stereo(3)
+    seen: dict = {"incoming": None, "chunks": [], "after_interrupt": None, "done": asyncio.Event()}
+    calls = 0
+
+    async def run_turn_fn(turn_source) -> None:
+        nonlocal calls
+        calls += 1
+        monitor = turn_source.barge_in
+        if calls == 1:
+            if noted_scope is not None:
+                monitor.note_resume_context("what is the weather", noted_scope)
+            monitor.mark_transcript_done()
+            timings = TurnTimings()
+            timings.turn_outcome = "completed"
+            await _speak(
+                turn_source,
+                _BurstFakeTts([b"\x00\x00" * 1600] * 10),
+                timings,
+                "It is sunny today",
+                kind="answer",
+                barge_in=monitor,
+                sink=edge_source.sink_format(),
+            )
+            return
+        seen["incoming"] = turn_source.follow_up.incoming
+        seen["after_interrupt"] = monitor.after_interrupt
+        async for chunk in turn_source.frames():
+            seen["chunks"].append(chunk)
+            if len(seen["chunks"]) == 2:
+                break
+        seen["done"].set()
+
+    runner = _handover_runner(
+        edge_source,
+        run_turn_fn,
+        _ScriptedWakeDetector(hit_on_calls={1}),
+        barge_in_config=BargeInConfig(enabled=True, wake_word=False, post_playback_guard_ms=0),
+        follow_up_window_s=lambda: 8.0,
+    )
+    run_task = asyncio.create_task(runner.run())
+    try:
+        await asyncio.sleep(0)
+        socket.push_bytes(_stereo(1))
+        await _wait_until(lambda: len(socket.sent_bytes) == 10)
+        socket.push_text(json.dumps({"type": "vad.start", "seq": 1}))
+        await _wait_until(lambda: len(_stop_frames(socket)) == 1)
+        socket.push_bytes(b_frame)
+        socket.push_bytes(c_frame)
+        await asyncio.wait_for(seen["done"].wait(), timeout=2.0)
+        assert seen["chunks"] == [b_frame, c_frame]
+        assert seen["after_interrupt"] is True
+        return seen["incoming"]
+    finally:
+        run_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_a_vad_interrupt_becomes_a_scoped_no_wake_word_answer_turn(edge_source):
+    from atlas.turn.follow_up import AnswerScope
+
+    scope = AnswerScope(tool_names=frozenset({"weather_now"}))
+    incoming = await _vad_interrupted_edge_turn(edge_source, noted_scope=scope)
+    assert incoming.kind == "answer"
+    assert incoming.chain_depth == 1
+    assert incoming.original_transcript == "what is the weather"
+    assert incoming.question == "It is sunny today"
+    assert incoming.answer_scope == scope
+
+
+async def test_a_vad_interrupt_with_no_note_reaches_no_tool(edge_source):
+    from atlas.turn.follow_up import AnswerScope
+
+    incoming = await _vad_interrupted_edge_turn(edge_source, noted_scope=None)
+    assert incoming.answer_scope == AnswerScope(tool_names=frozenset())
+    assert incoming.original_transcript == ""

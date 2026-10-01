@@ -2900,3 +2900,109 @@ async def test_a_bare_stop_with_no_monitor_at_all_still_reaches_the_brain(fake_t
     )
     assert len(brain.received_messages) == 1
     assert timings.turn_outcome != "stopped"
+
+
+# --- Phase 13 (plan 13-05): the resume notes a VAD interrupt reads ----------
+
+
+class _NoteToolHost:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def call_tool(self, name: str, arguments: dict):
+        self.calls.append(name)
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text=json.dumps({"ok": True}))])
+
+
+_NOTE_SCHEMA = [{"type": "function", "function": {"name": "weather_now"}}]
+
+
+async def _run_noted_turn(fake_audio_source, fake_stt, fake_tts, *, text, replies, macros=(), filler_cache=None):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.barge_in = _AfterInterruptBargeIn(after_interrupt=False)
+    await run_turn(
+        source,
+        fake_stt(events=[FinalTranscript(text=text)]),
+        _RecordingBrain(replies=replies),
+        fake_tts(chunks=[b"\x01\x02"]),
+        _NoteToolHost(),
+        tools_schema=_NOTE_SCHEMA,
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=TurnTimings(),
+        macros=macros,
+        filler_cache=filler_cache,
+    )
+    return source.barge_in
+
+
+async def test_a_turn_that_dispatches_a_tool_notes_exactly_that_scope(fake_audio_source, fake_stt, fake_tts):
+    from atlas.turn.follow_up import AnswerScope
+
+    monitor = await _run_noted_turn(
+        fake_audio_source,
+        fake_stt,
+        fake_tts,
+        text="what is the weather",
+        replies=[
+            BrainReply(tool_calls=[ToolCall(name="weather_now", arguments={"place": "home"})]),
+            BrainReply(text="It is sunny."),
+        ],
+    )
+    transcript, scope = monitor.notes[-1]
+    assert transcript == "what is the weather"
+    assert scope == AnswerScope(tool_names=frozenset({"weather_now"}))
+
+
+async def test_a_conversation_only_turn_notes_no_tool(fake_audio_source, fake_stt, fake_tts):
+    from atlas.turn.follow_up import AnswerScope
+
+    monitor = await _run_noted_turn(
+        fake_audio_source, fake_stt, fake_tts, text="tell me a joke", replies=[BrainReply(text="Knock knock.")]
+    )
+    assert monitor.notes[-1] == ("tell me a joke", AnswerScope(tool_names=frozenset()))
+
+
+async def test_a_macro_turn_notes_an_empty_scope(fake_audio_source, fake_stt, fake_tts):
+    from atlas.config import MacroActionConfig, MacroConfig
+
+    macro = MacroConfig(
+        phrase="good night",
+        aliases=(),
+        reply="good night",
+        actions=(MacroActionConfig(tool="weather_now", arguments={}),),
+    )
+    monitor = await _run_noted_turn(
+        fake_audio_source,
+        fake_stt,
+        fake_tts,
+        text="good night",
+        replies=[],
+        macros=(macro,),
+        filler_cache={None: {"good night": b"\x01\x02"}},
+    )
+    transcript, scope = monitor.notes[-1]
+    assert transcript == "good night"
+    assert scope.tool_names == frozenset()
+
+
+async def test_a_source_with_no_monitor_notes_nothing_and_still_runs(fake_audio_source, fake_stt, fake_tts):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    timings = TurnTimings()
+    await run_turn(
+        fake_audio_source(frames=[b"\x00\x01"]),
+        fake_stt(events=[FinalTranscript(text="tell me a joke")]),
+        _RecordingBrain(replies=[BrainReply(text="Knock knock.")]),
+        fake_tts(chunks=[b"\x01\x02"]),
+        None,
+        tools_schema=[],
+        system_prompt="you answer questions",
+        max_tool_rounds=3,
+        timings=timings,
+    )
+    assert timings.turn_outcome == "completed"
