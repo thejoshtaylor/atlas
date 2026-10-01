@@ -13,8 +13,10 @@ import json
 import pytest
 
 from atlas.desktop.bridge import DesktopEventBridge
+from atlas.desktop.hub import DesktopHub
 from atlas.desktop.protocol import SERVER_MESSAGE_ADAPTER
 from atlas.session.observers import ObserverRegistry
+from tests.desktop_fakes import FakeDesktopSocket, fake_desktop_device
 
 
 class _RecordingHub:
@@ -360,3 +362,64 @@ def test_the_bridge_logs_the_event_type_and_turn_id_never_the_text(caplog) -> No
         bridge.handle(_ended(outcome="SECRET-WORDS", playback_ms_left="SECRET-WORDS"))
 
     assert "SECRET-WORDS" not in caplog.text
+
+
+_HELLO = json.dumps(
+    {"type": "hello", "protocol": 1, "app_version": "0.1.0", "os_version": "26.0", "capabilities": []}
+)
+
+
+async def test_a_whole_turn_and_a_follow_up_arrive_in_order_through_the_real_hub() -> None:
+    hub = DesktopHub(device_repo=None, hello_timeout_s=0.5, ping_timeout_s=0.1, idle_timeout_s=0.5)
+    socket = FakeDesktopSocket()
+    socket.push_text(_HELLO)
+    serving = asyncio.create_task(hub.serve(socket, fake_desktop_device(id=1)))
+    for _ in range(200):
+        if socket.sent:
+            break
+        await asyncio.sleep(0.005)
+    assert socket.sent_types() == ["hello.ack"]
+    bridge = DesktopEventBridge(ObserverRegistry(), hub, follow_up_window_ms=lambda: 6800)
+
+    def feed(event_type: str, **fields) -> None:
+        bridge.handle({"type": event_type, "source": "camera", "turn_id": "t-1", **fields})
+
+    feed("wake.confirmed")
+    for text in ("what", "what is", "what is the"):
+        feed("transcript.partial", text=text)
+    feed("transcript.final", text="what is the time")
+    feed("reply.started", text="It is noon. Anything else?")
+    feed(
+        "turn.ended",
+        outcome="completed",
+        follow_up=True,
+        asks_question=True,
+        playback_ms_left=900,
+    )
+    bridge.handle({"type": "turn.started", "follow_up": True, "source": "camera", "turn_id": "t-2"})
+    bridge.handle({"type": "transcript.partial", "text": "yes", "turn_id": "t-2"})
+
+    for _ in range(200):
+        if len(socket.sent) >= 8:
+            break
+        await asyncio.sleep(0.005)
+    types = socket.sent_types()[1:]  # after hello.ack
+    collapsed = [t for i, t in enumerate(types) if not (t == "transcript.partial" and i and types[i - 1] == t)]
+    assert collapsed == [
+        "wake.confirmed",
+        "transcript.partial",
+        "transcript.final",
+        "state",
+        "state",
+        "card",
+        "turn.ended",
+        "state",
+        "transcript.partial",
+    ]
+    ended = next(f for f in socket.sent_json() if f["type"] == "turn.ended")
+    assert ended["follow_up_window_ms"] == 6800
+    for frame in socket.sent[1:]:
+        SERVER_MESSAGE_ADAPTER.validate_json(frame)
+
+    socket.push_disconnect()
+    await asyncio.wait_for(serving, 2)
