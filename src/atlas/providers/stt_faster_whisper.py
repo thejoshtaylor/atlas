@@ -82,6 +82,68 @@ def _pcm16_to_float32(pcm16: bytes) -> "np.ndarray":
     return samples / 32768.0
 
 
+async def _collect_frames(
+    frames: AsyncIterator[bytes], finalize: "asyncio.Event | None"
+) -> bytes:
+    """Buffer a turn's frames into one byte string.
+
+    With no `finalize`, drain everything. With one, a reader task appends
+    `frames` to a list while this races it against `finalize.wait()`;
+    whichever finishes first wins, the loser is cancelled and awaited, and
+    whatever was collected so far is returned. Shared with the Parakeet
+    provider (261001-mp8), which has the same whole-utterance shape."""
+    if finalize is None:
+        return b"".join([chunk async for chunk in frames])
+
+    collected: list[bytes] = []
+
+    async def _reader() -> None:
+        async for chunk in frames:
+            collected.append(chunk)
+
+    reader_task = asyncio.create_task(_reader())
+    finalize_task = asyncio.create_task(finalize.wait())
+    try:
+        await asyncio.wait({reader_task, finalize_task}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if not reader_task.done():
+            reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader_task
+        if not finalize_task.done():
+            finalize_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await finalize_task
+    return b"".join(collected)
+
+
+def _to_float32_16k(raw: bytes, source_format: SourceFormat) -> "np.ndarray":
+    """Source bytes to the 16 kHz mono float32 array both local models take.
+
+    IN-05 (code review): both branches resample. The `pcm` branch
+    used to take `raw` unchanged whatever rate the source declared,
+    which happens to be right for both PCM transports in this
+    codebase (`transports/websocket.py:54`,
+    `transports/webrtc.py:117` both report 16 kHz) -- but
+    `CameraConfig` accepts `encoding: "pcm"` with any `sample_rate`,
+    defaulting to 8000. A camera configured that way fed 8 kHz audio
+    straight into a 16 kHz feature extractor, which produces
+    plausible-looking nonsense with no error anywhere. Reading a
+    declared rate and then ignoring it is the part that made this
+    silent; `_resample_pcm16` returns its input untouched when the
+    rates already match, so the correct case costs nothing."""
+    if source_format.encoding == "alaw":
+        pcm16 = alaw_to_pcm16(raw)
+        pcm16 = _resample_pcm16(pcm16, source_format.sample_rate, _TARGET_SAMPLE_RATE)
+    elif source_format.encoding == "pcm":
+        pcm16 = _resample_pcm16(raw, source_format.sample_rate, _TARGET_SAMPLE_RATE)
+    else:
+        raise SttError(
+            f"local speech-to-text cannot handle source encoding {source_format.encoding!r}"
+        )
+    return _pcm16_to_float32(pcm16)
+
+
 def _run_transcribe(model: Any, audio: "np.ndarray", language: str) -> list:
     """Materialize every segment before returning.
 
@@ -175,57 +237,8 @@ class FasterWhisperStt:
                 f"{source_format.channels} channels"
             )
 
-        if finalize is None:
-            chunks = [chunk async for chunk in frames]
-        else:
-            collected: list[bytes] = []
-
-            async def _reader() -> None:
-                async for chunk in frames:
-                    collected.append(chunk)
-
-            reader_task = asyncio.create_task(_reader())
-            finalize_task = asyncio.create_task(finalize.wait())
-            try:
-                await asyncio.wait(
-                    {reader_task, finalize_task}, return_when=asyncio.FIRST_COMPLETED
-                )
-            finally:
-                if not reader_task.done():
-                    reader_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await reader_task
-                if not finalize_task.done():
-                    finalize_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await finalize_task
-            chunks = collected
-
-        raw = b"".join(chunks)
-
-        # IN-05 (code review): both branches resample. The `pcm` branch
-        # used to take `raw` unchanged whatever rate the source declared,
-        # which happens to be right for both PCM transports in this
-        # codebase (`transports/websocket.py:54`,
-        # `transports/webrtc.py:117` both report 16 kHz) -- but
-        # `CameraConfig` accepts `encoding: "pcm"` with any `sample_rate`,
-        # defaulting to 8000. A camera configured that way fed 8 kHz audio
-        # straight into a 16 kHz feature extractor, which produces
-        # plausible-looking nonsense with no error anywhere. Reading a
-        # declared rate and then ignoring it is the part that made this
-        # silent; `_resample_pcm16` returns its input untouched when the
-        # rates already match, so the correct case costs nothing.
-        if source_format.encoding == "alaw":
-            pcm16 = alaw_to_pcm16(raw)
-            pcm16 = _resample_pcm16(pcm16, source_format.sample_rate, _TARGET_SAMPLE_RATE)
-        elif source_format.encoding == "pcm":
-            pcm16 = _resample_pcm16(raw, source_format.sample_rate, _TARGET_SAMPLE_RATE)
-        else:
-            raise SttError(
-                f"local speech-to-text cannot handle source encoding {source_format.encoding!r}"
-            )
-
-        audio = _pcm16_to_float32(pcm16)
+        raw = await _collect_frames(frames, finalize)
+        audio = _to_float32_16k(raw, source_format)
 
         try:
             async with self._decode_lock:

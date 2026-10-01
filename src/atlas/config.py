@@ -149,6 +149,20 @@ def _parse_keyterms(raw: object) -> tuple[str, ...]:
     return terms
 
 
+# The four model files a provisioned Parakeet directory must hold, and the
+# optional BPE vocabulary `scripts/fetch_models.py --only parakeet` builds
+# beside them. `providers/stt_parakeet.py` and that script both read these
+# two names, the same way they share SPEAKER_MODEL_FILES, so the two can
+# never drift apart (261001-mp8 D-05, D-10).
+PARAKEET_MODEL_FILES: "tuple[str, ...]" = (
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+)
+PARAKEET_BPE_VOCAB = "bpe.vocab"
+
+
 @dataclass(frozen=True)
 class SttConfig:
     """The `stt:` block, carried under its own config key names.
@@ -166,6 +180,12 @@ class SttConfig:
     rather than downloading one. `local_model_size` documents which size
     was provisioned there for display/logging -- the directory itself,
     not this name, is what `WhisperModel` actually loads.
+
+    `parakeet_model_dir`, `parakeet_num_threads` and `parakeet_hotwords_score`
+    (261001-mp8, D-04) belong to the local Parakeet entry only. The model
+    directory is provisioned by `scripts/fetch_models.py --only parakeet`;
+    nothing downloads at boot. `stt.keyterms` doubles as Parakeet's hotword
+    list.
     """
 
     url: str = ""
@@ -181,10 +201,37 @@ class SttConfig:
     local_model_size: str = "small"
     local_compute_type: str = "int8"
     keyterms: tuple[str, ...] = ()
+    parakeet_model_dir: str = "/models/parakeet-tdt-0.6b-v2-int8"
+    parakeet_num_threads: int = 8
+    parakeet_hotwords_score: float = 1.5
 
     @classmethod
     def from_config(cls, raw: dict | None) -> "SttConfig":
         raw = raw or {}
+        parakeet_model_dir = raw.get("parakeet_model_dir", cls.parakeet_model_dir)
+        if not isinstance(parakeet_model_dir, str) or not parakeet_model_dir.strip():
+            raise ConfigError("stt.parakeet_model_dir must be a non-empty path string")
+        parakeet_num_threads = raw.get("parakeet_num_threads", cls.parakeet_num_threads)
+        if (
+            isinstance(parakeet_num_threads, bool)
+            or not isinstance(parakeet_num_threads, int)
+            or not 1 <= parakeet_num_threads <= 256
+        ):
+            raise ConfigError(
+                f"stt.parakeet_num_threads must be a whole number from 1 to 256, "
+                f"got {parakeet_num_threads!r}"
+            )
+        parakeet_hotwords_score = raw.get("parakeet_hotwords_score", cls.parakeet_hotwords_score)
+        if (
+            isinstance(parakeet_hotwords_score, bool)
+            or not isinstance(parakeet_hotwords_score, (int, float))
+            or not math.isfinite(parakeet_hotwords_score)
+            or not 0 < parakeet_hotwords_score <= 10
+        ):
+            raise ConfigError(
+                f"stt.parakeet_hotwords_score must be a number above 0 and at most 10, "
+                f"got {parakeet_hotwords_score!r}"
+            )
         local_compute_type = raw.get("local_compute_type", cls.local_compute_type)
         if local_compute_type not in _LOCAL_STT_COMPUTE_TYPES:
             raise ConfigError(
@@ -206,6 +253,9 @@ class SttConfig:
             local_model_size=raw.get("local_model_size", cls.local_model_size),
             local_compute_type=local_compute_type,
             keyterms=_parse_keyterms(raw.get("keyterms")),
+            parakeet_model_dir=parakeet_model_dir,
+            parakeet_num_threads=parakeet_num_threads,
+            parakeet_hotwords_score=float(parakeet_hotwords_score),
         )
 
 

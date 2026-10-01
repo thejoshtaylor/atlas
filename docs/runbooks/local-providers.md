@@ -8,6 +8,8 @@ before you select a local provider on the Providers screen.
 The local set has three parts, one per provider slot.
 
 - **Speech to text**: `faster-whisper`, a speech recognizer that runs on the CPU.
+  A second choice is Parakeet, also on the CPU, which leans toward the names in
+  `stt.keyterms`. See "Provisioning Parakeet" below.
 - **Text to speech**: Piper, a speech synthesizer that runs on the CPU. Piper is
   optional. See the licence note below before you install it.
 - **Language model**: any server that speaks the OpenAI-compatible chat API, for
@@ -68,11 +70,52 @@ If you prefer to call the script directly, set `PYTHONPATH=src:mcp` and pass
 PYTHONPATH=src:mcp .venv/bin/python scripts/fetch_models.py --config config/config.example.yaml
 ```
 
+## Provisioning Parakeet
+
+Parakeet is NVIDIA Parakeet TDT 0.6b v2, run by sherpa-onnx. It needs no
+credential. It is not part of the default fetch, because the download is large.
+Run it as a separate step:
+
+```bash
+scripts/dev-fetch-models.sh --only parakeet
+```
+
+Or call the script directly:
+
+```bash
+PYTHONPATH=src:mcp .venv/bin/python scripts/fetch_models.py --config config/config.example.yaml --only parakeet
+```
+
+The step downloads a pinned archive of about 480 MB. It copies four files out of
+it into `stt.parakeet_model_dir`: the encoder, the decoder, the joiner and
+`tokens.txt`. It then downloads a pinned NeMo file of about 2.4 GB, reads the
+tokenizer inside it once, and writes `bpe.vocab` beside the model files. It
+deletes both downloads when it finishes. A second run downloads nothing.
+
+The `bpe.vocab` step needs the `sentencepiece` package in the environment that
+runs the script. Install it with `pip install sentencepiece`, or install the
+project's `parakeet-fetch` extra. If `sentencepiece` is missing, the script stops
+after the model files and says so. Parakeet still works. Without `bpe.vocab`, it
+decodes greedily and does not lean toward your keyterms, and it logs one warning
+at startup. Install `sentencepiece` and run the step again to add the vocabulary.
+
+Parakeet reads `stt.keyterms` as its hotwords. Follow these rules:
+
+- List proper names and device names only. A generic word such as "weather",
+  "temperature" or "forecast" pulls television speech toward it.
+- Write each name in the case you want in the transcript. Parakeet keeps the case.
+- Do not list the wake word. Parakeet drops any term that contains it, because
+  biasing the wake word turns other speech into "Hey Atlas".
+
+The model is licensed under CC-BY-4.0. Attribution to NVIDIA is required if you
+redistribute it.
+
 ## What to select on the Providers screen
 
 Open the Providers screen as an admin, and for each slot pick the local option:
 
-1. **Speech to text**: select `faster-whisper (local)`.
+1. **Speech to text**: select `faster-whisper (local)`, or `Parakeet (local)`
+   after you provision it (see the next section).
 2. **Text to speech**: select `Piper (local)`, if you installed the optional
    Piper package (see below).
 3. **Language model**: select `Self-hosted (local)`, and enter the URL of your

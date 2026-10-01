@@ -70,12 +70,15 @@ def test_known_entries_returns_every_registered_option_for_the_slot():
     alongside `xai`) -- `known_entries` never returns registration order."""
     entries = registry.known_entries("stt")
 
-    assert [entry.name for entry in entries] == ["faster-whisper", "xai"]
+    assert [entry.name for entry in entries] == ["faster-whisper", "parakeet", "xai"]
     by_name = {entry.name: entry for entry in entries}
     assert by_name["xai"].requires_credential is True
     assert by_name["xai"].batch is False
     assert by_name["faster-whisper"].requires_credential is False
     assert by_name["faster-whisper"].batch is False
+    assert by_name["parakeet"].label == "Parakeet (local)"
+    assert by_name["parakeet"].requires_credential is False
+    assert by_name["parakeet"].batch is False
 
 
 def test_build_tts_builds_the_registered_xai_provider():

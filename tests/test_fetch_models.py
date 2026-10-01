@@ -750,3 +750,272 @@ def test_the_default_model_root_is_the_mount_point_both_deployments_use():
     )
     for model_file in planned:
         fetch_models.resolve_under_root(fetch_models._DEFAULT_MODEL_ROOT, model_file.dest)
+
+
+# --- Parakeet (261001-mp8, D-10) ----------------------------------------
+
+import io
+import tarfile
+
+from atlas.config import PARAKEET_BPE_VOCAB, PARAKEET_MODEL_FILES
+
+
+def _tar_bytes(members: "dict[str, bytes]", mode: str = "w:bz2") -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode=mode) as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _archive_members(skip: "tuple[str, ...]" = ()) -> "dict[str, bytes]":
+    top = fetch_models._PARAKEET_ARCHIVE_TOP_DIR
+    members = {f"{top}/{name}": f"model:{name}".encode() for name in PARAKEET_MODEL_FILES if name not in skip}
+    members[f"{top}/test_wavs/0.wav"] = b"wav"
+    members["../escape.txt"] = b"escaped"
+    return members
+
+
+class _FakeProcessor:
+    pieces = [("<unk>", 0.0), ("▁the", -1.5), ("a", -2.25)]
+
+    def get_piece_size(self):
+        return len(self.pieces)
+
+    def id_to_piece(self, index):
+        return self.pieces[index][0]
+
+    def get_score(self, index):
+        return self.pieces[index][1]
+
+
+class _ParakeetSource:
+    """A fake Downloader serving the synthesized archive and .nemo."""
+
+    def __init__(self, archive: bytes, nemo: bytes) -> None:
+        self.payloads = {
+            fetch_models._PARAKEET_ARCHIVE_URL: archive,
+            fetch_models._PARAKEET_NEMO_URL: nemo,
+        }
+        self.pinned = {url: hashlib.sha256(data).hexdigest() for url, data in self.payloads.items()}
+        self.downloads: "list[str]" = []
+
+    def __call__(self, url, part_path):
+        self.downloads.append(url)
+        data = self.payloads[url]
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(data)
+        return fetch_models.DownloadReceipt(declared_size=len(data), declared_sha256=None)
+
+
+def _nemo_bytes() -> bytes:
+    return _tar_bytes({"./model_config.yaml": b"x", "./abc123_tokenizer.model": b"spm"}, mode="w")
+
+
+def _source(tmp_path, **kwargs) -> "_ParakeetSource":
+    return _ParakeetSource(_tar_bytes(_archive_members(**kwargs)), _nemo_bytes())
+
+
+def _parakeet_cfg(model_dir: Path) -> SttConfig:
+    return SttConfig(parakeet_model_dir=str(model_dir))
+
+
+def test_fetch_parakeet_installs_only_the_four_files_and_a_vocab(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "parakeet"
+    source = _source(tmp_path)
+
+    results = fetch_models.fetch_parakeet(
+        _parakeet_cfg(model_dir),
+        root,
+        source,
+        source.pinned,
+        load_sentencepiece=lambda data: _FakeProcessor(),
+    )
+
+    assert sorted(p.name for p in model_dir.iterdir()) == sorted([*PARAKEET_MODEL_FILES, PARAKEET_BPE_VOCAB])
+    assert (model_dir / "encoder.int8.onnx").read_bytes() == b"model:encoder.int8.onnx"
+    assert (model_dir / PARAKEET_BPE_VOCAB).read_text(encoding="utf-8").splitlines() == [
+        "<unk>\t0.0",
+        "▁the\t-1.5",
+        "a\t-2.25",
+    ]
+    # Nothing escaped the model directory, and nothing else landed in the root.
+    assert not (root / "escape.txt").exists()
+    assert not (tmp_path / "escape.txt").exists()
+    assert [p.name for p in root.iterdir()] == ["parakeet"]
+    assert {r.status for r in results} == {"fetched"}
+    assert len(results) == len(PARAKEET_MODEL_FILES) + 1
+
+
+def test_fetch_parakeet_a_second_run_downloads_nothing(tmp_path):
+    root = tmp_path / "models"
+    source = _source(tmp_path)
+    args = (_parakeet_cfg(root / "parakeet"), root, source, source.pinned)
+    fetch_models.fetch_parakeet(*args, load_sentencepiece=lambda data: _FakeProcessor())
+    source.downloads.clear()
+
+    results = fetch_models.fetch_parakeet(*args, load_sentencepiece=lambda data: _FakeProcessor())
+
+    assert source.downloads == []
+    assert {r.status for r in results} == {"already-present"}
+
+
+def test_fetch_parakeet_an_archive_missing_a_required_file_leaves_no_partial_model(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "parakeet"
+    source = _source(tmp_path, skip=("tokens.txt",))
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models.fetch_parakeet(
+            _parakeet_cfg(model_dir),
+            root,
+            source,
+            source.pinned,
+            load_sentencepiece=lambda data: _FakeProcessor(),
+        )
+
+    assert "tokens.txt" in str(excinfo.value)
+    assert list(model_dir.iterdir()) == []
+
+
+def test_fetch_parakeet_a_missing_sentencepiece_keeps_the_model_and_deletes_the_nemo(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "parakeet"
+    source = _source(tmp_path)
+
+    def _no_sentencepiece(data):
+        raise fetch_models.FetchError(
+            "sentencepiece is needed ... `pip install sentencepiece` ... greedy decoding"
+        )
+
+    with pytest.raises(fetch_models.FetchError):
+        fetch_models.fetch_parakeet(
+            _parakeet_cfg(model_dir), root, source, source.pinned, load_sentencepiece=_no_sentencepiece
+        )
+
+    assert sorted(p.name for p in model_dir.iterdir()) == sorted(PARAKEET_MODEL_FILES)
+
+
+def test_the_real_sentencepiece_loader_names_the_install_step_and_greedy_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "sentencepiece", None)  # makes the import raise ImportError
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models._load_sentencepiece(b"x")
+
+    message = str(excinfo.value)
+    assert "pip install sentencepiece" in message
+    assert "greedy" in message
+
+
+def test_fetch_parakeet_a_nemo_without_one_tokenizer_is_refused(tmp_path):
+    root = tmp_path / "models"
+    model_dir = root / "parakeet"
+    source = _source(tmp_path)
+    source.payloads[fetch_models._PARAKEET_NEMO_URL] = _tar_bytes({"./other.txt": b"x"}, mode="w")
+    source.pinned[fetch_models._PARAKEET_NEMO_URL] = hashlib.sha256(
+        source.payloads[fetch_models._PARAKEET_NEMO_URL]
+    ).hexdigest()
+
+    with pytest.raises(fetch_models.FetchError) as excinfo:
+        fetch_models.fetch_parakeet(
+            _parakeet_cfg(model_dir),
+            root,
+            source,
+            source.pinned,
+            load_sentencepiece=lambda data: _FakeProcessor(),
+        )
+
+    assert "_tokenizer.model" in str(excinfo.value)
+    assert not (model_dir / PARAKEET_BPE_VOCAB).exists()
+    assert not (model_dir / fetch_models._PARAKEET_NEMO_FILENAME).exists()
+
+
+def test_fetch_parakeet_refuses_a_model_dir_outside_the_root(tmp_path):
+    root = tmp_path / "models"
+    root.mkdir()
+    source = _source(tmp_path)
+
+    with pytest.raises(fetch_models.FetchError):
+        fetch_models.fetch_parakeet(
+            _parakeet_cfg(tmp_path / "elsewhere"), root, source, source.pinned
+        )
+    assert source.downloads == []
+
+
+def test_the_parakeet_urls_carry_the_verified_pinned_digests():
+    assert (
+        fetch_models.pinned_sha256(fetch_models._PARAKEET_ARCHIVE_URL)
+        == "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad"
+    )
+    assert (
+        fetch_models.pinned_sha256(fetch_models._PARAKEET_NEMO_URL)
+        == "d99e39955c9d3d0350d8fb7c75e40c64a2b2eaeb003883d7c941fd2e8747b28c"
+    )
+
+
+def _parakeet_config_file(tmp_path, models_root) -> Path:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"""
+stt:
+  local_model_dir: "{models_root / 'faster-whisper'}"
+  parakeet_model_dir: "{models_root / 'parakeet'}"
+tts:
+  piper_voice_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx'}"
+  piper_config_path: "{models_root / 'piper' / 'en_US-lessac-medium.onnx.json'}"
+speaker_id:
+  model_dir: "{models_root / 'speaker-id'}"
+brain:
+  models:
+    - model: "fake-model"
+database:
+  url: "postgresql+asyncpg://u:p@localhost/db"
+""",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_only_parakeet_runs_just_the_parakeet_step(tmp_path, capsys, monkeypatch):
+    models_root = tmp_path / "models"
+    config_path = _parakeet_config_file(tmp_path, models_root)
+    source = _source(tmp_path)
+    monkeypatch.setattr(fetch_models, "_load_sentencepiece", lambda data: _FakeProcessor())
+    # `fetch_parakeet`'s default argument was bound at definition time, so
+    # route the real default through the module attribute for this test.
+    monkeypatch.setattr(
+        fetch_models.fetch_parakeet,
+        "__kwdefaults__",
+        {"load_sentencepiece": lambda data: _FakeProcessor()},
+    )
+
+    exit_code = fetch_models.main(
+        ["--config", str(config_path), "--model-root", str(models_root), "--only", "parakeet"],
+        download=source,
+        pinned=source.pinned,
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert source.downloads == [fetch_models._PARAKEET_ARCHIVE_URL, fetch_models._PARAKEET_NEMO_URL]
+    assert all("parakeet/" in line for line in out.splitlines() if line.strip())
+    assert not (models_root / "faster-whisper").exists()
+
+
+def test_only_all_does_not_plan_any_parakeet_file(tmp_path):
+    models_root = tmp_path / "models"
+    stt = SttConfig(local_model_dir=str(models_root / "faster-whisper"))
+    tts = TtsConfig(
+        piper_voice_path=str(models_root / "piper" / "en_US-lessac-medium.onnx"),
+        piper_config_path=str(models_root / "piper" / "en_US-lessac-medium.onnx.json"),
+    )
+
+    _root, files = fetch_models.plan_fetches(
+        stt, tts, models_root, speaker_id_config=SpeakerIdConfig(model_dir=str(models_root / "speaker-id"))
+    )
+
+    assert not any("parakeet" in f.label for f in files)
+    assert len(files) == 4 + 2 + len(SPEAKER_MODEL_FILES)

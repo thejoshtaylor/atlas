@@ -118,6 +118,46 @@ def test_stt_local_settings_have_shipped_defaults():
     assert config.local_compute_type == "int8"
 
 
+def test_stt_parakeet_settings_have_shipped_defaults():
+    """261001-mp8 D-04: the Parakeet keys default when the operator sets none."""
+    config = SttConfig.from_config({})
+
+    assert config.parakeet_model_dir == "/models/parakeet-tdt-0.6b-v2-int8"
+    assert config.parakeet_num_threads == 8
+    assert config.parakeet_hotwords_score == 1.5
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("parakeet_num_threads", 0),
+        ("parakeet_num_threads", -1),
+        ("parakeet_num_threads", True),
+        ("parakeet_num_threads", "8"),
+        ("parakeet_num_threads", 257),
+        ("parakeet_hotwords_score", 0),
+        ("parakeet_hotwords_score", -1),
+        ("parakeet_hotwords_score", True),
+        ("parakeet_hotwords_score", float("nan")),
+        ("parakeet_hotwords_score", float("inf")),
+        ("parakeet_hotwords_score", 11),
+        ("parakeet_hotwords_score", "1.5"),
+        ("parakeet_model_dir", ""),
+        ("parakeet_model_dir", 5),
+    ],
+)
+def test_stt_parakeet_settings_reject_invalid_values(key, value):
+    with pytest.raises(ConfigError) as exc_info:
+        SttConfig.from_config({key: value})
+    assert f"stt.{key}" in str(exc_info.value)
+
+
+def test_stt_parakeet_hotwords_score_accepts_an_int_and_stores_a_float():
+    config = SttConfig.from_config({"parakeet_hotwords_score": 2})
+    assert config.parakeet_hotwords_score == 2.0
+    assert isinstance(config.parakeet_hotwords_score, float)
+
+
 def test_stt_local_compute_type_rejects_an_unsupported_value():
     with pytest.raises(ConfigError) as exc_info:
         SttConfig.from_config({"local_compute_type": "float64"})
@@ -784,6 +824,9 @@ def test_example_config_loads_end_to_end(monkeypatch):
     # agrees by not raising on the shipped file.
     assert not hasattr(config, "macros")
     assert config.tts.voice_id == "leo"
+    assert config.stt.parakeet_model_dir == "/models/parakeet-tdt-0.6b-v2-int8"
+    assert config.stt.parakeet_num_threads == 8
+    assert config.stt.parakeet_hotwords_score == 1.5
     assert config.tts.cache_dir == "/data/tts-cache"
     assert config.tts.precache == (
         "ok",

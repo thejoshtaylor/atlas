@@ -146,10 +146,12 @@ def test_get_providers_reports_the_stt_slot_with_its_options(
     # local) alongside `xai` -- assert on the xai option specifically
     # rather than assuming the slot has exactly one.
     options_by_name = {option["name"]: option for option in slot["options"]}
-    assert options_by_name.keys() == {"xai", "faster-whisper"}
+    assert options_by_name.keys() == {"xai", "faster-whisper", "parakeet"}
     assert options_by_name["xai"]["label"] == "xAI"
     assert options_by_name["xai"]["requires_credential"] is True
     assert options_by_name["faster-whisper"]["requires_credential"] is False
+    assert options_by_name["parakeet"]["requires_credential"] is False
+    assert options_by_name["parakeet"]["label"] == "Parakeet (local)"
 
 
 def test_get_providers_reports_the_tts_slot_wrapped_with_no_measured_figure_yet(

@@ -361,6 +361,20 @@ def test_every_registered_stt_provider_accepts_finalize(tmp_path):
             provider = FasterWhisperStt(
                 _stt_config(tmp_path), load_model=lambda config: _FakeWhisperModel()
             )
+        elif name == "parakeet":
+            # Same reason: `entry.build` needs a provisioned model directory
+            # (261001-mp8). A fake recognizer stands in for sherpa-onnx.
+            from atlas.config import PARAKEET_MODEL_FILES, SttConfig
+            from atlas.providers.stt_parakeet import ParakeetStt
+
+            model_dir = tmp_path / "parakeet"
+            model_dir.mkdir()
+            for filename in PARAKEET_MODEL_FILES:
+                (model_dir / filename).write_bytes(b"x")
+            provider = ParakeetStt(
+                SttConfig(parakeet_model_dir=str(model_dir)),
+                load_recognizer=lambda spec: object(),
+            )
         else:
             provider = entry.build(_stt_cfg(), "test-key", {})
 

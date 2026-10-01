@@ -652,7 +652,8 @@ stt:
   # to 12 of 13 transcribed right. List only names you say out loud: a
   # listed name also pulls unclear background speech toward itself. At most
   # 100 terms, 50 characters each. House names belong in STT_KEYTERMS, not
-  # in this file.
+  # in this file. The local Parakeet option reads this same list as its
+  # hotwords: see the Parakeet note below.
   keyterms: "${STT_KEYTERMS:-Atlas}"
 
   # Give up on a session that produces nothing, so a stuck socket cannot hold
@@ -672,6 +673,24 @@ stt:
   local_model_dir: "/models/faster-whisper"
   local_model_size: "small"
   local_compute_type: "int8"
+
+  # The second local speech-to-text option: Parakeet (local), selected on the
+  # /providers screen rather than here. These keys only take effect when that
+  # option is chosen. parakeet_model_dir must already hold a provisioned model:
+  # run `scripts/fetch_models.py --only parakeet` first. Nothing in this
+  # process downloads one at boot, so a missing directory degrades that slot
+  # with the path named. parakeet_num_threads is the number of CPU threads
+  # for decoding. parakeet_hotwords_score is how hard recognition leans
+  # toward the keyterms above (above 0, at most 10).
+  #
+  # Parakeet uses stt.keyterms as its hotwords. It keeps the case you write.
+  # It drops any term that contains the wake word, because biasing the wake
+  # word turns other speech into "Hey Atlas". List proper names and device
+  # names only. Generic words such as "weather", "temperature" or "forecast"
+  # pull television speech toward them.
+  parakeet_model_dir: "/models/parakeet-tdt-0.6b-v2-int8"
+  parakeet_num_threads: 8
+  parakeet_hotwords_score: 1.5
 
 brain:
   base_url: "https://api.x.ai/v1"

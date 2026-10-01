@@ -111,6 +111,13 @@ dev = [
 # resolve as an installable distribution. D-10: GPL-3.0-or-later licence,
 # optional per D-10 -- never a default dependency.
 piper = ["piper-tts>=1.8,<2"]
+# Named by the operator in quick task 261001-mp8. Used only by
+# `scripts/fetch_models.py --only parakeet` to build bpe.vocab from the
+# tokenizer inside the Parakeet NeMo file. Never imported from src/atlas.
+# Legitimacy checked by the planner against pypi.org/project/sentencepiece
+# (0.2.2, 2026-07-12) and github.com/google/sentencepiece. Not installed by
+# that task; the operator installs it at fetch time.
+parakeet-fetch = ["sentencepiece>=0.2,<0.3"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

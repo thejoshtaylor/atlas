@@ -25,6 +25,7 @@ from atlas.config import BrainConfig, ConfigError, SttConfig, TtsConfig
 from atlas.providers.base import SttProvider, TtsProvider
 from atlas.providers.boot import ProviderUnavailable
 from atlas.providers.stt_faster_whisper import FasterWhisperStt
+from atlas.providers.stt_parakeet import ParakeetStt
 from atlas.providers.stt_xai import XaiStt
 from atlas.providers.tts_piper import PiperTts
 from atlas.providers.tts_xai import XaiTts
@@ -113,6 +114,11 @@ _FASTER_WHISPER_MEASURED_NOTE = (
     "real camera turn also pays an A-law decode and a resample this figure "
     "does not include."
 )
+_PARAKEET_MEASURED_NOTE = (
+    "Measured on this project's CPU-only host: about 265ms to decode a recorded "
+    "camera command with keyterm biasing (8 threads, Intel Xeon E5-2699A v4, no "
+    "GPU, 2026-10-01)."
+)
 _PIPER_MEASURED_NOTE = (
     "Measured on this project's CPU-only host: 112ms median to synthesize a "
     "spoken reply (5 repetitions, 12-core Apple M4 Pro, no GPU, 2026-09-20)."
@@ -139,6 +145,18 @@ STT_REGISTRY: "dict[str, ProviderEntry]" = {
         batch=False,
         licence_note=None,
         measured_note=_FASTER_WHISPER_MEASURED_NOTE,
+    ),
+    # 261001-mp8 (D-03): the second local option. It needs no credential, and
+    # it biases toward `stt.keyterms`. Selecting it is the operator's choice
+    # on /providers (D-13); no default or seed changes.
+    "parakeet": ProviderEntry(
+        name="parakeet",
+        label="Parakeet (local)",
+        build=lambda config, api_key, options: ParakeetStt(config),
+        requires_credential=False,
+        batch=False,
+        licence_note=None,
+        measured_note=_PARAKEET_MEASURED_NOTE,
     ),
 }
 

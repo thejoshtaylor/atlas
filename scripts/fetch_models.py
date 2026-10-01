@@ -53,6 +53,17 @@ code deliberately did not perform):
 A mismatch on any of these deletes the partial file rather than leaving a
 truncated or substituted model that would fail much later, much less
 clearly, deep inside `faster_whisper` or `piper`.
+
+**Parakeet** (`--only parakeet`, quick task 261001-mp8) is opt-in and is not
+part of `all`. It downloads the pinned sherpa-onnx archive (about 480 MB)
+and copies only four named files out of it into `stt.parakeet_model_dir`.
+No archive member path is ever used as a destination. Then it downloads the
+pinned NeMo file (about 2.4 GB), reads the sentencepiece tokenizer from
+inside it, and writes `bpe.vocab` (`piece<TAB>score` for every id) beside
+the model. Both downloads are deleted afterwards. `sentencepiece` is needed
+only for that last step and is imported inside the function that uses it.
+Without `bpe.vocab` the provider still runs, with greedy decoding and no
+keyterm biasing.
 """
 
 from __future__ import annotations
@@ -60,14 +71,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import sys
+import tarfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
-from atlas.config import SPEAKER_MODEL_FILES, ConfigError, load_config
+from atlas.config import (
+    PARAKEET_BPE_VOCAB,
+    PARAKEET_MODEL_FILES,
+    SPEAKER_MODEL_FILES,
+    ConfigError,
+    load_config,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "config.example.yaml"
@@ -91,6 +110,20 @@ _PIPER_VOICES_URL_TEMPLATE = "https://huggingface.co/rhasspy/piper-voices/resolv
 _SPEAKER_MODEL_URL_TEMPLATE = (
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/{filename}"
 )
+
+# Parakeet TDT 0.6b v2, int8 (261001-mp8, D-10). The archive is the
+# sherpa-onnx export; the NeMo file is read once for the sentencepiece
+# tokenizer inside it. Model licence: CC-BY-4.0 (NVIDIA), attribution required.
+_PARAKEET_ARCHIVE_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2"
+)
+_PARAKEET_ARCHIVE_TOP_DIR = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8"
+_PARAKEET_NEMO_URL = (
+    "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2/resolve/main/parakeet-tdt-0.6b-v2.nemo"
+)
+_PARAKEET_NEMO_FILENAME = "parakeet-tdt-0.6b-v2.nemo"
+_PARAKEET_TOKENIZER_SUFFIX = "_tokenizer.model"
 
 _DOWNLOAD_CHUNK_BYTES = 1 << 20  # 1 MiB
 _REQUEST_TIMEOUT_S = 120.0
@@ -152,6 +185,14 @@ _PINNED_SHA256: "dict[str, str]" = {
         "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b",
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx":
         "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+    # Parakeet TDT 0.6b v2 (261001-mp8, D-10), looked up 2026-10-01. The
+    # archive digest is the GitHub Releases API `digest` field (482468385
+    # bytes). The NeMo digest is the Hugging Face tree API `lfs.oid`
+    # (2472222720 bytes).
+    _PARAKEET_ARCHIVE_URL:
+        "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad",
+    _PARAKEET_NEMO_URL:
+        "d99e39955c9d3d0350d8fb7c75e40c64a2b2eaeb003883d7c941fd2e8747b28c",
 }
 
 
@@ -470,6 +511,156 @@ def plan_fetches(
     return model_root, [*faster_whisper_files, *piper_files, *speaker_id_files]
 
 
+def _load_sentencepiece(model_bytes: bytes) -> Any:
+    """Load a sentencepiece processor from model bytes. Imported here, not
+    at module scope: this is a fetch-time dependency only, and nothing under
+    `src/atlas` imports it."""
+    try:
+        import sentencepiece
+    except ImportError as exc:
+        raise FetchError(
+            "sentencepiece is needed only to build bpe.vocab from the Parakeet tokenizer. "
+            "Run `pip install sentencepiece` (or install the project's `parakeet-fetch` "
+            "extra) in the environment that runs this script, then re-run "
+            "`--only parakeet`. The model files are already in place, and Parakeet runs "
+            "with greedy decoding and no keyterm biasing until bpe.vocab exists."
+        ) from exc
+    return sentencepiece.SentencePieceProcessor(model_proto=model_bytes)
+
+
+def _extract_parakeet_files(archive_path: Path, model_dir: Path) -> "list[Path]":
+    """Copy the four allowlisted files out of the archive into `model_dir`.
+
+    A member is accepted only when it is a regular file named exactly
+    `<top dir>/<allowlisted basename>`. `extract` and `extractall` are never
+    called, so no member path is ever used as a destination. Files are
+    written to `.part` siblings and renamed only when all four are present,
+    so a bad archive leaves no partial model behind."""
+    wanted = set(PARAKEET_MODEL_FILES)
+    parts: "dict[str, Path]" = {}
+    try:
+        with tarfile.open(archive_path, "r:bz2") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                pure = PurePosixPath(member.name)
+                if len(pure.parts) != 2 or pure.parts[0] != _PARAKEET_ARCHIVE_TOP_DIR:
+                    continue
+                basename = pure.parts[1]
+                if basename not in wanted:
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                part_path = model_dir / (basename + ".part")
+                with source, part_path.open("wb") as out:
+                    shutil.copyfileobj(source, out, _DOWNLOAD_CHUNK_BYTES)
+                parts[basename] = part_path
+        missing = [name for name in PARAKEET_MODEL_FILES if name not in parts]
+        if missing:
+            raise FetchError(
+                f"the Parakeet archive does not hold {', '.join(missing)} under "
+                f"{_PARAKEET_ARCHIVE_TOP_DIR}/ -- nothing was installed"
+            )
+    except BaseException:
+        for part_path in parts.values():
+            part_path.unlink(missing_ok=True)
+        raise
+    placed: "list[Path]" = []
+    for name in PARAKEET_MODEL_FILES:
+        dest = model_dir / name
+        parts[name].replace(dest)
+        placed.append(dest)
+    return placed
+
+
+def _build_bpe_vocab(nemo_path: Path, vocab_path: Path, load_sentencepiece: Callable[[bytes], Any]) -> None:
+    """Write `piece<TAB>score` for every id of the tokenizer inside the
+    NeMo file (a tar) to `vocab_path`."""
+    with tarfile.open(nemo_path, "r:*") as nemo:
+        candidates = [
+            member
+            for member in nemo
+            if member.isfile() and member.name.endswith(_PARAKEET_TOKENIZER_SUFFIX)
+        ]
+        if len(candidates) != 1:
+            raise FetchError(
+                f"expected exactly one *{_PARAKEET_TOKENIZER_SUFFIX} in {nemo_path.name}, "
+                f"found {len(candidates)}"
+            )
+        source = nemo.extractfile(candidates[0])
+        if source is None:
+            raise FetchError(f"cannot read the tokenizer inside {nemo_path.name}")
+        with source:
+            model_bytes = source.read()
+    processor = load_sentencepiece(model_bytes)
+    part_path = vocab_path.with_name(vocab_path.name + ".part")
+    try:
+        with part_path.open("w", encoding="utf-8") as out:
+            for index in range(processor.get_piece_size()):
+                out.write(f"{processor.id_to_piece(index)}\t{processor.get_score(index)}\n")
+        part_path.replace(vocab_path)
+    except BaseException:
+        part_path.unlink(missing_ok=True)
+        raise
+
+
+def fetch_parakeet(
+    stt_config: "Any",
+    model_root: Path,
+    download: Downloader = default_download,
+    pinned: "Mapping[str, str] | None" = None,
+    *,
+    load_sentencepiece: Callable[[bytes], Any] = _load_sentencepiece,
+) -> "list[FetchResult]":
+    """Provision the Parakeet model directory: the four model files from the
+    pinned sherpa-onnx archive, then `bpe.vocab` from the tokenizer inside
+    the pinned NeMo file. A step whose output is already present is skipped,
+    so a second run downloads nothing."""
+    model_dir = resolve_under_root(model_root, Path(stt_config.parakeet_model_dir))
+    results: "list[FetchResult]" = []
+
+    model_paths = [model_dir / name for name in PARAKEET_MODEL_FILES]
+    if all(path.exists() for path in model_paths):
+        results.extend(
+            FetchResult(label=f"parakeet/{path.name}", dest=path, status="already-present")
+            for path in model_paths
+        )
+    else:
+        archive_path = model_dir / _PARAKEET_ARCHIVE_URL.rsplit("/", 1)[1]
+        fetched = fetch_one(
+            ModelFile(label="parakeet/archive", url=_PARAKEET_ARCHIVE_URL, dest=archive_path),
+            model_root,
+            download,
+            pinned,
+        )
+        try:
+            placed = _extract_parakeet_files(fetched.dest, model_dir)
+        finally:
+            archive_path.unlink(missing_ok=True)
+        results.extend(
+            FetchResult(label=f"parakeet/{path.name}", dest=path, status="fetched") for path in placed
+        )
+
+    vocab_path = model_dir / PARAKEET_BPE_VOCAB
+    if vocab_path.exists():
+        results.append(FetchResult(label=f"parakeet/{PARAKEET_BPE_VOCAB}", dest=vocab_path, status="already-present"))
+    else:
+        nemo_path = model_dir / _PARAKEET_NEMO_FILENAME
+        try:
+            fetch_one(
+                ModelFile(label="parakeet/nemo", url=_PARAKEET_NEMO_URL, dest=nemo_path),
+                model_root,
+                download,
+                pinned,
+            )
+            _build_bpe_vocab(nemo_path, vocab_path, load_sentencepiece)
+        finally:
+            nemo_path.unlink(missing_ok=True)
+        results.append(FetchResult(label=f"parakeet/{PARAKEET_BPE_VOCAB}", dest=vocab_path, status="fetched"))
+    return results
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -497,12 +688,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--only",
-        choices=("all", "local-providers", "speaker-id"),
+        choices=("all", "local-providers", "speaker-id", "parakeet"),
         default="all",
         help=(
             "which file set to plan (default: all). 'local-providers' plans only the "
             "faster-whisper and Piper files the local STT/TTS provider set needs; "
-            "'speaker-id' plans only the two Phase 11 speaker-embedding models (D-05)"
+            "'speaker-id' plans only the two Phase 11 speaker-embedding models (D-05); "
+            "'parakeet' is opt-in and not part of 'all': it downloads about 480 MB plus a "
+            "2.4 GB NeMo file that is read once for its tokenizer and then deleted"
         ),
     )
     return parser
@@ -525,14 +718,18 @@ def main(
 
     try:
         requested_root = Path(args.model_root) if args.model_root else None
-        model_root, model_files = plan_fetches(
-            config.stt, config.tts, requested_root, speaker_id_config=config.speaker_id
-        )
-        if args.only == "local-providers":
-            model_files = [f for f in model_files if not f.label.startswith("speaker-id/")]
-        elif args.only == "speaker-id":
-            model_files = [f for f in model_files if f.label.startswith("speaker-id/")]
-        results = fetch_all(model_files, model_root, download, pinned)
+        if args.only == "parakeet":
+            model_root = requested_root or Path(config.stt.parakeet_model_dir).parent
+            results = fetch_parakeet(config.stt, model_root, download, pinned)
+        else:
+            model_root, model_files = plan_fetches(
+                config.stt, config.tts, requested_root, speaker_id_config=config.speaker_id
+            )
+            if args.only == "local-providers":
+                model_files = [f for f in model_files if not f.label.startswith("speaker-id/")]
+            elif args.only == "speaker-id":
+                model_files = [f for f in model_files if f.label.startswith("speaker-id/")]
+            results = fetch_all(model_files, model_root, download, pinned)
     # WR-06 (code review): `FetchError` alone left every failure the real
     # download path can actually produce as a raw traceback --
     # `httpx.HTTPStatusError` from `raise_for_status()` (a 404 on a
