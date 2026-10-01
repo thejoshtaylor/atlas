@@ -136,7 +136,7 @@ async def test_an_ambiguous_capability_speaks_a_question_naming_both_plugins_and
     lookup, weather_host, garden_host = _two_colliding_plugin_hosts()
 
     class _NeverFinishesBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             await asyncio.sleep(10)
             raise AssertionError("should have been cancelled before this line")  # pragma: no cover
 

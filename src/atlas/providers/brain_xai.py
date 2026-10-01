@@ -135,15 +135,25 @@ class XaiBrain:
             )
         return self._resolved_model
 
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> BrainReply:
-        stream = await self._client.chat.completions.create(
-            model=self._resolved_model,
-            messages=messages,
-            tools=tools or None,
-            stream=True,
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_tokens,
-        )
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> BrainReply:
+        kwargs: dict[str, Any] = {
+            "model": self._resolved_model,
+            "messages": messages,
+            "tools": tools or None,
+            "stream": True,
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens,
+        }
+        # Sent only when given: a caller without a format (quarantine,
+        # confirmation, style profile) makes the exact request it made before.
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        stream = await self._client.chat.completions.create(**kwargs)
         return await accumulate_stream(stream)
 
 

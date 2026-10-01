@@ -539,7 +539,7 @@ async def test_a_raising_top_tier_propagates_out_of_run_turn(
     from atlas.turn.controller import run_turn
 
     class _RaisingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise RuntimeError("top tier exploded")
 
     source = fake_audio_source(frames=[b"\x00\x01"])
@@ -705,7 +705,7 @@ async def test_a_committed_top_tier_survives_a_confident_triage_reply_end_to_end
         def __init__(self) -> None:
             self.call_count = 0
 
-        async def chat(self, messages, tools=None) -> BrainReply:
+        async def chat(self, messages, tools=None, response_format=None) -> BrainReply:
             self.call_count += 1
             if self.call_count == 1:
                 return BrainReply(

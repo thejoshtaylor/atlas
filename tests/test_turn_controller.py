@@ -875,7 +875,7 @@ class _RecordingBrain:
         self._replies = list(replies)
         self.received_messages: list[list[dict]] = []
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         self.received_messages.append([dict(m) for m in messages])
         if not self._replies:
             raise AssertionError("_RecordingBrain.chat called more times than scripted")

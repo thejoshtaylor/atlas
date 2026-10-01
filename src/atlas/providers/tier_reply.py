@@ -123,6 +123,10 @@ class TierReply(BaseModel):
             "and would not recognize one."
         ),
     )
+    expects_reply: bool = Field(
+        default=False,
+        description="True only when `answer` asks the operator a question and needs their spoken reply.",
+    )
 
     @model_validator(mode="after")
     def _confident_reply_must_have_an_answer(self) -> "TierReply":

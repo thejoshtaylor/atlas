@@ -607,7 +607,7 @@ class _ScriptedBrain:
     def __init__(self) -> None:
         self.ordinary_calls = 0
 
-    async def chat(self, messages: "list[dict]", tools: Any = None) -> BrainReply:
+    async def chat(self, messages: "list[dict]", tools: Any = None, response_format: Any = None) -> BrainReply:
         if tools:
             return BrainReply(tool_calls=[ToolCall(name="confirm", arguments={})])
         self.ordinary_calls += 1

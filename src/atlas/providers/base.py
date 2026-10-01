@@ -109,8 +109,18 @@ class SttProvider(Protocol):
 
 
 class BrainProvider(Protocol):
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> BrainReply:
-        """Run one chat-completion round, possibly returning tool calls."""
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> BrainReply:
+        """Run one chat-completion round, possibly returning tool calls.
+
+        `response_format=None` (the default) sends the same request as before.
+        The top-tier tool loop passes a `json_schema` format here, so the
+        model's final text round is a JSON object, while the tools stay on offer.
+        """
         ...
 
 

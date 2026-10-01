@@ -575,7 +575,7 @@ async def test_end_to_end_wake_readback_yes_inserts_and_says_done(fake_stt):
     pending_actions = FakePendingActionRepository()
 
     class _ScriptedBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             if tools:
                 # The confirmation round is the only caller that ever
                 # offers a non-empty `tools` here (`CONFIRM_CANCEL_TOOLS`)

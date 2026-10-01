@@ -699,7 +699,7 @@ async def test_two_pending_runs_matching_the_words_are_disambiguated_with_zero_t
         than racing it to a tool call, the identical shape Phase 4's own
         entity-disambiguation test already establishes."""
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             await asyncio.sleep(10)
             raise AssertionError("should have been cancelled before this line")  # pragma: no cover
 

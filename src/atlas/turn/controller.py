@@ -156,6 +156,29 @@ logger = logging.getLogger("atlas.turn.controller")
 _NO_SPEECH_REPLY = "sorry, i didn't catch that"
 _TOO_MANY_ROUNDS_REPLY = "that needs more steps than i can take at once"
 _EMPTY_REPLY = "sorry, i don't have anything to say to that"
+
+# 261001-dlp: the response format every top-tier tool round sends. The model's
+# final text is then a JSON object with the spoken answer and a flag that says
+# whether the answer asks the operator a question. A live probe on
+# grok-4.20-0309-non-reasoning verified this exact shape together with tools:
+# tool-call rounds came with empty content, and final rounds came back as valid
+# JSON. Property descriptions are left out because the probe did not test them.
+_SPOKEN_REPLY_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "spoken_reply",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "expects_reply": {"type": "boolean"},
+            },
+            "required": ["answer", "expects_reply"],
+            "additionalProperties": False,
+        },
+    },
+}
 # Spoken whenever an error-shaped tool result's extracted text is empty --
 # in both `_run_tool_rounds`'s short-circuit below and the macro path's
 # failure branch above. Names the case without asserting an outcome: an
@@ -284,7 +307,12 @@ class _SttProvider(Protocol):
 
 
 class _BrainProvider(Protocol):
-    async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> Any: ...
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> Any: ...
 
 
 class _TtsProvider(Protocol):
@@ -1962,6 +1990,20 @@ async def run_turn(
                 final_text=final_text,
                 reply_text=reply_text,
                 called_tools=handoff_slot.called_tools,
+                # A user decision of 2026-10-01 amends 13-CONTEXT D-11 for
+                # this case only. The turn dispatched no tool and the model
+                # asked the operator a question. The answer may then reach
+                # every tool this turn offered, with no entity limit.
+                # `narrowed_by` makes sure a chain never gets a wider scope.
+                # A turn that dispatched tools keeps the D-10 scope, whatever
+                # the flag says. A source without `answer_windows` still
+                # opens no window.
+                expects_reply=winner.expects_reply,
+                offered_tools=frozenset(
+                    name
+                    for entry in turn_tools_schema
+                    if isinstance(name := entry.get("function", {}).get("name"), str)
+                ),
                 answer_scope=answer_scope,
                 proposals_only=restrict_tools_to_proposals,
                 prior_exchange=prior_exchange,
@@ -2619,6 +2661,31 @@ def _triage_clarification_scope(candidates: "tuple[str, ...]") -> AnswerScope:
     return AnswerScope(tool_names=frozenset())
 
 
+def _parse_spoken_reply(text: str, timings: TurnTimings) -> tuple[str, bool]:
+    """The spoken answer and the `expects_reply` flag from a final round's text.
+
+    The text should be the `_SPOKEN_REPLY_FORMAT` JSON. A text that is not
+    never fails the turn. It is spoken verbatim with the flag False, and one
+    warning is logged. Only a JSON `true` sets the flag.
+    """
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("answer"), str):
+        answer = parsed["answer"]
+        if not answer.strip():
+            timings.turn_outcome = "empty_reply"
+            return _EMPTY_REPLY, False
+        flag = parsed.get("expects_reply")
+        if not isinstance(flag, bool):
+            logger.warning("spoken_reply JSON has no boolean expects_reply; treating it as false")
+            flag = False
+        return answer, flag
+    logger.warning("brain reply was not the spoken_reply JSON; speaking it as plain text: %.80r", text)
+    return text, False
+
+
 async def _run_tool_rounds(
     brain: _BrainProvider,
     tool_host: _ToolHost,
@@ -2679,13 +2746,19 @@ async def _run_tool_rounds(
     brain still reads Home Assistant's full error; only the spoken cap reply
     changes. `turn_outcome` stays `round_cap`. With no such result the old
     `_TOO_MANY_ROUNDS_REPLY` is unchanged.
+
+    Every round sends `_SPOKEN_REPLY_FORMAT` as `response_format`, with the
+    tools still on offer. The final text is parsed by `_parse_spoken_reply`,
+    and the model's `expects_reply` flag lands on `handoff_slot.expects_reply`.
+    That is the only place the flag is written, so a reply composed in code
+    (done, refusal, round cap, handoff) always keeps False.
     """
     last_ha_refusal: str | None = None
     # A round whose only errors are argument errors goes back to the model
     # (260930-e3r, D-03). Every other error round is composed in code with no
     # second `brain.chat` (D-14), so a refusal never goes through a model.
     for round_num in range(max_tool_rounds):
-        reply = await brain.chat(messages, tools=tools_schema)
+        reply = await brain.chat(messages, tools=tools_schema, response_format=_SPOKEN_REPLY_FORMAT)
         timings.mark_brain_first_round()
         if not reply.tool_calls:
             if not reply.text:
@@ -2699,7 +2772,10 @@ async def _run_tool_rounds(
                 # `turn_outcome` that keeps this distinguishable in the log.
                 timings.turn_outcome = "empty_reply"
                 return _EMPTY_REPLY
-            return reply.text
+            spoken, expects_reply = _parse_spoken_reply(reply.text, timings)
+            if handoff_slot is not None:
+                handoff_slot.expects_reply = expects_reply
+            return spoken
 
         messages.append(
             {

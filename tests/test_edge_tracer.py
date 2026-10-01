@@ -89,7 +89,7 @@ class _EdgeTracerBrain:
     async def resolve_model(self) -> str:
         return "fake-model"
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         self.chat_calls += 1
         return BrainReply(text=self._reply_text)
 

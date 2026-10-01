@@ -50,7 +50,7 @@ async def test_quarantine_round_ignores_tool_calls_in_the_reply():
 
 async def test_quarantine_round_raises_on_timeout():
     class _SlowBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             await asyncio.sleep(1)
             return BrainReply(text="too late")
 
@@ -60,7 +60,7 @@ async def test_quarantine_round_raises_on_timeout():
 
 async def test_quarantine_round_raises_on_brain_error():
     class _FailingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise BrainError("boom")
 
     with pytest.raises(QuarantineError):
@@ -74,7 +74,7 @@ async def test_quarantine_round_raises_on_a_non_brain_error_exception(caplog):
     unguarded past every caller's own `except QuarantineError` fallback."""
 
     class _ConnectionFailingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise RuntimeError("connection reset by peer")
 
     with caplog.at_level("ERROR"):
@@ -91,7 +91,7 @@ async def test_quarantine_round_leaves_cancellation_to_propagate():
     it must never be rewritten into a `QuarantineError`."""
 
     class _CancellingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):

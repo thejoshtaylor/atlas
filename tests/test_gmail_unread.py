@@ -94,7 +94,7 @@ class _ContentAwareBrain:
         self._replies = dict(replies_by_substring)
         self.calls: "list[tuple[list[dict], list[dict] | None]]" = []
 
-    async def chat(self, messages, tools=None) -> BrainReply:
+    async def chat(self, messages, tools=None, response_format=None) -> BrainReply:
         self.calls.append((list(messages), tools))
         content = messages[-1]["content"]
         for substring, text in self._replies.items():

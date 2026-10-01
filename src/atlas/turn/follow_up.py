@@ -100,7 +100,9 @@ class FollowUpRequest:
     clarification -- the two shapes `dispatch_handoff` ever builds one for --
     and from an `"answer"` (Phase 13, D-09): the listening window `run_turn`
     requests after an ordinary brain answer on a source that opts in. An
-    answer window may reach only the tools the answered turn dispatched.
+    answer window may reach only the tools the answered turn dispatched,
+    or, when that turn dispatched none and asked the operator a question,
+    the tools it offered.
     `chain_depth` is this request's own position in a chain of follow-ups
     (1 for the first ask); `pending_action_id` is set only for a
     `"confirmation"` request, naming the exact row a "yes" resolves.

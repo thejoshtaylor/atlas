@@ -639,6 +639,33 @@ async def test_xai_brain_warm_calls_models_list_once_and_never_raises():
 
 
 @pytest.mark.asyncio
+async def test_xai_brain_chat_sends_response_format_only_when_given():
+    from atlas.config import BrainConfig, BrainTierConfig
+    from atlas.providers.brain_xai import XaiBrain
+
+    config = BrainConfig(api_key="test-key", models=(BrainTierConfig(model="grok"),))
+    brain = XaiBrain(config)
+    sent: list[dict] = []
+
+    async def _create(**kwargs):
+        sent.append(kwargs)
+
+        async def _stream():
+            yield _chunk(content="hi")
+
+        return _stream()
+
+    brain._client.chat.completions.create = _create
+    fmt = {"type": "json_schema", "json_schema": {"name": "x", "strict": True, "schema": {"type": "object"}}}
+
+    await brain.chat([{"role": "user", "content": "hello"}], tools=None, response_format=fmt)
+    await brain.chat([{"role": "user", "content": "hello"}])
+
+    assert sent[0]["response_format"] == fmt
+    assert "response_format" not in sent[1]
+
+
+@pytest.mark.asyncio
 async def test_xai_tts_warm_sends_one_head_with_auth_and_swallows_every_error():
     import httpx as _httpx
 

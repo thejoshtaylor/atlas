@@ -9,7 +9,9 @@ The window fails closed, because every word heard in it is untrusted. The
 microphone hears the television, and a television can speak any sentence.
 So the window turn may reach only the tools the answered turn itself
 dispatched (D-10). After a conversation-only answer it reaches no tool at all
-(D-11). Along a chain of windows the scope only narrows. A window turn never
+(D-11), except when that answer asked the operator a question. Then it reaches
+the catalog the turn offered (261001-dlp, a user decision that amends D-11 for
+this case only). Along a chain of windows the scope only narrows. A window turn never
 runs a macro, a local on/off intent or a timer intent, because the continued
 exchange skips those paths. A window that hears nothing speaks nothing (D-15).
 """
@@ -50,16 +52,24 @@ def build_answer_request(
     prior_exchange: "list[dict[str, Any]] | None",
     playback_ends_at: "float | None",
     answer_only_from: "str | None",
+    expects_reply: bool = False,
+    offered_tools: "frozenset[str]" = frozenset(),
 ) -> "FollowUpRequest | None":
     """The request for the window after this answer, or `None` for no window.
 
     The scope is the exact set of tools this turn dispatched, narrowed by the
-    scope this turn itself ran under, so a chain never widens (D-10). No
-    window opens past `MAX_CHAINED_FOLLOW_UPS` links or after a blank reply.
+    scope this turn itself ran under, so a chain never widens (D-10). When the
+    turn dispatched no tool and the model asked the operator a question
+    (`expects_reply`), the scope is `offered_tools` instead, the catalog the
+    turn offered. It is narrowed the same way. No window opens past
+    `MAX_CHAINED_FOLLOW_UPS` links or after a blank reply.
     """
     chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
     if chain_depth > MAX_CHAINED_FOLLOW_UPS or not reply_text.strip():
         return None
+    scope_tools = frozenset(called_tools)
+    if not scope_tools and expects_reply:
+        scope_tools = frozenset(offered_tools)
     return FollowUpRequest(
         kind="answer",
         chain_depth=chain_depth,
@@ -68,7 +78,7 @@ def build_answer_request(
         prior_messages=tuple(prior_exchange) if prior_exchange else (),
         playback_ends_at=playback_ends_at,
         proposals_only=proposals_only,
-        answer_scope=AnswerScope(tool_names=frozenset(called_tools)).narrowed_by(answer_scope),
+        answer_scope=AnswerScope(tool_names=scope_tools).narrowed_by(answer_scope),
         answer_only_from=answer_only_from,
     )
 

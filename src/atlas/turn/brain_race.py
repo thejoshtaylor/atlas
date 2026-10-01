@@ -235,6 +235,9 @@ async def run_top_tier(
     follow-up chain. `answer_scope` (R3-IN-05, D-24, default `None`) is
     forwarded the same way: the target check of a turn that answers a
     clarifying question.
+
+    `TierReply.expects_reply` copies `handoff_slot.expects_reply`, which
+    `_run_tool_rounds` sets only from the model's own final-round JSON.
     """
     # Deferred, not module-level: `controller.py` imports this module at
     # load time to dispatch tiers, so a module-level import here of anything
@@ -264,6 +267,7 @@ async def run_top_tier(
         confident=bool(settled_text.strip()),
         needs_tool=False,
         filler=DEFAULT_FILLER,
+        expects_reply=handoff_slot.expects_reply if handoff_slot is not None else False,
     )
 
 

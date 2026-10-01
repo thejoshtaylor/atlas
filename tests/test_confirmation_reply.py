@@ -111,7 +111,7 @@ class _ReplyReadingBrain:
     def __init__(self) -> None:
         self.calls: list[list[dict]] = []
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         import json
 
         from atlas.providers.base import BrainReply, ToolCall

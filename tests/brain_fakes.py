@@ -22,6 +22,7 @@ class RecordedCall:
 
     messages: "list[dict[str, Any]]"
     tools: "list[dict[str, Any]] | None"
+    response_format: Any = None
 
 
 class RecordingFakeBrain:
@@ -34,9 +35,14 @@ class RecordingFakeBrain:
         self._replies = list(replies)
         self.calls: "list[RecordedCall]" = []
 
-    async def chat(self, messages: "list[dict[str, Any]]", tools: "list[dict[str, Any]] | None" = None) -> BrainReply:
+    async def chat(
+        self,
+        messages: "list[dict[str, Any]]",
+        tools: "list[dict[str, Any]] | None" = None,
+        response_format: Any = None,
+    ) -> BrainReply:
         call_index = len(self.calls)
-        self.calls.append(RecordedCall(messages=list(messages), tools=tools))
+        self.calls.append(RecordedCall(messages=list(messages), tools=tools, response_format=response_format))
         if call_index >= len(self._replies):
             raise AssertionError("RecordingFakeBrain.chat called more times than scripted")
         return self._replies[call_index]

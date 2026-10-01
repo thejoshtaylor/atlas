@@ -70,7 +70,7 @@ class _StubToolHost:
 
 
 class _AssertNeverCalledBrain:
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         raise AssertionError("brain.chat must not be called for a word-for-word read")
 
 

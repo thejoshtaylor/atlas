@@ -135,6 +135,11 @@ class HandoffSlot:
     # dispatched. An answer window is scoped to this set. A refused or
     # code-only call is never added.
     called_tools: "set[str]" = field(default_factory=set)
+    # 261001-dlp: whether the model's own final answer asked the operator a
+    # question. `_run_tool_rounds` sets it only from the model's final-round
+    # JSON, so a reply composed in code keeps False. This follows the
+    # `called_tools` side channel and adds no new return structure.
+    expects_reply: bool = False
 
 
 @dataclass(frozen=True)

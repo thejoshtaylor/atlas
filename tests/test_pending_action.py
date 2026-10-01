@@ -945,7 +945,7 @@ class _RecordingConfirmationBrain:
         self._amended = amended
         self.calls: list[dict] = []
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         self.calls.append({"messages": messages, "tools": tools})
         arguments = {"amended": True} if self._decision == "cancel" and self._amended else {}
         return BrainReply(tool_calls=[ToolCall(name=self._decision, arguments=arguments)])
@@ -1071,7 +1071,7 @@ async def test_run_confirmation_round_settles_on_cancel_for_a_non_brain_error_ex
     operator who just said "yes" never hears silence."""
 
     class _ConnectionFailingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise RuntimeError("connection reset by peer")
 
     with caplog.at_level("ERROR"):
@@ -1093,7 +1093,7 @@ async def test_run_confirmation_round_settles_on_cancel_for_malformed_streamed_t
     round previously let escape uncaught."""
 
     class _MalformedStreamBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise json.JSONDecodeError("Expecting value", "", 0)
 
     with caplog.at_level("ERROR"):
@@ -1114,7 +1114,7 @@ async def test_run_confirmation_round_leaves_cancellation_to_propagate():
     import asyncio
 
     class _CancellingBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             raise asyncio.CancelledError()
 
     with pytest.raises(asyncio.CancelledError):
@@ -1439,7 +1439,7 @@ async def test_an_unreadable_reply_cancels_the_same_as_an_explicit_no(
     # A brain that calls neither confirm nor cancel -- `decision_from_reply`
     # settles this on `cancel` (D-08, D-11), same as an explicit no.
     class _NoToolCallBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             return BrainReply(text="i'm not sure what you mean")
 
     handoff_context = HandoffContext(

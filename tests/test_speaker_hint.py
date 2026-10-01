@@ -26,7 +26,7 @@ class _RecordingBrain:
         self._replies = list(replies)
         self.calls: "list[list[dict]]" = []
 
-    async def chat(self, messages, tools=None) -> BrainReply:
+    async def chat(self, messages, tools=None, response_format=None) -> BrainReply:
         self.calls.append([dict(message) for message in messages])
         reply = self._replies[len(self.calls) - 1]
         return reply

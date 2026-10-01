@@ -112,7 +112,7 @@ class _RecordingBrain(FakeBrain):
         super().__init__(replies=replies)
         self.received: list[list[dict]] = []
 
-    async def chat(self, messages, tools=None):
+    async def chat(self, messages, tools=None, response_format=None):
         self.received.append(list(messages))
         return await super().chat(messages, tools)
 

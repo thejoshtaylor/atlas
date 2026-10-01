@@ -135,7 +135,7 @@ async def test_a_needs_clarification_winner_speaks_a_question_and_makes_no_tool_
         already won -- proof the clarifying reply pre-empts it rather than
         racing it to a tool call."""
 
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             await asyncio.sleep(10)
             raise AssertionError("should have been cancelled before this line")  # pragma: no cover
 
@@ -229,7 +229,7 @@ async def test_a_needs_clarification_question_prefers_friendly_names_from_inject
     )
 
     class _NeverFinishesBrain:
-        async def chat(self, messages, tools=None):
+        async def chat(self, messages, tools=None, response_format=None):
             await asyncio.sleep(10)
             raise AssertionError("should have been cancelled before this line")  # pragma: no cover
 

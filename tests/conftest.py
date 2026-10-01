@@ -203,7 +203,7 @@ class FakeBrain:
         self._delay_s = delay_s
         self.call_count = 0
 
-    async def chat(self, messages, tools=None) -> BrainReply:
+    async def chat(self, messages, tools=None, response_format=None) -> BrainReply:
         if self.call_count >= len(self._replies):
             raise AssertionError("FakeBrain.chat called more times than scripted")
         reply = self._replies[self.call_count]
