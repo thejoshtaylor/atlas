@@ -645,6 +645,51 @@ class _RaisingThenScriptedDetector(_ScriptedWakeDetector):
         return super().process(chunk)
 
 
+class _GatedLedSocket(FakeEdgeSocket):
+    """Holds `led` sends on `gate` once armed, like a socket that is slow to write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.armed = False
+
+    async def send_text(self, data: str) -> None:
+        if self.armed and json.loads(data).get("type") == "led":
+            await self.gate.wait()
+        await super().send_text(data)
+
+
+async def test_a_reply_chunk_that_a_stop_overtakes_is_never_sent(edge_source):
+    """WR-05: the first reply chunk awaits the LED send. A stop that lands in
+    that await must not be followed by the chunk, which can be the whole
+    reply."""
+    from atlas.transports.edge import LED_THINKING
+
+    socket = _GatedLedSocket()
+    serve_task = asyncio.create_task(edge_source.serve(socket, fake_edge_device(device_id=1)))
+    try:
+        await asyncio.sleep(0)
+        await edge_source.set_led_state(LED_THINKING)
+        socket.armed = True
+        send_task = asyncio.create_task(edge_source.send_audio(b"reply"))
+        await asyncio.sleep(0.01)
+        assert not send_task.done()
+
+        await edge_source.stop_playback(120)
+        socket.gate.set()
+        await send_task
+
+        assert socket.sent_bytes == []
+        assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+        # Audio sent after the stop is a new reply and goes out.
+        await edge_source.send_audio(b"next")
+        assert socket.sent_bytes == [b"next"]
+    finally:
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
 async def test_a_detector_error_during_playback_does_not_end_the_listener(edge_source, caplog):
     """WR-04: the listener logs it and keeps reading, so the later wake hit still interrupts."""
     socket = FakeEdgeSocket()
@@ -770,6 +815,33 @@ async def test_interrupt_turns_stop_after_the_cap_and_the_runner_goes_back_to_wa
     assert last is ran[-1][1]
     assert all(monitor.after_interrupt for _, monitor in ran)
     assert [chunk async for chunk in _first_chunks(ran[0][0], 1)] == [_stereo(9)]
+
+
+async def test_the_next_turn_starts_only_after_the_pending_stop_is_sent(edge_source, monkeypatch):
+    """WR-05: the stop reaches the Pi before the next turn's wake cue."""
+    runner = _handover_runner(
+        edge_source,
+        lambda turn_source: None,
+        _NeverHitDetector(),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+    )
+    order: list[str] = []
+
+    async def slow_stop() -> None:
+        await asyncio.sleep(0.02)
+        order.append("stop sent")
+
+    stop_task = asyncio.create_task(slow_stop())
+    runner._pending_stop_tasks.add(stop_task)
+
+    async def next_turn(turn_source, monitor) -> None:
+        order.append("turn started")
+
+    monkeypatch.setattr(runner, "_run_one_turn", next_turn)
+
+    await runner._continue_after_interrupts(_interrupted_monitor(runner, "wake"), None)
+
+    assert order == ["stop sent", "turn started"]
 
 
 async def _first_chunks(turn_source, count):

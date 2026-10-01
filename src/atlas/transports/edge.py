@@ -557,6 +557,9 @@ class EdgeAudioSource:
         self._led_state: str = LED_IDLE
         self._led_send_warned = False
         self._stop_send_warned = False
+        # WR-05: counts the stops asked for. `send_audio` compares it across
+        # its own awaits, so a chunk that a stop overtook is never sent.
+        self._stop_epoch = 0
         # Volume requests that wait for the Pi's `volume.result`, by id. The
         # id counter never resets, so a late reply from an old connection
         # cannot match a new request.
@@ -665,9 +668,16 @@ class EdgeAudioSource:
         A filler chunk goes out with the ring still at `thinking`. The first
         chunk of any other kind moves the ring to `replying` before its
         bytes go out. The wake cue plays at `listening` and does not change
-        the state."""
+        the state.
+
+        A stop that arrives while this call awaits the LED send overtakes the
+        chunk: the chunk is dropped, so no reply audio follows a `stop`
+        (WR-05)."""
+        epoch = self._stop_epoch
         if self._led_state == LED_THINKING and speech_kind.get() != "filler":
             await self.set_led_state(LED_REPLYING)
+        if epoch != self._stop_epoch:
+            return
         if self._websocket is None:
             if not self._send_audio_warned:
                 self._send_audio_warned = True
@@ -749,6 +759,8 @@ class EdgeAudioSource:
         `STOP_FADE_MS_RANGE`. Unlike the LED, a repeat is always sent. With
         no device connected, it logs one warning per disconnected episode and
         sends nothing. A send failure logs one warning per connection."""
+        # Before any await, so a `send_audio` that is mid-await sees it.
+        self._stop_epoch += 1
         low, high = STOP_FADE_MS_RANGE
         fade_ms = min(high, max(low, int(fade_ms)))
         websocket = self._websocket

@@ -1224,6 +1224,9 @@ class SourceRunner:
         turns = 0
         while monitor.interrupt_kind in ("wake", "vad") and turns < MAX_CHAINED_INTERRUPT_TURNS:
             kind = monitor.interrupt_kind
+            # WR-05: the Pi has its `stop` before the next turn's cue goes out.
+            if self._pending_stop_tasks:
+                await asyncio.gather(*list(self._pending_stop_tasks), return_exceptions=True)
             # One wrapper per turn: it replays the hand-over once (260922-woc).
             turn_source = PrerollReplayingSource(self._source, list(monitor.handover))
             next_monitor = self._new_barge_in_monitor()
