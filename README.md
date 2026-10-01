@@ -132,6 +132,11 @@ Docker Compose reserves the same amount of memory. Compose has no CPU
 reservation outside Swarm mode. Docker already gives every container an equal
 CPU weight by default.
 
+## Mac companion app
+
+A menu bar app pairs a Mac with your ATLAS server and shows the state of the connection.
+To build, install, and pair it, follow [docs/desktop.md](docs/desktop.md).
+
 ## Licence
 
 This project is licensed under the MIT License.
