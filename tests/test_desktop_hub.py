@@ -16,8 +16,10 @@ from datetime import datetime, timezone
 import pytest
 from starlette.websockets import WebSocketDisconnect
 
+import atlas.desktop.hub as hub_module
 from atlas.desktop.hub import DesktopHub, DesktopNotConnected
 from atlas.desktop.protocol import (
+    CLOSE_GOING_AWAY,
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_MISMATCH,
     CLOSE_REVOKED,
@@ -463,3 +465,46 @@ async def test_a_frame_broadcast_before_the_hello_ack_goes_out_after_it() -> Non
     assert socket.sent_types() == ["hello.ack", "wake.confirmed"]
     socket.push_disconnect()
     await task
+
+
+class _ClosingSocket(_DyingSocket):
+    """Closing the socket ends the receive loop, as a real socket does."""
+
+    async def close(self, code: int = 1000, reason: "str | None" = None) -> None:
+        await super().close(code, reason)
+        self.push_disconnect(code)
+
+
+async def test_a_send_that_stalls_closes_the_socket_so_the_mac_redials(monkeypatch) -> None:
+    monkeypatch.setattr(hub_module, "SEND_TIMEOUT_S", 0.05)
+    hub = _hub()
+    socket = _ClosingSocket(RuntimeError("unused"))
+    task = await _connected(hub, socket, fake_desktop_device(id=1))
+    original_send = socket.send_text
+
+    async def stalled_send(data: str) -> None:
+        await asyncio.sleep(3600)
+        await original_send(data)
+
+    socket.send_text = stalled_send  # type: ignore[method-assign]
+
+    hub.broadcast('{"type":"wake.confirmed","turn_id":"t-1"}', frame_type="wake.confirmed")
+
+    await _until(lambda: socket.close_code is not None)
+    assert socket.close_code == CLOSE_GOING_AWAY
+    await _until(task.done)
+    assert not hub.is_connected(1)
+
+
+async def test_a_send_that_fails_closes_the_socket_too() -> None:
+    hub = _hub()
+    socket = _ClosingSocket(RuntimeError("broken pipe"))
+    task = await _connected(hub, socket, fake_desktop_device(id=1))
+    socket.dead = True
+
+    hub.broadcast('{"type":"wake.confirmed","turn_id":"t-1"}', frame_type="wake.confirmed")
+
+    await _until(lambda: socket.close_code is not None)
+    assert socket.close_code == CLOSE_GOING_AWAY
+    await _until(task.done)
+    assert not hub.is_connected(1)

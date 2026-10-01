@@ -276,22 +276,29 @@ class DesktopHub:
         self._sticky.pop(key, None)
 
     async def _send_loop(self, connection: DesktopConnection) -> None:
-        """Write this Mac's queued frames to its socket, one at a time. A
-        timeout or a send error ends the loop. The receive loop's own
-        disconnect handling then cleans up (RESEARCH Pattern 5)."""
+        """Write this Mac's queued frames to its socket, one at a time.
+
+        When a send times out or fails, the loop closes the socket and ends.
+        The close is what makes the Mac dial again: a Mac that stalled for a
+        moment (a Wi-Fi roam, a wake from sleep) still answers pings through
+        the receive loop, so without it the Mac stays connected and never gets
+        another frame. The close also ends the receive loop, and `serve` then
+        cleans up (RESEARCH Pattern 5). A cancellation passes through, because
+        `serve` cancels the sender itself on its way out."""
         while True:
             frame = await connection.outbox.get()
             try:
                 await asyncio.wait_for(connection.websocket.send_text(frame), SEND_TIMEOUT_S)
             except asyncio.TimeoutError:
-                logger.info("desktop %s: send timed out, ending its sender", connection.device_id)
-                return
+                logger.info("desktop %s: send timed out, closing it", connection.device_id)
             except _SEND_FAILED:
-                logger.info("desktop %s: send failed, ending its sender", connection.device_id)
-                return
+                logger.info("desktop %s: send failed, closing it", connection.device_id)
             except Exception:
-                logger.exception("desktop %s: sender failed", connection.device_id)
-                return
+                logger.exception("desktop %s: sender failed, closing it", connection.device_id)
+            else:
+                continue
+            await self._close(connection.websocket, CLOSE_GOING_AWAY, "send_stalled")
+            return
 
     async def _supersede(self, device_id: int) -> None:
         """Close the older socket for this Mac, if any, and cancel its task.
