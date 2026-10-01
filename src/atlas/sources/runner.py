@@ -137,10 +137,12 @@ REPLY_WAKE_WORD_BLOCK = "reply_wake_word"
 # long after the window's first audio to belong to the transcribed utterance.
 ANSWER_WINDOW_LATE_HIT_BLOCK = "answer_window_late_hit"
 
-# Phase 13 (RESEARCH Pitfall 9): at most this many turns in a row may be
-# started by an interrupt. A television that says the wake word again and again
-# cannot chain turns forever. The wake gate refractory still applies to each
-# hit. After the cap the runner goes back to listening for the wake word.
+# Phase 13 (RESEARCH Pitfall 9): at most this many turns may be started by an
+# interrupt between two idle wake hits, counted across interrupt turns and the
+# answer windows between them (WR-06). A television that says the wake word
+# again and again cannot chain turns forever. The wake gate refractory still
+# applies to each hit. After the cap the runner goes back to listening for the
+# wake word.
 MAX_CHAINED_INTERRUPT_TURNS = 3
 
 
@@ -729,6 +731,10 @@ class SourceRunner:
         # Phase 13: each stop send runs as its own task, held here until its
         # done-callback discards it (the pattern the wake-event writes use).
         self._pending_stop_tasks: set[asyncio.Task] = set()
+        # WR-06: the interrupt-started turns since the last idle wake hit. It
+        # spans the whole call chain (interrupt turns and answer windows), so
+        # the cap bounds alternation between the two.
+        self._interrupt_turns = 0
         # One line per episode of saturation, not one per wake hit -- the
         # same "the operator gets the fact once instead of a log they stop
         # reading" discipline the degraded-slot refusal already uses.
@@ -1021,6 +1027,7 @@ class SourceRunner:
                 follow_up_channel = FollowUpChannel()
                 turn_source.follow_up = follow_up_channel
 
+            self._interrupt_turns = 0
             await self._run_one_turn(turn_source, monitor)
             # Phase 13: an interrupt hands its speech to the next turn.
             monitor, follow_up_channel = await self._continue_after_interrupts(monitor, follow_up_channel)
@@ -1220,9 +1227,13 @@ class SourceRunner:
         VAD start, run the speech that interrupted it as the next turn (D-15,
         D-16). Returns the last monitor and the channel its turn left, or
         `None` when `MAX_CHAINED_INTERRUPT_TURNS` ran and the last turn was
-        interrupted again. The camera's energy interrupt starts no turn (D-04)."""
-        turns = 0
-        while monitor.interrupt_kind in ("wake", "vad") and turns < MAX_CHAINED_INTERRUPT_TURNS:
+        interrupted again. The camera's energy interrupt starts no turn (D-04).
+
+        The cap counts across the whole wake-started call chain (WR-06): every
+        interrupt turn and every answer window it opens share one counter, so
+        a television that says the wake word over each reply ends the chain
+        here and the runner goes back to idle."""
+        while monitor.interrupt_kind in ("wake", "vad") and self._interrupt_turns < MAX_CHAINED_INTERRUPT_TURNS:
             kind = monitor.interrupt_kind
             # WR-05: the Pi has its `stop` before the next turn's cue goes out.
             if self._pending_stop_tasks:
@@ -1248,7 +1259,7 @@ class SourceRunner:
             )
             await self._run_one_turn(turn_source, next_monitor)
             monitor = next_monitor
-            turns += 1
+            self._interrupt_turns += 1
         if monitor.interrupt_kind in ("wake", "vad"):
             logger.warning(
                 "source %r: %d interrupt turns in a row, back to listening for the wake word",

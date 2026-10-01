@@ -817,6 +817,61 @@ async def test_interrupt_turns_stop_after_the_cap_and_the_runner_goes_back_to_wa
     assert [chunk async for chunk in _first_chunks(ran[0][0], 1)] == [_stereo(9)]
 
 
+async def test_the_interrupt_cap_counts_across_answer_windows(edge_source, monkeypatch):
+    """WR-06: interrupt turns that alternate with answer windows share one
+    cap. Each `_continue_after_interrupts` call is one hop of the chain."""
+    from atlas.sources.runner import MAX_CHAINED_INTERRUPT_TURNS
+    from atlas.turn.follow_up import FollowUpChannel
+
+    runner = _handover_runner(
+        edge_source,
+        lambda turn_source: None,
+        _NeverHitDetector(),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+        follow_up_window_s=lambda: 8.0,
+    )
+    ran: list[int] = []
+
+    async def finish_cleanly(turn_source, monitor) -> None:
+        ran.append(1)
+
+    monkeypatch.setattr(runner, "_run_one_turn", finish_cleanly)
+
+    # Hop after hop: a window turn is interrupted, the interrupt turn ends
+    # cleanly and leaves a channel, and the next window turn is interrupted.
+    channel = FollowUpChannel()
+    for _ in range(MAX_CHAINED_INTERRUPT_TURNS):
+        _monitor, channel = await runner._continue_after_interrupts(_interrupted_monitor(runner, "wake"), channel)
+        assert channel is not None
+    assert len(ran) == MAX_CHAINED_INTERRUPT_TURNS
+
+    last, channel = await runner._continue_after_interrupts(_interrupted_monitor(runner, "wake"), channel)
+
+    assert len(ran) == MAX_CHAINED_INTERRUPT_TURNS, "no turn starts past the cap"
+    assert channel is None
+
+
+async def test_the_interrupt_cap_restarts_at_the_next_idle_wake_hit(edge_source):
+    from atlas.sources.runner import MAX_CHAINED_INTERRUPT_TURNS
+
+    seen: list[int] = []
+
+    async def run_turn_fn(turn_source) -> None:
+        seen.append(runner._interrupt_turns)
+
+    runner = _handover_runner(
+        edge_source,
+        run_turn_fn,
+        _ScriptedWakeDetector(hit_on_calls={1}),
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+    )
+    runner._interrupt_turns = MAX_CHAINED_INTERRUPT_TURNS
+
+    await runner._process_chunk(_stereo(1))
+
+    assert seen == [0]
+
+
 async def test_the_next_turn_starts_only_after_the_pending_stop_is_sent(edge_source, monkeypatch):
     """WR-05: the stop reaches the Pi before the next turn's wake cue."""
     runner = _handover_runner(
