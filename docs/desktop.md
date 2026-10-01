@@ -43,7 +43,7 @@ The script checks this Mac first. It stops with a clear message if the macOS ver
 
 A second run is a rebuild. It keeps the same signing identity. Run it again after you update the repository.
 
-The script writes only to `/Applications` and to its own `desktop/build` folder. It never asks for administrator rights. If your account cannot write to `/Applications`, run the script from an administrator account.
+The script writes to `/Applications`, to its own `desktop/build` and `desktop/.build` folders, and to `desktop/.signing-identity`. If it makes the local certificate, it also adds that certificate, its private key, and a code-signing trust setting to your login keychain. It never asks for administrator rights. If your account cannot write to `/Applications`, run the script from an administrator account.
 
 To read all options, run `desktop/scripts/install.sh --help`.
 
@@ -97,7 +97,7 @@ The first run asks for your login password twice:
 1. A macOS dialog asks you to trust the new certificate for code signing.
 2. The terminal then asks for the login password. This step lets `codesign` use the new key without a prompt on each build.
 
-The script never holds your password. The `security` tool asks for it.
+The script never holds your password. The `security` tool asks for it. The script puts no password on a command line. It deletes the private key file as soon as the key is in your keychain.
 
 After each later rebuild, macOS asks once in a Keychain dialog. Choose Always Allow. The app then reads its token with no further prompt until the next rebuild.
 
@@ -105,7 +105,7 @@ If you made the certificate with an older version of the script, delete it and m
 
 1. Open Keychain Access.
 2. Search for "ATLAS Local Signing".
-3. Delete the certificate and its private key.
+3. Delete the certificate and the private key that belongs to it. Open the My Certificates tab and expand the certificate to find the key. Keychain Access names that key "Imported Private Key".
 4. Run `desktop/scripts/install.sh`. The script makes a new certificate.
 
 A new certificate is a new identity. The grants reset once.
@@ -333,4 +333,4 @@ With the local certificate, the Keychain asks once after each rebuild. Choose Al
 
 7. Open the Macs page in the webapp and revoke the Mac.
 
-To remove the signing certificate too, delete "ATLAS Local Signing" in Keychain Access. The next install makes a new certificate and a new identity.
+To remove the signing certificate too, delete "ATLAS Local Signing" and its private key in Keychain Access. The next install makes a new certificate and a new identity.
