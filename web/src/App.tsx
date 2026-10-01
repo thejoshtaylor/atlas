@@ -12,6 +12,7 @@ import { AccountsRoute } from "@/routes/accounts/AccountsRoute"
 import { CalibrationRoute } from "@/routes/calibration/CalibrationRoute"
 import { DevMicRoute } from "@/routes/dev-mic/DevMicRoute"
 import { EdgeDevicesRoute } from "@/routes/edge-devices/EdgeDevicesRoute"
+import { DesktopDevicesRoute } from "@/routes/macs/DesktopDevicesRoute"
 import { ListenRoute } from "@/routes/listen/ListenRoute"
 import { HomeRoute } from "@/routes/HomeRoute"
 import { LiveRoute } from "@/routes/live/LiveRoute"
@@ -92,6 +93,7 @@ function AppRoutes() {
           <Route element={<RequireRole minimum="admin" />}>
             <Route path="/accounts" element={<AccountsRoute />} />
             <Route path="/edge-devices" element={<EdgeDevicesRoute />} />
+            <Route path="/macs" element={<DesktopDevicesRoute />} />
             <Route path="/speakers" element={<SpeakersRoute />} />
             <Route path="/settings" element={<SettingsRoute />} />
             <Route path="/plugins" element={<PluginsRoute />} />
