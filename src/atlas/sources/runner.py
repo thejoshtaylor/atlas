@@ -112,6 +112,7 @@ from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
 from atlas.transports.edge import LED_IDLE, LED_LISTENING
+from atlas.turn.answer_window import WAKE_EVIDENCE_WINDOW_S
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
 from atlas.wake.base import WakeDetector, WakeHit
 from atlas.wake.gate import WakeGate
@@ -131,6 +132,10 @@ MAX_PENDING_WAKE_EVENT_WRITES = 64
 # wake word (Phase 13 D-02). `wake_events.block_reason` is free text, so a new
 # reason needs no migration.
 REPLY_WAKE_WORD_BLOCK = "reply_wake_word"
+
+# WR-02: the block reason for a wake hit in an answer window that lands too
+# long after the window's first audio to belong to the transcribed utterance.
+ANSWER_WINDOW_LATE_HIT_BLOCK = "answer_window_late_hit"
 
 # Phase 13 (RESEARCH Pitfall 9): at most this many turns in a row may be
 # started by an interrupt. A television that says the wake word again and again
@@ -1162,23 +1167,33 @@ class SourceRunner:
         `channel.wake_heard`. The controller widens the scope only when the
         transcript also opens with the wake phrase. The frames start at
         `opens_at`, so the reply's own echo tail never reaches the detector.
-        Logs scores only."""
+        Only a hit within `WAKE_EVIDENCE_WINDOW_S` of the window's first audio
+        counts (WR-02), so a hit cannot pair with an utterance that began
+        later. Logs scores only."""
         started = False
+        first_audio_at: "float | None" = None
 
         async def tap(chunk: bytes) -> None:
-            nonlocal started
+            nonlocal started, first_audio_at
             loop = asyncio.get_running_loop()
+            if first_audio_at is None:
+                first_audio_at = self._clock()
             if not started:
                 started = True
                 reset = getattr(self._wake_detector, "reset", None)
                 if reset is not None:
                     await loop.run_in_executor(self._detector_executor, reset)
-            if channel.wake_heard:
+            # WR-02: only a hit at the start of the window's audio is evidence
+            # for the utterance that the turn transcribes.
+            if channel.wake_heard or self._clock() - first_audio_at > WAKE_EVIDENCE_WINDOW_S:
                 return
             hit = await loop.run_in_executor(self._detector_executor, self._detect, chunk)
             if hit is None:
                 return
             now = self._clock()
+            if now - first_audio_at > WAKE_EVIDENCE_WINDOW_S:
+                self._record_blocked_hit(hit.score, ANSWER_WINDOW_LATE_HIT_BLOCK, now)
+                return
             decision = self._gate.evaluate(hit.score, now, self._last_hit_at)
             if not decision.allowed:
                 self._record_blocked_hit(hit.score, decision.reason, now)

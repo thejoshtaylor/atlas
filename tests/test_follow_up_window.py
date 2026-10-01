@@ -701,6 +701,7 @@ async def _run_window(
     *,
     refractory_s: float = 0.0,
     frames: "list[bytes] | None" = None,
+    clock: Any = None,
 ) -> list[bool]:
     """A wake turn that leaves one `kind` request, then the window turn,
     which drains its source. Returns `wake_heard` as the window turn saw it."""
@@ -733,7 +734,7 @@ async def _run_window(
         follow_up_window_s=lambda: 6.0,
         follow_up_echo_tail_s=0.0,
         wake_event_repo=wake_event_repo,
-        clock=lambda: 0.0,
+        clock=clock if clock is not None else (lambda: 0.0),
         detector=detector,
         refractory_s=refractory_s,
     )
@@ -764,6 +765,65 @@ async def test_a_blocked_wake_hit_inside_an_answer_window_leaves_the_channel_unm
 
     assert seen == [False]
     assert [(event.allowed, event.block_reason) for event in repo.events] == [(True, None), (False, "refractory")]
+
+
+class _SlowThenHitDetector:
+    """Hits on the first call (the idle hit that starts the wake turn). Every
+    later call moves the shared clock on by `step_s`, and hits only when
+    `hit_late` is set."""
+
+    def __init__(self, now: list[float], *, step_s: float, hit_late: bool) -> None:
+        self.now = now
+        self.step_s = step_s
+        self.hit_late = hit_late
+        self.process_calls = 0
+
+    def process(self, chunk: bytes) -> Any:
+        from tests.conftest import FakeWakeHit
+
+        self.process_calls += 1
+        if self.process_calls == 1:
+            return FakeWakeHit(score=1.0)
+        self.now[0] += self.step_s
+        return FakeWakeHit(score=1.0) if self.hit_late else None
+
+    def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+async def test_a_wake_hit_late_in_an_answer_window_does_not_mark_the_channel(fake_wake_event_repository):
+    """WR-02: a hit that lands long after the window's first audio cannot pair
+    with the transcribed utterance, so it never sets `wake_heard`."""
+    repo = fake_wake_event_repository()
+    now = [0.0]
+    detector = _SlowThenHitDetector(now, step_s=2.0, hit_late=True)
+
+    seen = await _run_window("answer", detector, repo, frames=[b"\x00"], clock=lambda: now[0])
+
+    assert seen == [False]
+    assert [(event.allowed, event.block_reason) for event in repo.events] == [
+        (True, None),
+        (False, "answer_window_late_hit"),
+    ]
+
+
+async def test_the_detector_stops_listening_once_the_evidence_window_has_passed(fake_wake_event_repository):
+    repo = fake_wake_event_repository()
+    now = [0.0]
+    detector = _SlowThenHitDetector(now, step_s=2.0, hit_late=False)
+
+    seen = await _run_window(
+        "answer", detector, repo, frames=[b"\x00", b"\x01", b"\x02"], clock=lambda: now[0]
+    )
+
+    assert seen == [False]
+    # The idle hit starts the turn, and the window decodes its first chunk. The
+    # clock then stands 2 s past the first audio, so the window's other two
+    # chunks are not decoded. The last two calls are the idle loop's own frames.
+    assert detector.process_calls == 4
 
 
 @pytest.mark.parametrize("kind", ["confirmation", "clarification"])

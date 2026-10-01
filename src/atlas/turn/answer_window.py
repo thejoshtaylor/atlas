@@ -38,6 +38,13 @@ from atlas.turn.wake_echo import strip_wake_phrase
 
 ANSWER_WINDOW_SILENT = "answer_window_silent"
 
+# WR-02: a wake hit counts as evidence for the window turn only when it lands
+# within this many seconds of the first audio the window heard. The Pi sends
+# voice-gated segments only, so that first audio is where the utterance the
+# turn transcribes begins. A hit later in the window, or after another sound,
+# cannot pair with a transcript that happens to open like the wake phrase.
+WAKE_EVIDENCE_WINDOW_S = 1.5
+
 # "turn it off" is a ring stop phrase, but in this window it is a real
 # command about the thing the last answer touched. Any text with the word
 # "off" goes to the brain, never to a silent stop.
@@ -165,9 +172,10 @@ def wake_addressed_command(follow_up: Any, final_text: str, wake_phrase: "str | 
     """The command after the wake phrase when this window turn was addressed
     to Atlas, or `None` for an ordinary window turn (plan 13-06).
 
-    The rule needs two facts together: the wake detector hit inside this
-    window (`follow_up.wake_heard`), and a transcript that opens with the
-    wake phrase. That is the same evidence an ordinary wake turn has with
+    The rule needs two facts together: the wake detector hit at the start of
+    this window's audio (`follow_up.wake_heard`, set only for a hit inside
+    `WAKE_EVIDENCE_WINDOW_S`), and a transcript that opens with the wake
+    phrase. That is the same evidence an ordinary wake turn has with
     `verify_transcript`. Transcript text alone never qualifies, because a
     television can say "hey atlas" and any command. An empty string means
     only the phrase was heard.
