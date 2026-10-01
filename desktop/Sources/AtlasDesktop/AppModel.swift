@@ -50,6 +50,8 @@ final class AppModel {
     @ObservationIgnored private let store = KeychainStore()
     @ObservationIgnored let connection: DesktopConnection
     @ObservationIgnored private let systemEvents = SystemEvents()
+    /// The panel of a turn. It listens to the connection's inbound frames.
+    @ObservationIgnored let panel = PanelController()
     @ObservationIgnored private let log = Logger(subsystem: AppIdentity.bundleIdentifier, category: "app")
     @ObservationIgnored private var started = false
     @ObservationIgnored private var activity: NSObjectProtocol?
@@ -92,6 +94,17 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+
+        // The panel is built now, hidden, so a show never waits for a view tree.
+        panel.prepare()
+        panel.onSendTimerStop = { [weak self] timerId in self?.sendTimerStop(timerId) }
+        let inbound = connection.inbound
+        let panel = panel
+        Task {
+            for await message in inbound {
+                if let event = PanelEvent(message) { panel.dispatch(event) }
+            }
+        }
 
         let stream = connection.snapshots
         Task {
@@ -245,6 +258,16 @@ final class AppModel {
         }
     }
 
+    // MARK: - Panel
+
+    /// The Stop button of a ringing timer (CARD-03). A write that fails returns
+    /// false and sends nothing, and the reducer enables the button again after
+    /// 3 s, so the operator can click once more.
+    func sendTimerStop(_ timerId: Int) {
+        let connection = connection
+        Task { _ = await connection.send(.timerStop(TimerStop(timerId: timerId))) }
+    }
+
     // MARK: - Setup window
 
     func openSetup(focus: SetupFocus) {
@@ -342,7 +365,15 @@ final class AppModel {
     // MARK: - Connection snapshots
 
     private func handle(_ next: ConnectionSnapshot) {
+        var wasConnected = false
+        if case .connected = snapshot.status { wasConnected = true }
         snapshot = next
+        // A dropped connection hides the panel at once (D-08).
+        if wasConnected {
+            var isConnected = false
+            if case .connected = next.status { isConnected = true }
+            if !isConnected { panel.dispatch(.connectionLost) }
+        }
         if next.everConnected { UserDefaults.standard.set(true, forKey: Self.localNetworkGrantedKey) }
         let wasPairing: Bool
         switch flow.state {
