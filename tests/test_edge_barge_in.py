@@ -19,7 +19,7 @@ import pytest
 
 from atlas.config import EDGE_BARGE_IN_PROVEN, BargeInConfig, EdgeSourceConfig
 from atlas.sources.runner import SourceRunner
-from atlas.transports.edge import EdgeAudioSource
+from atlas.transports.edge import EdgeAudioSource, SegmentBoundedWakeDetector
 from atlas.turn.controller import _speak
 
 from tests.conftest import FakeWakeHit
@@ -317,6 +317,60 @@ async def test_wake_hit_during_edge_reply_hold_sends_stop_and_ends_barged_in(edg
         assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
         assert socket.binary_after_text_type("stop") == 0
         assert detector.resets == 1
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+class _PlaybackOnlyDetector:
+    """A Vosk detector that hears "the atlas" over a reply: the echo
+    suppressor clipped the "hey". The idle match (`process`) does not fire,
+    and the playback match does."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def process(self, chunk: bytes):
+        self.calls.append("process")
+        return None
+
+    def process_during_playback(self, chunk: bytes):
+        self.calls.append("process_during_playback")
+        return FakeWakeHit(score=1.0)
+
+    def reset(self) -> None:
+        pass
+
+
+async def test_a_wake_phrase_with_a_clipped_hey_stops_an_edge_reply(edge_source):
+    """UAT 13-1: the listener uses the playback match, through the same
+    `SegmentBoundedWakeDetector` the edge runner has, so "the atlas" heard
+    over a reply sends the Pi its stop."""
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    detector = _PlaybackOnlyDetector()
+    runner = _edge_runner(
+        edge_source,
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+        detector=SegmentBoundedWakeDetector(detector),
+    )
+    monitor = runner._new_barge_in_monitor()
+    monitor.mark_transcript_done()
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        socket.push_bytes(b"\x00\x00\x00\x00" * 256)
+        await _wait_until(lambda: len(_stop_frames(socket)) >= 1)
+        assert monitor.interrupt_kind == "wake"
+        assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+        assert detector.calls == ["process_during_playback"]
+        # The idle path keeps the full phrase for the same audio.
+        assert runner._detect(b"\x00\x00\x00\x00" * 256) is None
     finally:
         watch_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):

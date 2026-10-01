@@ -263,6 +263,34 @@ def test_segment_bounded_detector_resets_once_before_the_next_chunk():
     assert inner.calls == ["process", "reset", "process", "process"]
 
 
+class _PlaybackRecordingDetector(_RecordingDetector):
+    def process_during_playback(self, chunk: bytes):
+        self.calls.append("process_during_playback")
+        return None
+
+
+def test_segment_bounded_detector_uses_the_inner_playback_match_after_a_pending_reset():
+    inner = _PlaybackRecordingDetector()
+    detector = SegmentBoundedWakeDetector(inner)
+
+    detector.mark_segment_start()
+    detector.process_during_playback(b"\x00\x00")
+    detector.process_during_playback(b"\x00\x00")
+
+    assert inner.calls == ["reset", "process_during_playback", "process_during_playback"]
+
+
+def test_segment_bounded_detector_falls_back_to_process_during_playback():
+    """An inner detector with no playback match (openWakeWord) gets `process`."""
+    inner = _RecordingDetector()
+    detector = SegmentBoundedWakeDetector(inner)
+
+    detector.mark_segment_start()
+    detector.process_during_playback(b"\x00\x00")
+
+    assert inner.calls == ["reset", "process"]
+
+
 def test_vad_start_marks_a_segment_start_and_vad_end_does_not():
     source = EdgeAudioSource(_measured_config())
     starts: list[int] = []

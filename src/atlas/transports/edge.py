@@ -476,10 +476,23 @@ class SegmentBoundedWakeDetector:
         self._reset_pending = True
 
     def process(self, chunk: bytes) -> Any:
+        self._apply_pending_reset()
+        return self._inner.process(chunk)
+
+    def process_during_playback(self, chunk: bytes) -> Any:
+        """The barge-in listener's call while a reply plays. It uses the
+        inner detector's own playback match when it has one, else
+        `process`."""
+        self._apply_pending_reset()
+        inner_process = getattr(self._inner, "process_during_playback", None)
+        if inner_process is None:
+            return self._inner.process(chunk)
+        return inner_process(chunk)
+
+    def _apply_pending_reset(self) -> None:
         if self._reset_pending:
             self._reset_pending = False
             self._inner.reset()
-        return self._inner.process(chunk)
 
     def reset(self) -> None:
         self._inner.reset()

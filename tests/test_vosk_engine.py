@@ -153,3 +153,31 @@ def test_reset_clears_open_partial(make_detector):
     detector.reset()
     assert rec.reset_calls == 1
     assert detector.process(b"atlas") is None
+
+
+@pytest.mark.parametrize("heard", ["the atlas", "a atlas", "atlas", "[unk] atlas", "hey atlas", "the atlas [unk]"])
+@pytest.mark.parametrize("final", [False, True])
+def test_the_keyword_alone_fires_during_playback(make_detector, heard, final):
+    """During a reply the echo suppressor clips "hey" into "the" or "a".
+    The playback match fires on "atlas" with any lead-in, and resets."""
+    detector, rec = make_detector()
+    chunk = (heard + (_END if final else "")).encode("utf-8")
+    assert detector.process_during_playback(chunk) == WakeHit(score=1.0)
+    assert rec.reset_calls == 1
+
+
+@pytest.mark.parametrize("heard", ["at last", "alice", "hey", "the", "a", "hey at last", "hey alice", "[unk]"])
+@pytest.mark.parametrize("final", [False, True])
+def test_no_keyword_stays_silent_during_playback(make_detector, heard, final):
+    """Without the whole word "atlas" the playback match does not fire."""
+    detector, rec = make_detector()
+    chunk = (heard + (_END if final else "")).encode("utf-8")
+    assert detector.process_during_playback(chunk) is None
+    assert rec.reset_calls == 0
+
+
+def test_the_idle_match_still_needs_the_whole_phrase(make_detector):
+    """The same clipped decode that fires during playback does not fire idle."""
+    detector, _ = make_detector()
+    assert detector.process(b"the atlas") is None
+    assert detector.process_during_playback(b"") == WakeHit(score=1.0)

@@ -66,6 +66,8 @@ class VoskWakeDetector:
         self._recognizer = vosk.KaldiRecognizer(self._model, _SAMPLE_RATE, grammar_json)
         self._phrase = phrase
         self._phrase_tokens = tuple(phrase.split())
+        # The keyword is the last word of the phrase ("atlas" for "hey atlas").
+        self._keyword_tokens = self._phrase_tokens[-1:]
 
     def process(self, chunk: bytes) -> WakeHit | None:
         """Feed one chunk of 16 kHz mono PCM16 to the recognizer.
@@ -86,11 +88,28 @@ class VoskWakeDetector:
         following chunk. The `WakeGate` refractory window is a second
         guard only.
         """
+        return self._match(chunk, self._phrase_tokens)
+
+    def process_during_playback(self, chunk: bytes) -> WakeHit | None:
+        """Like `process`, but the keyword alone is a hit.
+
+        The barge-in listener calls this while a reply plays on the edge
+        source. The XVF3800 echo suppressor clips the start of speech during
+        playback, so "hey" often decodes as the decoy "the" or "a". "atlas"
+        decodes correctly. So "the atlas", "a atlas" and "atlas" fire here,
+        and "at last" and "alice" do not. The idle path keeps the full
+        phrase. Transcript verification (`turn/wake_echo.strip_wake_phrase`)
+        and the reply's own wake-word windows (`sources/reply_timing.py`)
+        use the same keyword.
+        """
+        return self._match(chunk, self._keyword_tokens)
+
+    def _match(self, chunk: bytes, tokens: tuple[str, ...]) -> WakeHit | None:
         if self._recognizer.AcceptWaveform(chunk):
             text = json.loads(self._recognizer.Result()).get("text", "")
         else:
             text = json.loads(self._recognizer.PartialResult()).get("partial", "")
-        if not _contains_phrase(text.split(), self._phrase_tokens):
+        if not _contains_phrase(text.split(), tokens):
             return None
         self._recognizer.Reset()
         # The grammar match itself is binary -- Vosk's own result carries no

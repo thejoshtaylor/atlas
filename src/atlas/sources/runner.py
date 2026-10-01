@@ -924,6 +924,20 @@ class SourceRunner:
             return None
         return self._wake_detector.process(detector_chunk)
 
+    def _detect_during_playback(self, chunk: bytes) -> WakeHit | None:
+        """`_detect` for the barge-in listener, on the same worker thread.
+        A detector with `process_during_playback` (Vosk, through
+        `SegmentBoundedWakeDetector`) accepts the keyword alone while a
+        reply plays, because the echo suppressor clips the "hey". A detector
+        without it uses `process`."""
+        detector_chunk = self._decode_for_detector(chunk)
+        if not detector_chunk:
+            return None
+        process = getattr(self._wake_detector, "process_during_playback", None)
+        if process is None:
+            return self._wake_detector.process(detector_chunk)
+        return process(detector_chunk)
+
     def _barge_in_energy(self, chunk: bytes) -> float | None:
         """The barge-in listener's own off-loop pair (D2): the same decode
         `_detect` makes, then an energy reading instead of a wake-detector
@@ -1426,7 +1440,7 @@ class SourceRunner:
                         self._preroll.push(chunk)
                     try:
                         hit = await asyncio.get_running_loop().run_in_executor(
-                            self._detector_executor, self._detect, chunk
+                            self._detector_executor, self._detect_during_playback, chunk
                         )
                     except asyncio.CancelledError:
                         # A VAD start latched during the await: the chunk is
