@@ -145,3 +145,12 @@ def test_constants_fixture_equals_the_python_constants():
         "test_timeout_s": protocol.TEST_TIMEOUT_S,
     }
     assert fixture == expected
+
+
+def test_refusal_fixture_equals_the_python_constants():
+    fixture = json.loads((PROTOCOL_DIR / "refusal.json").read_text())
+    assert fixture == {
+        "status": protocol.REFUSAL_STATUS,
+        "header": protocol.REFUSAL_HEADER,
+        "token_value": protocol.REFUSAL_TOKEN,
+    }

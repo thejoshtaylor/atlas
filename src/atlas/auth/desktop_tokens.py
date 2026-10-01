@@ -9,8 +9,10 @@ the edge table, so `/ws/edge` cannot find it.
 
 `require_desktop_device` reads the token only from the `Authorization`
 header. Missing header, missing repository, unknown token and revoked token
-all raise the same `WebSocketException` before the socket is accepted. Nothing
-here logs the token or its hash.
+all raise the same `DesktopTokenRefused` before the socket is accepted. Its
+handler answers the handshake with an HTTP 403 that carries the
+`X-Atlas-Refusal: token` header (D-30), so the app can tell this refusal from
+a 403 that a proxy or firewall made. Nothing here logs the token or its hash.
 """
 
 from __future__ import annotations
@@ -20,9 +22,11 @@ import secrets
 
 from fastapi import WebSocketException
 from starlette import status
+from starlette.responses import Response
 from starlette.websockets import WebSocket
 
 from atlas.db.desktop_repository import DesktopDevice
+from atlas.desktop.protocol import REFUSAL_HEADER, REFUSAL_STATUS, REFUSAL_TOKEN
 
 
 def issue_desktop_token() -> str:
@@ -48,10 +52,26 @@ def bearer_token_from_header(value: str | None) -> str | None:
     return token
 
 
-def _refused() -> WebSocketException:
-    """The one refusal for every failure case. The caller never learns
-    which case it hit."""
-    return WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+class DesktopTokenRefused(WebSocketException):
+    """A Mac token was refused before accept. The same exception covers every
+    failure case, so the caller never learns which case it hit."""
+
+
+async def handle_desktop_token_refused(websocket: WebSocket, exc: Exception) -> None:
+    """Answer the handshake with a marked HTTP 403 (the ASGI Websocket Denial
+    Response extension, which all three uvicorn protocol stacks offer). A
+    server without the extension falls back to the plain 1008 close, which the
+    app reads as an unmarked 403 and so retries without unpairing."""
+    if "websocket.http.response" in websocket.scope.get("extensions", {}):
+        await websocket.send_denial_response(
+            Response(status_code=REFUSAL_STATUS, headers={REFUSAL_HEADER: REFUSAL_TOKEN})
+        )
+    else:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+
+
+def _refused() -> DesktopTokenRefused:
+    return DesktopTokenRefused(code=status.WS_1008_POLICY_VIOLATION)
 
 
 async def require_desktop_device(websocket: WebSocket) -> DesktopDevice:

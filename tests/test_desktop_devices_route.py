@@ -18,7 +18,12 @@ from starlette.testclient import WebSocketDisconnect
 
 from atlas.auth.tokens import issue_access_token
 from atlas.config import SecurityConfig
-from atlas.desktop.protocol import CLOSE_POLICY_VIOLATION, CLOSE_REVOKED
+from atlas.desktop.protocol import (
+    CLOSE_REVOKED,
+    REFUSAL_HEADER,
+    REFUSAL_STATUS,
+    REFUSAL_TOKEN,
+)
 from test_desktop_tracer import _boot_with_desktop_repo, _create_admin, _fixture_message
 from tests.edge_fakes import FakeEdgeDeviceRepository, fake_edge_device
 
@@ -105,7 +110,9 @@ def test_revoking_a_connected_mac_closes_its_socket_with_4001_and_refuses_the_ne
         with pytest.raises(WebSocketDisconnect) as refused:
             with client.websocket_connect("/ws/desktop", headers=_bearer(mac["token"])):
                 pass
-        assert refused.value.code == CLOSE_POLICY_VIOLATION
+        # A revoked token is the marked HTTP 403 denial (D-30).
+        assert refused.value.status_code == REFUSAL_STATUS
+        assert refused.value.headers.get(REFUSAL_HEADER) == REFUSAL_TOKEN
 
 
 def test_delete_on_an_unknown_id_returns_404(tmp_path, monkeypatch):

@@ -222,6 +222,14 @@ import Testing
         }
     }
 
+    @Test func refusalMarkerMatchesTheFixture() throws {
+        let table = try readObject(protocolRoot().appending(path: "refusal.json"))
+        #expect(Set(table.allKeys.compactMap { $0 as? String }) == ["status", "header", "token_value"])
+        #expect((table["status"] as? NSNumber)?.intValue == RefusalMarker.status)
+        #expect(table["header"] as? String == RefusalMarker.header)
+        #expect(table["token_value"] as? String == RefusalMarker.tokenValue)
+    }
+
     @Test func helloCarriesExactlyFiveKeys() throws {
         let hello = Hello(
             protocolVersion: ProtocolConstants.protocolVersion,

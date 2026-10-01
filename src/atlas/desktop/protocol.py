@@ -37,6 +37,13 @@ MAX_TEXT_FRAME_BYTES = 2048
 MAX_INVALID_MESSAGES = 20
 TEST_TIMEOUT_S = 5.0
 
+# The server's own pre-accept refusal of a Mac token is an HTTP 403 with this
+# header (D-30). A proxy, WAF or ingress also answers 403, but never with this
+# header, so the app counts only a marked 403 toward the two-strike unpair.
+REFUSAL_STATUS = 403
+REFUSAL_HEADER = "X-Atlas-Refusal"
+REFUSAL_TOKEN = "token"
+
 CLOSE_GOING_AWAY = 1001
 # 1008 stays "policy violation": a bad or missing hello, or too many bad
 # frames. Revoke has its own code below on purpose, because a live-socket

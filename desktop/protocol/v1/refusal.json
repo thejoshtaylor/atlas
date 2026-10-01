@@ -1,0 +1,5 @@
+{
+  "status": 403,
+  "header": "X-Atlas-Refusal",
+  "token_value": "token"
+}

@@ -13,6 +13,16 @@ public enum ProtocolConstants {
     public static let testTimeoutS = 5
 }
 
+/// How the server marks its own refusal of a Mac token (D-30). The refusal is an
+/// HTTP 403 on the handshake with this header. A proxy, WAF or ingress also
+/// answers 403 but never with this header, so only a marked 403 counts toward
+/// the two-strike unpair. Twin of `desktop/protocol/v1/refusal.json`.
+public enum RefusalMarker {
+    public static let status = 403
+    public static let header = "X-Atlas-Refusal"
+    public static let tokenValue = "token"
+}
+
 /// What the app does when the server closes the socket with a given code.
 public enum CloseAction: String, Sendable {
     case reconnect

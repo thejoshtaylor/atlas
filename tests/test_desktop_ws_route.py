@@ -8,17 +8,22 @@ both seeded with one device. Token literals stay under 8 characters
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import WebSocketDisconnect
+from starlette.websockets import WebSocket
 
-from atlas.auth.desktop_tokens import hash_desktop_token
+from atlas.auth.desktop_tokens import handle_desktop_token_refused, hash_desktop_token
 from atlas.auth.edge_tokens import hash_edge_token
 from atlas.desktop.protocol import (
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_MISMATCH,
+    REFUSAL_HEADER,
+    REFUSAL_STATUS,
+    REFUSAL_TOKEN,
 )
 from test_desktop_tracer import _boot_with_desktop_repo, _create_admin, _fixture_message
 from tests.desktop_fakes import fake_desktop_device
@@ -64,6 +69,17 @@ def _refusal(client, path, headers) -> tuple[int, str]:
         with client.websocket_connect(path, headers=headers):
             pass
     return exc_info.value.code, exc_info.value.reason
+
+
+def _desktop_refusal(client, path, headers) -> tuple[int, str | None]:
+    """A refused Mac token is an HTTP 403 denial. Returns its status and the
+    value of the refusal header (D-30)."""
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(path, headers=headers):
+            pass
+    denial = exc_info.value
+    assert hasattr(denial, "status_code"), "expected a denial response, not a close frame"
+    return denial.status_code, denial.headers.get(REFUSAL_HEADER)
 
 
 def _bearer(token: str) -> dict:
@@ -113,8 +129,8 @@ def test_an_edge_token_on_ws_desktop_is_refused_and_registers_nothing(tmp_path, 
     client = _boot(tmp_path, monkeypatch)
     with client:
         _create_admin(client)
-        code, _reason = _refusal(client, "/ws/desktop", _bearer(EDGE_TOKEN))
-        assert code == CLOSE_POLICY_VIOLATION
+        refusal = _desktop_refusal(client, "/ws/desktop", _bearer(EDGE_TOKEN))
+        assert refusal == (REFUSAL_STATUS, REFUSAL_TOKEN)
         assert _hub_snapshot() == {}
 
 
@@ -125,13 +141,32 @@ def test_missing_header_query_token_unknown_and_revoked_tokens_get_the_same_refu
     with client:
         _create_admin(client)
         refusals = {
-            "missing header": _refusal(client, "/ws/desktop", {}),
-            "query parameter only": _refusal(client, f"/ws/desktop?token={DESKTOP_TOKEN}", {}),
-            "unknown token": _refusal(client, "/ws/desktop", _bearer("t-9")),
-            "revoked token": _refusal(client, "/ws/desktop", _bearer(REVOKED_TOKEN)),
+            "missing header": _desktop_refusal(client, "/ws/desktop", {}),
+            "query parameter only": _desktop_refusal(
+                client, f"/ws/desktop?token={DESKTOP_TOKEN}", {}
+            ),
+            "unknown token": _desktop_refusal(client, "/ws/desktop", _bearer("t-9")),
+            "revoked token": _desktop_refusal(client, "/ws/desktop", _bearer(REVOKED_TOKEN)),
         }
-        assert set(refusals.values()) == {(CLOSE_POLICY_VIOLATION, "")}, refusals
+        # Every case is an HTTP 403 that carries the ATLAS refusal marker (D-30).
+        assert set(refusals.values()) == {(REFUSAL_STATUS, REFUSAL_TOKEN)}, refusals
         assert _hub_snapshot() == {}
+
+
+def test_a_server_without_the_denial_extension_falls_back_to_a_plain_1008_close():
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "websocket", "headers": [], "extensions": {}}
+    asyncio.run(handle_desktop_token_refused(WebSocket(scope, receive, send), Exception()))
+    assert sent == [
+        {"type": "websocket.close", "code": CLOSE_POLICY_VIOLATION, "reason": ""},
+    ]
 
 
 def test_an_unknown_message_type_is_ignored_and_the_socket_stays_open(tmp_path, monkeypatch):

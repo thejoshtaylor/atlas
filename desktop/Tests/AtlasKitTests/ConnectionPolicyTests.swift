@@ -40,8 +40,20 @@ import Testing
         #expect(policy.wakeDelay == 1.0)
     }
 
-    @Test func aHandshake403IsRefused() {
-        #expect(DialFailure.classify(httpStatus: 403, closeCode: 0) == .refused)
+    @Test func aMarkedHandshake403IsRefused() {
+        let marker = RefusalMarker.tokenValue
+        #expect(DialFailure.classify(httpStatus: 403, refusalHeader: marker, closeCode: 0) == .refused)
+    }
+
+    @Test func anUnmarkedHandshake403IsUnreachable() {
+        #expect(DialFailure.classify(httpStatus: 403, refusalHeader: nil, closeCode: 0) == .unreachable)
+        #expect(DialFailure.classify(httpStatus: 403, refusalHeader: "other", closeCode: 0) == .unreachable)
+        #expect(DialFailure.classify(httpStatus: 403, closeCode: 0) == .unreachable)
+    }
+
+    @Test func theMarkerOnAnotherStatusIsUnreachable() {
+        let marker = RefusalMarker.tokenValue
+        #expect(DialFailure.classify(httpStatus: 500, refusalHeader: marker, closeCode: 0) == .unreachable)
     }
 
     @Test func aCloseCodeWithNoStatusIsClosed() {

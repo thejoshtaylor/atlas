@@ -6,8 +6,9 @@ import Foundation
 /// It has no session delegate (RESEARCH Pitfall 7). `open` returns before the
 /// handshake finishes. When the handshake fails, the first `send` or `receive`
 /// throws, and the HTTP status and close code are read off the task then. A
-/// token refused before accept shows up as status 403 with close code 0. A live
-/// close shows up as a close code. Nothing here logs the request, its headers
+/// token refused before accept shows up as status 403 with the ATLAS refusal
+/// header (D-30) and close code 0. A 403 without the header came from something
+/// else on the path. A live close shows up as a close code. Nothing here logs the request, its headers
 /// or the token.
 public struct URLSessionWebSocketTransport: WebSocketTransport {
     public init() {}
@@ -62,8 +63,11 @@ final class URLSessionWebSocketChannel: WebSocketChannel, @unchecked Sendable {
 
     /// Reads both signals off the task, then drops the session.
     private func failure() -> DialFailure {
-        let status = (task.response as? HTTPURLResponse)?.statusCode
-        let result = DialFailure.classify(httpStatus: status, closeCode: task.closeCode.rawValue)
+        let response = task.response as? HTTPURLResponse
+        let result = DialFailure.classify(
+            httpStatus: response?.statusCode,
+            refusalHeader: response?.value(forHTTPHeaderField: RefusalMarker.header),
+            closeCode: task.closeCode.rawValue)
         session.invalidateAndCancel()
         return result
     }

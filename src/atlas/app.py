@@ -32,7 +32,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from atlas.audio.cue import ring_tone, silence
 from atlas.audio.ring import PrerollBuffer
 from atlas.auth.dependencies import Role, require_role, require_setup_complete
-from atlas.auth.desktop_tokens import require_desktop_device
+from atlas.auth.desktop_tokens import (
+    DesktopTokenRefused,
+    handle_desktop_token_refused,
+    require_desktop_device,
+)
 from atlas.auth.edge_tokens import require_edge_device
 from atlas.auth.tokens import validate_secret_key_strength
 from atlas.calibration.record import EchoCalibration
@@ -2388,6 +2392,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 # wizard) -- `require_setup_complete` itself still exempts those exact
 # paths, so gating their routers too is a no-op, not a second gate.
 app = FastAPI(lifespan=lifespan)
+# A refused Mac token is an HTTP 403 that carries the `X-Atlas-Refusal` header
+# (D-30), which a bare `websocket.close` cannot do.
+app.add_exception_handler(DesktopTokenRefused, handle_desktop_token_refused)
 register_routers(app)
 # The built single-page application, served at the same origin its own
 # session cookie needs (D-15). `app.frontend()` (verified directly against

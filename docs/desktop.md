@@ -235,6 +235,8 @@ The menu has these items: Finish Setup… while a required step is open, Pair…
 
 **The menu says Offline but the server is up.** The Local Network permission may be off. Open the setup window, find the Local Network row, and click Open Settings. Turn on ATLAS. The app connects again by itself. See [Local Network](#local-network).
 
+**The menu says Offline behind a reverse proxy.** A proxy, firewall, or ingress can answer the connection with an HTTP 403 of its own. The app does not treat that as a refused token, so it keeps the pairing and tries again. The app reads a token refusal only from a 403 that carries the `X-Atlas-Refusal: token` header, which only the ATLAS server sends. Make sure the proxy forwards the `Authorization` header and the WebSocket upgrade, and passes the server's response headers through unchanged.
+
 **The Local Network row stays on Checking….** The app shows a result only after a connection attempt ends. Open the server in a browser to make sure it is up. Wait for the next attempt. See [Local Network](#local-network).
 
 **Accessibility resets after a rebuild.** The signing identity changed. Run `desktop/scripts/install.sh --verify`. It exits 1 when the new build has a different identity from the installed app. Then pin the identity with `ATLAS_SIGN_IDENTITY`. See [Signing identity](#signing-identity). Grant Accessibility again after you pin it.
