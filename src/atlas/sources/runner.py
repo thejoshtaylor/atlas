@@ -1187,7 +1187,12 @@ class SourceRunner:
             # for the utterance that the turn transcribes.
             if channel.wake_heard or self._clock() - first_audio_at > WAKE_EVIDENCE_WINDOW_S:
                 return
-            hit = await loop.run_in_executor(self._detector_executor, self._detect, chunk)
+            try:
+                hit = await loop.run_in_executor(self._detector_executor, self._detect, chunk)
+            except Exception:
+                # WR-04: a detector error must not end the window's turn.
+                logger.exception("source %r: wake detector failed in an answer window -- continuing", self._name)
+                return
             if hit is None:
                 return
             now = self._clock()
@@ -1308,7 +1313,14 @@ class SourceRunner:
         finally:
             listener_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await listener_task
+                try:
+                    await listener_task
+                except Exception:
+                    # WR-04: a failed listener must not hide the turn's own
+                    # outcome or skip its follow-ups.
+                    logger.warning(
+                        "source %r: the barge-in listener ended with an error", self._name, exc_info=True
+                    )
             # The listener pushed playback audio into the pre-roll to find a
             # wake hit. A wake hit already took it for the hand-over. What is
             # left must not lead the next idle turn's pre-roll.
@@ -1408,6 +1420,16 @@ class SourceRunner:
                         if monitor.interrupt_requested:
                             monitor.handover.append(chunk)
                         raise
+                    except Exception:
+                        # WR-04: the same containment `run()` gives the idle
+                        # detector (CR-03). A bad chunk costs one decode, not
+                        # the listener and the turn's follow-ups.
+                        logger.exception(
+                            "source %r: wake detector failed during playback -- continuing", self._name
+                        )
+                        if monitor.interrupt_requested:
+                            monitor.handover.append(chunk)
+                        continue
                     if monitor.interrupt_requested:
                         monitor.handover.append(chunk)
                     elif hit is not None:

@@ -631,6 +631,79 @@ async def test_a_wake_interrupt_hands_its_frames_to_the_next_wake_turn_once_each
             await serve_task
 
 
+class _RaisingThenScriptedDetector(_ScriptedWakeDetector):
+    """Raises on the scripted call numbers, like a decoder that meets a bad chunk."""
+
+    def __init__(self, raise_on_calls=(), hit_on_calls=()) -> None:
+        super().__init__(hit_on_calls=hit_on_calls)
+        self._raise_on_calls = set(raise_on_calls)
+
+    def process(self, chunk: bytes):
+        if self.calls + 1 in self._raise_on_calls:
+            self.calls += 1
+            raise RuntimeError("bad chunk")
+        return super().process(chunk)
+
+
+async def test_a_detector_error_during_playback_does_not_end_the_listener(edge_source, caplog):
+    """WR-04: the listener logs it and keeps reading, so the later wake hit still interrupts."""
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+
+    async def never(turn_source) -> None:
+        return None
+
+    detector = _RaisingThenScriptedDetector(raise_on_calls={1}, hit_on_calls={3})
+    runner = _handover_runner(
+        edge_source, never, detector, barge_in_config=BargeInConfig(enabled=False, wake_word=True)
+    )
+    monitor = runner._new_barge_in_monitor()
+    monitor.mark_transcript_done()
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        frames = [_stereo(n) for n in (1, 2, 3, 4)]
+        for frame in frames:
+            socket.push_bytes(frame)
+        await _wait_until(lambda: len(monitor.handover) == 4)
+        assert monitor.interrupt_kind == "wake"
+        assert monitor.handover == frames
+        assert not watch_task.done()
+        assert "wake detector failed during playback" in caplog.text
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_a_failed_listener_does_not_raise_out_of_the_turn(edge_source, monkeypatch):
+    """WR-04: whatever ends the listener, `_run_one_turn` returns, so the
+    follow-ups of a turn that completed still run."""
+    ran: list[str] = []
+
+    async def finish(turn_source) -> None:
+        await asyncio.sleep(0)
+        ran.append("turn")
+
+    runner = _handover_runner(
+        edge_source, finish, _NeverHitDetector(), barge_in_config=BargeInConfig(enabled=False, wake_word=True)
+    )
+
+    async def broken_listener(monitor, frames=None) -> None:
+        raise RuntimeError("listener broke")
+
+    monkeypatch.setattr(runner, "_watch_barge_in", broken_listener)
+    monitor = runner._new_barge_in_monitor()
+
+    await runner._run_one_turn(edge_source, monitor)
+
+    assert ran == ["turn"]
+
+
 async def test_the_listener_gives_every_chunk_it_holds_to_the_pre_roll_or_the_hand_over(edge_source):
     """RESEARCH Pitfall 2: chunks read before the hit are in the pre-roll the
     hit takes. Chunks read after it go to the hand-over, in order."""
