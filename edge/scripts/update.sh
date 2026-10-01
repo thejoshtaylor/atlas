@@ -78,7 +78,7 @@ print(value if isinstance(value, str) else "")
 # owner to atlas-edge. That user faces the network, and it must not be
 # able to write code that root runs later.
 install_current() {
-  local unit target restarts_before restarts_after
+  local unit target watchdog_new restarts_before restarts_after
 
   # The same install as runbook step 3.
   (
@@ -88,14 +88,38 @@ install_current() {
 
   # Refresh only the unit files that are already installed. Optional units
   # such as atlas-librespot stay opt-in. This also keeps the two
-  # atlas-edge-update units current after the first install.
+  # atlas-edge-update units current after the first install. One exception
+  # follows: atlas-librespot-watchdog is a companion unit, and the updater
+  # installs it on a Pi that already has atlas-librespot.
   for unit in "$ATLAS_EDGE_DIR"/edge/systemd/*.service "$ATLAS_EDGE_DIR"/edge/systemd/*.timer; do
     [ -e "$unit" ] || continue
     target="$UNITS_DIR/$(basename "$unit")"
     [ -e "$target" ] || continue
     cp "$unit" "$target" || return 1
   done
+
+  # The companion-unit exception. The updater copies the watchdog only when
+  # the file is not installed. An operator who disables the watchdog keeps
+  # it disabled, because the file stays and the updater never enables it
+  # again. The checkout test exists because an older commit (for example
+  # during a rollback) can lack the unit file.
+  watchdog_new=no
+  if [ -e "$UNITS_DIR/atlas-librespot.service" ] &&
+    [ ! -e "$UNITS_DIR/atlas-librespot-watchdog.service" ] &&
+    [ -e "$ATLAS_EDGE_DIR/edge/systemd/atlas-librespot-watchdog.service" ]; then
+    cp "$ATLAS_EDGE_DIR/edge/systemd/atlas-librespot-watchdog.service" \
+      "$UNITS_DIR/atlas-librespot-watchdog.service" || return 1
+    watchdog_new=yes
+  fi
   systemctl daemon-reload || return 1
+
+  # A failed enable does not fail the update. The watchdog does not touch
+  # atlas-edge. A rollback would replace a working atlas-edge build and
+  # still not fix the watchdog. The unit file stays, so a later update does
+  # not try the enable again. The log line gives the operator the command.
+  if [ "$watchdog_new" = yes ]; then
+    systemctl enable --now atlas-librespot-watchdog || log "cannot enable atlas-librespot-watchdog. Run systemctl enable --now atlas-librespot-watchdog by hand."
+  fi
 
   # ponytail: no restart deferral during an active turn. This is the known
   # ceiling. A restart during a turn drops that turn. The upgrade path:
