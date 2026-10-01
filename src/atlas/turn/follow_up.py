@@ -17,6 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from atlas.turn.entity_claims import bare_tool_name
+from atlas_mcp.ha_names import HA_WRITE_TOOL_NAMES
+
 if TYPE_CHECKING:
     # Annotation-only: `turn/controller.py` imports this module at load
     # time (its own module docstring), so an import of `SpeechResult` here
@@ -76,9 +79,15 @@ class AnswerScope:
             entity_ids = self.entity_ids & other.entity_ids
         return AnswerScope(tool_names=self.tool_names & other.tool_names, entity_ids=entity_ids)
 
-    def allows_targets(self, arguments: "dict | None") -> bool:
-        """True when a call's own arguments name only entities in scope."""
+    def allows_targets(self, arguments: "dict | None", tool_name: "str | None" = None) -> bool:
+        """True when a call's own arguments name only entities in scope.
+
+        With a `tool_name`, the check applies to a Home Assistant write tool
+        only (WR-01): an answer window can hold a mix of tools, and a
+        weather lookup names no entity. Without one, every call is checked."""
         if self.entity_ids is None:
+            return True
+        if tool_name is not None and bare_tool_name(tool_name) not in HA_WRITE_TOOL_NAMES:
             return True
         if not isinstance(arguments, dict):
             return False

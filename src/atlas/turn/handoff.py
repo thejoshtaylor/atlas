@@ -140,6 +140,12 @@ class HandoffSlot:
     # JSON, so a reply composed in code keeps False. This follows the
     # `called_tools` side channel and adds no new return structure.
     expects_reply: bool = False
+    # WR-01: the entity ids those calls named for a Home Assistant write tool,
+    # and the write tools that named none (an area, a device, a label or no
+    # target). The answer window is scoped to these, so a write tool that
+    # reached no named entity is left out of the window's scope.
+    called_entities: "set[str]" = field(default_factory=set)
+    untargeted_writes: "set[str]" = field(default_factory=set)
 
 
 @dataclass(frozen=True)

@@ -23,8 +23,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from atlas_mcp.ha_names import HA_WRITE_TOOL_NAMES
+
 from atlas.timers.ring_stop import is_stop_command
-from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpRequest
+from atlas.turn.entity_claims import bare_tool_name
+from atlas.turn.follow_up import (
+    _EXPANDING_TARGET_ARGUMENTS,
+    MAX_CHAINED_FOLLOW_UPS,
+    AnswerScope,
+    FollowUpRequest,
+)
 from atlas.turn.transcript_guard import is_no_command
 from atlas.turn.wake_echo import strip_wake_phrase
 
@@ -58,6 +66,48 @@ def is_quiet_stop(text: str) -> bool:
     return is_stop_command(text) and not _OFF_RE.search(text)
 
 
+def _named_entities(arguments: Any) -> "frozenset[str]":
+    """The entity ids a call names through `entity_id` alone. Empty when it
+    names none, or when it also names an area, a device or a label, which
+    expand to entities the call never listed."""
+    if not isinstance(arguments, dict) or any(arguments.get(key) for key in _EXPANDING_TARGET_ARGUMENTS):
+        return frozenset()
+    value = arguments.get("entity_id")
+    named = [value] if isinstance(value, str) else value
+    if not isinstance(named, list) or not all(isinstance(item, str) and item for item in named):
+        return frozenset()
+    return frozenset(named)
+
+
+def note_dispatched_call(slot: Any, name: str, arguments: Any) -> None:
+    """Record one dispatched call on the turn's `HandoffSlot` (D-10, WR-01).
+    A Home Assistant write tool also records the entities it named, or that
+    it named none."""
+    slot.called_tools.add(name)
+    if bare_tool_name(name) not in HA_WRITE_TOOL_NAMES:
+        return
+    entities = _named_entities(arguments)
+    if entities:
+        slot.called_entities |= entities
+    else:
+        slot.untargeted_writes.add(name)
+
+
+def dispatched_scope(slot: Any) -> AnswerScope:
+    """What a window after this turn may reach: the tools it dispatched,
+    and for a Home Assistant write tool only the entities it named (WR-01).
+    A write tool that named no entity fails closed: it is left out. The
+    entity limit applies to the write tools only (`allows_targets`)."""
+    tool_names = frozenset(
+        name
+        for name in slot.called_tools
+        if name not in slot.untargeted_writes
+        and (bare_tool_name(name) not in HA_WRITE_TOOL_NAMES or slot.called_entities)
+    )
+    writes = any(bare_tool_name(name) in HA_WRITE_TOOL_NAMES for name in tool_names)
+    return AnswerScope(tool_names=tool_names, entity_ids=frozenset(slot.called_entities) if writes else None)
+
+
 def build_answer_request(
     *,
     incoming: "FollowUpRequest | None",
@@ -71,6 +121,7 @@ def build_answer_request(
     answer_only_from: "str | None",
     expects_reply: bool = False,
     offered_tools: "frozenset[str]" = frozenset(),
+    called_entities: "frozenset[str] | None" = None,
 ) -> "FollowUpRequest | None":
     """The request for the window after this answer, or `None` for no window.
 
@@ -95,7 +146,7 @@ def build_answer_request(
         prior_messages=tuple(prior_exchange) if prior_exchange else (),
         playback_ends_at=playback_ends_at,
         proposals_only=proposals_only,
-        answer_scope=AnswerScope(tool_names=scope_tools).narrowed_by(answer_scope),
+        answer_scope=AnswerScope(tool_names=scope_tools, entity_ids=called_entities).narrowed_by(answer_scope),
         answer_only_from=answer_only_from,
         expects_reply=expects_reply,
     )

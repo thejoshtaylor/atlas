@@ -33,12 +33,14 @@ from atlas.turn.answer_window import (
     answer_speaker_mismatch,
     answer_turn_scope,
     build_answer_request,
+    dispatched_scope,
+    note_dispatched_call,
     silent_answer_outcome,
     wake_addressed_command,
 )
 from atlas.turn.controller import run_turn
 from atlas.turn.follow_up import MAX_CHAINED_FOLLOW_UPS, AnswerScope, FollowUpChannel, FollowUpRequest
-from atlas.turn.handoff import AMENDED_CONTINUATION_REFUSAL
+from atlas.turn.handoff import AMENDED_CONTINUATION_REFUSAL, HandoffSlot
 
 from brain_fakes import RecordingFakeBrain
 from conftest import FakeAudioSource, FakeStt, FakeTts
@@ -48,9 +50,17 @@ _SCHEMA = [
     {"type": "function", "function": {"name": "lights_set"}},
     {"type": "function", "function": {"name": "gmail_fetch_body"}},
 ]
+# The schema with the Home Assistant write tool, for the entity-scope tests.
+_HA_SCHEMA = [*_SCHEMA, {"type": "function", "function": {"name": "ha_call_service"}}]
 
 _WEATHER = ToolCall(name="weather_now", arguments={"place": "home"})
 _LIGHTS = ToolCall(name="lights_set", arguments={"entity_id": "light.example_lamp", "on": True})
+_HA_LAMP = ToolCall(
+    name="ha_call_service", arguments={"domain": "light", "service": "turn_on", "entity_id": "light.example_lamp"}
+)
+_HA_DOOR = ToolCall(
+    name="ha_call_service", arguments={"domain": "lock", "service": "unlock", "entity_id": "lock.example_door"}
+)
 
 
 class _RecordingToolHost:
@@ -103,6 +113,7 @@ class _Edge:
         answer_windows: bool = True,
         macros: tuple[MacroConfig, ...] = (),
         window_s: float = 0.3,
+        tools_schema: "list[dict] | None" = None,
     ) -> None:
         self.source = FakeAudioSource(frames=[b"\x00"])
         self.tool_host = _RecordingToolHost()
@@ -126,7 +137,7 @@ class _Edge:
                 brain,
                 tts,
                 self.tool_host,
-                tools_schema=_SCHEMA,
+                tools_schema=tools_schema if tools_schema is not None else _SCHEMA,
                 system_prompt="you answer questions",
                 max_tool_rounds=3,
                 timings=timings,
@@ -218,6 +229,36 @@ def test_build_answer_request_opens_no_window_past_the_chain_cap_or_after_a_blan
     assert blank is None
 
 
+def _slot_after(*calls: ToolCall) -> HandoffSlot:
+    slot = HandoffSlot()
+    for call in calls:
+        note_dispatched_call(slot, call.name, call.arguments)
+    return slot
+
+
+def test_a_home_write_scope_names_the_entities_the_turn_called():
+    """WR-01: a window after one `ha_call_service` reaches that entity, and no other."""
+    scope = dispatched_scope(_slot_after(_WEATHER, _HA_LAMP))
+    assert scope == AnswerScope(
+        tool_names=frozenset({"weather_now", "ha_call_service"}), entity_ids=frozenset({"light.example_lamp"})
+    )
+    assert scope.allows_targets(_HA_LAMP.arguments, "ha_call_service")
+    assert not scope.allows_targets(_HA_DOOR.arguments, "ha_call_service")
+    # The entity limit does not touch a tool that is not a Home Assistant write.
+    assert scope.allows_targets(_WEATHER.arguments, "weather_now")
+
+
+def test_a_home_write_that_named_no_entity_leaves_the_window_no_write_tool():
+    by_area = ToolCall(name="ha_call_service", arguments={"domain": "light", "service": "turn_off", "area_id": "den"})
+    by_both = ToolCall(
+        name="ha_call_service", arguments={"domain": "light", "service": "turn_on", "entity_id": "light.a", "area_id": "den"}
+    )
+    for calls in ((_WEATHER, by_area), (_WEATHER, _HA_LAMP, by_area), (_WEATHER, by_both)):
+        scope = dispatched_scope(_slot_after(*calls))
+        assert scope.tool_names == frozenset({"weather_now"}), calls
+    assert dispatched_scope(_slot_after(_WEATHER)) == AnswerScope(tool_names=frozenset({"weather_now"}))
+
+
 def test_an_answer_request_with_no_recorded_scope_offers_no_tool():
     assert answer_turn_scope(_answer_request(answer_scope=None)) == AnswerScope(tool_names=frozenset())
 
@@ -279,6 +320,30 @@ async def test_a_window_opens_after_an_answer_and_is_scoped_to_the_tools_it_used
         {"role": "user", "content": "and tomorrow"},
     ]
     assert AMENDED_CONTINUATION_REFUSAL in edge.tts[1].received_text[-1]
+
+
+async def test_a_window_after_a_light_call_cannot_reach_another_entity():
+    """WR-01: a television inside the window cannot unlock a door because the
+    answered turn switched a lamp."""
+    brain = RecordingFakeBrain(
+        replies=[
+            BrainReply(tool_calls=[_HA_LAMP]),
+            BrainReply(text="Done."),
+            BrainReply(tool_calls=[_HA_DOOR]),
+            BrainReply(text="I cannot do that."),
+        ]
+    )
+    edge = _Edge([_text("turn on the lamp"), _text("unlock the door"), _text("")], brain, tools_schema=_HA_SCHEMA)
+
+    await edge.run()
+
+    request = edge.requests[0]
+    assert request is not None
+    assert request.answer_scope == AnswerScope(
+        tool_names=frozenset({"ha_call_service"}), entity_ids=frozenset({"light.example_lamp"})
+    )
+    assert [name for name, _ in edge.tool_host.calls] == ["ha_call_service"]
+    assert edge.tool_host.calls[0][1]["entity_id"] == "light.example_lamp"
 
 
 async def test_a_conversation_only_answer_opens_a_window_that_offers_no_tool():

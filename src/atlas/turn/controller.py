@@ -144,7 +144,9 @@ from atlas.turn.answer_window import (
     answer_speaker_mismatch,
     answer_turn_scope,
     build_answer_request,
+    dispatched_scope,
     is_quiet_stop,
+    note_dispatched_call,
     silent_answer_outcome,
     wake_addressed_command,
 )
@@ -1763,9 +1765,8 @@ async def run_turn(
         timings.mark_tool_rounds_done()
         # D-16: what this turn dispatched, and no more than its own scope. A
         # VAD interrupt of its reply may reach only these tools.
-        _note_resume(
-            barge_in, final_text, AnswerScope(tool_names=frozenset(handoff_slot.called_tools)).narrowed_by(answer_scope)
-        )
+        dispatched = dispatched_scope(handoff_slot)
+        _note_resume(barge_in, final_text, dispatched.narrowed_by(answer_scope))
 
         if handoff_slot.handoff is not None:
             # Plan 09-04 (D-08): the tool round stored a handoff instead of
@@ -1989,11 +1990,14 @@ async def run_turn(
         # path only: a Phase 12 turn group has its own follow-up handling.
         if answer_windows and follow_up is not None and turn_context is None and timings.turn_outcome == "completed":
             asked_by = speaker_outcome.event.get("speaker_id")
+            # Read now, not from the note above: it is what the whole turn dispatched.
+            dispatched = dispatched_scope(handoff_slot)
             answer_request = build_answer_request(
                 incoming=incoming,
                 final_text=final_text,
                 reply_text=reply_text,
-                called_tools=handoff_slot.called_tools,
+                called_tools=dispatched.tool_names,
+                called_entities=dispatched.entity_ids,
                 # A user decision of 2026-10-01 amends 13-CONTEXT D-11 for
                 # this case only. The turn dispatched no tool and the model
                 # asked the operator a question. The answer may then reach
@@ -2003,11 +2007,15 @@ async def run_turn(
                 # the flag says. A source without `answer_windows` still
                 # opens no window.
                 expects_reply=winner.expects_reply,
+                # A turn that dispatched a tool never widens, even when WR-01
+                # dropped that tool from the scope: it offers nothing here.
                 offered_tools=frozenset(
                     name
                     for entry in turn_tools_schema
                     if isinstance(name := entry.get("function", {}).get("name"), str)
-                ),
+                )
+                if not handoff_slot.called_tools
+                else frozenset(),
                 answer_scope=answer_scope,
                 proposals_only=restrict_tools_to_proposals,
                 prior_exchange=prior_exchange,
@@ -2830,7 +2838,7 @@ async def _run_tool_rounds(
         def _refused(tc: Any) -> bool:
             if restricted_to is not None and tc.name not in restricted_to:
                 return True
-            return answer_scope is not None and not answer_scope.allows_targets(tc.arguments)
+            return answer_scope is not None and not answer_scope.allows_targets(tc.arguments, tc.name)
 
         dispatchable = [
             (index, tc)
@@ -2839,7 +2847,8 @@ async def _run_tool_rounds(
         ]
         # Phase 13 (D-10): the answer window is scoped to exactly these names.
         if handoff_slot is not None:
-            handoff_slot.called_tools.update(tc.name for _, tc in dispatchable)
+            for _, tc in dispatchable:
+                note_dispatched_call(handoff_slot, tc.name, tc.arguments)
         dispatched_results = await asyncio.gather(
             *(tool_host.call_tool(tc.name, tc.arguments) for _, tc in dispatchable),
             return_exceptions=True,
