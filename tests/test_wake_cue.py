@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from atlas.audio.alaw import alaw_to_pcm16
-from atlas.audio.cue import silence, wake_cue
+from atlas.audio.cue import ring_tone, silence, wake_cue
 from atlas.providers.tts_xai import SinkFormat
 
 
@@ -54,3 +54,16 @@ def test_silence_rejects_an_unsupported_codec_naming_it():
 def test_silence_rejects_a_negative_duration():
     with pytest.raises(ValueError):
         silence(SinkFormat("pcm", 24000), -0.1)
+
+
+def test_ring_tone_is_a_soft_fading_bell_in_the_sink_codec():
+    import numpy as np
+
+    pcm = np.frombuffer(ring_tone(SinkFormat(codec="pcm", sample_rate=16000)), dtype="<i2")
+    assert len(pcm) == int(16000 * 1.6)
+    peak = int(np.max(np.abs(pcm)))
+    # Quieter than the wake cue, and it fades out with no click at the end.
+    assert peak <= round(0.2 * 32767)
+    assert int(np.max(np.abs(pcm[-160:]))) < peak * 0.05
+    assert len(ring_tone(SinkFormat(codec="alaw", sample_rate=8000))) == int(8000 * 1.6)
+    assert ring_tone(SinkFormat(codec="mp3", sample_rate=24000)) == b""

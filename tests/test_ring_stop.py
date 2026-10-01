@@ -14,13 +14,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.runner import SourceRunner
 from atlas.timers.core import announcement
 from atlas.timers.ring_stop import RingStopWindow, is_stop_command, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.transports.base import SourceFormat
-from atlas.turn.controller import SpeechResult
 from tests.conftest import FakeStt, FakeWakeDetector, FinalTranscript
 from tests.timer_fakes import FakeTimerRepository
 
@@ -339,32 +337,6 @@ async def test_the_window_gives_up_with_one_warning_when_stt_is_unavailable(capl
     assert len([r for r in caplog.records if "gave up" in r.getMessage()]) == 1
     assert len(spoken) >= 2
     assert not window.active()
-
-
-# --- pacing one ring repetition to real playback -------------------------------
-
-
-async def test_wait_for_playback_end_sleeps_to_the_estimated_end():
-    from atlas.app import _wait_for_playback_end
-
-    slept: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        slept.append(seconds)
-
-    sink = SinkFormat("alaw", 8000)
-    await _wait_for_playback_end(
-        SpeechResult(8000, 0.0, 0.0), sink, clock=lambda: 0.0, sleep=fake_sleep
-    )
-    await _wait_for_playback_end(None, sink, clock=lambda: 0.0, sleep=fake_sleep)
-    await _wait_for_playback_end(
-        SpeechResult(8000 * 600, 0.0, 0.0), sink, clock=lambda: 0.0, sleep=fake_sleep
-    )
-    await _wait_for_playback_end(
-        SpeechResult(8000, 0.0, 0.0), sink, clock=lambda: 5.0, sleep=fake_sleep
-    )
-
-    assert slept == [1.0, 30.0]
 
 
 # --- "Hey Atlas, stop" through run_turn ----------------------------------------

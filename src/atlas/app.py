@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from atlas.audio.cue import silence
+from atlas.audio.cue import ring_tone, silence
 from atlas.audio.ring import PrerollBuffer
 from atlas.auth.dependencies import Role, require_role, require_setup_complete
 from atlas.auth.edge_tokens import require_edge_device
@@ -124,8 +124,7 @@ from atlas.timers.core import clock_text, describe_timers
 from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
-from atlas.turn.controller import _play_wake_cue, _speak, run_turn
-from atlas.turn.follow_up import estimate_playback_end
+from atlas.turn.controller import _speak, run_turn
 from atlas.wake.base import WakeDetector, WakeError
 from atlas.wake.vosk_engine import VoskWakeDetector
 from atlas.workflow.scheduler import WorkflowScheduler
@@ -939,31 +938,6 @@ def _warm_providers(providers: Iterable[Any], keep_alive: set[asyncio.Task]) -> 
         task.add_done_callback(keep_alive.discard)
         tasks.append(task)
     return tasks
-
-
-async def _wait_for_playback_end(
-    result: "Any | None",
-    sink: "SinkFormat | None",
-    *,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], Any] = asyncio.sleep,
-    max_wait_s: float = 30.0,
-) -> None:
-    """Wait until the room has heard the audio `_speak` wrote.
-
-    `_speak` returns when the last byte is written. The speaker plays the
-    bytes later. A ring uses this to pace each repetition to real playback.
-    Without it, an edge ring would fill the Pi buffer in one burst, and a
-    stop word would wait behind that audio.
-    """
-    if result is None:
-        return
-    end = estimate_playback_end(result, sink)
-    if end is None:
-        return
-    wait_s = min(end - clock(), max_wait_s)
-    if wait_s > 0:
-        await sleep(wait_s)
 
 
 def _make_ring_stop_window(app: FastAPI, config: Config) -> RingStopWindow:
@@ -2136,20 +2110,33 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async def _scheduled_speak(text: str) -> None:
         await _speak_scheduled(app.state.camera_source, app.state.speaker_lock, text)
 
-    # Quick task 260930-06x: a timer or alarm ring plays the wake chime, then
-    # the sentence, on the deployment's active audio source. An edge source
-    # takes no lock, the same rule a live edge turn follows. The chime comes
-    # before the TTS check, so a degraded TTS slot still chimes.
-    async def _timer_speak(text: str) -> None:
+    # Quick task 261001-a6l: a timer or alarm ring is a soft bell tone with
+    # no speech, on the deployment's active audio source. An edge source
+    # takes no lock, the same rule a live edge turn follows. The scheduler
+    # still passes the announcement text, and the ring ignores it. Each
+    # repetition lasts as long as the room hears the tone, so a stop word
+    # never waits behind queued audio (260930-e3r).
+    async def _timer_ring(_text: str) -> None:
         if resolved_audio_source == EDGE_SOURCE_NAME:
             source, lock = app.state.edge_source, None
         else:
             source, lock = app.state.camera_source, app.state.speaker_lock
         sink = source.sink_format()
-        await _play_wake_cue(source, sink, lock)
-        result = await _speak_scheduled(source, lock, text)
-        # Each repetition lasts as long as the room hears it (260930-e3r).
-        await _wait_for_playback_end(result, sink)
+        tone = ring_tone(sink)
+        if not tone:
+            return
+        started = time.monotonic()
+        try:
+            if lock is not None:
+                async with lock:
+                    await source.send_audio(tone)
+            else:
+                await source.send_audio(tone)
+        except SpeakerError as exc:
+            logger.warning("speaker unavailable, skipping one ring: %s", exc)
+        bytes_per_sample = 2 if sink.codec == "pcm" else 1
+        playback_s = len(tone) / (sink.sample_rate * bytes_per_sample)
+        await asyncio.sleep(max(0.0, started + playback_s - time.monotonic()))
 
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
@@ -2183,7 +2170,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     timer_scheduler: "TimerScheduler | None" = None
     if timer_repo is not None:
-        timer_scheduler = TimerScheduler(timer_repo, _timer_speak, zone=_resolved_timezone)
+        timer_scheduler = TimerScheduler(timer_repo, _timer_ring, zone=_resolved_timezone)
         timer_scheduler.start()
         _timers_view = lambda: timer_scheduler.snapshot  # noqa: E731 -- a one-line view, not a function
     app.state.timer_scheduler = timer_scheduler

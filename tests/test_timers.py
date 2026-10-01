@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from atlas.mcp_client import McpToolHostLookup
+from atlas.audio.cue import ring_tone
 from atlas.timers.core import announcement, clock_text, spoken_duration
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
@@ -191,17 +192,16 @@ def test_lifespan_exposes_set_timer_and_rings_a_due_timer_on_the_camera_source(t
             created_at=datetime.now(timezone.utc),
         )
     )
-    spoken: list[tuple[object, str]] = []
-    cues: list[object] = []
+    rings: list[tuple[object, bytes]] = []
+    spoken: list[str] = []
 
     async def fake_speak(source, tts, timings, text, **kwargs):
-        spoken.append((source, text))
+        spoken.append(text)
 
-    async def fake_cue(source, sink, lock):
-        cues.append(source)
+    async def fake_send_audio(self, chunk):
+        rings.append((self, chunk))
 
     monkeypatch.setattr(app_module, "_speak", fake_speak)
-    monkeypatch.setattr(app_module, "_play_wake_cue", fake_cue)
     # The smoke boot's fake camera source has no `sink_format`, and its TTS
     # slot is degraded. The timer is due 1.5 s after boot, so the test gives
     # both a stand-in before the first ring.
@@ -211,31 +211,32 @@ def test_lifespan_exposes_set_timer_and_rings_a_due_timer_on_the_camera_source(t
     monkeypatch.setattr(
         smoke._FakeCameraSource, "sink_format", lambda self: SinkFormat("alaw", 8000), raising=False
     )
+    monkeypatch.setattr(smoke._FakeCameraSource, "send_audio", fake_send_audio, raising=False)
     client = _boot_with_timer_repo(tmp_path, monkeypatch, repo)
 
     with client:
         names = [tool["function"]["name"] for tool in app_module.app.state.tools_schema]
         assert "set_timer" in names
-        app_module.app.state.tts = object()
         runner = app_module.app.state.source_runners[0]
         assert runner.ring_window is not None
         scheduler = app_module.app.state.timer_scheduler
         deadline = time.monotonic() + 15
-        while len(spoken) < 3 and time.monotonic() < deadline:
+        while len(rings) < 2 and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert len(spoken) >= 3
+        assert len(rings) >= 2
         # The test thread is not the loop thread, so the stop goes through the portal.
         assert client.portal.call(scheduler.stop_ringing) is True
         time.sleep(0.3)
-        rings_after_stop = len(spoken)
+        rings_after_stop = len(rings)
         time.sleep(1.5)
-        assert len(spoken) == rings_after_stop
+        assert len(rings) == rings_after_stop
         assert client.portal.call(lambda: scheduler.ringing) is False
         camera_source = app_module.app.state.camera_source
 
-    assert {text for _source, text in spoken} == {"Your timer is done."}
-    assert all(source is camera_source for source, _text in spoken)
-    assert cues and all(source is camera_source for source in cues)
+    # The ring is the tone alone. Nothing is spoken.
+    assert spoken == []
+    assert {chunk for _source, chunk in rings} == {ring_tone(SinkFormat("alaw", 8000))}
+    assert all(source is camera_source for source, _chunk in rings)
 
 
 # ---------------------------------------------------------------------------

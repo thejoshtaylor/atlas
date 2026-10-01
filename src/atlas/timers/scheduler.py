@@ -8,9 +8,10 @@ entry more than `STALE_AFTER_S` late, for example after a restart, is
 advanced without speaking.
 
 A ring repeats until somebody stops it with `stop_ringing()`, or until
-`max_ring_s` has passed. Each repetition is the chime and the sentence. The
-`speak` callable returns only after the room has heard the utterance, so the
-loop paces itself. A short gap follows each repetition. Then the ring goes
+`max_ring_s` has passed. Each repetition calls `speak` with the
+announcement text. In the app, `speak` plays a soft ring tone and ignores the
+text, so a ring never speaks (261001-a6l). `speak` returns only after the
+room has heard the tone, so the loop paces itself. A short gap follows each repetition. Then the ring goes
 quiet by itself, and the timer row is gone, as it is after a stop. A second
 entry that becomes due during a ring rings after the first ring ends. The
 context `snapshot` does not refresh during a ring. The database advance comes
