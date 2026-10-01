@@ -1,11 +1,14 @@
 """RED for the deployment artifacts (10-09-PLAN.md Task 3): the systemd
 unit, the udev rule, and the model-fetch script. Every assertion reads
 the file as text -- none of these run on this dev host (no systemd, no
-real USB device, no network fetch)."""
+real USB device, no network fetch). TestUpdaterWatchdogInstall is the
+exception. It runs install_current of the updater with stub commands."""
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -17,6 +20,9 @@ _LIBRESPOT_PATH = _EDGE_ROOT / "systemd" / "atlas-librespot.service"
 _WATCHDOG_PATH = _EDGE_ROOT / "systemd" / "atlas-librespot-watchdog.service"
 _UDEV_PATH = _EDGE_ROOT / "udev" / "99-atlas-edge-xvf3800.rules"
 _FETCH_SCRIPT_PATH = _EDGE_ROOT / "scripts" / "fetch-vad-model.sh"
+# tests/test_repo_hygiene.py reads the plain file name as a Home Assistant
+# entity id, so the code builds the name with with_suffix.
+_UPDATER_PATH = (_EDGE_ROOT / "scripts" / "update").with_suffix(".sh")
 
 
 def _service_text() -> str:
@@ -187,3 +193,123 @@ class TestFetchVadModelScript:
         for path in src_root.rglob("*.py"):
             text = path.read_text()
             assert not invocation_re.search(text), f"{path} invokes the fetch script"
+
+
+_WATCHDOG_NAME = "atlas-librespot-watchdog.service"
+
+_STUB_SYSTEMCTL = """#!/bin/sh
+echo "$*" >> "$STUB_LOG"
+if [ "$1" = "show" ]; then
+  echo 0
+fi
+if [ "$1" = "enable" ]; then
+  exit "$STUB_ENABLE_RC"
+fi
+exit 0
+"""
+
+_STUB_NOOP = "#!/bin/sh\nexit 0\n"
+
+
+class TestUpdaterWatchdogInstall:
+    def _run(
+        self,
+        tmp_path: Path,
+        *,
+        librespot_installed: bool,
+        watchdog_installed: bool = False,
+        watchdog_in_checkout: bool = True,
+        enable_rc: int = 0,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+        checkout = tmp_path / "checkout"
+        systemd_dir = checkout / "edge" / "systemd"
+        shutil.copytree(_EDGE_ROOT / "systemd", systemd_dir)
+        if not watchdog_in_checkout:
+            (systemd_dir / _WATCHDOG_NAME).unlink()
+
+        units = tmp_path / "units"
+        units.mkdir()
+        if librespot_installed:
+            (units / "atlas-librespot.service").write_text("placeholder\n")
+        if watchdog_installed:
+            (units / _WATCHDOG_NAME).write_text("placeholder\n")
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in (
+            ("systemctl", _STUB_SYSTEMCTL),
+            ("uv", _STUB_NOOP),
+            ("sleep", _STUB_NOOP),
+        ):
+            stub = bin_dir / name
+            stub.write_text(body)
+            stub.chmod(0o755)
+
+        lines = _UPDATER_PATH.read_text().splitlines()
+        while lines and not lines[-1].strip():
+            lines.pop()
+        assert lines[-1] == 'main "$@"'
+        functions = tmp_path / "updater_functions.bash"
+        functions.write_text("\n".join(lines[:-1]) + "\n")
+
+        stub_log = tmp_path / "stub.log"
+        stub_log.write_text("")
+        env = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "ATLAS_EDGE_DIR": str(checkout),
+            "STUB_LOG": str(stub_log),
+            "STUB_ENABLE_RC": str(enable_rc),
+        }
+        script = 'source "$1"; UNITS_DIR="$2"; if install_current; then exit 0; fi; exit 1'
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(functions), str(units)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result, stub_log.read_text().splitlines(), units
+
+    def test_installs_and_enables_the_watchdog_next_to_librespot(self, tmp_path: Path) -> None:
+        result, log, units = self._run(tmp_path, librespot_installed=True)
+        assert result.returncode == 0, result.stderr
+        assert (units / _WATCHDOG_NAME).read_bytes() == _WATCHDOG_PATH.read_bytes()
+        reload_at = log.index("daemon-reload")
+        enable_at = log.index("enable --now atlas-librespot-watchdog")
+        assert reload_at < enable_at
+        assert "restart atlas-edge" in log
+
+    def test_skips_the_watchdog_without_librespot(self, tmp_path: Path) -> None:
+        result, log, units = self._run(tmp_path, librespot_installed=False)
+        assert result.returncode == 0, result.stderr
+        assert not (units / _WATCHDOG_NAME).exists()
+        assert not any(line.startswith("enable") for line in log)
+
+    def test_refreshes_an_installed_watchdog_but_never_enables_it_again(
+        self, tmp_path: Path
+    ) -> None:
+        result, log, units = self._run(
+            tmp_path, librespot_installed=True, watchdog_installed=True
+        )
+        assert result.returncode == 0, result.stderr
+        assert (units / _WATCHDOG_NAME).read_bytes() == _WATCHDOG_PATH.read_bytes()
+        assert not any(line.startswith("enable") for line in log)
+
+    def test_a_failed_enable_only_logs(self, tmp_path: Path) -> None:
+        result, log, _units = self._run(tmp_path, librespot_installed=True, enable_rc=1)
+        assert result.returncode == 0, result.stderr
+        assert "atlas-librespot-watchdog" in result.stderr
+        assert "restart atlas-edge" in log
+
+    def test_a_checkout_without_the_watchdog_skips_the_block(self, tmp_path: Path) -> None:
+        result, log, units = self._run(
+            tmp_path, librespot_installed=True, watchdog_in_checkout=False
+        )
+        assert result.returncode == 0, result.stderr
+        assert not (units / _WATCHDOG_NAME).exists()
+        assert not any(line.startswith("enable") for line in log)
+
+    def test_the_updater_script_parses_as_bash(self) -> None:
+        result = subprocess.run(["bash", "-n", str(_UPDATER_PATH)], check=False)
+        assert result.returncode == 0
