@@ -51,6 +51,13 @@ function stubDesktopDevices(queryClient: QueryClient, handlers: Handlers) {
   }))
 }
 
+function stubEdgeDevices(devices: unknown[]) {
+  mock.module("@/lib/edgeDevices", () => ({
+    EDGE_DEVICES_QUERY_KEY: ["edge-devices"],
+    edgeDevicesQueryOptions: { queryKey: ["edge-devices"], queryFn: async () => devices },
+  }))
+}
+
 function newClient() {
   return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
@@ -59,9 +66,11 @@ async function renderRow(
   device: ReturnType<typeof sampleDevice>,
   handlers: Handlers,
   controlsDisabled = false,
+  edgeDevices: unknown[] = [],
 ) {
   const queryClient = newClient()
   stubDesktopDevices(queryClient, handlers)
+  stubEdgeDevices(edgeDevices)
   const { MacRow } = await import("./MacRow")
   return render(
     <QueryClientProvider client={queryClient}>
@@ -270,4 +279,23 @@ test("every control is disabled while the screen is not ready", async () => {
     expect((within(row).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true)
   }
   expect(within(row).getByRole("checkbox", { name: "Default Mac" }).hasAttribute("disabled")).toBe(true)
+})
+
+function edgeDevice(id: number, name: string, revoked = false) {
+  return { id, name, created_at: "2026-10-01T00:00:00Z", revoked, last_connected_at: null, connected: false }
+}
+
+// Light render only: Radix Select is not driven with pointer events under
+// happy-dom (RESEARCH Pitfall 10). The choice logic lives in roomOptions.test.ts.
+test("an active row renders a Room label and a trigger showing None when no room is mapped", async () => {
+  await renderRow(sampleDevice({ edge_device_id: null }), {})
+  expect(screen.getByText("Room")).toBeTruthy()
+  const trigger = screen.getByRole("combobox", { name: "Room" })
+  expect(trigger.textContent).toContain("None")
+})
+
+test("the Room trigger shows the saved edge device's name", async () => {
+  await renderRow(sampleDevice({ edge_device_id: 3 }), {}, false, [edgeDevice(3, "Kitchen"), edgeDevice(4, "Study")])
+  const trigger = screen.getByRole("combobox", { name: "Room" })
+  await waitFor(() => expect(trigger.textContent).toContain("Kitchen"))
 })

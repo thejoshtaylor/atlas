@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { SubmitButton } from "@/components/state/SubmitButton"
 import { ApiError } from "@/lib/api"
 import {
@@ -24,7 +25,9 @@ import {
   updateDesktopDeviceMutationOptions,
   type DesktopDevice,
 } from "@/lib/desktopDevices"
+import { edgeDevicesQueryOptions } from "@/lib/edgeDevices"
 import { lastSeenLine } from "./formatLastSeen"
+import { roomChangeFor, roomOptions, selectedRoomValue } from "./roomOptions"
 
 // One Mac row (PAIR-03, PAIR-04). Line 1 names the Mac and its state. Line 2
 // holds the controls and only shows for a Mac that is not revoked (D-17).
@@ -99,6 +102,7 @@ export function MacRow({
 
   const rename = useMutation(updateDesktopDeviceMutationOptions)
   const setDefault = useMutation(updateDesktopDeviceMutationOptions)
+  const setRoom = useMutation(updateDesktopDeviceMutationOptions)
   const revoke = useMutation(revokeDesktopDeviceMutationOptions)
   const test = useMutation(testDesktopDeviceMutationOptions)
 
@@ -139,9 +143,13 @@ export function MacRow({
   const defaultError = setDefault.isError
     ? failureMessage(setDefault.error, "Could not change the default Mac. Try again.")
     : null
+  const roomError = setRoom.isError ? failureMessage(setRoom.error, "Could not save the room. Try again.") : null
   const revokeError = revoke.isError ? failureMessage(revoke.error, "Could not revoke the Mac. Try again.") : null
 
   const defaultId = `mac-default-${device.id}`
+  const roomId = `mac-room-${device.id}`
+  const edgeDevices = useQuery(edgeDevicesQueryOptions)
+  const rooms = roomOptions(edgeDevices.data ?? [], device.edge_device_id)
 
   return (
     <li className="flex flex-col px-4 py-3">
@@ -200,6 +208,25 @@ export function MacRow({
 
       {device.revoked ? null : (
         <div className="flex flex-wrap items-center gap-2 pt-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <Label htmlFor={roomId}>Room</Label>
+            <Select
+              value={selectedRoomValue(device)}
+              disabled={controlsDisabled || setRoom.isPending}
+              onValueChange={(value) => setRoom.mutate({ deviceId: device.id, changes: roomChangeFor(value) })}
+            >
+              <SelectTrigger id={roomId} className="max-w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {rooms.map((room) => (
+                  <SelectItem key={room.value} value={room.value} disabled={room.disabled}>
+                    {room.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="touch-target flex items-center gap-2">
             <Checkbox
               id={defaultId}
@@ -256,6 +283,7 @@ export function MacRow({
 
       {device.revoked ? null : <TestResultLine device={device} result={test.data} failed={test.isError} />}
       {renameError ? <p className="text-label text-destructive">{renameError}</p> : null}
+      {roomError ? <p className="text-label text-destructive">{roomError}</p> : null}
       {defaultError ? <p className="text-label text-destructive">{defaultError}</p> : null}
       {revokeError ? <p className="text-label text-destructive">{revokeError}</p> : null}
     </li>
