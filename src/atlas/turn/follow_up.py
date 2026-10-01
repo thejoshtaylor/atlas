@@ -193,7 +193,22 @@ def estimate_playback_end(result: "SpeechResult", sink: "SinkFormat | None") -> 
     land faster than the audio duration they encode must not estimate a
     playback end in the past). A-law and mu-law are one byte per sample;
     `pcm` (16-bit signed) is two.
+
+    A result that carries `playback_ends_at` (the monitor cursor's queue
+    end) returns the later of the two (Phase 13, RESEARCH Pitfall 3): after
+    a hold, a burst-written reply's own estimate can fall before the true end
+    of a queued filler, and the echo-tail guard would vanish.
     """
+    computed = _computed_playback_end(result, sink)
+    extra = getattr(result, "playback_ends_at", None)
+    if computed is None:
+        return extra
+    if extra is None:
+        return computed
+    return max(computed, extra)
+
+
+def _computed_playback_end(result: "SpeechResult", sink: "SinkFormat | None") -> "float | None":
     if sink is None:
         return result.last_write_at
     if result.first_write_at is None or result.last_write_at is None:

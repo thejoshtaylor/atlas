@@ -1683,7 +1683,10 @@ async def run_turn(
                 # D-09: a readback that opens a confirm window plays last.
                 expects_answer=outcome.follow_up is not None and follow_up is not None,
             )
-            if outcome.follow_up is not None and follow_up is not None:
+            # D-12: no window opens after an interrupted reply. The stored
+            # pending action expires on its TTL, the same rule the speaker
+            # gate uses for a blocked follow-up.
+            if outcome.follow_up is not None and follow_up is not None and timings.turn_outcome != "barged_in":
                 # Plan 09-06 (D-06, D-09): `playback_ends_at` is set from
                 # this readback's own `SpeechResult` -- never a guessed
                 # constant -- so `SourceRunner._run_follow_ups` can open
@@ -1763,7 +1766,7 @@ async def run_turn(
                 # D-09: a question that opens a follow-up window plays last.
                 expects_answer=follow_up is not None and clarification_chain_depth <= MAX_CHAINED_FOLLOW_UPS,
             )
-            if follow_up is not None:
+            if follow_up is not None and timings.turn_outcome != "barged_in":
                 if clarification_chain_depth <= MAX_CHAINED_FOLLOW_UPS:
                     follow_up.request(
                         FollowUpRequest(
@@ -2826,6 +2829,9 @@ class SpeechResult:
     bytes_sent: int
     first_write_at: "float | None"
     last_write_at: "float | None"
+    # The monitor cursor's queue end, which counts a filler still playing
+    # ahead of this utterance (Phase 13, RESEARCH Pitfall 3).
+    playback_ends_at: "float | None" = None
 
 
 def _barge_in_active(barge_in: Any) -> bool:
@@ -3081,7 +3087,12 @@ async def _speak_direct(
             timings.turn_outcome = "barged_in"
             await _emit_event(source, _interrupted_event(barge_in, playback, chunks_sent, chunks_total))
 
-    return SpeechResult(bytes_sent=bytes_sent, first_write_at=first_write_at, last_write_at=last_write_at)
+    return SpeechResult(
+        bytes_sent=bytes_sent,
+        first_write_at=first_write_at,
+        last_write_at=last_write_at,
+        playback_ends_at=playback.playing_until if playback is not None else None,
+    )
 
 
 def _interrupted_event(barge_in: Any, playback: Any, chunks_sent: int, chunks_total: int) -> dict[str, Any]:

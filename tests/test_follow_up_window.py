@@ -89,6 +89,81 @@ def test_estimate_playback_end_with_nothing_ever_written_is_last_write_at():
     assert estimate_playback_end(result, sink) is None
 
 
+def test_estimate_playback_end_takes_the_later_of_the_computed_end_and_the_cursor_end():
+    sink = SinkFormat("alaw", 8000)
+    # Computed: 10.0 + 8000 / 8000 = 11.0. The cursor says a filler queued ahead pushes it to 12.5.
+    later = SpeechResult(bytes_sent=8000, first_write_at=10.0, last_write_at=10.05, playback_ends_at=12.5)
+    assert estimate_playback_end(later, sink) == 12.5
+    # A cursor end earlier than the computed one never pulls the estimate in.
+    earlier = SpeechResult(bytes_sent=8000, first_write_at=10.0, last_write_at=10.05, playback_ends_at=10.5)
+    assert estimate_playback_end(earlier, sink) == 11.0
+
+
+def test_estimate_playback_end_is_unchanged_when_the_result_carries_no_cursor_end():
+    sink = SinkFormat("alaw", 8000)
+    result = SpeechResult(bytes_sent=8000, first_write_at=10.0, last_write_at=10.05)
+    assert result.playback_ends_at is None
+    assert estimate_playback_end(result, sink) == 11.0
+
+
+def test_estimate_playback_end_uses_the_cursor_end_when_nothing_else_is_known():
+    result = SpeechResult(bytes_sent=0, first_write_at=None, last_write_at=None, playback_ends_at=7.0)
+    assert estimate_playback_end(result, SinkFormat("alaw", 8000)) == 7.0
+
+
+def test_a_speech_result_with_three_fields_still_constructs():
+    result = SpeechResult(0, None, None)
+    assert result.playback_ends_at is None
+
+
+async def test_a_filler_queued_ahead_of_an_answer_moves_the_window_past_the_true_end(fake_audio_source, fake_tts):
+    """A burst-written answer behind a still-playing filler: its own estimate
+    (first write plus its length) falls before the real queue end. The cursor
+    result keeps the echo-tail guard in place (RESEARCH Pitfall 3)."""
+    from atlas.sources.runner import BargeInMonitor, follow_up_window_opens_at
+    from atlas.turn.controller import _speak
+
+    sink = SinkFormat("pcm", 16000)
+    one_second = b"\x00\x00" * 16000
+    monitor = BargeInMonitor(
+        floor=0.08,
+        min_duration_s=0.3,
+        guard_window_s=0.15,
+        enabled=False,
+        wake_interrupts=True,
+        holds_for_playback=False,  # no hold: the cursor still runs and the test stays fast
+    )
+    source = fake_audio_source()
+    timings = TurnTimings()
+
+    filler = await _speak(
+        source, fake_tts(chunks=[one_second]), timings, "one moment", kind="filler", barge_in=monitor, sink=sink
+    )
+    answer = await _speak(
+        source, fake_tts(chunks=[one_second]), timings, "the answer", kind="answer", barge_in=monitor, sink=sink
+    )
+
+    assert filler.playback_ends_at is not None
+    assert answer.playback_ends_at is not None
+    assert answer.playback_ends_at == filler.playback_ends_at + 1.0
+    # Without the cursor the answer's own estimate would sit before the true end.
+    own_estimate = estimate_playback_end(
+        SpeechResult(answer.bytes_sent, answer.first_write_at, answer.last_write_at), sink
+    )
+    assert own_estimate < answer.playback_ends_at
+
+    request = FollowUpRequest(
+        kind="clarification",
+        chain_depth=1,
+        original_transcript="x",
+        question="y",
+        playback_ends_at=estimate_playback_end(answer, sink),
+    )
+    opens_at = follow_up_window_opens_at(request, echo_tail_s=0.8, calibration=None, now=0.0)
+    assert opens_at >= filler.playback_ends_at + 0.8
+    assert opens_at >= answer.playback_ends_at + 0.8
+
+
 # --- `_drain_to_final_transcript`'s onset_deadline, through run_turn --------
 
 

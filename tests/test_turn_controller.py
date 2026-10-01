@@ -2701,3 +2701,124 @@ async def test_a_timer_command_runs_locally_with_no_brain_call(fake_tts):
     assert brain.received_messages == []
     assert "".join(tts.received_text) == "Timer set for 5 minutes."
     assert timings.turn_outcome == "timer_intent"
+
+
+# --- Phase 13: the playback hold and interrupted follow-up requests ----------
+
+
+class _HoldBargeIn:
+    """A monitor double that holds a turn for playback: `active` with
+    `enabled` false, a real `ReplyCursor`, and an `interrupted` event the
+    test sets itself."""
+
+    def __init__(self) -> None:
+        from atlas.sources.reply_timing import ReplyCursor
+
+        self.enabled = False
+        self.active = True
+        self.holds_for_playback = True
+        self.playback = ReplyCursor()
+        self.interrupted = asyncio.Event()
+        self.interrupt_requested = False
+        self.playback_started_at: float | None = None
+
+    def mark_playback_started(self, now: float) -> None:
+        self.playback_started_at = now
+
+    def mark_transcript_done(self) -> None:
+        pass
+
+    def interrupt(self) -> None:
+        self.interrupt_requested = True
+        self.interrupted.set()
+
+
+async def test_a_held_answer_interrupted_during_the_hold_emits_the_spoken_figure(fake_audio_source, fake_tts):
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _speak
+
+    source = fake_audio_source()
+    events: list[dict] = []
+
+    async def _send_event(event: dict) -> None:
+        events.append(event)
+
+    source.send_event = _send_event
+    barge_in = _HoldBargeIn()
+    timings = TurnTimings()
+    timings.turn_outcome = "completed"
+    # 32000 bytes of 16 kHz PCM16 is 1.0 s of audio, written in one burst.
+    tts = fake_tts(chunks=[b"\x00\x00" * 8000] * 2)
+
+    speak_task = asyncio.create_task(
+        _speak(
+            source,
+            tts,
+            timings,
+            "reply",
+            kind="answer",
+            barge_in=barge_in,
+            sink=SinkFormat("pcm", 16000),
+        )
+    )
+    await asyncio.sleep(0.05)
+    assert not speak_task.done(), "the answer must hold until the playback end"
+    barge_in.interrupt()
+    result = await asyncio.wait_for(speak_task, timeout=0.5)
+
+    assert timings.turn_outcome == "barged_in"
+    [event] = [e for e in events if e["type"] == "reply.interrupted"]
+    assert event["chunks_sent"] == 2
+    assert event["chunks_total"] == 2
+    assert event["faded"] is True
+    assert 0.0 < event["spoken_s"] < 1.0
+    assert result.playback_ends_at == barge_in.playback.playing_until
+
+
+async def test_a_clarification_question_that_is_interrupted_leaves_no_follow_up_request(
+    fake_audio_source, fake_stt, fake_tts, fake_envelope_client
+):
+    """D-12: an interrupted question opens no no-wake-word window."""
+    from atlas.providers.tier_reply import FillerPhrase, TierReply
+    from atlas.timing import TurnTimings
+    from atlas.turn import brain_race
+    from atlas.turn.controller import run_turn
+    from atlas.turn.follow_up import FollowUpChannel
+
+    clarifying_reply = TierReply(
+        answer="",
+        confident=False,
+        needs_tool=False,
+        filler=FillerPhrase.LET_ME_CHECK,
+        needs_clarification=True,
+        candidates=("light.example_lamp", "light.example_desk_lamp"),
+    )
+    triage_tier = brain_race.TierBrain(
+        index=0,
+        model="triage-model",
+        brain=None,
+        envelope_client=fake_envelope_client(reply=clarifying_reply, delay_s=0.0),
+        calls_tools=False,
+    )
+    source = fake_audio_source(frames=[b"\x00\x01"])
+    source.follow_up = FollowUpChannel()
+    source.barge_in = _FakeBargeIn(interrupt_after_checks=0)
+    stt = fake_stt(events=[FinalTranscript(text="turn on the lamp")])
+    tts = fake_tts(chunks=[b"\x01\x02"])
+    timings = TurnTimings()
+
+    await run_turn(
+        source,
+        stt,
+        None,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        tiers=[triage_tier],
+    )
+
+    assert timings.turn_outcome == "barged_in"
+    assert source.follow_up.requested is None
