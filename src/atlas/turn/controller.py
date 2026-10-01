@@ -200,11 +200,12 @@ _SPOKEN_REPLY_FORMAT: dict[str, Any] = {
 _TOOL_ERROR_REPLY = "sorry, something went wrong with that"
 _DENIED_FALLBACK_REPLY = "that was refused, and i don't have anything more to tell you about it"
 
-# `mcp/atlas_mcp/ha.py::handle_call_service` answers a non-2xx from Home
-# Assistant with `{"error": "home assistant returned <status>..."}` as an
-# ordinary (non-error) result. This literal mirrors that format. It is not
-# imported: importing `atlas_mcp.ha` loads a policy. A coupling test in
-# `tests/test_turn_controller.py` runs the real handler against a 500.
+# `mcp/atlas_mcp/ha.py::handle_call_service` raises `ToolError` with a
+# message that starts with this prefix when Home Assistant answers non-2xx.
+# The SDK wraps it as "Error executing tool <name>: ...". This literal
+# mirrors that format. It is not imported: importing `atlas_mcp.ha` loads a
+# policy. A coupling test in `tests/test_turn_controller.py` runs the real
+# handler against a 500.
 _HA_NON_2XX_PREFIX = "home assistant returned "
 _HA_REFUSED_REPLY_PREFIX = "home assistant refused"
 _HA_SLUG_RE = re.compile(r"^[a-z0-9_]+$")
@@ -2885,7 +2886,9 @@ def _compose_mixed_outcome_reply(
     keeps a single-action batch's composed sentence byte-identical to the
     single-action path's own reply: one call, one error-shaped result,
     one clause -- exactly the boundary's own reason text, nothing joined
-    around it.
+    around it. A Home Assistant rejection is not a boundary refusal, so its
+    clause names the refused service (`_ha_refusal_reply`) in place of the
+    generic Home Assistant body. A `Denied` reason still passes word for word.
 
     A successful action's clause is the fixed `_ACTION_SUCCEEDED_CLAUSE`
     phrase, attached to its action by its position in the sentence, the same
@@ -2914,29 +2917,42 @@ def _compose_mixed_outcome_reply(
             )
             clauses.append(f"{tool_call.name}: {_ACTION_DID_NOT_COMPLETE_CLAUSE}")
         elif _is_error(result):
-            clauses.append(_spoken_error_text(tool_call.name, result) or _DENIED_FALLBACK_REPLY)
+            clauses.append(
+                _ha_refusal_reply(tool_call, result)
+                or _spoken_error_text(tool_call.name, result)
+                or _DENIED_FALLBACK_REPLY
+            )
         else:
             clauses.append(_succeeded_clause(tool_call, friendly_names))
     return "; ".join(clauses)
+
+
+def _is_ha_non_2xx(tool_name: str, result: Any) -> bool:
+    """True when `result` is a Home Assistant non-2xx answer (issue #8).
+
+    The child raises `ToolError("home assistant returned <status>...")`, and
+    the SDK sends that as an error-shaped result behind its "Error executing
+    tool <name>: " wrapper. A `Denied` refusal and a bare crash do not start
+    with `_HA_NON_2XX_PREFIX`, so they are not matched.
+    """
+    return _is_error(result) and _strip_sdk_error_wrapper(tool_name, _result_text(result)).startswith(
+        _HA_NON_2XX_PREFIX
+    )
 
 
 def _ha_refusal_reply(tool_call: Any, result: Any) -> "str | None":
     """What Home Assistant refused, as a sentence, or `None` when `result`
     is not a Home Assistant non-2xx answer.
 
-    `handle_call_service` returns a non-2xx as an ordinary result, so the
-    brain can retry it until the round cap. For these failures Home
-    Assistant's own body is aiohttp's generic 500 or 400 text, which is not
-    worth speaking, so this names the service that was refused instead.
+    A Home Assistant rejection arrives error-shaped (`_is_ha_non_2xx`), so
+    code composes the reply at once and the brain gets no second round.
+    Home Assistant's own body is aiohttp's generic 500 or 400 text, which is
+    not worth speaking, so this names the service that was refused instead.
     The domain and service come from model-written arguments, so they are
     read aloud only when both are plain slugs (`_HA_SLUG_RE`); otherwise the
     reply is the fixed "home assistant refused that".
     """
-    payload = _result_payload(result)
-    if not isinstance(payload, dict):
-        return None
-    error = payload.get("error")
-    if not isinstance(error, str) or not error.startswith(_HA_NON_2XX_PREFIX):
+    if not _is_ha_non_2xx(getattr(tool_call, "name", ""), result):
         return None
     arguments = getattr(tool_call, "arguments", None)
     if not isinstance(arguments, dict):
@@ -3135,20 +3151,12 @@ async def _run_tool_rounds(
     `_DONE_REPLY` at once, skipping the second `brain.chat` round that
     would otherwise only phrase a confirmation of what already happened.
 
-    When the cap is hit and a round in the turn had a Home Assistant non-2xx
-    result (`_ha_refusal_reply`), the reply names what Home Assistant
-    refused instead of claiming the request needed too many steps. The
-    brain still reads Home Assistant's full error; only the spoken cap reply
-    changes. `turn_outcome` stays `round_cap`. With no such result the old
-    `_TOO_MANY_ROUNDS_REPLY` is unchanged.
-
     Every round sends `_SPOKEN_REPLY_FORMAT` as `response_format`, with the
     tools still on offer. The final text is parsed by `_parse_spoken_reply`,
     and the model's `expects_reply` flag lands on `handoff_slot.expects_reply`.
     That is the only place the flag is written, so a reply composed in code
     (done, refusal, round cap, handoff) always keeps False.
     """
-    last_ha_refusal: str | None = None
     # A round whose only errors are argument errors goes back to the model
     # (260930-e3r, D-03). Every other error round is composed in code with no
     # second `brain.chat` (D-14), so a refusal never goes through a model.
@@ -3368,23 +3376,9 @@ async def _run_tool_rounds(
         # `reply.tool_calls` index order, and the loop continues to the next
         # round where the next `brain.chat` call composes the confirmation.
         for i, result in enumerate(results):
-            # A non-2xx Home Assistant response (see `handle_call_service`)
-            # is not a refusal -- it comes back as an ordinary, non-error
-            # result whose content names the failure, so the next brain call
-            # reports it rather than confirming success.
             messages.append({"role": "tool", "tool_call_id": f"call_{i}", "content": _result_text(result)})
-            refusal = _ha_refusal_reply(reply.tool_calls[i], result)
-            if refusal is not None:
-                last_ha_refusal = refusal
 
     timings.turn_outcome = "round_cap"
-    if last_ha_refusal is not None:
-        logger.warning(
-            "turn hit max_tool_rounds=%d after a Home Assistant refusal; speaking %r",
-            max_tool_rounds,
-            last_ha_refusal,
-        )
-        return last_ha_refusal
     logger.warning("turn hit max_tool_rounds=%d without settling on a reply", max_tool_rounds)
     return _TOO_MANY_ROUNDS_REPLY
 

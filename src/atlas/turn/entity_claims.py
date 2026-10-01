@@ -192,8 +192,9 @@ def _result_payload(result: Any) -> Any:
 
 def _failed(result: Any) -> bool:
     """True when a forwarded write changed nothing: an error result, or a dict
-    payload with an `error` key (`handle_call_service` returns a non-2xx that
-    way)."""
+    payload with an `error` key. `handle_call_service` now raises for a
+    non-2xx answer, so that is an error result. The `error` key check stays as
+    a guard for any tool that reports a failure in its payload."""
     if _is_error_result(result):
         return True
     payload = _result_payload(result)

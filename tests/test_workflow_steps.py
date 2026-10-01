@@ -232,6 +232,30 @@ async def test_a_call_service_crash_with_no_reason_stays_failed_and_silent():
     assert speak.spoken == []
 
 
+async def test_a_call_service_home_assistant_rejection_is_failed_not_denied():
+    """Issue #8: a Home Assistant 4xx or 5xx is not a policy refusal. A false
+    "denied" misleads as much as a skipped step (T-05-16)."""
+    step = _make_step(
+        kind="call_service",
+        arguments={"domain": "switch", "service": "turn_off", "entity_id": "switch.example_fan"},
+    )
+    text = (
+        "Error executing tool ha_call_service: home assistant returned 400: "
+        "Service not supported for this entity"
+    )
+    result = CallToolResult(isError=True, content=[TextContent(type="text", text=text)])
+    speak = _RecordingSpeak()
+
+    outcome = await execute_step(
+        step, _RecordingToolHost(result=result), WorkflowConfig(), _NOW_ON_TIME, speak=speak
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.detail == {"error": text}
+    assert outcome.retry is False
+    assert speak.spoken == []
+
+
 def test_compose_lateness_sentence_is_deterministic_and_exact():
     assert compose_lateness_sentence(60.0) == "sorry, this was about 1 minute late."
     assert compose_lateness_sentence(120.0) == "sorry, this was about 2 minutes late."

@@ -445,19 +445,23 @@ async def test_tool_round_cap_is_enforced(fake_audio_source, fake_stt, fake_brai
     assert timings.turn_outcome == "round_cap"
 
 
-async def _run_capped_ha_refusal_turn(
+_HA_REJECTION_TEXT = (
+    "Error executing tool ha_call_service: home assistant returned 500: 500 Internal Server Error"
+)
+
+
+async def _run_ha_rejection_turn(
     fake_audio_source, fake_stt, fake_brain, fake_tts, *, domain: str, service: str
 ):
     from atlas.timing import TurnTimings
     from atlas.turn.controller import run_turn
 
     class _RefusingHaHost:
-        """Home Assistant answered non-2xx: `handle_call_service` returns
-        that as an ordinary, non-error result."""
+        """Home Assistant answered non-2xx: the child raises `ToolError`, and
+        this is the result shape the SDK makes from it."""
 
         async def call_tool(self, name: str, arguments: dict) -> SimpleNamespace:
-            text = json.dumps({"error": "home assistant returned 500: 500 Internal Server Error"})
-            return SimpleNamespace(isError=False, content=[SimpleNamespace(text=text)])
+            return SimpleNamespace(isError=True, content=[SimpleNamespace(text=_HA_REJECTION_TEXT)])
 
     max_tool_rounds = 3
     tool_call = ToolCall(
@@ -480,28 +484,69 @@ async def _run_capped_ha_refusal_turn(
         max_tool_rounds=max_tool_rounds,
         timings=timings,
     )
-    return brain, tts, timings, max_tool_rounds
+    return brain, tts, timings
 
 
-async def test_round_cap_after_a_home_assistant_refusal_names_what_was_refused(
+async def test_a_home_assistant_rejection_names_what_was_refused_with_no_second_round(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):
-    brain, tts, timings, rounds = await _run_capped_ha_refusal_turn(
+    brain, tts, timings = await _run_ha_rejection_turn(
         fake_audio_source, fake_stt, fake_brain, fake_tts, domain="media_player", service="media_play"
     )
     assert tts.received_text == ["home assistant refused media player media play"]
-    assert timings.turn_outcome == "round_cap"
-    assert brain.call_count == rounds
+    assert brain.call_count == 1
+    assert timings.turn_outcome != "round_cap"
 
 
-async def test_round_cap_after_a_home_assistant_refusal_does_not_read_back_a_non_slug(
+async def test_a_home_assistant_rejection_does_not_read_back_a_non_slug(
     fake_audio_source, fake_stt, fake_brain, fake_tts
 ):
-    _, tts, timings, _ = await _run_capped_ha_refusal_turn(
+    brain, tts, timings = await _run_ha_rejection_turn(
         fake_audio_source, fake_stt, fake_brain, fake_tts, domain="Media Player!", service="media_play"
     )
     assert tts.received_text == ["home assistant refused that"]
-    assert timings.turn_outcome == "round_cap"
+    assert brain.call_count == 1
+    assert timings.turn_outcome != "round_cap"
+
+
+@pytest.mark.parametrize(
+    "tool_name,result,expected",
+    [
+        (
+            "ha_call_service",
+            SimpleNamespace(isError=True, content=[SimpleNamespace(text=_HA_REJECTION_TEXT)]),
+            True,
+        ),
+        (
+            "example__ha_call_service",
+            SimpleNamespace(isError=True, content=[SimpleNamespace(text=_HA_REJECTION_TEXT)]),
+            True,
+        ),
+        (
+            "ha_call_service",
+            SimpleNamespace(
+                isError=True,
+                content=[SimpleNamespace(text="Error executing tool ha_call_service: that one is off limits")],
+            ),
+            False,
+        ),
+        (
+            "ha_call_service",
+            SimpleNamespace(isError=True, content=[SimpleNamespace(text="Error executing tool ha_call_service")]),
+            False,
+        ),
+        (
+            "ha_call_service",
+            SimpleNamespace(isError=False, content=[SimpleNamespace(text=json.dumps({"changed": []}))]),
+            False,
+        ),
+    ],
+    ids=["rejection", "plugin-prefixed", "denied", "bare-crash", "non-error"],
+)
+def test_is_ha_non_2xx_only_matches_a_home_assistant_rejection(tool_name, result, expected):
+    from atlas.turn.controller import _is_ha_non_2xx
+
+    assert _is_ha_non_2xx(tool_name, result) is expected
 
 
 async def test_ha_non_2xx_prefix_matches_what_handle_call_service_raises():
