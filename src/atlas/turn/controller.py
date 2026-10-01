@@ -159,6 +159,7 @@ from atlas.turn.answer_window import (
     wake_addressed_command,
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
+from atlas.turn.wake_confirm import WakeConfirmation
 from atlas.turn.wake_echo import WakeHold, is_wake_only, is_wake_without_command, strip_wake_phrase
 
 logger = logging.getLogger("atlas.turn.controller")
@@ -892,6 +893,18 @@ async def run_turn(
                     unfinished_needs_wake=False,
                     wake_gate=lambda: bool(getattr(follow_up, "wake_heard", False)),
                 )
+
+        # Phase 15 (D-05): the panel opens only for a wake the server's own
+        # transcript confirms. One confirmation per turn, judged as each STT
+        # event arrives. `source` is read at call time: it is rewrapped later.
+        async def _emit_wake_confirmed() -> None:
+            await _emit_event(source, {"type": "wake.confirmed"})
+
+        wake_confirm = (
+            WakeConfirmation(wake_phrase, _emit_wake_confirmed)
+            if incoming is None and wake_phrase
+            else None
+        )
         final = await _drain_to_final_transcript(
             source,
             stt,
@@ -916,6 +929,7 @@ async def run_turn(
             # speaker span (D-07's camera/browser turns, mode "off") --
             # byte-identical to before this plan.
             split_event=speaker_span.split_event if speaker_span is not None else None,
+            on_text=wake_confirm.observe if wake_confirm is not None else None,
         )
         final_text = getattr(final, "text", "") if final is not None else ""
         # D-04: a speaker change ended this turn, so its transcript still holds
@@ -987,6 +1001,7 @@ async def run_turn(
                 # the command itself, and any second voice inside it, is
                 # actually heard.
                 split_event=speaker_span.split_event if speaker_span is not None else None,
+                on_text=wake_confirm.observe if wake_confirm is not None else None,
             )
             final_text = getattr(final, "text", "") if final is not None else ""
             # D-04: the command's own segment can end at a change point too.
@@ -2426,8 +2441,14 @@ async def _drain_to_final_transcript(
     hold_final: "Callable[[str], bool] | None" = None,
     wordless_segment_grace_s: float | None = None,
     unfinished_hold_s: float | None = None,
+    on_text: "Callable[[str], Awaitable[None]] | None" = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
+
+    `on_text` (Phase 15, D-05), when given, is awaited with the text of every
+    STT event at the moment it arrives, before the partial forward: it sees
+    partials, held finals and the final. `run_turn` uses it to confirm a wake.
+    `None` (the default, and every caller outside `run_turn`) does nothing.
 
     `hold_final` (261001-glr), when given, is passed to `stt.stream` so the
     provider can keep its socket open after a final that is only the wake
@@ -2804,6 +2825,8 @@ async def _drain_to_final_transcript(
         # A piece of the wake phrase in the preroll ("Hey", "atlas") is
         # not the command, so it does not count as a heard word.
         heard_text = getattr(event, "text", "")
+        if on_text is not None:
+            await on_text(heard_text)
         heard_words = brain_race._normalize_for_echo_check(heard_text)
         if heard_words and not newly_held:
             # New words after a held, unfinished command: the continuation is

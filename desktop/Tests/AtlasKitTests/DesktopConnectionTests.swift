@@ -95,6 +95,36 @@ private final class Rig: Sendable {
         #expect(await rig.connection.currentSnapshot == before)
     }
 
+    @Test func aWakeConfirmedFrameComesOutOfTheInboundStream() async throws {
+        let rig = Rig()
+        let channel = await rig.connect()
+
+        let url = desktopRoot().appending(path: "protocol/v1/messages/wake_confirmed.json")
+        let root = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let message = try #require(root["message"] as? [String: Any])
+        let turnId = try #require(message["turn_id"] as? String)
+        let text = try #require(
+            String(data: try JSONSerialization.data(withJSONObject: message), encoding: .utf8))
+
+        // A bounded wait: the stream must yield, or the task group's timeout wins.
+        let first = await withTaskGroup(of: ServerMessage?.self) { group in
+            group.addTask {
+                var iterator = rig.connection.inbound.makeAsyncIterator()
+                return await iterator.next()
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return nil
+            }
+            channel.push(text)
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+        #expect(first == .wakeConfirmed(WakeConfirmed(turnId: turnId)))
+    }
+
     @Test func aMissingPongClosesTheSocketAndTheNextDialFollowsTheBackoff() async throws {
         let rig = Rig()
         let channel = await rig.connect()

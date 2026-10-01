@@ -11,6 +11,7 @@ enum WireType {
     static let ping = "ping"
     static let pong = "pong"
     static let error = "error"
+    static let wakeConfirmed = "wake.confirmed"
 }
 
 private enum Caps {
@@ -24,7 +25,7 @@ private enum TypeKey: String, CodingKey { case type }
 
 /// Reads an integer and refuses a JSON bool, a string or a fraction. Python's
 /// `StrictInt` does the same, so both sides drop the same frames.
-private func strictInt<K: CodingKey>(
+func strictInt<K: CodingKey>(
     _ container: KeyedDecodingContainer<K>, _ key: K
 ) throws -> Int {
     if (try? container.decode(Bool.self, forKey: key)) != nil {
@@ -35,7 +36,7 @@ private func strictInt<K: CodingKey>(
     return try container.decode(Int.self, forKey: key)
 }
 
-private func shortText<K: CodingKey>(
+func shortText<K: CodingKey>(
     _ container: KeyedDecodingContainer<K>, _ key: K, max: Int
 ) throws -> String {
     let value = try container.decode(String.self, forKey: key)
@@ -48,7 +49,7 @@ private func shortText<K: CodingKey>(
     return value
 }
 
-private func requireType<K: CodingKey>(
+func requireType<K: CodingKey>(
     _ container: KeyedDecodingContainer<K>, _ key: K, equals expected: String
 ) throws {
     let actual = try container.decode(String.self, forKey: key)
@@ -257,6 +258,7 @@ public enum ServerMessage: Decodable, Sendable, Equatable {
     case ping(Ping)
     case pong(Pong)
     case error(ErrorMessage)
+    case wakeConfirmed(WakeConfirmed)
     case unknown(type: String)
 
     public init(from decoder: any Decoder) throws {
@@ -266,6 +268,7 @@ public enum ServerMessage: Decodable, Sendable, Equatable {
         case WireType.ping: self = .ping(try Ping(from: decoder))
         case WireType.pong: self = .pong(try Pong(from: decoder))
         case WireType.error: self = .error(try ErrorMessage(from: decoder))
+        case WireType.wakeConfirmed: self = .wakeConfirmed(try WakeConfirmed(from: decoder))
         default: self = .unknown(type: type)
         }
     }

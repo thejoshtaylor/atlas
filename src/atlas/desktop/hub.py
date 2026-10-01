@@ -10,6 +10,7 @@ code only: never token material, and never hello text beyond `app_version`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from typing import Any, Callable
 from starlette.websockets import WebSocketDisconnect
 
 from atlas.db.desktop_repository import DesktopDevice, DesktopDeviceRepository
+from atlas.desktop.outbox import PanelOutbox
 from atlas.desktop.protocol import (
     CLOSE_GOING_AWAY,
     CLOSE_POLICY_VIOLATION,
@@ -49,6 +51,10 @@ logger = logging.getLogger(__name__)
 # a routine event, not a fault.
 _SEND_FAILED = (WebSocketDisconnect, RuntimeError, OSError)
 
+# How long one frame may take to leave for a Mac (Phase 15, D-13). A Mac that
+# does not take a frame in this time is treated as gone.
+SEND_TIMEOUT_S = 5.0
+
 
 class DesktopNotConnected(Exception):
     """No live socket for this Mac when a ping was asked for."""
@@ -71,6 +77,10 @@ class DesktopConnection:
         # alone and still let any other cancellation, such as a server
         # shutdown, propagate.
         self.ended_by_hub = False
+        # Phase 15 (D-13): frames for this Mac wait here. One sender task,
+        # started by `DesktopHub.serve`, is the only writer to the socket.
+        self.outbox = PanelOutbox()
+        self.sender: asyncio.Task[None] | None = None
 
     async def ping(self, timeout_s: float, clock: Callable[[], float]) -> float | None:
         """Send a ping and wait for the Mac's pong with the same id. Returns
@@ -189,6 +199,8 @@ class DesktopHub:
                 logger.info("desktop %s: gone before the hello.ack", device.id)
                 return
             await self._mark_seen(device.id)
+            # Frames queued before the ack went out are sent after it.
+            connection.sender = asyncio.create_task(self._send_loop(connection))
             logger.info("desktop %s connected, app %s", device.id, hello.app_version)
             await self._receive_loop(websocket, connection)
         except asyncio.CancelledError:
@@ -207,8 +219,50 @@ class DesktopHub:
                 del self._connections[device.id]
                 self._tasks.pop(device.id, None)
             connection.fail_pending()
+            if connection.sender is not None:
+                connection.sender.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await connection.sender
             await self._mark_seen(device.id)
             logger.info("desktop %s disconnected", device.id)
+
+    def broadcast(self, frame: str, *, frame_type: str, coalesce_key: str | None = None) -> int:
+        """Put `frame` on the outbox of every connected Mac (Phase 15, D-12).
+
+        A plain method on purpose: it only appends to a bounded queue and
+        never awaits a socket, so a turn that calls it is never slowed by a
+        Mac (D-13). Returns how many Macs it reached. The log names the
+        device id and the frame type only, never the frame body.
+        """
+        reached = 0
+        for connection in list(self._connections.values()):
+            try:
+                connection.outbox.put(frame, frame_type, coalesce_key=coalesce_key)
+            except Exception:
+                logger.exception(
+                    "desktop %s: could not queue a %s frame", connection.device_id, frame_type
+                )
+                continue
+            reached += 1
+        return reached
+
+    async def _send_loop(self, connection: DesktopConnection) -> None:
+        """Write this Mac's queued frames to its socket, one at a time. A
+        timeout or a send error ends the loop. The receive loop's own
+        disconnect handling then cleans up (RESEARCH Pattern 5)."""
+        while True:
+            frame = await connection.outbox.get()
+            try:
+                await asyncio.wait_for(connection.websocket.send_text(frame), SEND_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                logger.info("desktop %s: send timed out, ending its sender", connection.device_id)
+                return
+            except _SEND_FAILED:
+                logger.info("desktop %s: send failed, ending its sender", connection.device_id)
+                return
+            except Exception:
+                logger.exception("desktop %s: sender failed", connection.device_id)
+                return
 
     async def _supersede(self, device_id: int) -> None:
         """Close the older socket for this Mac, if any, and cancel its task.

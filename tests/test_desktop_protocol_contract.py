@@ -50,6 +50,7 @@ _SERVER_BUILDERS = {
     "ping": lambda m: protocol.build_ping(m["id"]),
     "pong": lambda m: protocol.build_pong(m["id"]),
     "error": lambda m: protocol.build_error(m["code"], m["detail"]),
+    "wake.confirmed": lambda m: protocol.build_wake_confirmed(m["turn_id"]),
 }
 
 

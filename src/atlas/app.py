@@ -124,6 +124,7 @@ from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
 from atlas.speaker.volume_tool import VolumeToolHost, set_current_turn_target
 from atlas.timing import TurnTimings
+from atlas.desktop.bridge import DesktopEventBridge
 from atlas.desktop.hub import DesktopHub
 from atlas.transports.camera import CameraAudioSource
 from atlas.transports.edge import (
@@ -1081,13 +1082,15 @@ def _make_run_turn_for_source(
         # answer and most hear nothing. Its `turn.started` waits for the first
         # speech, so a silent window leaves no card on the live page.
         incoming = getattr(getattr(source, "follow_up", None), "incoming", None)
+        # Phase 15 (D-05): the Mac panel admits a follow-up turn by this flag.
+        started_event["follow_up"] = incoming is not None
         answer_window = incoming is not None and getattr(incoming, "kind", None) == "answer"
         feed: Any = app.state.observer_registry
         if answer_window:
             feed = QuietStartPublisher(feed, started_event)
         else:
             feed.publish(started_event)
-        source = ObserverPublishingSource(source, source_name, feed)
+        source = ObserverPublishingSource(source, source_name, feed, turn_id=timings.turn_id)
         # The ContextVar belongs to this turn's task (Phase 12 D-12). The
         # edge source has at most one connected device, which is the device
         # that heard this turn. Every other source sets None, so the tool
@@ -1416,6 +1419,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.follow_up_window_s = resolved_follow_up_window_s
     logger.info("follow-up window resolved from %s", follow_up_window_resolved_from)
+
+    # Phase 15 (D-13): the Mac panel's one reader of the turn event feed. It
+    # subscribes once here and never awaits a socket. The follow-up window
+    # is read live on each call, since a settings PUT changes it at runtime.
+    app.state.desktop_bridge = DesktopEventBridge(
+        app.state.observer_registry,
+        app.state.desktop_hub,
+        follow_up_window_ms=lambda: int(
+            (app.state.follow_up_window_s + config.follow_up.echo_tail_ms / 1000) * 1000
+        ),
+    )
+    app.state.desktop_bridge.start()
 
     # D-01 (phase 4), extended by the 260924-h2f quick task (issue #1):
     # resolve the house's own time zone -- the one process-wide reading
@@ -2316,6 +2331,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if app.state.edge_source is not None:
         await app.state.edge_source.close()
     # Phase 14: close every live Mac socket with 1001 so each app redials.
+    await app.state.desktop_bridge.stop()
     await app.state.desktop_hub.close()
     # Plan 11-04: release the `EmbeddingWorker`'s one dedicated thread --
     # only when speaker id actually built one (mode `"record"`/`"enforce"`,

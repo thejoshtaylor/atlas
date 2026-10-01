@@ -43,6 +43,9 @@ public struct HelloInfo: Sendable, Equatable {
 /// kinds, never the token and never a frame body.
 public actor DesktopConnection {
     public nonisolated let snapshots: AsyncStream<ConnectionSnapshot>
+    /// Frames from the server that the panel acts on. Ping, pong, hello.ack and
+    /// error stay inside this actor.
+    public nonisolated let inbound: AsyncStream<ServerMessage>
 
     private let transport: any WebSocketTransport
     private let clock: any ConnectionClock
@@ -51,6 +54,7 @@ public actor DesktopConnection {
     private let random: @Sendable () -> Double
     private let log = Logger(subsystem: AppIdentity.bundleIdentifier, category: "connection")
     private let continuation: AsyncStream<ConnectionSnapshot>.Continuation
+    private let inboundContinuation: AsyncStream<ServerMessage>.Continuation
 
     private var machine: ConnectionStateMachine
     private var credentials: PairingCredentials?
@@ -91,6 +95,10 @@ public actor DesktopConnection {
         self.snapshots = stream
         self.continuation = continuation
         continuation.yield(initial)
+        let (inboundStream, inboundContinuation) = AsyncStream.makeStream(
+            of: ServerMessage.self, bufferingPolicy: .bufferingNewest(256))
+        self.inbound = inboundStream
+        self.inboundContinuation = inboundContinuation
     }
 
     public var currentSnapshot: ConnectionSnapshot { lastPublished }
@@ -249,6 +257,9 @@ public actor DesktopConnection {
             if pong.id == pendingPingId { pendingPingId = nil }
         case .error(let error):
             log.info("The server sent an error frame with code \(error.code, privacy: .public).")
+        case .wakeConfirmed:
+            log.info("The server sent a wake.confirmed frame.")
+            inboundContinuation.yield(message)
         case .unknown:
             break
         }

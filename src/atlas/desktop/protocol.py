@@ -58,12 +58,14 @@ MSG_HELLO_ACK = "hello.ack"
 MSG_PING = "ping"
 MSG_PONG = "pong"
 MSG_ERROR = "error"
+MSG_WAKE_CONFIRMED = "wake.confirmed"
 
 _PING_ID_MAX = 2147483647
 
 _ShortText = Annotated[StrictStr, Field(min_length=1, max_length=32)]
 _Capability = Annotated[StrictStr, Field(min_length=1, max_length=64)]
 _PingId = Annotated[StrictInt, Field(ge=0, le=_PING_ID_MAX)]
+_TurnId = Annotated[StrictStr, Field(min_length=1, max_length=64)]
 
 
 class DesktopProtocolError(ValueError):
@@ -111,6 +113,15 @@ class DesktopError(BaseModel):
     detail: StrictStr
 
 
+class DesktopWakeConfirmed(BaseModel):
+    """The server confirmed a wake for this turn (Phase 15, D-05, D-10)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["wake.confirmed"]
+    turn_id: _TurnId
+
+
 class UnknownMessage(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -124,7 +135,7 @@ _CLIENT_MODELS: dict[str, type[BaseModel]] = {
 }
 
 ServerMessage = Annotated[
-    DesktopHelloAck | DesktopPing | DesktopPong | DesktopError,
+    DesktopHelloAck | DesktopPing | DesktopPong | DesktopError | DesktopWakeConfirmed,
     Field(discriminator="type"),
 ]
 SERVER_MESSAGE_ADAPTER: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
@@ -195,3 +206,7 @@ def build_pong(ping_id: int) -> str:
 
 def build_error(code: str, detail: str) -> str:
     return _dump(DesktopError(type=MSG_ERROR, code=code, detail=detail))
+
+
+def build_wake_confirmed(turn_id: str) -> str:
+    return _dump(DesktopWakeConfirmed(type=MSG_WAKE_CONFIRMED, turn_id=turn_id))

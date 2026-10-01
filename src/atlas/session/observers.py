@@ -24,7 +24,9 @@ Two small classes:
   every other observer, still less the turn itself.
 - `ObserverPublishingSource`: wraps one `AudioSource`-shaped object. Its
   `send_event` publishes a *new* dictionary -- the original event plus the
-  source name under a `source` key -- to the registry, then forwards the
+  source name under a `source` key, and the turn id under `turn_id` when the
+  wrapper was given one (the id lets a reader tell parallel turns on one
+  source apart, as Phase 12 groups run them) -- to the registry, then forwards the
   *original*, unmodified event to the wrapped source's own `send_event`
   when it has one. Never a mutation of the caller's own dict: the same
   object is already on its way to `SessionRecorder.record_event` (via
@@ -137,10 +139,18 @@ class ObserverPublishingSource:
     own docstring for the full contract.
     """
 
-    def __init__(self, wrapped: Any, source_name: str, registry: ObserverRegistry) -> None:
+    def __init__(
+        self,
+        wrapped: Any,
+        source_name: str,
+        registry: ObserverRegistry,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
         self._wrapped = wrapped
         self._source_name = source_name
         self._registry = registry
+        self._turn_id = turn_id
 
     async def frames(self) -> AsyncIterator[bytes]:
         async for chunk in self._wrapped.frames():
@@ -152,7 +162,10 @@ class ObserverPublishingSource:
     async def send_event(self, event: dict[str, Any]) -> None:
         # A new dictionary, never a mutation of `event` -- see the module
         # docstring for why a shared mutable event is unsafe here.
-        self._registry.publish({**event, "source": self._source_name})
+        published = {**event, "source": self._source_name}
+        if self._turn_id is not None:
+            published["turn_id"] = self._turn_id
+        self._registry.publish(published)
         wrapped_send_event = getattr(self._wrapped, "send_event", None)
         if wrapped_send_event is not None:
             await wrapped_send_event(event)

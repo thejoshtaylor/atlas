@@ -82,7 +82,7 @@ import Testing
         let server = try fixtures(in: "messages").filter {
             $0.direction == "server_to_client" && !$0.unknown
         }
-        #expect(server.count >= 4)
+        #expect(server.count >= 5)
         for fixture in server {
             let decoded = try WireCodec.decodeServer(fixture.text)
             let reEncoded: NSDictionary
@@ -91,6 +91,7 @@ import Testing
             case .ping(let value): reEncoded = try encodeToObject(value)
             case .pong(let value): reEncoded = try encodeToObject(value)
             case .error(let value): reEncoded = try encodeToObject(value)
+            case .wakeConfirmed(let value): reEncoded = try encodeToObject(value)
             case .unknown:
                 Issue.record("\(fixture.name) decoded as unknown")
                 continue
