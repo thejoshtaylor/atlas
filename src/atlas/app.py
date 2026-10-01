@@ -810,26 +810,32 @@ def _resolve_edge_barge_in_config(config: Config) -> BargeInConfig:
     """The edge source's own resolved barge-in policy (D-16), never the
     bare global `config.barge_in` handed to the camera runner unchanged.
 
+    Wake-word barge-in (Phase 13) needs no AEC proof, because the wake
+    detector, not the VAD, decides (RESEARCH Finding 2). So the edge always
+    gets `wake_word: True` under its override, and the operator's own keys
+    win. VAD barge-in still follows `EDGE_BARGE_IN_PROVEN`. A cluster config
+    that already has `barge_in.sources.edge.enabled: false` gets the wake
+    path with no edit.
+
     An operator's own `barge_in.sources.edge.enabled`
     (`config/config.example.yaml` ships one, `false`, from 10-SPIKE.md's
     `aec: not_proven`) wins exactly as `BargeInConfig.resolve` would
-    apply it -- this function changes nothing about `config.barge_in`
-    when an `edge` override already exists. Only a configuration that
-    names no `edge` override at all falls back to `EDGE_BARGE_IN_PROVEN`,
-    added here as a synthetic override rather than assumed by
-    `SourceRunner` itself: the camera-era global `barge_in.enabled`
-    (`true` by default) must never reach this source by accident the way
-    `SourceRunner.__init__`'s own absent-configuration fallback
-    (`BargeInConfig(enabled=False)`) already keeps it from doing for a
-    runner built with no `barge_in_config` at all -- this is that same
+    apply it. Only a configuration that names no `edge` override at all
+    falls back to `EDGE_BARGE_IN_PROVEN`, added here as a synthetic override
+    rather than assumed by `SourceRunner` itself: the camera-era global
+    `barge_in.enabled` (`true` by default) must never reach this source by
+    accident the way `SourceRunner.__init__`'s own absent-configuration
+    fallback (`BargeInConfig(enabled=False)`) already keeps it from doing
+    for a runner built with no `barge_in_config` at all -- this is that same
     guarantee, applied to a runner that now always gets one.
     """
-    if "edge" in config.barge_in.sources:
-        return config.barge_in
-    return replace(
-        config.barge_in,
-        sources={**config.barge_in.sources, "edge": {"enabled": EDGE_BARGE_IN_PROVEN}},
+    existing = config.barge_in.sources.get("edge")
+    override = (
+        {"wake_word": True, **existing}
+        if existing is not None
+        else {"enabled": EDGE_BARGE_IN_PROVEN, "wake_word": True}
     )
+    return replace(config.barge_in, sources={**config.barge_in.sources, "edge": override})
 
 
 async def _open_speaker_writer(writer: FifoWriter) -> None:

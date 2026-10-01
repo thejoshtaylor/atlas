@@ -381,6 +381,7 @@ def test_edge_runner_barge_in_uses_the_configured_override_when_present():
 
     resolved = _resolve_edge_barge_in_config(config).resolve("edge")
     assert resolved.enabled is True
+    assert resolved.wake_word is True
 
 
 def test_edge_runner_barge_in_falls_back_to_the_spikes_verdict_when_unconfigured():
@@ -396,6 +397,7 @@ def test_edge_runner_barge_in_falls_back_to_the_spikes_verdict_when_unconfigured
 
     resolved = _resolve_edge_barge_in_config(config).resolve("edge")
     assert resolved.enabled is EDGE_BARGE_IN_PROVEN
+    assert resolved.wake_word is True
 
 
 def test_edge_runner_barge_in_never_inherits_the_bare_global_enabled():
@@ -415,3 +417,30 @@ def test_edge_runner_barge_in_never_inherits_the_bare_global_enabled():
 
     resolved = _resolve_edge_barge_in_config(config).resolve("edge")
     assert resolved.enabled is False
+
+
+def test_edge_runner_gets_wake_word_when_the_operator_only_disabled_the_vad_path():
+    """A cluster config that already says `barge_in.sources.edge.enabled:
+    false` gets the wake path with no edit (Phase 13)."""
+    from atlas.app import _resolve_edge_barge_in_config
+    from atlas.config import Config
+
+    from tests.test_config import _minimal_raw_config
+
+    raw = _minimal_raw_config()
+    raw["barge_in"] = {"sources": {"edge": {"enabled": False}}}
+    resolved = _resolve_edge_barge_in_config(Config.from_config(raw)).resolve("edge")
+    assert resolved.enabled is False
+    assert resolved.wake_word is True
+
+
+def test_the_operators_own_wake_word_key_wins_for_the_edge():
+    from atlas.app import _resolve_edge_barge_in_config
+    from atlas.config import Config
+
+    from tests.test_config import _minimal_raw_config
+
+    raw = _minimal_raw_config()
+    raw["barge_in"] = {"sources": {"edge": {"wake_word": False}}}
+    resolved = _resolve_edge_barge_in_config(Config.from_config(raw)).resolve("edge")
+    assert resolved.wake_word is False

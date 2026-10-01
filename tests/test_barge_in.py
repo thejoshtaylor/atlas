@@ -17,6 +17,7 @@ specified and the code review (CR-02) found absent.
 
 from __future__ import annotations
 
+import asyncio
 import struct
 from types import SimpleNamespace
 
@@ -765,3 +766,169 @@ async def test_trace_falls_back_to_the_source_format_when_the_source_declares_no
     monitor.trace.append(bytes(8000))  # 1 s of A-law at 8 kHz
     assert monitor.trace.level_at(0.5) is not None
     assert monitor.trace.level_at(1.5) is None
+
+
+# --- Phase 13: the wake word path of BargeInMonitor -------------------------
+
+
+def _wake_monitor(*, wake: bool = True, enabled: bool = False, on_interrupt=None) -> BargeInMonitor:
+    return BargeInMonitor(
+        floor=_FLOOR,
+        min_duration_s=_MIN_DURATION_S,
+        guard_window_s=_GUARD_S,
+        enabled=enabled,
+        wake_interrupts=wake,
+        on_interrupt=on_interrupt,
+    )
+
+
+def test_process_wake_hit_with_the_wake_path_off_latches_nothing():
+    monitor = _wake_monitor(wake=False, enabled=True)
+    assert monitor.process_wake_hit(now=5.0) is False
+    assert monitor.interrupt_requested is False
+    assert monitor.interrupt_kind is None
+    assert monitor.interrupted.is_set() is False
+
+
+def test_process_wake_hit_latches_once():
+    monitor = _wake_monitor()
+    assert monitor.process_wake_hit(now=5.0) is True
+    assert monitor.interrupt_requested is True
+    assert monitor.interrupt_kind == "wake"
+    assert monitor.interrupted.is_set() is True
+    assert monitor.process_wake_hit(now=6.0) is False
+
+
+def test_process_wake_hit_latches_before_playback_has_started():
+    monitor = _wake_monitor()
+    assert monitor.playback_started_at is None
+    assert monitor.process_wake_hit(now=0.0) is True
+
+
+def test_a_latch_calls_the_hook_once_before_the_interrupted_event_is_set():
+    seen = []
+    holder = {}
+
+    def hook() -> None:
+        seen.append(holder["monitor"].interrupted.is_set())
+
+    monitor = _wake_monitor(on_interrupt=hook)
+    holder["monitor"] = monitor
+    monitor.process_wake_hit(now=1.0)
+    monitor.process_wake_hit(now=2.0)
+    assert seen == [False]
+    assert monitor.interrupted.is_set() is True
+
+
+def test_a_hook_that_raises_is_logged_and_the_latch_still_completes(caplog):
+    def hook() -> None:
+        raise RuntimeError("hook broke")
+
+    monitor = _wake_monitor(on_interrupt=hook)
+    with caplog.at_level("WARNING", logger="atlas.sources.runner"):
+        assert monitor.process_wake_hit(now=1.0) is True
+    assert monitor.interrupt_requested is True
+    assert monitor.interrupted.is_set() is True
+    assert any("hook failed" in record.getMessage() for record in caplog.records)
+
+
+def test_no_hook_means_no_call():
+    monitor = _wake_monitor(on_interrupt=None)
+    assert monitor.process_wake_hit(now=1.0) is True
+
+
+def test_energy_and_vad_latches_also_set_the_event_and_the_kind():
+    energy = _monitor()
+    energy.mark_playback_started(0.0)
+    energy.process_energy(1.0, now=1.0)
+    energy.process_energy(1.0, now=1.0 + _MIN_DURATION_S)
+    assert energy.interrupt_requested is True
+    assert energy.interrupt_kind == "energy"
+    assert energy.interrupted.is_set() is True
+
+    vad = _monitor()
+    vad.mark_playback_started(0.0)
+    vad.process_speech_start(now=10.0)
+    assert vad.interrupt_kind == "vad"
+    assert vad.interrupted.is_set() is True
+
+
+@pytest.mark.parametrize(
+    ("enabled", "wake", "expected"),
+    [(False, False, False), (True, False, True), (False, True, True), (True, True, True)],
+)
+def test_active_is_enabled_or_wake_interrupts(enabled, wake, expected):
+    assert _wake_monitor(wake=wake, enabled=enabled).active is expected
+
+
+# --- Phase 13: which sources and turns may ever get the wake path (D-04) ----
+
+
+class _RaisingDetector:
+    """Any call fails the test: the wake detector must never run here."""
+
+    def process(self, chunk: bytes):
+        raise AssertionError("the wake detector must not run in this listener")
+
+    def reset(self) -> None:
+        raise AssertionError("the wake detector must not be reset in this listener")
+
+
+async def _noop_turn(turn_source) -> None:
+    return None
+
+
+def _wake_runner(source, *, detector=None) -> SourceRunner:
+    return SourceRunner(
+        "edge",
+        source,
+        detector if detector is not None else _RaisingDetector(),
+        lambda chunk: chunk,
+        _noop_turn,
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True),
+    )
+
+
+async def test_a_camera_shaped_source_never_gets_the_wake_path_or_the_hold():
+    from tests.conftest import FakeAudioSource
+
+    runner = _wake_runner(FakeAudioSource([bytes(640)]))
+    monitor = runner._new_barge_in_monitor()
+    assert monitor.wake_interrupts is False
+    assert monitor.holds_for_playback is False
+    monitor.mark_transcript_done()
+    # Returns at once: a camera with wake_word true and enabled false has no listener.
+    await asyncio.wait_for(runner._watch_barge_in(monitor), timeout=1.0)
+
+
+async def test_a_parallel_runner_never_gets_the_wake_path_or_the_hold():
+    from atlas.config import EdgeSourceConfig
+    from atlas.transports.edge import EdgeAudioSource
+
+    source = EdgeAudioSource(EdgeSourceConfig(sample_rate=16000, channels=2, asr_channel=1))
+    runner = _wake_runner(source)
+    assert runner._new_barge_in_monitor().wake_interrupts is True
+    # A runner built with a ParallelTurns spec owns a TurnGroup; its own wake
+    # detection stays in run(), so no serial-path wake monitor may exist.
+    runner._turn_group = object()
+    monitor = runner._new_barge_in_monitor()
+    assert monitor.wake_interrupts is False
+    assert monitor.holds_for_playback is False
+
+
+async def test_a_listener_given_its_own_frames_never_runs_the_wake_detector():
+    from atlas.config import EdgeSourceConfig
+    from atlas.transports.edge import EdgeAudioSource
+
+    source = EdgeAudioSource(EdgeSourceConfig(sample_rate=16000, channels=2, asr_channel=1))
+    runner = _wake_runner(source)
+    monitor = runner._new_barge_in_monitor()
+    assert monitor.wake_interrupts is True
+    monitor.mark_transcript_done()
+
+    async def own_frames():
+        for _ in range(3):
+            yield bytes(640)
+
+    await asyncio.wait_for(runner._watch_barge_in(monitor, frames=own_frames()), timeout=1.0)
+    assert monitor.interrupt_requested is False
