@@ -1,6 +1,7 @@
 import Foundation
 import LocalAuthentication
 import Security
+import Synchronization
 
 /// The pairing in the legacy login keychain: one generic-password item per
 /// service (D-04). The account holds the server host and the data holds the
@@ -11,6 +12,11 @@ import Security
 /// The token is never logged or printed.
 public struct KeychainStore: SecretStore {
     public let service: String
+
+    /// One lock for every Keychain call in this process. `readStatus` turns the
+    /// session-wide "no UI" switch off and on, and that switch would also hit a
+    /// real `load` running on another thread, so no two calls may overlap.
+    private static let access = Mutex(())
 
     public init(service: String = AppIdentity.pairingKeychainService) {
         self.service = service
@@ -27,6 +33,10 @@ public struct KeychainStore: SecretStore {
     /// pairing is never deleted first, so a failed save (a locked keychain, a
     /// cancelled prompt) leaves the working pairing as it was.
     public func save(_ credentials: PairingCredentials) throws {
+        try Self.access.withLock { _ in try saveLocked(credentials) }
+    }
+
+    private func saveLocked(_ credentials: PairingCredentials) throws {
         let match = Self.baseQuery(service: service)
         let attributes: [String: Any] = [
             kSecAttrAccount as String: credentials.host,
@@ -43,6 +53,10 @@ public struct KeychainStore: SecretStore {
     }
 
     public func load() throws -> PairingCredentials? {
+        try Self.access.withLock { _ in try loadLocked() }
+    }
+
+    private func loadLocked() throws -> PairingCredentials? {
         var query = Self.baseQuery(service: service)
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         query[kSecReturnAttributes as String] = true
@@ -61,6 +75,10 @@ public struct KeychainStore: SecretStore {
     }
 
     public func delete() throws {
+        try Self.access.withLock { _ in try deleteLocked() }
+    }
+
+    private func deleteLocked() throws {
         let status = SecItemDelete(Self.baseQuery(service: service) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SecretStoreError.keychain(status)
@@ -76,6 +94,10 @@ public struct KeychainStore: SecretStore {
     /// Unit tests cover the status mapping only. The real behavior of both
     /// switches on the login keychain is checked in the phase UAT.
     public func readStatus() -> Int32 {
+        Self.access.withLock { _ in readStatusLocked() }
+    }
+
+    private func readStatusLocked() -> Int32 {
         let context = LAContext()
         context.interactionNotAllowed = true
         var query = Self.baseQuery(service: service)
