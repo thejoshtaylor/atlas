@@ -116,11 +116,18 @@ from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_ur
 from atlas.speaker.volume_tool import VolumeToolHost, set_current_turn_target
 from atlas.timing import TurnTimings
 from atlas.transports.camera import CameraAudioSource
-from atlas.transports.edge import CLOSE_NOT_CONFIGURED, EdgeAudioSource, SegmentBoundedWakeDetector
+from atlas.transports.edge import (
+    CLOSE_NOT_CONFIGURED,
+    LED_IDLE,
+    LED_RINGING,
+    EdgeAudioSource,
+    SegmentBoundedWakeDetector,
+)
 from atlas.transports.webrtc import WebrtcTransport, create_offer_answer
 from atlas.transports.websocket import WebSocketAudioSource
 from atlas.turn import brain_race
 from atlas.timers.core import clock_text, describe_timers
+from atlas.timers.intents import handle as handle_timer_intent
 from atlas.timers.ring_stop import RingStopWindow, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.timers.tool import TimerToolHost
@@ -1098,6 +1105,8 @@ def _make_run_turn_for_source(
             # 260930-e3r: read per turn, because the scheduler starts after
             # the runners. "Hey Atlas, stop" ends a ringing timer.
             timer_ring=getattr(app.state, "timer_scheduler", None),
+            # A plain timer or alarm command runs here with no brain call.
+            timer_intents=getattr(app.state, "timer_intents", None),
         )
 
     return _run
@@ -2138,6 +2147,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         playback_s = len(tone) / (sink.sample_rate * bytes_per_sample)
         await asyncio.sleep(max(0.0, started + playback_s - time.monotonic()))
 
+    # An edge source pulses its LED ring while a timer or alarm rings. The
+    # ring goes dark at the end only if nothing else changed it meanwhile.
+    async def _timer_ring_led(ringing: bool) -> None:
+        if resolved_audio_source != EDGE_SOURCE_NAME:
+            return
+        edge_source = app.state.edge_source
+        if ringing:
+            await edge_source.set_led_state(LED_RINGING)
+        elif edge_source.led_state == LED_RINGING:
+            await edge_source.set_led_state(LED_IDLE)
+
     # The workflow poller (plan 05-01, D-01 .. D-03): a fourth
     # `start()`/`stop()` scheduler, built after `app.state.tool_host_lookup`
     # exists so its own executor calls through the identical lookup the
@@ -2170,10 +2190,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     timer_scheduler: "TimerScheduler | None" = None
     if timer_repo is not None:
-        timer_scheduler = TimerScheduler(timer_repo, _timer_ring, zone=_resolved_timezone)
+        timer_scheduler = TimerScheduler(
+            timer_repo, _timer_ring, zone=_resolved_timezone, on_ring=_timer_ring_led
+        )
         timer_scheduler.start()
         _timers_view = lambda: timer_scheduler.snapshot  # noqa: E731 -- a one-line view, not a function
     app.state.timer_scheduler = timer_scheduler
+
+    async def _timer_intents(text: str) -> "str | None":
+        return await handle_timer_intent(
+            text, timer_repo, now=datetime.now(timezone.utc), zone=_resolved_timezone
+        )
+
+    app.state.timer_intents = _timer_intents if timer_repo is not None else None
 
     # Quick task 260924-4is (D1): started last, right before `yield`, so a
     # boot that fails before this point never starts the watcher thread --

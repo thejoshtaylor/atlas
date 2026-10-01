@@ -2668,3 +2668,36 @@ async def test_a_follow_up_turn_is_never_verified_or_stripped(fake_tts):
     assert len(brain.received_messages) == 1
     assert brain.received_messages[0][-1] == {"role": "user", "content": "home"}
     assert timings.turn_outcome != "wake_unverified"
+
+
+async def test_a_timer_command_runs_locally_with_no_brain_call(fake_tts):
+    from atlas.providers.base import FinalTranscript
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import run_turn
+
+    heard: list[str] = []
+
+    async def timer_intents(text: str):
+        heard.append(text)
+        return "Timer set for 5 minutes."
+
+    brain = _RecordingBrain(replies=[])
+    tts = fake_tts(chunks=[b"\x01"])
+    timings = TurnTimings()
+    await run_turn(
+        _CameraLikeSource(frames=[b"\x00\x01"]),
+        _SequentialDrainingStt(calls=[[FinalTranscript(text="set a timer for 5 minutes")]]),
+        brain,
+        tts,
+        None,
+        tools_schema=[],
+        system_prompt="you control a home",
+        max_tool_rounds=3,
+        timings=timings,
+        timer_intents=timer_intents,
+    )
+
+    assert heard == ["set a timer for 5 minutes"]
+    assert brain.received_messages == []
+    assert "".join(tts.received_text) == "Timer set for 5 minutes."
+    assert timings.turn_outcome == "timer_intent"

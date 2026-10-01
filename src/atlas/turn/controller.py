@@ -88,7 +88,7 @@ import re
 import time as _time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import Any, AsyncIterator, Callable, Literal, Mapping, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Protocol
 
 from atlas_mcp.google_tools import UNREACHABLE_KEY
 
@@ -438,8 +438,13 @@ async def run_turn(
     speaker_id: "SpeakerIdTurnContext | None" = None,
     turn_context: "TurnContext | None" = None,
     timer_ring: "RingControl | None" = None,
+    timer_intents: "Callable[[str], Awaitable[str | None]] | None" = None,
 ) -> None:
     """Drive one turn end to end: frames -> transcript -> macro/tier -> speech.
+
+    `timer_intents` (quick task 261001-b7l), when given, runs a plain timer or
+    alarm command on the server after the macro check. It returns the reply
+    to speak, or None, and then the turn goes to the brain as before.
 
     `timer_ring` (quick task 260930-e3r), when given and a timer or alarm is
     ringing, lets "Hey Atlas, stop" end the ring. A wake turn whose command is
@@ -1244,6 +1249,28 @@ async def run_turn(
                 speaking_tts,
                 timings,
                 outcome.text or _DENIED_FALLBACK_REPLY,
+                kind="answer",
+                barge_in=barge_in,
+                speech_lock=speech_lock,
+                sink=sink,
+            )
+            await _emit_event(source, timings.to_event())
+            timings.log()
+            return
+
+        # A plain timer or alarm command needs no brain. Macros still win.
+        timer_reply = (
+            await timer_intents(final_text) if prior_exchange is None and timer_intents is not None else None
+        )
+        if timer_reply is not None:
+            await _cancel_state_task(state_task)
+            await _cancel_state_task(pending_runs_task)
+            timings.turn_outcome = "timer_intent"
+            await _speak(
+                source,
+                tts,
+                timings,
+                timer_reply,
                 kind="answer",
                 barge_in=barge_in,
                 speech_lock=speech_lock,
