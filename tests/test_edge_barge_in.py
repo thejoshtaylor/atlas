@@ -473,22 +473,23 @@ def test_edge_runner_barge_in_falls_back_to_the_spikes_verdict_when_unconfigured
 
 
 def test_edge_runner_barge_in_never_inherits_the_bare_global_enabled():
-    """The global `barge_in.enabled` defaults `True` -- proving the edge
-    runner's own resolved policy is `False` (matching
-    `EDGE_BARGE_IN_PROVEN`) with no `edge` override configured proves the
-    global default never leaked through by accident."""
+    """Whatever the global `barge_in.enabled` says, an edge source with no
+    override of its own resolves to `EDGE_BARGE_IN_PROVEN` -- the global
+    value never leaks through by accident. Holds for either AEC verdict."""
+    from atlas.app import _resolve_edge_barge_in_config
     from atlas.config import Config
 
     from tests.test_config import _minimal_raw_config
 
-    raw = _minimal_raw_config()
-    config = Config.from_config(raw)
-    assert config.barge_in.enabled is True
+    for global_enabled in (True, False):
+        raw = _minimal_raw_config()
+        raw["barge_in"] = {"enabled": global_enabled}
+        config = Config.from_config(raw)
+        assert config.barge_in.enabled is global_enabled
+        assert "edge" not in config.barge_in.sources
 
-    from atlas.app import _resolve_edge_barge_in_config
-
-    resolved = _resolve_edge_barge_in_config(config).resolve("edge")
-    assert resolved.enabled is False
+        resolved = _resolve_edge_barge_in_config(config).resolve("edge")
+        assert resolved.enabled is EDGE_BARGE_IN_PROVEN
 
 
 def test_edge_runner_gets_wake_word_when_the_operator_only_disabled_the_vad_path():

@@ -762,13 +762,15 @@ class EdgeSourceConfig:
             )
 
 
-# D-16, Q3 (`10-SPIKE.md`): the spike's `aec_verdict` returned
-# `not_proven` -- playback-only opened 2 VAD segments on the array (the
-# chip's own echo triggering VAD, an AEC-failure signature) and doubletalk
-# opened none (inconclusive on top of that). Barge-in for the edge source
-# stays off by default, exactly like the camera, until a later spike
-# proves the array's on-chip AEC actually suppresses its own played-back
-# reply well enough to gate a VAD-triggered interrupt safely. `app.py`'s
+# D-16, Q3 (`10-SPIKE.md`, firmware 2.0.6, channel 1): the spike's
+# `aec_verdict` returned `not_proven` -- playback-only opened 2 VAD
+# segments on the array (the chip's own echo triggering VAD, an AEC-failure
+# signature) and doubletalk opened none. Phase 13 measured again
+# (`13-SPIKE.md`, firmware 2.0.10, channel 0, the channel production reads):
+# playback-only opened 4 segments and doubletalk opened 2, which is
+# `not_proven` again (D-06). Barge-in by VAD for the edge source stays off
+# by default, exactly like the camera, until a later measurement returns
+# `proven`. Wake-word barge-in does not depend on this flag. `app.py`'s
 # edge runner reads this constant only when `barge_in.sources.edge` sets
 # no explicit `enabled` override of its own (D-16) -- the camera-era
 # global `barge_in.enabled` never reaches this source by accident.

@@ -1804,8 +1804,10 @@ def test_edge_source_config_explicit_null_still_means_not_measured():
 
 
 def test_edge_barge_in_proven_matches_the_spikes_aec_verdict():
-    """10-SPIKE.md's Q3 measured `aec: not_proven` -- barge-in for the
-    edge source must default off, exactly like the camera (D-16)."""
+    """10-SPIKE.md's Q3 (firmware 2.0.6) and 13-SPIKE.md (firmware 2.0.10,
+    channel 0) both measured `aec: not_proven` -- barge-in by VAD for the
+    edge source must default off, exactly like the camera (D-06, D-16).
+    Flip this only after a measurement returns `proven`."""
     from atlas.config import EDGE_BARGE_IN_PROVEN
 
     assert EDGE_BARGE_IN_PROVEN is False

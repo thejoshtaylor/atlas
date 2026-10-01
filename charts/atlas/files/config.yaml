@@ -607,9 +607,11 @@ barge_in:
   # The edge (Pi + XVF3800) source sets `enabled` to false for a different
   # reason (D-16). A VAD start during playback is a safe interrupt signal
   # only if the chip's echo cancellation works. 10-SPIKE.md's Q3 measured
-  # `aec: not_proven`: playback alone opened VAD segments. `false` here
-  # matches `atlas.config.EDGE_BARGE_IN_PROVEN`. Change both together only
-  # after a later spike measures `aec: proven` on the real array.
+  # `aec: not_proven`: playback alone opened VAD segments. The 13-SPIKE.md
+  # re-measurement on firmware 2.0.10, on channel 0, also found
+  # `not_proven`. `false` here matches `atlas.config.EDGE_BARGE_IN_PROVEN`.
+  # Change both together only after a later spike measures `aec: proven` on
+  # the real array.
   #
   # Wake word barge-in needs no echo cancellation proof, because the wake
   # detector decides. So the edge source sets `wake_word` to true.
