@@ -180,6 +180,11 @@ _ROLE_EXEMPT_PATHS = {
     # role check's own job, done a different way. The route still carries
     # `require_setup_complete`.
     "/ws/edge",
+    # Phase 14 (D-02, T-14-06): a hashed Mac device token authenticates this
+    # route, not a user session -- `require_desktop_device` refuses a
+    # missing, unknown or revoked token before `accept()`. The route still
+    # carries `require_setup_complete`.
+    "/ws/desktop",
 }
 
 # FastAPI's own built-in routes -- not application content, and carry no

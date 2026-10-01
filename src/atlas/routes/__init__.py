@@ -21,6 +21,7 @@ from atlas.routes.accounts import router as accounts_router
 from atlas.routes.auth import router as auth_router
 from atlas.routes.auth import setup_router
 from atlas.routes.credentials import router as credentials_router
+from atlas.routes.desktop_devices import router as desktop_devices_router
 from atlas.routes.edge_devices import router as edge_devices_router
 from atlas.routes.follow_up_settings import router as follow_up_settings_router
 from atlas.routes.google_accounts import router as google_accounts_router
@@ -76,6 +77,8 @@ def register_routers(app: FastAPI) -> None:
     gated.include_router(follow_up_settings_router)
     gated.include_router(google_accounts_router)
     gated.include_router(edge_devices_router)
+    # Phase 14 (D-13): paired Macs, a separate table and page from edge devices.
+    gated.include_router(desktop_devices_router)
     # Plan 11-03 (D-01, D-03, D-04): household member (speaker) CRUD, after
     # the edge devices router, matching this list's own arrival order.
     gated.include_router(speakers_router)

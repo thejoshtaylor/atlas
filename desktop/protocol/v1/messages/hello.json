@@ -1,0 +1,11 @@
+{
+  "direction": "client_to_server",
+  "description": "The first frame a Mac sends. Capabilities is empty in this phase. It carries nothing about where the Mac is.",
+  "message": {
+    "type": "hello",
+    "protocol": 1,
+    "app_version": "0.1.0",
+    "os_version": "26.0",
+    "capabilities": []
+  }
+}

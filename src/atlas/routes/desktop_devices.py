@@ -1,0 +1,143 @@
+"""Admin routes for paired Macs (Phase 14, D-01, D-03, D-15, D-28).
+
+Mirrors `routes/edge_devices.py`: the plaintext Mac token is returned once,
+in the create response, with `Cache-Control: no-store`. No other route ever
+carries it or its hash. Every route sits behind `require_role(Role.ADMIN)`.
+Online state comes from the live `DesktopHub`, never from the database.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import BaseModel, field_validator
+
+from atlas.auth.dependencies import CurrentUser, Role, require_role
+from atlas.auth.desktop_tokens import hash_desktop_token, issue_desktop_token
+from atlas.db.desktop_repository import (
+    DesktopDevice,
+    DesktopDeviceNameTaken,
+    DesktopDeviceRepository,
+)
+from atlas.desktop.hub import DesktopHub, DesktopNotConnected
+
+router = APIRouter(tags=["desktop-devices"])
+
+# The same closed character set the edge device name uses.
+_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,64}$")
+
+
+class DesktopDeviceCreateRequest(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not _NAME_RE.match(trimmed):
+            raise ValueError(
+                "name must be 1-64 characters of letters, digits, space, '-', '_' and '.' "
+                "(after trimming)"
+            )
+        return trimmed
+
+
+class DesktopDeviceResponse(BaseModel):
+    """No `token` field and no hash field, in any listing response."""
+
+    id: int
+    name: str
+    created_at: datetime
+    revoked: bool
+    last_seen_at: "datetime | None"
+    connected: bool
+    edge_device_id: "int | None"
+    is_default: bool
+
+
+class DesktopDeviceCreatedResponse(BaseModel):
+    """The one response that ever carries the plaintext Mac token."""
+
+    id: int
+    name: str
+    token: str
+    created_at: datetime
+
+
+class DesktopTestResponse(BaseModel):
+    answered: bool
+    rtt_ms: "int | None"
+
+
+def _to_response(device: DesktopDevice, *, connected: bool) -> DesktopDeviceResponse:
+    return DesktopDeviceResponse(
+        id=device.id,
+        name=device.name,
+        created_at=device.created_at,
+        revoked=device.revoked_at is not None,
+        last_seen_at=device.last_seen_at,
+        connected=connected,
+        edge_device_id=device.edge_device_id,
+        is_default=device.is_default,
+    )
+
+
+@router.get("/api/desktop-devices")
+async def list_desktop_devices(
+    request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> list[DesktopDeviceResponse]:
+    repo: DesktopDeviceRepository = request.app.state.desktop_device_repo
+    hub: DesktopHub = request.app.state.desktop_hub
+    online = hub.snapshot()
+    devices = await repo.list_devices()
+    return [_to_response(device, connected=device.id in online) for device in devices]
+
+
+@router.post("/api/desktop-devices", status_code=201)
+async def create_desktop_device(
+    payload: DesktopDeviceCreateRequest,
+    request: Request,
+    response: Response,
+    admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> DesktopDeviceCreatedResponse:
+    """Issues a token, stores only its hash, and returns the plaintext token
+    once. The response is never cached (D-03)."""
+    response.headers["Cache-Control"] = "no-store"
+    repo: DesktopDeviceRepository = request.app.state.desktop_device_repo
+    token = issue_desktop_token()
+    try:
+        device = await repo.create_device(
+            name=payload.name,
+            token_hash=hash_desktop_token(token),
+            created_by_user_id=admin.id,
+            created_at=datetime.now(timezone.utc),
+        )
+    except DesktopDeviceNameTaken:
+        raise HTTPException(
+            status_code=409, detail="another active Mac already uses this name"
+        ) from None
+    return DesktopDeviceCreatedResponse(
+        id=device.id, name=device.name, token=token, created_at=device.created_at
+    )
+
+
+@router.post("/api/desktop-devices/{device_id}/test")
+async def run_desktop_device_test(
+    device_id: int, request: Request, _admin: CurrentUser = Depends(require_role(Role.ADMIN))
+) -> DesktopTestResponse:
+    """A silent round trip: the server pings the live Mac and waits for its
+    pong. The Mac shows nothing (D-15). The name is not `test_*`, so pytest
+    never collects it from a test module that imports it."""
+    repo: DesktopDeviceRepository = request.app.state.desktop_device_repo
+    hub: DesktopHub = request.app.state.desktop_hub
+    if await repo.get_device(device_id) is None:
+        raise HTTPException(status_code=404, detail="no such Mac")
+    try:
+        rtt_ms = await hub.ping(device_id)
+    except DesktopNotConnected:
+        raise HTTPException(status_code=409, detail="this Mac is not connected") from None
+    if rtt_ms is None:
+        return DesktopTestResponse(answered=False, rtt_ms=None)
+    return DesktopTestResponse(answered=True, rtt_ms=int(round(rtt_ms)))

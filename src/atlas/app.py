@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from atlas.audio.cue import ring_tone, silence
 from atlas.audio.ring import PrerollBuffer
 from atlas.auth.dependencies import Role, require_role, require_setup_complete
+from atlas.auth.desktop_tokens import require_desktop_device
 from atlas.auth.edge_tokens import require_edge_device
 from atlas.auth.tokens import validate_secret_key_strength
 from atlas.calibration.record import EchoCalibration
@@ -52,6 +53,7 @@ from atlas.config import (
     load_raw_config,
 )
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
+from atlas.db.desktop_repository import DesktopDevice
 from atlas.db.edge_postgres import PostgresEdgeDeviceRepository
 from atlas.db.edge_repository import EdgeDevice
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
@@ -117,6 +119,7 @@ from atlas.speaker.fifo_writer import FifoWriter, SpeakerError
 from atlas.speaker.tapo_talk import TapoTalkSupervisor, camera_host_from_rtsp_url
 from atlas.speaker.volume_tool import VolumeToolHost, set_current_turn_target
 from atlas.timing import TurnTimings
+from atlas.desktop.hub import DesktopHub
 from atlas.transports.camera import CameraAudioSource
 from atlas.transports.edge import (
     CLOSE_NOT_CONFIGURED,
@@ -1311,6 +1314,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Postgres implementation; until then this is always `None` outside a
     # test that seeds one.
     app.state.edge_device_repo = repositories.get("edge_device_repo")
+    # Phase 14 (D-01): Macs paired over `/ws/desktop`. The same tolerant
+    # `.get(...)`: plan 14-04 registers the Postgres repository. The hub is
+    # built unconditionally, because a Mac connection does not depend on the
+    # audio source.
+    app.state.desktop_device_repo = repositories.get("desktop_device_repo")
+    app.state.desktop_hub = DesktopHub(device_repo=app.state.desktop_device_repo)
     # Quick task 260930-06x: same tolerant `.get(...)` for timers.
     timer_repo = repositories.get("timer_repo")
     app.state.timer_repo = timer_repo
@@ -2297,6 +2306,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # runs unconditionally just above.
     if app.state.edge_source is not None:
         await app.state.edge_source.close()
+    # Phase 14: close every live Mac socket with 1001 so each app redials.
+    await app.state.desktop_hub.close()
     # Plan 11-04: release the `EmbeddingWorker`'s one dedicated thread --
     # only when speaker id actually built one (mode `"record"`/`"enforce"`,
     # `app.state.speaker_id_context` defaults to `None` otherwise, same as
@@ -2915,6 +2926,23 @@ async def edge_ws(websocket: WebSocket, device: EdgeDevice = Depends(require_edg
             logger.exception("edge device %s: mark_connected failed", device.id)
 
     await edge_source.serve(websocket, device)
+
+
+@app.websocket(
+    "/ws/desktop",
+    dependencies=[Depends(require_setup_complete)],
+)
+async def desktop_ws(
+    websocket: WebSocket, device: DesktopDevice = Depends(require_desktop_device)
+) -> None:
+    """A Mac's own connection (Phase 14, D-02). A hashed Mac device token
+    authenticates this route, not a user session, so it is exempt from
+    `require_role`: `require_desktop_device` (`auth/desktop_tokens.py`)
+    refuses a missing, unknown or revoked token before `accept()`. It is
+    never in an APIRouter, so the role-walk test still sees it. The route
+    still carries `require_setup_complete`."""
+    await websocket.accept()
+    await websocket.app.state.desktop_hub.serve(websocket, device)
 
 
 @app.websocket(

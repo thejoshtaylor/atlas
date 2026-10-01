@@ -1,0 +1,5 @@
+{
+  "direction": "server_to_client",
+  "description": "The server asks the Mac to answer. The Test button uses this.",
+  "message": {"type": "ping", "id": 3}
+}

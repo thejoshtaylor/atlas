@@ -1,0 +1,172 @@
+"""The `/ws/desktop` wire protocol, version 1 (Phase 14, D-09, D-21).
+
+The shared fixtures in `desktop/protocol/v1/` are the contract. This module
+is the Python half of it, and `swift test` reads the same files for the Mac
+half. Every constant below has a twin in `constants.json` or
+`close_codes.json`, and `tests/test_desktop_protocol_contract.py` fails if
+a twin drifts.
+
+Every frame is one JSON text object with a string `type`. A known type is
+validated strictly. An unknown `type` is not an error: an old server must
+keep working with a newer app, so it parses to `UnknownMessage` and the hub
+ignores it.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Annotated, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    TypeAdapter,
+    ValidationError,
+)
+
+PROTOCOL_VERSION = 1
+
+PING_INTERVAL_S = 15
+PONG_TIMEOUT_S = 10
+HELLO_TIMEOUT_S = 10.0
+IDLE_TIMEOUT_S = 45.0
+MAX_TEXT_FRAME_BYTES = 2048
+MAX_INVALID_MESSAGES = 20
+TEST_TIMEOUT_S = 5.0
+
+CLOSE_GOING_AWAY = 1001
+# 1008 stays "policy violation": a bad or missing hello, or too many bad
+# frames. Revoke has its own code below on purpose, because a live-socket
+# 1008 already means "too many bad frames" (RESEARCH Pattern 3).
+CLOSE_POLICY_VIOLATION = 1008
+CLOSE_SUPERSEDED = 4000
+CLOSE_REVOKED = 4001
+CLOSE_PROTOCOL_MISMATCH = 4002
+
+MSG_HELLO = "hello"
+MSG_HELLO_ACK = "hello.ack"
+MSG_PING = "ping"
+MSG_PONG = "pong"
+MSG_ERROR = "error"
+
+_PING_ID_MAX = 2147483647
+
+_ShortText = Annotated[StrictStr, Field(min_length=1, max_length=32)]
+_Capability = Annotated[StrictStr, Field(min_length=1, max_length=64)]
+_PingId = Annotated[StrictInt, Field(ge=0, le=_PING_ID_MAX)]
+
+
+class DesktopProtocolError(ValueError):
+    """The client's text is not a valid frame of a type this server knows."""
+
+
+class DesktopHello(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["hello"]
+    protocol: StrictInt
+    app_version: _ShortText
+    os_version: _ShortText
+    capabilities: Annotated[list[_Capability], Field(max_length=32)]
+
+
+class DesktopPing(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["ping"]
+    id: _PingId
+
+
+class DesktopPong(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["pong"]
+    id: _PingId
+
+
+class DesktopHelloAck(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["hello.ack"]
+    protocol: StrictInt
+    device_id: StrictInt
+    ping_interval_s: StrictInt
+
+
+class DesktopError(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: Literal["error"]
+    code: StrictStr
+    detail: StrictStr
+
+
+class UnknownMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: StrictStr
+
+
+_CLIENT_MODELS: dict[str, type[BaseModel]] = {
+    MSG_HELLO: DesktopHello,
+    MSG_PING: DesktopPing,
+    MSG_PONG: DesktopPong,
+}
+
+ServerMessage = Annotated[
+    DesktopHelloAck | DesktopPing | DesktopPong | DesktopError,
+    Field(discriminator="type"),
+]
+SERVER_MESSAGE_ADAPTER: TypeAdapter[ServerMessage] = TypeAdapter(ServerMessage)
+
+
+def parse_client_message(text: str) -> DesktopHello | DesktopPing | DesktopPong | UnknownMessage:
+    """Parse one frame from a Mac. Raises `DesktopProtocolError` for text
+    that is not a JSON object, has no string `type`, or fails validation
+    for a known type. Any other `type` is `UnknownMessage`."""
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        raise DesktopProtocolError("frame is not JSON") from exc
+    if not isinstance(payload, dict):
+        raise DesktopProtocolError("frame is not a JSON object")
+    message_type = payload.get("type")
+    if not isinstance(message_type, str):
+        raise DesktopProtocolError("frame has no string type")
+    model = _CLIENT_MODELS.get(message_type)
+    if model is None:
+        return UnknownMessage(type=message_type)
+    try:
+        return model.model_validate(payload)  # type: ignore[return-value]
+    except ValidationError as exc:
+        raise DesktopProtocolError(f"invalid {message_type} frame") from exc
+
+
+def _dump(model: BaseModel) -> str:
+    return json.dumps(model.model_dump(), separators=(",", ":"))
+
+
+def build_hello_ack(device_id: int) -> str:
+    return _dump(
+        DesktopHelloAck(
+            type=MSG_HELLO_ACK,
+            protocol=PROTOCOL_VERSION,
+            device_id=device_id,
+            ping_interval_s=PING_INTERVAL_S,
+        )
+    )
+
+
+def build_ping(ping_id: int) -> str:
+    return _dump(DesktopPing(type=MSG_PING, id=ping_id))
+
+
+def build_pong(ping_id: int) -> str:
+    return _dump(DesktopPong(type=MSG_PONG, id=ping_id))
+
+
+def build_error(code: str, detail: str) -> str:
+    return _dump(DesktopError(type=MSG_ERROR, code=code, detail=detail))

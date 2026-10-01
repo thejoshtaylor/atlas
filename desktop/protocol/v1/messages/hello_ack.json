@@ -1,0 +1,10 @@
+{
+  "direction": "server_to_client",
+  "description": "The server accepts the hello. Connected means this frame was sent.",
+  "message": {
+    "type": "hello.ack",
+    "protocol": 1,
+    "device_id": 7,
+    "ping_interval_s": 15
+  }
+}

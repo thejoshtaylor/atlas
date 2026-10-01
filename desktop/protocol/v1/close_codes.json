@@ -1,0 +1,7 @@
+{
+  "1001": {"name": "going_away", "client_action": "reconnect"},
+  "1008": {"name": "policy_violation", "client_action": "reconnect"},
+  "4000": {"name": "superseded", "client_action": "retry_after_cap"},
+  "4001": {"name": "revoked", "client_action": "unpair"},
+  "4002": {"name": "protocol_mismatch", "client_action": "stop_update_app"}
+}

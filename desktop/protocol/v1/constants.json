@@ -1,0 +1,10 @@
+{
+  "protocol": 1,
+  "ping_interval_s": 15,
+  "pong_timeout_s": 10,
+  "hello_timeout_s": 10,
+  "idle_timeout_s": 45,
+  "max_text_frame_bytes": 2048,
+  "max_invalid_messages": 20,
+  "test_timeout_s": 5
+}
