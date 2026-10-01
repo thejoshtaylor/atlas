@@ -94,7 +94,11 @@ class TierReply(BaseModel):
 
     answer: str = Field(description="What to say aloud if `confident` is true.")
     confident: bool = Field(
-        description="True only when `answer` fully answers the request with no tool call needed."
+        description=(
+            "True only when `answer` fully answers the request with no tool call needed. "
+            "A short question for an incomplete or ambiguous request, with `expects_reply` "
+            "true, also counts."
+        )
     )
     needs_tool: bool = Field(description="True when fulfilling the request requires a tool call.")
     filler: FillerPhrase = Field(
@@ -125,7 +129,12 @@ class TierReply(BaseModel):
     )
     expects_reply: bool = Field(
         default=False,
-        description="True only when `answer` asks the operator a question and needs their spoken reply.",
+        description=(
+            "True only when `answer` asks the operator a question and needs their spoken reply. "
+            "If a request is incomplete or ambiguous, never guess. Set `confident` true, put one "
+            "short question in `answer`, and set `expects_reply` true. When the spoken words "
+            "match more than one candidate you were given, use `needs_clarification` instead."
+        ),
     )
 
     @model_validator(mode="after")

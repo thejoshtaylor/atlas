@@ -233,3 +233,10 @@ def test_tier_reply_flag_defaults_to_false_and_parses_from_json():
     assert reply.model_dump()["expects_reply"] is False
     assert TierReply.model_validate_json(json.dumps(base)).expects_reply is False
     assert TierReply.model_validate_json(json.dumps({**base, "expects_reply": True})).expects_reply is True
+
+
+def test_the_expects_reply_description_is_the_triage_tiers_own_instruction():
+    props = TierReply.model_json_schema()["properties"]
+    assert "never guess" in props["expects_reply"]["description"]
+    assert "one short question" in props["expects_reply"]["description"]
+    assert "expects_reply" in props["confident"]["description"]
