@@ -16,6 +16,10 @@ quiet by itself, and the timer row is gone, as it is after a stop. A second
 entry that becomes due during a ring rings after the first ring ends. The
 context `snapshot` does not refresh during a ring. The database advance comes
 before any sound, so a ring still fires at most once.
+
+`on_ring_event(ringing, timer)` tells the desktop panel which timer rings and
+when it ends, for any reason. `stop_ring_for(timer_id)` stops the ring only
+when that timer still rings, so a stale Stop click changes nothing.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ class TimerScheduler:
         ring_gap_s: float = RING_GAP_S,
         monotonic: Callable[[], float] = time.monotonic,
         on_ring: "Callable[[bool], Awaitable[None]] | None" = None,
+        on_ring_event: "Callable[[bool, Timer], Awaitable[None]] | None" = None,
     ) -> None:
         self._repository = repository
         self._speak = speak
@@ -65,9 +70,13 @@ class TimerScheduler:
         # Called with True when a ring starts and False when it ends, for
         # example to pulse the edge LED ring. A failure never stops a ring.
         self._on_ring = on_ring
+        # The desktop panel hook (Phase 15, D-14): which timer rings, at the
+        # start and at every end. A failure never stops a ring.
+        self._on_ring_event = on_ring_event
         self._stopping = False
         self._ring_task: asyncio.Task[None] | None = None
         self._ring_text: str | None = None
+        self._ring_timer_id: int | None = None
         # Set while no ring plays.
         self._ring_idle = asyncio.Event()
         self._ring_idle.set()
@@ -96,6 +105,18 @@ class TimerScheduler:
     @property
     def ring_text(self) -> str | None:
         return self._ring_text if self.ringing else None
+
+    @property
+    def ring_timer_id(self) -> int | None:
+        """The id of the timer that rings now, else None."""
+        return self._ring_timer_id if self.ringing else None
+
+    def stop_ring_for(self, timer_id: int) -> bool:
+        """End the ring only when `timer_id` is the timer that rings now.
+        A stale or forged id returns False and changes nothing (D-15)."""
+        if not self.ringing or self._ring_timer_id != timer_id:
+            return False
+        return self.stop_ringing()
 
     def stop_ringing(self) -> bool:
         """End the ring that plays now. True only when a ring was playing."""
@@ -156,19 +177,23 @@ class TimerScheduler:
         """Ring until the loop ends, `stop_ringing()` is called or this task is cancelled."""
         self._ring_idle.clear()
         self._ring_text = text
+        self._ring_timer_id = timer.id
         task = asyncio.create_task(self._ring_loop(text, self._monotonic()))
         self._ring_task = task
         await self._notify_ring(True)
+        await self._notify_ring_event(True, timer)
         try:
             await asyncio.wait({task})
         finally:
             await self._notify_ring(False)
+            await self._notify_ring_event(False, timer)
             if not task.done():
                 task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
             self._ring_task = None
             self._ring_text = None
+            self._ring_timer_id = None
             self._ring_idle.set()
         if task.cancelled():
             return
@@ -187,6 +212,16 @@ class TimerScheduler:
             raise
         except Exception:
             logger.warning("ring notification failed", exc_info=True)
+
+    async def _notify_ring_event(self, ringing: bool, timer: Timer) -> None:
+        if self._on_ring_event is None:
+            return
+        try:
+            await self._on_ring_event(ringing, timer)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("ring event notification failed for timer %s", timer.id, exc_info=True)
 
     async def _run(self) -> None:
         while not self._stopping:
