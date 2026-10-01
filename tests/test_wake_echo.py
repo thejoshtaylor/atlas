@@ -5,7 +5,7 @@ follows (260922-woc).
 
 import pytest
 
-from atlas.turn.wake_echo import is_wake_only, strip_wake_phrase
+from atlas.turn.wake_echo import WakeHold, is_wake_only, is_wake_without_command, strip_wake_phrase
 
 _PHRASE = "hey atlas"
 
@@ -53,6 +53,17 @@ _STRIP_SAMPLES = [
     ("A atlas.", ""),
     ("Hey at last, stop.", "stop."),
     ("Hey Atlas. Turn off the fan.", "Turn off the fan."),
+    ("the atlas", ""),
+    ("heyatlas", ""),
+    ("hey, atlas turn on", "turn on"),
+    ("at last turn on", "turn on"),
+    ("Atlas play music", "play music"),
+    ("Okay Atlas, lights off.", "lights off."),
+    ("Oh atlas.", ""),
+    ("Hi Atlas, what time is it?", "what time is it?"),
+    ("Hay Atlas, stop.", "stop."),
+    # Accepted miss: "at"+"least" is a split keyword (0.83).
+    ("At least, I think so.", "I think so."),
 ]
 
 _NOT_A_WAKE_SAMPLES = [
@@ -69,6 +80,10 @@ _NOT_A_WAKE_SAMPLES = [
     "Puppies usually sleep in a crate.",
     "Turn on the lights.",
     "stop",
+    "You always say AM in the morning.",
+    "So atlas is a book.",
+    "Yeah atlas.",
+    "You atlas.",
 ]
 
 
@@ -88,3 +103,40 @@ def test_strip_wake_phrase_with_a_blank_phrase_returns_none() -> None:
 
 def test_strip_wake_phrase_works_for_a_one_word_phrase() -> None:
     assert strip_wake_phrase("Computer, lights on.", "computer") == "lights on."
+
+
+# --- 261001-glr: the helpers that keep one stream open ---
+
+
+@pytest.mark.parametrize(
+    ("text", "verify", "expected"),
+    [
+        ("Hey Atlas.", True, True),
+        ("Hey Atlas, turn on the lights.", True, False),
+        ("She left the car in the lot.", True, False),
+        ("at less", False, True),
+        ("", False, False),
+    ],
+)
+def test_is_wake_without_command(text: str, verify: bool, expected: bool) -> None:
+    assert is_wake_without_command(text, _PHRASE, verify=verify) is expected
+
+
+def test_wake_hold_holds_a_wake_only_final_and_the_empty_final_after_it() -> None:
+    hold = WakeHold(_PHRASE, verify=True)
+
+    assert hold("") is False
+    assert hold("Hey Atlas.") is True
+    assert hold("") is True
+    assert hold("turn on the lights") is False
+    assert hold.held == ["Hey Atlas.", ""]
+
+
+def test_wake_hold_heard_text_puts_the_held_phrase_back() -> None:
+    hold = WakeHold(_PHRASE, verify=True)
+    assert hold.heard_text("turn on the lights") == "turn on the lights"
+
+    hold("Hey Atlas.")
+
+    assert hold.heard_text("turn on the lights") == "Hey Atlas. turn on the lights"
+    assert hold.heard_text("Hey Atlas, turn on") == "Hey Atlas, turn on"

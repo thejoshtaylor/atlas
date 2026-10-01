@@ -65,6 +65,16 @@ _SIMILARITY_THRESHOLD = 0.55
 _KEYWORD_SIMILARITY = 0.7
 
 
+# A lead-in word before the keyword must be one of these, or look like one of
+# the phrase's own lead words at this similarity or better.
+_LEAD_FILLERS = frozenset({"a", "the", "oh", "ok", "okay", "hi"})
+_LEAD_SIMILARITY = 0.6
+
+
+def _similar(candidate: str, keyword: str) -> bool:
+    return difflib.SequenceMatcher(None, candidate, keyword).ratio() >= _KEYWORD_SIMILARITY
+
+
 def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
 
@@ -101,6 +111,13 @@ def is_wake_only(text: str, phrase: str) -> bool:
     return False
 
 
+def _may_lead(word: str, lead_words: list[str]) -> bool:
+    """True when `word` may stand before the keyword in a wake phrase."""
+    if not word or word in _LEAD_FILLERS:
+        return True
+    return any(difflib.SequenceMatcher(None, word, lead).ratio() >= _LEAD_SIMILARITY for lead in lead_words)
+
+
 def strip_wake_phrase(text: str, phrase: str) -> str | None:
     """Return the text after a wake phrase at the start of `text`.
 
@@ -109,6 +126,15 @@ def strip_wake_phrase(text: str, phrase: str) -> str | None:
     looks at the first `len(phrase words)` positions, so one lead-in word is
     allowed. At each position it tries one word, then two words joined
     ("at last" for "atlas").
+
+    A lead-in word must look like the phrase's own lead word ("hey": "they",
+    "he", "hay" pass) or be one of a few fixed fillers ("a", "the", "oh",
+    "ok", "okay", "hi"). "You always say AM in the morning." fails because
+    "you" is not a lead word, even though "always" is close to "atlas".
+
+    A two-word join counts only as a split keyword ("at last", "at less").
+    It is skipped when the second word alone already matches the keyword,
+    because then the first word is a lead-in and the lead-in rule judges it.
 
     Keyword similarity that passes: "atlas" 1.0, "atlast" 0.91, "aatlas"
     0.91, "heyatlas" 0.77, "atless" 0.73. Keyword similarity that fails:
@@ -125,16 +151,21 @@ def strip_wake_phrase(text: str, phrase: str) -> str | None:
         return None
 
     keyword = phrase_words[-1]
+    lead_words = phrase_words[:-1]
     norm = [_PUNCT_RE.sub("", word.lower()) for word in raw]
     for start in range(len(phrase_words)):
+        if not all(_may_lead(word, lead_words) for word in norm[:start]):
+            continue
         for width in (1, 2):
             end = start + width
             if end > len(norm):
                 continue
+            if width == 2 and _similar(norm[end - 1], keyword):
+                continue
             candidate = "".join(norm[start:end])
             if not candidate:
                 continue
-            if difflib.SequenceMatcher(None, candidate, keyword).ratio() >= _KEYWORD_SIMILARITY:
+            if _similar(candidate, keyword):
                 return " ".join(raw[end:]).lstrip(" ,.;:!?-")
     return None
 
