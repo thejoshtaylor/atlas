@@ -39,6 +39,7 @@ from atlas.desktop.protocol import (
     build_ping,
     build_pong,
     parse_client_message,
+    raw_hello_protocol,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,20 @@ class DesktopHub:
             return
 
         text = first.get("text")
+        # The first frame gets the same size cap as every later frame.
+        if text is not None and len(text.encode("utf-8")) > MAX_TEXT_FRAME_BYTES:
+            text = None
+        # Name a protocol mismatch before the hello is validated: a newer
+        # protocol may change the hello shape, and that hello would otherwise
+        # fail validation here and read as "bad_hello" (D-09).
+        claimed = raw_hello_protocol(text) if text is not None else None
+        if claimed is not None and claimed != PROTOCOL_VERSION:
+            await self._refuse(
+                websocket, "protocol_mismatch", f"server speaks protocol {PROTOCOL_VERSION}"
+            )
+            await self._close(websocket, CLOSE_PROTOCOL_MISMATCH, "protocol_mismatch")
+            return
+
         hello = None
         if text is not None:
             try:
@@ -147,13 +162,6 @@ class DesktopHub:
         if not isinstance(hello, DesktopHello):
             await self._refuse(websocket, "bad_hello", "the first frame must be a hello")
             await self._close(websocket, CLOSE_POLICY_VIOLATION, "bad_hello")
-            return
-
-        if hello.protocol != PROTOCOL_VERSION:
-            await self._refuse(
-                websocket, "protocol_mismatch", f"server speaks protocol {PROTOCOL_VERSION}"
-            )
-            await self._close(websocket, CLOSE_PROTOCOL_MISMATCH, "protocol_mismatch")
             return
 
         # A revoke can land between the handshake check and this hello. Look

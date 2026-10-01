@@ -152,6 +152,24 @@ def parse_client_message(text: str) -> DesktopHello | DesktopPing | DesktopPong 
         raise DesktopProtocolError(f"invalid {message_type} frame") from exc
 
 
+def raw_hello_protocol(text: str) -> int | None:
+    """The `protocol` integer of a hello frame, read from the raw JSON before
+    any model validation. `None` when the frame is not a hello object or the
+    field is not an integer. A future protocol may change the hello shape, so
+    the server must be able to name a version mismatch for a hello that this
+    version cannot validate (D-09)."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != MSG_HELLO:
+        return None
+    version = payload.get("protocol")
+    if isinstance(version, bool) or not isinstance(version, int):
+        return None
+    return version
+
+
 def _dump(model: BaseModel) -> str:
     return json.dumps(model.model_dump(), separators=(",", ":"))
 

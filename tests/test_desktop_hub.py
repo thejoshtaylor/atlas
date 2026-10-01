@@ -18,6 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 from atlas.desktop.hub import DesktopHub, DesktopNotConnected
 from atlas.desktop.protocol import (
     CLOSE_POLICY_VIOLATION,
+    CLOSE_PROTOCOL_MISMATCH,
     CLOSE_REVOKED,
     CLOSE_SUPERSEDED,
     MAX_INVALID_MESSAGES,
@@ -238,6 +239,41 @@ async def test_a_client_ping_is_answered_with_a_pong_of_the_same_id() -> None:
     assert socket.sent_json()[-1] == {"type": "pong", "id": 41}
     socket.push_disconnect()
     await _until(task.done)
+
+
+async def test_a_future_protocol_hello_that_fails_v1_validation_still_gets_4002() -> None:
+    hub = _hub()
+    socket = FakeDesktopSocket()
+    # The v2 hello dropped `capabilities` and `os_version`: invalid under v1.
+    socket.push_text(json.dumps({"type": "hello", "protocol": 2, "app_version": "9.0.0"}))
+
+    await hub.serve(socket, fake_desktop_device(id=1))
+
+    assert socket.sent_json()[0]["code"] == "protocol_mismatch"
+    assert socket.close_code == CLOSE_PROTOCOL_MISMATCH
+    assert not hub.is_connected(1)
+
+
+async def test_an_oversized_first_frame_is_refused_as_a_bad_hello() -> None:
+    hub = _hub()
+    socket = FakeDesktopSocket()
+    big = json.dumps(
+        {
+            "type": "hello",
+            "protocol": 1,
+            "app_version": "0.1.0",
+            "os_version": "26.0",
+            "capabilities": [],
+            "padding": "x" * MAX_TEXT_FRAME_BYTES,
+        }
+    )
+    socket.push_text(big)
+
+    await hub.serve(socket, fake_desktop_device(id=1))
+
+    assert socket.sent_json()[0]["code"] == "bad_hello"
+    assert socket.close_code == CLOSE_POLICY_VIOLATION
+    assert not hub.is_connected(1)
 
 
 async def test_ping_returns_none_after_its_timeout() -> None:
