@@ -788,3 +788,160 @@ async def test_held_wake_final_with_nothing_after_it_times_out(monkeypatch, fake
     assert timings.turn_outcome == "timeout"
     assert len(connects) == 1
     assert brain.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# 261001-glr: grace finalize for a wordless segment that began inside the drain
+# ---------------------------------------------------------------------------
+
+
+class _WakeThenGatedStt:
+    """Hears only the wake phrase until it is finalized, like xAI holding a
+    short command. Records when it saw `finalize` set."""
+
+    def __init__(self, final_text: str) -> None:
+        self._final_text = final_text
+        self.finalize_seen_at: float | None = None
+        self.finalize_event: "asyncio.Event | None" = None
+
+    async def stream(self, frames, source_format, *, finalize=None):
+        import time
+
+        self.finalize_event = finalize
+        yield PartialTranscript(text="Hey Atlas")
+        await finalize.wait()
+        self.finalize_seen_at = time.monotonic()
+        yield FinalTranscript(text=self._final_text)
+
+
+def _ended_wake_signals() -> SpeechSignals:
+    signals = SpeechSignals(hangover_s=0.0)
+    signals.publish({"type": "vad.start", "seq": 1})
+    signals.publish({"type": "vad.end", "seq": 1})
+    return signals
+
+
+async def test_wordless_command_segment_finalizes_within_the_grace(fake_brain, fake_tts):
+    """Pattern A: xAI sent no word for the command until it was finalized,
+    and the watch waited for a word, so the turn hung."""
+    from atlas.timing import TurnTimings
+
+    signals = _ended_wake_signals()
+    source = _EventCapturingSource(signals)
+    stt = _WakeThenGatedStt("Hey Atlas, turn on the lights")
+    brain = fake_brain(replies=[BrainReply(text="done")])
+    timings = TurnTimings()
+
+    async def _command_segment() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+
+    asyncio.ensure_future(_command_segment())
+    await _run_wake_turn(source, stt, brain, fake_tts(chunks=[b"\x01\x02"]), timings, timeout_s=2)
+
+    assert timings.turn_outcome == "completed"
+    assert timings.vad_end_at is not None
+    assert source.final_text() == "turn on the lights"
+
+
+async def test_resumed_speech_inside_the_grace_defers_the_finalize(fake_brain, fake_tts):
+    import time
+
+    from atlas.timing import TurnTimings
+
+    signals = _ended_wake_signals()
+    source = _EventCapturingSource(signals)
+    stt = _WakeThenGatedStt("Hey Atlas, turn on the lights")
+    brain = fake_brain(replies=[BrainReply(text="done")])
+    timings = TurnTimings()
+    last_end_at: list[float] = []
+
+    async def _segments() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+        await asyncio.sleep(0.1)
+        signals.publish({"type": "vad.start", "seq": 3})  # inside the 0.3 s grace
+        await asyncio.sleep(0.4)
+        last_end_at.append(time.monotonic())
+        signals.publish({"type": "vad.end", "seq": 3})
+
+    asyncio.ensure_future(_segments())
+    await _run_wake_turn(source, stt, brain, fake_tts(chunks=[b"\x01\x02"]), timings, timeout_s=3)
+
+    assert stt.finalize_seen_at is not None
+    assert stt.finalize_seen_at >= last_end_at[0]
+
+
+async def test_follow_up_drain_gets_no_grace():
+    import time
+
+    from atlas.timing import TurnTimings
+    from atlas.turn.controller import _drain_to_final_transcript
+
+    signals = _ended_wake_signals()
+    source = _EventCapturingSource(signals)
+    stt = _WakeThenGatedStt("never")
+
+    async def _blip() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+
+    asyncio.ensure_future(_blip())
+    final = await _drain_to_final_transcript(
+        source,
+        stt,
+        0.6,
+        TurnTimings(),
+        clock=time.monotonic,
+        poll_interval_s=0.01,
+        speech_signals=signals,
+        finalize_if_already_ended=False,
+        wake_phrase="hey atlas",
+        wordless_segment_grace_s=None,
+    )
+
+    assert final is None
+    assert stt.finalize_event is not None and not stt.finalize_event.is_set()
+
+
+async def test_held_wake_final_after_a_grace_finalize_rearms_the_watch(monkeypatch, fake_brain, fake_tts):
+    from atlas.timing import TurnTimings
+
+    signals = _ended_wake_signals()
+    socket = _ScriptedXaiSocket(
+        [
+            ("finalize", 1),
+            _partial("Hey Atlas.", final=True),
+            ("finalize", 2),
+            _partial("turn on the lights", final=True),
+        ]
+    )
+    connects = _patch_connect(monkeypatch, socket)
+    source = _EventCapturingSource(signals)
+    brain = fake_brain(replies=[BrainReply(text="done")])
+    timings = TurnTimings()
+
+    async def _segments() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 2})  # a wordless blip
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 2})
+        await socket._finalize_event(1).wait()
+        await asyncio.sleep(0.4)  # the held wake final arrives meanwhile
+        signals.publish({"type": "vad.start", "seq": 3})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 3})
+
+    asyncio.ensure_future(_segments())
+    await _run_wake_turn(source, XaiStt(_xai_cfg()), brain, fake_tts(chunks=[b"\x01\x02"]), timings, timeout_s=4)
+
+    assert len(connects) == 1
+    assert socket.finalize_count == 2
+    assert source.final_text() == "turn on the lights"
+    assert timings.vad_end_at is not None

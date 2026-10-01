@@ -200,6 +200,43 @@ def test_hold_final_is_a_keyword_only_xai_parameter(tmp_path):
     assert "hold_final" not in inspect.signature(whisper.stream).parameters
 
 
+class _TwoFinalizeWebsocket(_FakeXaiWebsocket):
+    """Answers only once it has received two FINALIZE messages."""
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self.second_finalize = asyncio.Event()
+
+    async def send(self, data):
+        await super().send(data)
+        if data == json.dumps(FINALIZE_MESSAGE) and self.sent.count(data) == 2:
+            self.second_finalize.set()
+
+    async def __aiter__(self):
+        await self.second_finalize.wait()
+        yield json.dumps({"type": "transcript.partial", "speech_final": True, "text": "turn off the fan"})
+
+
+async def test_xai_with_hold_final_sends_one_finalize_per_set(monkeypatch):
+    fake_ws = _TwoFinalizeWebsocket()
+    monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", lambda *args, **kwargs: fake_ws)
+    finalize_event = asyncio.Event()
+
+    task = asyncio.ensure_future(
+        _collect(XaiStt(_stt_cfg()), finalize=finalize_event, hold_final=lambda text: False)
+    )
+    await asyncio.sleep(0.02)
+    finalize_event.set()
+    await asyncio.sleep(0.02)
+    assert not finalize_event.is_set()  # cleared after the send
+    finalize_event.set()
+
+    events = await asyncio.wait_for(task, timeout=1.0)
+
+    assert events == [FinalTranscript(text="turn off the fan")]
+    assert fake_ws.sent.count(json.dumps(FINALIZE_MESSAGE)) == 2
+
+
 async def test_xai_without_finalize_is_unchanged(monkeypatch):
     fake_ws = _FakeXaiWebsocket([{"type": "transcript.done", "text": "turn on the fan"}])
     monkeypatch.setattr("atlas.providers.stt_xai.websockets.connect", lambda *args, **kwargs: fake_ws)

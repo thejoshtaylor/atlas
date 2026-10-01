@@ -275,6 +275,12 @@ _UNREACHABLE_ACCOUNT_NOTE = " i can't reach your {label} account right now."
 # latency of an ordinary turn.
 _DEFAULT_POLL_INTERVAL_S = 0.05
 
+# How long a `vad.end` from a segment that began inside a wake drain waits for
+# a word before it finalizes anyway. Live edge turns (2026-10-01): xAI sent no
+# word for a 0.6-1.0 s command until that command was finalized, and the watch
+# waited for a word, so the turn hung until `max_utterance_s`.
+_WORDLESS_SEGMENT_GRACE_S = 0.3
+
 # 10-07-PLAN.md (D-17): the prefix every edge `speech_signals` event is
 # recorded under -- `edge.vad.start`, `edge.vad.end`, `edge.doa`,
 # `edge.latency` -- so a reader of `events.jsonl` can tell an edge-source
@@ -855,6 +861,7 @@ async def run_turn(
             poll_interval_s=poll_interval_s,
             onset_deadline=onset_deadline,
             hold_final=wake_hold,
+            wordless_segment_grace_s=_WORDLESS_SEGMENT_GRACE_S if incoming is None else None,
             speech_signals=speech_signals,
             # 10-05-PLAN.md: an ordinary wake turn (`incoming is None`)
             # whose segment already ended before speech-to-text even opened
@@ -921,6 +928,7 @@ async def run_turn(
                 # finalize immediately on the already-ended state the first
                 # drain's wake-only segment left behind.
                 finalize_if_already_ended=False,
+                wordless_segment_grace_s=_WORDLESS_SEGMENT_GRACE_S,
                 wake_phrase=wake_phrase,
                 # 11-06-PLAN.md Task 1 (D-12): the same span's own
                 # split_event as the first drain above -- a wake-only first
@@ -2256,6 +2264,7 @@ async def _drain_to_final_transcript(
     wake_phrase: str | None = None,
     split_event: "asyncio.Event | None" = None,
     hold_final: "Callable[[str], bool] | None" = None,
+    wordless_segment_grace_s: float | None = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
 
@@ -2263,7 +2272,17 @@ async def _drain_to_final_transcript(
     provider can keep its socket open after a final that is only the wake
     phrase. A held final is an ordinary non-last event here: it is forwarded
     as `transcript.partial` and the loop keeps reading. `None` (the default)
-    passes no keyword, so doubles that do not take it are unchanged.
+    passes no keyword, so doubles that do not take it are unchanged. When a
+    held final arrives after a finalize was already sent, the end-of-speech
+    watch is re-armed, so the command's own segment end sends one more
+    finalize on the same socket.
+
+    `wordless_segment_grace_s` (261001-glr), when given with `speech_signals`,
+    lets a `vad.end` that closes a segment which began after this drain
+    opened finalize after that many seconds even when no word was heard.
+    A segment already ended or in progress at drain start still needs a word.
+    A `vad.start` inside the grace cancels it. `None` (follow-up drains and
+    every other caller) gives no grace.
 
     `speech_signals` (10-05-PLAN.md, D-09 through D-13), when not `None`,
     is the edge source's own `SpeechSignals` -- `run_turn` reads it off the
@@ -2360,10 +2379,38 @@ async def _drain_to_final_transcript(
     # the next `vad.end` stay in charge.
     heard_speech = asyncio.Event()
     stream_kwargs: dict[str, Any] = {}
+    # A `vad.start` seen after this drain opened. Tells the command segment
+    # from the wake or cue-echo segment that was already over (or running)
+    # when the drain began.
+    segment_started = asyncio.Event()
+    segment_starts = 0
+    unsubscribe_segments: "Callable[[], None] | None" = None
+    # True once a finalize was asked for. The provider clears `finalize_event`
+    # after each send when it can hold a final, so this is the lasting record.
+    finalize_requested = False
+    held_count = 0
+    held_seen = 0
+
+    def _request_finalize() -> None:
+        nonlocal finalize_requested
+        finalize_requested = True
+        segment_started.clear()
+        finalize_event.set()
+
     if speech_signals is not None:
         finalize_event = asyncio.Event()
 
-        async def _watch_end_of_speech() -> None:
+        if wordless_segment_grace_s is not None:
+
+            def _on_segment_event(event: dict[str, Any]) -> None:
+                nonlocal segment_starts
+                if event.get("type") == "vad.start":
+                    segment_starts += 1
+                    segment_started.set()
+
+            unsubscribe_segments = speech_signals.subscribe(_on_segment_event, replay_segment=False)
+
+        async def _watch_end_of_speech(already_ended_counts: bool) -> None:
             # A segment that had already ended before this drain started
             # finalizes at once only if speech-to-text heard a word in it.
             # On the Pi, the wake segment has always ended by now, and the
@@ -2372,9 +2419,31 @@ async def _drain_to_final_transcript(
             at = await wait_for_end_of_speech(
                 speech_signals,
                 hangover_s=speech_signals.hangover_s,
-                already_ended_counts=finalize_if_already_ended,
+                already_ended_counts=already_ended_counts,
             )
             while not heard_speech.is_set():
+                if (
+                    wordless_segment_grace_s is not None
+                    and segment_started.is_set()
+                    and not speech_signals.in_speech
+                ):
+                    # A segment that began inside this drain has ended and
+                    # no word came. xAI may hold a short command until it is
+                    # finalized, so give the word a short grace and then
+                    # finalize anyway.
+                    starts = segment_starts
+                    try:
+                        await asyncio.wait_for(heard_speech.wait(), timeout=wordless_segment_grace_s)
+                    except asyncio.TimeoutError:
+                        if speech_signals.in_speech:
+                            pass  # resumed: wait for that segment's own end
+                        elif segment_starts == starts:
+                            break
+                        else:
+                            at = _time.monotonic()  # a blip inside the grace; its end restarts it
+                            continue
+                    else:
+                        continue
                 # No word yet. Either speech-to-text is still catching up on
                 # the segment that just ended (about 150 ms on the Pi), or
                 # that segment was a blip. A word that arrives while nobody
@@ -2398,9 +2467,9 @@ async def _drain_to_final_transcript(
                     heard.cancel()
                     next_end.cancel()
             timings.mark_vad_end(at)
-            finalize_event.set()
+            _request_finalize()
 
-        watch_task = asyncio.create_task(_watch_end_of_speech())
+        watch_task = asyncio.create_task(_watch_end_of_speech(finalize_if_already_ended))
 
         if split_event is not None:
 
@@ -2416,21 +2485,31 @@ async def _drain_to_final_transcript(
                 # on every return path below.
                 await heard_speech.wait()
                 await split_event.wait()
-                if not finalize_event.is_set():
+                if not finalize_requested:
                     timings.speaker_split_at = _time.monotonic()
-                    finalize_event.set()
+                    _request_finalize()
 
             split_watch_task = asyncio.create_task(_watch_split())
 
         stream_kwargs["finalize"] = finalize_event
     if hold_final is not None:
-        stream_kwargs["hold_final"] = hold_final
+
+        def _counting_hold(text: str) -> bool:
+            nonlocal held_count
+            held = hold_final(text)
+            if held:
+                held_count += 1
+            return held
+
+        stream_kwargs["hold_final"] = _counting_hold
     stream = stt.stream(frames, fmt, **stream_kwargs)
 
     async def _stop_watch() -> None:
         # Cancelled and awaited on every return path below, so a watch
         # that never saw its own `vad.end` (D-13: xAI's own endpointing or
         # `max_utterance_s` ended the turn first) never outlives this call.
+        if unsubscribe_segments is not None:
+            unsubscribe_segments()
         if watch_task is not None:
             watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2484,6 +2563,23 @@ async def _drain_to_final_transcript(
             await _stop_watch()
             timings.mark_speech_end(last_word_change_arrival)
             return pending
+
+        if held_count > held_seen:
+            held_seen = held_count
+            if finalize_requested and watch_task is not None:
+                # The finalize reached xAI, but what came back is only the
+                # wake phrase. The command is still ahead, so watch for its
+                # segment end and send one more finalize on this socket.
+                watch_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watch_task
+                finalize_requested = False
+                heard_speech.clear()
+                finalize_event.clear()
+                # `mark_vad_end` is first-call-wins; the command's own
+                # `vad.end` must be the one recorded.
+                timings.vad_end_at = None
+                watch_task = asyncio.create_task(_watch_end_of_speech(segment_started.is_set()))
 
         arrival = _time.monotonic()
         # A piece of the wake phrase in the preroll ("Hey", "atlas") is

@@ -126,7 +126,9 @@ class XaiStt:
         the command after it. One socket works because xAI keeps the session
         open after `speech_final` and after `finalize`, and the next final
         carries only the speech since the previous one (docs.x.ai
-        speech-to-text, checked 2026-10-01, not yet live-verified).
+        speech-to-text, checked 2026-10-01, not yet live-verified). With
+        `hold_final`, the provider clears `finalize` after each send, and the
+        caller sets it again to ask for the next finalize.
         """
         headers = {"Authorization": f"Bearer {self._config.api_key}"}
         # MEASURED LIVE, 2026-09-28: xAI never acknowledges the client's
@@ -150,8 +152,13 @@ class XaiStt:
                 # `finalize` is per stream call, never provider state
                 # (base.py's `SttProvider.stream` docstring, SRC-03) -- this
                 # closure captures the one event this call was given.
-                await finalize.wait()
-                await ws.send(json.dumps(FINALIZE_MESSAGE))
+                while True:
+                    await finalize.wait()
+                    if hold_final is not None:
+                        finalize.clear()
+                    await ws.send(json.dumps(FINALIZE_MESSAGE))
+                    if hold_final is None:
+                        return
 
             send_task = asyncio.create_task(sender())
             finalize_task = asyncio.create_task(finalizer()) if finalize is not None else None
