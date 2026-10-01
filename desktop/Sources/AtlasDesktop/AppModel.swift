@@ -36,6 +36,8 @@ final class AppModel {
 
     /// Accessibility, read live. Local Network comes from the connection.
     let permissions = PermissionMonitor()
+    /// A rough location for Home or Away. It stays on this Mac (D-11).
+    let location = LocationController()
     /// The Launch at login toggle. On by default, and it applies on Continue (D-19).
     var launchAtLogin: Bool {
         didSet { UserDefaults.standard.set(launchAtLogin, forKey: Self.launchAtLoginKey) }
@@ -81,6 +83,7 @@ final class AppModel {
             status: nil, revokedHost: UserDefaults.standard.string(forKey: Self.revokedHostKey),
             away: false, now: Date())
         permissions.onActivate = { [weak self] in self?.refreshSetupState() }
+        location.onChange = { [weak self] in self?.updateAway() }
     }
 
     /// Loads the pairing, starts the connection and listens for it. Runs once.
@@ -261,6 +264,7 @@ final class AppModel {
 
     private func refreshSetupState() {
         permissions.refresh()
+        location.refresh()
         loginState = loginItem.status()
     }
 
@@ -299,6 +303,8 @@ final class AppModel {
             pair: pairStepState,
             axTrusted: permissions.axTrusted,
             localNetwork: localNetwork,
+            location: location.auth,
+            homeSavedAt: location.homeSavedAt,
             loginItem: loginState,
             launchAtLogin: launchAtLogin)
     }
@@ -334,6 +340,8 @@ final class AppModel {
         } else {
             releaseActivity()
         }
+        if case .offline = next.status { location.requestFixIfOffline() }
+        updateAway()
         resolveMenu()
         log.info("The connection is now \(self.menuState.accessibilityLabel, privacy: .public).")
     }
@@ -348,6 +356,16 @@ final class AppModel {
         log.info("The server revoked this Mac: \(host, privacy: .public).")
         openSetup(focus: .pair)
         RevokeNotifier.postOnce()
+    }
+
+    /// Away needs the Mac offline, Location allowed, a home point and a fix more
+    /// than 1 km away (D-10). It changes the menu label only.
+    private func updateAway() {
+        var connected = false
+        if case .connected = snapshot.status { connected = true }
+        away = HomeAway.isAway(
+            current: location.current, home: location.home,
+            locationAllowed: location.auth == .allowed, connected: connected)
     }
 
     private func resolveMenu() {

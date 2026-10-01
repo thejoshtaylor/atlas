@@ -94,7 +94,7 @@ struct SetupView: View {
         case .localNetwork:
             stepButton(step) { SettingsLinks.open(.localNetwork) }
         case .location:
-            EmptyView()
+            stepButton(step) { locationAction() }
         case .launchAtLogin:
             VStack(alignment: .trailing, spacing: 8) {
                 Toggle("Launch at login", isOn: Binding(get: { model.launchAtLogin }, set: { model.launchAtLogin = $0 }))
@@ -105,6 +105,14 @@ struct SetupView: View {
                     stepButton(step) { model.openLoginItems() }
                 }
             }
+        }
+    }
+
+    private func locationAction() {
+        switch model.location.auth {
+        case .notAsked: model.location.allowLocation()
+        case .denied: SettingsLinks.open(.location)
+        case .allowed: model.location.setHomeHere()
         }
     }
 

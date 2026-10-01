@@ -20,6 +20,11 @@ struct MenuContent: View {
                 model.openSetup(focus: .pair)
             }
         }
+        if model.location.auth == .allowed {
+            Button("Set Home Here") {
+                model.location.setHomeHere()
+            }
+        }
         if model.setupProgress.requiredDone {
             Button("Setup\u{2026}") {
                 model.openSetup(focus: .pair)
