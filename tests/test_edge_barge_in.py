@@ -380,7 +380,7 @@ async def test_a_wake_phrase_with_a_clipped_hey_stops_an_edge_reply(edge_source)
             await serve_task
 
 
-async def _speak_with_one_hit(edge_source, repo, *, reply_text: str, atlas_margin_ms: int):
+async def _speak_with_one_hit(edge_source, repo, *, reply_text: str, atlas_margin_ms: int, detector=None):
     """A burst reply of `reply_text` (1.0 s of audio) and a wake hit right
     after the burst. Returns the socket and the finished timings."""
     from atlas.timing import TurnTimings
@@ -388,7 +388,8 @@ async def _speak_with_one_hit(edge_source, repo, *, reply_text: str, atlas_margi
     socket = FakeEdgeSocket()
     device = fake_edge_device(device_id=1)
     serve_task = asyncio.create_task(edge_source.serve(socket, device))
-    detector = _ScriptedWakeDetector(hit_on_calls={1})
+    if detector is None:
+        detector = _ScriptedWakeDetector(hit_on_calls={1})
     runner = _edge_runner(
         edge_source,
         barge_in_config=BargeInConfig(enabled=False, wake_word=True, atlas_margin_ms=atlas_margin_ms),
@@ -449,6 +450,67 @@ async def test_a_hit_outside_every_atlas_window_still_interrupts(edge_source, fa
     assert timings.turn_outcome == "barged_in"
     assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
     assert [(e.allowed, e.block_reason) for e in repo.events] == [(True, None)]
+
+
+class _FullPhraseDetector(_PlaybackOnlyDetector):
+    """The operator said the whole "hey atlas": both matches fire."""
+
+    def process(self, chunk: bytes):
+        self.calls.append("process")
+        return FakeWakeHit(score=1.0)
+
+
+async def test_a_bare_atlas_does_not_interrupt_a_reply_that_says_atlas(edge_source, fake_wake_event_repository):
+    """D-B (UAT 13-2): the reply names a robot "Atlas", so during it the
+    listener needs the full phrase. A detector that hears only the keyword
+    (its echo, or a clipped "the atlas") does not cut the reply. No margin,
+    and "Atlas" is the last word, so the D-02 window does not cover the hit:
+    only the D-B rule keeps the reply playing."""
+    repo = fake_wake_event_repository()
+    detector = _PlaybackOnlyDetector()
+    socket, timings = await _speak_with_one_hit(
+        edge_source,
+        repo,
+        reply_text="the robot is named Atlas",
+        atlas_margin_ms=0,
+        detector=SegmentBoundedWakeDetector(detector),
+    )
+    assert timings.turn_outcome == "completed"
+    assert _stop_frames(socket) == []
+    assert repo.events == []
+    assert detector.calls == ["process"]
+
+
+async def test_a_bare_atlas_still_interrupts_a_reply_that_never_says_it(edge_source, fake_wake_event_repository):
+    """D-B keeps the 0083262 relaxation for every other reply."""
+    repo = fake_wake_event_repository()
+    detector = _PlaybackOnlyDetector()
+    socket, timings = await _speak_with_one_hit(
+        edge_source,
+        repo,
+        reply_text="the robot is named Robo",
+        atlas_margin_ms=0,
+        detector=SegmentBoundedWakeDetector(detector),
+    )
+    assert timings.turn_outcome == "barged_in"
+    assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+    assert detector.calls == ["process_during_playback"]
+
+
+async def test_the_full_phrase_still_interrupts_a_reply_that_says_atlas(edge_source, fake_wake_event_repository):
+    repo = fake_wake_event_repository()
+    detector = _FullPhraseDetector()
+    socket, timings = await _speak_with_one_hit(
+        edge_source,
+        repo,
+        reply_text="the robot is named Atlas",
+        atlas_margin_ms=0,
+        detector=SegmentBoundedWakeDetector(detector),
+    )
+    assert timings.turn_outcome == "barged_in"
+    assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+    assert [(e.allowed, e.block_reason) for e in repo.events] == [(True, None)]
+    assert detector.calls == ["process"]
 
 
 async def test_edge_reply_with_no_wake_hit_holds_until_playback_end(edge_source):

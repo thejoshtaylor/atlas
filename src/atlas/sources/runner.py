@@ -107,7 +107,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.frame_fanout import TurnFrameSource
-from atlas.sources.reply_timing import ReplyCursor, in_any_window, wake_word_windows
+from atlas.sources.reply_timing import ReplyCursor, in_any_window, says_wake_word, wake_word_windows
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
@@ -316,6 +316,9 @@ class BargeInMonitor:
         # D-A: on the turn a wake interrupt started, the window request it runs
         # under if its transcript fails verification.
         self.unverified_request: FollowUpRequest | None = None
+        # D-B: True once an utterance of this turn's reply says the wake word.
+        # The listener then needs the full phrase.
+        self.reply_says_wake_word = False
         self._on_interrupt = on_interrupt
         self._above_floor_since: float | None = None
         # Correlation is active only when both a trace to compare against
@@ -358,6 +361,12 @@ class BargeInMonitor:
         last note is the one a VAD interrupt resumes from."""
         self.resume_transcript = transcript
         self.resume_scope = scope
+
+    def note_reply_text(self, text: str) -> None:
+        """`_speak` calls this with each utterance's text before it writes the
+        first chunk, so the flag is set before the word can play (D-B)."""
+        if says_wake_word(text, self.wake_phrase):
+            self.reply_says_wake_word = True
 
     def reply_wake_word_at(self, now: float) -> bool:
         """True when `now` falls inside the estimated play time of the wake
@@ -1435,9 +1444,11 @@ class SourceRunner:
                         continue
                     if self._preroll is not None:
                         self._preroll.push(chunk)
+                    # D-B: a reply that says the wake word needs the full phrase.
+                    detect = self._detect if monitor.reply_says_wake_word else self._detect_during_playback
                     try:
                         hit = await asyncio.get_running_loop().run_in_executor(
-                            self._detector_executor, self._detect_during_playback, chunk
+                            self._detector_executor, detect, chunk
                         )
                     except asyncio.CancelledError:
                         # A VAD start latched during the await: the chunk is

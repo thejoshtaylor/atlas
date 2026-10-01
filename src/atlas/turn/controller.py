@@ -3410,6 +3410,11 @@ async def _speak_direct(
             await _emit_event(source, _interrupted_event(barge_in, playback, chunks_sent, chunks_total))
         await _emit_event(source, {"type": "reply.text", "text": reply_text if event_text is None else event_text})
 
+    # D-B: the monitor knows the words before any of their audio plays.
+    note_reply_text = getattr(barge_in, "note_reply_text", None) if playback is not None else None
+    if note_reply_text is not None:
+        note_reply_text(reply_text)
+
     token = speech_kind.set(kind)
     try:
         if speech_lock is not None:

@@ -979,3 +979,37 @@ async def test_a_listener_given_its_own_frames_never_runs_the_wake_detector():
 
     await asyncio.wait_for(runner._watch_barge_in(monitor, frames=own_frames()), timeout=1.0)
     assert monitor.interrupt_requested is False
+
+
+# --- D-B: the monitor learns whether the reply says the wake word ------------
+
+
+def _phrase_monitor() -> BargeInMonitor:
+    return BargeInMonitor(
+        floor=_FLOOR,
+        min_duration_s=_MIN_DURATION_S,
+        guard_window_s=_GUARD_S,
+        enabled=False,
+        wake_interrupts=True,
+        wake_phrase="hey atlas",
+    )
+
+
+def test_a_new_monitor_accepts_the_bare_keyword():
+    assert _phrase_monitor().reply_says_wake_word is False
+
+
+def test_one_utterance_that_says_the_wake_word_flags_the_whole_reply():
+    monitor = _phrase_monitor()
+    monitor.note_reply_text("let me check")
+    assert monitor.reply_says_wake_word is False
+    monitor.note_reply_text("Once upon a time, a robot named Atlas lived in a house.")
+    assert monitor.reply_says_wake_word is True
+    monitor.note_reply_text("The end.")
+    assert monitor.reply_says_wake_word is True, "a later utterance never clears the flag"
+
+
+def test_a_monitor_with_no_wake_phrase_never_flags():
+    monitor = BargeInMonitor(floor=_FLOOR, min_duration_s=_MIN_DURATION_S, guard_window_s=_GUARD_S, enabled=False)
+    monitor.note_reply_text("Atlas")
+    assert monitor.reply_says_wake_word is False

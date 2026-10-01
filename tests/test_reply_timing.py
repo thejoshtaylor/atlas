@@ -155,3 +155,33 @@ def test_in_any_window_is_inclusive_at_both_edges():
     assert not in_any_window(2.5, windows)
     assert not in_any_window(0.9, windows)
     assert in_any_window(1.0, ()) is False
+
+
+# --- D-B: a reply that says the wake word needs the full phrase -------------
+
+
+from atlas.sources.reply_timing import says_wake_word  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a little robot named Atlas lived here", "ATLAS", "He said 'Hey Atlas.'", "atlas, are you there?"],
+)
+def test_a_reply_that_says_the_wake_word_anywhere_is_flagged(text):
+    assert says_wake_word(text, "hey atlas")
+
+
+@pytest.mark.parametrize(
+    "text", ["", "the lights are on", "the atlases are heavy", "the Atlantic is wide", "atlas2 is a model"]
+)
+def test_a_reply_without_the_whole_wake_word_is_not_flagged(text):
+    assert not says_wake_word(text, "hey atlas")
+
+
+def test_only_the_last_word_of_the_phrase_counts():
+    assert not says_wake_word("hey there", "hey atlas")
+
+
+def test_an_empty_phrase_flags_nothing():
+    assert not says_wake_word("Atlas", "")
+    assert not says_wake_word("Atlas", "   ")

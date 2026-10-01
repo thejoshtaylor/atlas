@@ -14,6 +14,11 @@ wake word in the reply (`wake_word_windows`), and a hit that falls inside a
 window is the reply's own echo (`in_any_window`). Character position stands
 in for time, so the windows are wide on purpose.
 
+D-B (debug edge-interrupt-handover-unverified): during playback the listener
+accepts the keyword alone ("atlas"), because the echo suppressor clips the
+"hey". A reply that says the keyword anywhere (`says_wake_word`) gives that
+up: for that reply the listener needs the full phrase, as when idle.
+
 Pure: no asyncio, no clock reads. The caller passes `now`.
 """
 
@@ -96,6 +101,26 @@ class ReplyCursor:
         return max(0.0, min(now - start, end - start))
 
 
+def _wake_word_pattern(wake_phrase: str) -> "re.Pattern[str] | None":
+    """A whole-word, case-insensitive match for the wake word: the last word
+    of `wake_phrase` ("hey atlas" gives "atlas"). `None` for an empty phrase."""
+    words = [w.strip(".,!?;:\"'()[]") for w in wake_phrase.lower().split()]
+    words = [w for w in words if w]
+    if not words:
+        return None
+    return re.compile(rf"\b{re.escape(words[-1])}\b", re.IGNORECASE)
+
+
+def says_wake_word(text: str, wake_phrase: str) -> bool:
+    """True when `text` says the wake word as a whole word, in any case
+    ("Atlas," counts, "Atlantic" does not). False for an empty phrase.
+
+    D-B: a reply for which this is True needs the full wake phrase to be
+    interrupted during playback, so its own echo of the word cannot stop it."""
+    pattern = _wake_word_pattern(wake_phrase)
+    return pattern is not None and pattern.search(text) is not None
+
+
 def wake_word_windows(
     utterances,
     *,
@@ -112,11 +137,9 @@ def wake_word_windows(
     adds `margin_s` on both sides, and `echo_delay_s` (the calibrated echo
     delay) on the high side only. An empty phrase gives no windows.
     """
-    words = [w.strip(".,!?;:\"'()[]") for w in wake_phrase.lower().split()]
-    words = [w for w in words if w]
-    if not words:
+    pattern = _wake_word_pattern(wake_phrase)
+    if pattern is None:
         return ()
-    pattern = re.compile(rf"\b{re.escape(words[-1])}\b", re.IGNORECASE)
     windows: list[tuple[float, float]] = []
     for utterance in utterances:
         length = max(1, len(utterance.text))
