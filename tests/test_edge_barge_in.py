@@ -519,6 +519,36 @@ def test_the_operators_own_wake_word_key_wins_for_the_edge():
     assert resolved.wake_word is False
 
 
+def test_an_edge_override_without_enabled_never_turns_vad_barge_in_on():
+    """WR-07: the global `barge_in.enabled` defaults to true. An edge override
+    that names only `wake_word` must still resolve `enabled` to the AEC verdict
+    (`not_proven`), not to the camera-era global."""
+    from atlas.app import _resolve_edge_barge_in_config
+    from atlas.config import Config
+
+    from tests.test_config import _minimal_raw_config
+
+    raw = _minimal_raw_config()
+    raw["barge_in"] = {"enabled": True, "sources": {"edge": {"wake_word": False}}}
+    config = Config.from_config(raw)
+    assert config.barge_in.enabled is True
+    resolved = _resolve_edge_barge_in_config(config).resolve("edge")
+    assert resolved.enabled is EDGE_BARGE_IN_PROVEN
+    assert resolved.wake_word is False
+
+
+def test_the_global_wake_word_key_does_not_reach_the_edge():
+    from atlas.app import _resolve_edge_barge_in_config
+    from atlas.config import Config
+
+    from tests.test_config import _minimal_raw_config
+
+    raw = _minimal_raw_config()
+    raw["barge_in"] = {"wake_word": False}
+    resolved = _resolve_edge_barge_in_config(Config.from_config(raw)).resolve("edge")
+    assert resolved.wake_word is True
+
+
 # --- Phase 13 (plan 13-05): the interrupting speech becomes the next turn ---
 
 

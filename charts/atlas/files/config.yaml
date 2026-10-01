@@ -582,7 +582,9 @@ barge_in:
 
   # The wake word, heard while the assistant speaks, stops the reply. Only a
   # source that can stop its own playback (the edge Pi) acts on this. The
-  # camera ignores it, because the camera has no echo cancellation.
+  # camera ignores it, because the camera has no echo cancellation. The edge
+  # source turns it on whatever this global key says. To turn it off on the
+  # edge, set `wake_word: false` under `sources.edge` below.
   wake_word: false
 
   # How long the Pi fades a cut reply before silence, in milliseconds.

@@ -814,18 +814,19 @@ def _resolve_edge_barge_in_config(config: Config) -> BargeInConfig:
     bare global `config.barge_in` handed to the camera runner unchanged.
 
     Wake-word barge-in (Phase 13) needs no AEC proof, because the wake
-    detector, not the VAD, decides (RESEARCH Finding 2). So the edge always
-    gets `wake_word: True` under its override, and the operator's own keys
-    win. VAD barge-in still follows `EDGE_BARGE_IN_PROVEN`. A cluster config
-    that already has `barge_in.sources.edge.enabled: false` gets the wake
-    path with no edit.
+    detector, not the VAD, decides (RESEARCH Finding 2). So the edge starts
+    from `wake_word: True` and `enabled: EDGE_BARGE_IN_PROVEN`, and any key
+    the operator sets under `barge_in.sources.edge` replaces them. The global
+    `barge_in.wake_word` does not reach the edge, and neither does the global
+    `barge_in.enabled` (WR-07). A cluster config that already has
+    `barge_in.sources.edge.enabled: false` gets the wake path with no edit.
 
     An operator's own `barge_in.sources.edge.enabled`
     (`config/config.example.yaml` ships one, `false`, from 10-SPIKE.md's
     `aec: not_proven`) wins exactly as `BargeInConfig.resolve` would
-    apply it. Only a configuration that names no `edge` override at all
-    falls back to `EDGE_BARGE_IN_PROVEN`, added here as a synthetic override
-    rather than assumed by `SourceRunner` itself: the camera-era global
+    apply it. An `edge` override with no `enabled` key, or no override at
+    all, falls back to `EDGE_BARGE_IN_PROVEN`, added here as a synthetic
+    default rather than assumed by `SourceRunner` itself: the camera-era global
     `barge_in.enabled` (`true` by default) must never reach this source by
     accident the way `SourceRunner.__init__`'s own absent-configuration
     fallback (`BargeInConfig(enabled=False)`) already keeps it from doing
@@ -833,11 +834,7 @@ def _resolve_edge_barge_in_config(config: Config) -> BargeInConfig:
     guarantee, applied to a runner that now always gets one.
     """
     existing = config.barge_in.sources.get("edge")
-    override = (
-        {"wake_word": True, **existing}
-        if existing is not None
-        else {"enabled": EDGE_BARGE_IN_PROVEN, "wake_word": True}
-    )
+    override = {"enabled": EDGE_BARGE_IN_PROVEN, "wake_word": True, **(existing or {})}
     return replace(config.barge_in, sources={**config.barge_in.sources, "edge": override})
 
 
