@@ -156,3 +156,103 @@ async def test_a_transcript_that_never_opens_with_the_phrase_confirms_nothing(fa
     )
 
     assert "wake.confirmed" not in _types(source)
+
+
+# --- Pure builders ---------------------------------------------------------
+
+
+def test_asks_question_is_false_without_a_request() -> None:
+    from atlas.turn.panel_events import asks_question
+
+    assert asks_question(None) is False
+
+
+def test_a_confirmation_or_a_clarification_asks_a_question() -> None:
+    from atlas.turn.follow_up import FollowUpRequest
+    from atlas.turn.panel_events import asks_question
+
+    for kind in ("confirmation", "clarification"):
+        request = FollowUpRequest(kind=kind, chain_depth=1, original_transcript="x", question="y?")
+        assert asks_question(request) is True
+
+
+def test_an_answer_window_asks_a_question_only_when_the_reply_expects_one() -> None:
+    from atlas.turn.follow_up import FollowUpRequest
+    from atlas.turn.panel_events import asks_question
+
+    plain = FollowUpRequest(kind="answer", chain_depth=1, original_transcript="x", question="", expects_reply=False)
+    asked = FollowUpRequest(kind="answer", chain_depth=1, original_transcript="x", question="", expects_reply=True)
+
+    assert asks_question(plain) is False
+    assert asks_question(asked) is True
+
+
+def test_a_request_left_from_an_earlier_turn_is_not_this_turns_request() -> None:
+    from atlas.turn.panel_events import request_of_this_turn
+
+    older = object()
+    newer = object()
+
+    assert request_of_this_turn(None, None) is None
+    assert request_of_this_turn(older, older) is None
+    assert request_of_this_turn(newer, older) is newer
+    assert request_of_this_turn(newer, None) is newer
+
+
+def test_a_completed_turn_without_a_request_ends_quiet() -> None:
+    from atlas.turn.panel_events import turn_ended_event
+
+    event = turn_ended_event(
+        outcome="completed", failed=False, cancelled=False, request=None, playback_end_at=None, now=10.0
+    )
+
+    assert event == {
+        "type": "turn.ended",
+        "outcome": "completed",
+        "follow_up": False,
+        "asks_question": False,
+        "playback_ms_left": 0,
+    }
+
+
+def test_failed_wins_over_cancelled_and_over_the_outcome_argument() -> None:
+    from atlas.turn.panel_events import turn_ended_event
+
+    kwargs = dict(request=None, playback_end_at=None, now=1.0)
+
+    assert turn_ended_event(outcome="completed", failed=True, cancelled=False, **kwargs)["outcome"] == "failed"
+    assert turn_ended_event(outcome="completed", failed=True, cancelled=True, **kwargs)["outcome"] == "failed"
+    assert turn_ended_event(outcome="completed", failed=False, cancelled=True, **kwargs)["outcome"] == "cancelled"
+
+
+def test_playback_ms_left_counts_to_the_end_of_the_reply_and_never_goes_negative() -> None:
+    from atlas.turn.panel_events import turn_ended_event
+
+    kwargs = dict(outcome="completed", failed=False, cancelled=False, request=None, now=10.0)
+
+    ahead = turn_ended_event(playback_end_at=12.5, **kwargs)["playback_ms_left"]
+    behind = turn_ended_event(playback_end_at=9.0, **kwargs)["playback_ms_left"]
+
+    assert ahead == 2500
+    assert isinstance(ahead, int)
+    assert behind == 0
+
+
+def test_an_answer_window_after_a_plain_answer_is_a_follow_up_that_asks_nothing() -> None:
+    from atlas.turn.follow_up import FollowUpRequest
+    from atlas.turn.panel_events import turn_ended_event
+
+    request = FollowUpRequest(kind="answer", chain_depth=1, original_transcript="x", question="", expects_reply=False)
+
+    event = turn_ended_event(
+        outcome="completed", failed=False, cancelled=False, request=request, playback_end_at=None, now=0.0
+    )
+
+    assert event["follow_up"] is True
+    assert event["asks_question"] is False
+
+
+def test_reply_started_carries_the_answer_text() -> None:
+    from atlas.turn.panel_events import reply_started_event
+
+    assert reply_started_event("It is sunny.") == {"type": "reply.started", "text": "It is sunny."}
