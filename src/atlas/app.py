@@ -54,6 +54,7 @@ from atlas.config import (
 )
 from atlas.crypto.credentials import CredentialSlot, resolve_credential_value
 from atlas.db.desktop_repository import DesktopDevice
+from atlas.db.desktop_postgres import PostgresDesktopDeviceRepository
 from atlas.db.edge_postgres import PostgresEdgeDeviceRepository
 from atlas.db.edge_repository import EdgeDevice
 from atlas.db.engine import build_engine, get_current_revision, run_migrations
@@ -750,6 +751,10 @@ def _build_repositories(config: Config, engine: AsyncEngine) -> dict[str, Any]:
         # `wake_event_repo`/`google_account_repo` already use, so a test's
         # own fake repository dict that predates this key boots unchanged.
         "edge_device_repo": PostgresEdgeDeviceRepository(sessionmaker),
+        # Plan 14-04 (D-01): paired Macs -- read with `.get(...)` in lifespan,
+        # so a test's own fake repository dict that predates this key boots
+        # unchanged.
+        "desktop_device_repo": PostgresDesktopDeviceRepository(sessionmaker),
         # Plan 11-03 (D-01, D-03): household members and their enrollment
         # embeddings -- read with `.get(...)` at the call site below, the
         # same tolerant lookup `edge_device_repo` already uses, so a
