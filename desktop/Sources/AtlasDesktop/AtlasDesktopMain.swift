@@ -1,5 +1,20 @@
-// Placeholder so the package builds at the end of task 1. Task 2 replaces it.
+import AppKit
+import AtlasKit
+import Foundation
+
 @main
 enum AtlasDesktopMain {
-    static func main() {}
+    @MainActor
+    static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.contains("--diagnose") {
+            // No UI and no single-instance check: this is a scripted probe.
+            exit(DiagnoseCommand.run(arguments: arguments))
+        }
+        // A Keychain read must never delay the menu, so record off the main thread.
+        Task.detached(priority: .utility) {
+            LaunchDiagnostics.recordLaunch()
+        }
+        AtlasDesktopApp.main()
+    }
 }
