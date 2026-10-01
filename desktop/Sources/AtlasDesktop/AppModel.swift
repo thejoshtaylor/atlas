@@ -25,6 +25,10 @@ final class AppModel {
 
     /// The steps of pairing (D-03). The setup window renders it.
     private(set) var flow = PairingFlow()
+    /// The timer that rings now, for the "Stop Ringing" menu item. It follows
+    /// the server frames, so it stays set after the panel was closed.
+    private(set) var ringTracker = RingTracker()
+    var ringingTimerId: Int? { ringTracker.timerId }
     /// True while the Pair form replaces the step list in the setup window.
     private(set) var showingPairForm = false
 
@@ -99,10 +103,11 @@ final class AppModel {
         panel.prepare()
         panel.onSendTimerStop = { [weak self] timerId in self?.sendTimerStop(timerId) }
         let inbound = connection.inbound
-        let panel = panel
-        Task {
+        Task { [weak self] in
             for await message in inbound {
-                if let event = PanelEvent(message) { panel.dispatch(event) }
+                guard let event = PanelEvent(message), let self else { continue }
+                self.ringTracker.apply(event)
+                self.panel.dispatch(event)
             }
         }
 
@@ -268,6 +273,19 @@ final class AppModel {
         Task { _ = await connection.send(.timerStop(TimerStop(timerId: timerId))) }
     }
 
+    /// The "Stop Ringing" menu item, the keyboard path to Stop (UI-SPEC
+    /// "Keyboard and accessibility"). With the ring in the panel and its button
+    /// idle, it acts as a click, so the panel shows "Stopping". Otherwise (the
+    /// panel was closed) it sends the stop and the ring sound ends. The server
+    /// ignores a stale id (D-15).
+    func stopRinging() {
+        switch ringTracker.stopAction(panelRing: panel.state.ring) {
+        case .clickInPanel: panel.dispatch(.stopClicked)
+        case .send(let timerId): sendTimerStop(timerId)
+        case nil: break
+        }
+    }
+
     // MARK: - Setup window
 
     func openSetup(focus: SetupFocus) {
@@ -372,7 +390,10 @@ final class AppModel {
         if wasConnected {
             var isConnected = false
             if case .connected = next.status { isConnected = true }
-            if !isConnected { panel.dispatch(.connectionLost) }
+            if !isConnected {
+                ringTracker.apply(.connectionLost)
+                panel.dispatch(.connectionLost)
+            }
         }
         if next.everConnected { UserDefaults.standard.set(true, forKey: Self.localNetworkGrantedKey) }
         let wasPairing: Bool

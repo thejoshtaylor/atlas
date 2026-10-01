@@ -93,6 +93,7 @@ import Testing
         #expect(names.count >= 8, "found only \(names)")
         #expect(names.contains("PanelView.swift"))
         #expect(names.contains("PanelController.swift"))
+        #expect(names.contains("TimerRingView.swift"), "the ring view must be under the gate")
     }
 
     @Test func noMarkupLinkWebOrSelectionApi() throws {

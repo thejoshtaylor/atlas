@@ -12,7 +12,10 @@ struct PanelRoot: View {
     let controller: PanelController
 
     var body: some View {
-        PanelView(state: controller.shown, onClose: { controller.dispatch(.closePressed) })
+        PanelView(
+            state: controller.shown,
+            onClose: { controller.dispatch(.closePressed) },
+            onStop: { controller.dispatch(.stopClicked) })
     }
 }
 

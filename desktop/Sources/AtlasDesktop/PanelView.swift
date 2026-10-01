@@ -7,11 +7,14 @@ import SwiftUI
 /// text card and the outcome line.
 ///
 /// Every string is `Text(verbatim:)`, so a remote string is never read as
-/// Markdown or as a link (D-11). `HostileTextGateTests` enforces it. The ring
-/// view and the Stop button come in plan 15-10.
+/// Markdown or as a link (D-11). `HostileTextGateTests` enforces it. While a
+/// timer rings, `TimerRingView` takes the place of the turn content.
 struct PanelView: View {
     let state: PanelState
     let onClose: () -> Void
+    /// The ring view's Stop button. The controller turns it into `.stopClicked`,
+    /// and the reducer sends `timer.stop` once (D-15).
+    let onStop: () -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -29,8 +32,14 @@ struct PanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: PanelLayout.sectionGap) {
-            header
-            content
+            if let ring = state.ring {
+                // A ring has priority over the turn (D-16). The turn keeps
+                // updating in the state, so it returns when the ring ends.
+                TimerRingView(ring: ring, onStop: onStop, onClose: onClose)
+            } else {
+                header
+                content
+            }
         }
         .padding(PanelLayout.padding)
         .frame(width: PanelLayout.width, alignment: .topLeading)
@@ -46,7 +55,7 @@ struct PanelView: View {
     // MARK: Header
 
     private var header: some View {
-        HStack(spacing: PanelLayout.symbolGap) {
+        PanelHeader(onClose: onClose) {
             Image(systemName: PanelCopy.stateSymbol(word))
                 .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(word == .done ? Color.green : Color.accentColor)
@@ -55,20 +64,7 @@ struct PanelView: View {
                 .accessibilityHidden(true)
             Text(verbatim: PanelCopy.stateWord(word))
                 .font(.subheadline.weight(.semibold))
-            Spacer(minLength: 0)
-            Button(action: onClose) {
-                Image(systemName: PanelCopy.closeSymbol)
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(width: PanelLayout.closeHitSize, height: PanelLayout.closeHitSize)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PanelCloseButtonStyle())
-            .accessibilityLabel(PanelCopy.closeLabel)
-            .accessibilityAddTraits(.isButton)
         }
-        .frame(height: PanelLayout.headerHeight)
-        .accessibilityElement(children: .contain)
     }
 
     // MARK: Content
@@ -131,6 +127,33 @@ struct PanelView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: PanelLayout.contentWidth, alignment: .leading)
         }
+    }
+}
+
+/// The header row of the panel: the leading content of the view (symbol and
+/// word), a spacer and the Close button. The turn view and the ring view share
+/// it, so Close has one implementation.
+struct PanelHeader<Leading: View>: View {
+    let onClose: () -> Void
+    @ViewBuilder let leading: () -> Leading
+
+    var body: some View {
+        HStack(spacing: PanelLayout.symbolGap) {
+            leading()
+            Spacer(minLength: 0)
+            Button(action: onClose) {
+                Image(systemName: PanelCopy.closeSymbol)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .frame(width: PanelLayout.closeHitSize, height: PanelLayout.closeHitSize)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PanelCloseButtonStyle())
+            .accessibilityLabel(PanelCopy.closeLabel)
+            .accessibilityAddTraits(.isButton)
+        }
+        .frame(height: PanelLayout.headerHeight)
+        .accessibilityElement(children: .contain)
     }
 }
 

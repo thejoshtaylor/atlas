@@ -10,6 +10,13 @@ struct MenuContent: View {
     var body: some View {
         Text(model.menuState.firstLine)
         Divider()
+        if model.ringingTimerId != nil {
+            Button {
+                model.stopRinging()
+            } label: {
+                Text(verbatim: PanelCopy.stopRingingMenuItem)
+            }
+        }
         if !model.setupProgress.requiredDone {
             Button("Finish Setup\u{2026}") {
                 model.openSetup(focus: .pair)
