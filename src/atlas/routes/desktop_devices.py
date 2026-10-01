@@ -17,7 +17,9 @@ from pydantic import BaseModel, field_validator
 from atlas.auth.dependencies import CurrentUser, Role, require_role
 from atlas.auth.desktop_tokens import hash_desktop_token, issue_desktop_token
 from atlas.db.desktop_repository import (
+    DesktopDefaultConflict,
     DesktopDevice,
+    DesktopDeviceChanges,
     DesktopDeviceNameTaken,
     DesktopDeviceRepository,
 )
@@ -43,6 +45,36 @@ class DesktopDeviceCreateRequest(BaseModel):
                 "(after trimming)"
             )
         return trimmed
+
+
+class DesktopDeviceUpdateRequest(BaseModel):
+    """A partial update. A key that is absent leaves its value alone, and
+    `edge_device_id: null` clears the room mapping. The route tells the two
+    apart with `model_fields_set`."""
+
+    name: str | None = None
+    edge_device_id: int | None = None
+    is_default: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str:
+        if value is None:
+            raise ValueError("name cannot be null")
+        trimmed = value.strip()
+        if not _NAME_RE.match(trimmed):
+            raise ValueError(
+                "name must be 1-64 characters of letters, digits, space, '-', '_' and '.' "
+                "(after trimming)"
+            )
+        return trimmed
+
+    @field_validator("is_default")
+    @classmethod
+    def _validate_is_default(cls, value: bool | None) -> bool:
+        if value is None:
+            raise ValueError("is_default cannot be null")
+        return value
 
 
 class DesktopDeviceResponse(BaseModel):
@@ -142,6 +174,59 @@ async def run_desktop_device_test(
     if rtt_ms is None:
         return DesktopTestResponse(answered=False, rtt_ms=None)
     return DesktopTestResponse(answered=True, rtt_ms=int(round(rtt_ms)))
+
+
+@router.patch("/api/desktop-devices/{device_id}")
+async def update_desktop_device(
+    device_id: int,
+    payload: DesktopDeviceUpdateRequest,
+    request: Request,
+    _admin: CurrentUser = Depends(require_role(Role.ADMIN)),
+) -> DesktopDeviceResponse:
+    """Rename a Mac, map it to an edge device (its room), or make it the
+    default (D-06, D-14, D-16, D-17). Setting a default clears the previous
+    one inside the repository's single transaction."""
+    sent = payload.model_fields_set
+    if not sent:
+        raise HTTPException(status_code=422, detail="nothing to change")
+    repo: DesktopDeviceRepository = request.app.state.desktop_device_repo
+    hub: DesktopHub = request.app.state.desktop_hub
+    device = await repo.get_device(device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="no such Mac")
+    if device.revoked_at is not None:
+        raise HTTPException(status_code=409, detail="this Mac is revoked")
+
+    if "edge_device_id" in sent and payload.edge_device_id is not None:
+        # Checked only when it is set. A mapping to an edge device that was
+        # revoked later stays readable.
+        edge_repo = getattr(request.app.state, "edge_device_repo", None)
+        edge_devices = await edge_repo.list_devices() if edge_repo is not None else []
+        if not any(
+            edge.id == payload.edge_device_id and edge.revoked_at is None for edge in edge_devices
+        ):
+            raise HTTPException(status_code=422, detail="no such active edge device")
+
+    changes = DesktopDeviceChanges(
+        name=payload.name if "name" in sent else None,
+        set_edge_device="edge_device_id" in sent,
+        edge_device_id=payload.edge_device_id if "edge_device_id" in sent else None,
+        is_default=payload.is_default if "is_default" in sent else None,
+    )
+    try:
+        updated = await repo.update_device(device_id, changes, at=datetime.now(timezone.utc))
+    except DesktopDeviceNameTaken:
+        raise HTTPException(
+            status_code=409, detail="another active Mac already uses this name"
+        ) from None
+    except DesktopDefaultConflict:
+        raise HTTPException(
+            status_code=409,
+            detail="another Mac became the default at the same time. Try again.",
+        ) from None
+    if updated is None:
+        raise HTTPException(status_code=409, detail="this Mac is revoked")
+    return _to_response(updated, connected=hub.is_connected(device_id))
 
 
 @router.delete("/api/desktop-devices/{device_id}", status_code=204)
