@@ -8,11 +8,12 @@ extension PanelReducer {
     /// A ring opens the panel with no wake word and takes over a turn (D-14, D-16).
     /// A second ring replaces the label and the id. The same id again (the sticky
     /// replay after a reconnect) changes nothing. A ring the operator closed
-    /// never opens again for its id (T-15-28).
+    /// never opens again for its id (T-15-28), until the server says that ring ended
+    /// or one ring cap has passed. A repeating alarm rings under one id every time.
     static func timerRinging(
         _ state: inout PanelState, _ message: TimerRinging, _ now: Date, _ effects: inout [PanelEffect]
     ) {
-        guard message.timerId != state.closedTimerId, state.ring?.timerId != message.timerId else { return }
+        guard !state.isClosedRing(message.timerId, now: now), state.ring?.timerId != message.timerId else { return }
         let kind: RingKind = message.kind == "alarm" ? .alarm : .timer
         let label = TextSanitizer.sanitize(message.label, maxScalars: PanelTiming.labelMaxScalars)
         let opening = !state.visible
@@ -44,6 +45,9 @@ extension PanelReducer {
     static func timerStopped(
         _ state: inout PanelState, _ message: TimerStopped, _ now: Date, _ effects: inout [PanelEffect]
     ) {
+        // The ring ended on the server, so the memory of a closed ring ends too,
+        // even when the panel shows no ring (a repeating alarm rings again).
+        if state.closedTimerId == message.timerId { state.forgetClosedRing() }
         guard let ring = state.ring, ring.timerId == message.timerId, ring.stop != .stopped else { return }
         resumeIfAwaitingScreen(&state, &effects)
         state.stopRetryAt = nil
@@ -69,7 +73,7 @@ extension PanelReducer {
         if let at = state.ringCapAt, at <= now {
             state.ringCapAt = nil
             state.stopRetryAt = nil
-            if let id = state.ring?.timerId { state.closedTimerId = id }
+            if let id = state.ring?.timerId { state.rememberClosedRing(id, now: now) }
             state.ring = nil
             if state.turn == nil {
                 hide(&state, animated: true, &effects)

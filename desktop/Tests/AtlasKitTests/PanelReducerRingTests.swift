@@ -256,6 +256,52 @@ private func ringingRig(_ id: Int = 12) -> PanelRig {
         #expect(rig.state.ring?.timerId == 13)
     }
 
+    // A repeating alarm keeps one timer id for every ring (CR-01).
+    @Test func aClosedRepeatingAlarmShowsAgainWhenItsNextRingComes() {
+        var rig = ringingRig(5)
+        rig.send(.closePressed, at: 1)
+        rig.send(stopped(5), at: 2)
+        let effects = rig.send(ring(5, "alarm", "wake up"), at: 86_400)
+        #expect(effects.contains(.show))
+        #expect(rig.state.visible)
+        #expect(rig.state.ring?.timerId == 5)
+    }
+
+    @Test func aStoppedFrameForAClosedRingClearsTheMemoryEvenWithNoRingInView() {
+        var rig = ringingRig(5)
+        rig.send(.closePressed, at: 1)
+        #expect(rig.state.ring == nil)
+        rig.send(stopped(5), at: 2)
+        #expect(rig.state.closedTimerId == nil)
+    }
+
+    @Test func aStoppedFrameForAnotherTimerKeepsTheClosedMemory() {
+        var rig = ringingRig(5)
+        rig.send(.closePressed, at: 1)
+        rig.send(stopped(6), at: 2)
+        rig.send(ring(5), at: 3)
+        #expect(!rig.state.visible)
+    }
+
+    @Test func aLostStoppedAfterCloseForgetsTheClosedRingAfterTheCap() {
+        var rig = ringingRig(5)
+        rig.send(.closePressed, at: 10)
+        rig.send(ring(5), at: 139)  // a replay inside the cap still stays hidden
+        #expect(!rig.state.visible)
+        rig.send(ring(5), at: 141)  // the cap since the close has passed
+        #expect(rig.state.visible)
+        #expect(rig.state.ring?.timerId == 5)
+    }
+
+    @Test func aCappedRingIsForgottenOneCapLater() {
+        var rig = ringingRig(12)
+        rig.send(.deadline, at: 130)
+        rig.send(ring(12), at: 259)
+        #expect(!rig.state.visible)
+        rig.send(ring(12), at: 261)
+        #expect(rig.state.visible)
+    }
+
     @Test func aDroppedConnectionHidesTheRingView() {
         var rig = ringingRig(12)
         let effects = rig.send(.connectionLost, at: 1)

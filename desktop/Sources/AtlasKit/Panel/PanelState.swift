@@ -134,6 +134,9 @@ public struct PanelState: Sendable, Equatable {
     // panel back (D-04, D-05, RESEARCH Pitfall 1).
     var closedTurnId: String?
     var closedTimerId: Int?
+    /// The memory of `closedTimerId` ends here. A repeating alarm keeps one id
+    /// for every ring, and a lost `timer.stopped` must not hide it for good.
+    var closedTimerUntil: Date?
     var retiredTurnIds: [String] = []
 
     /// A display went away while the panel showed. The next accepted event
@@ -165,6 +168,24 @@ public struct PanelState: Sendable, Equatable {
     }
 
     /// Drop the turn content, remembering its id.
+    /// Remember that the operator closed (or the cap ended) this ring. The
+    /// memory lasts one ring cap, which is as long as any ring plays.
+    mutating func rememberClosedRing(_ timerId: Int, now: Date) {
+        closedTimerId = timerId
+        closedTimerUntil = now.addingTimeInterval(PanelTiming.ringCapS)
+    }
+
+    mutating func forgetClosedRing() {
+        closedTimerId = nil
+        closedTimerUntil = nil
+    }
+
+    /// True while a replay of this ring must stay hidden.
+    func isClosedRing(_ timerId: Int, now: Date) -> Bool {
+        guard timerId == closedTimerId, let until = closedTimerUntil else { return false }
+        return until > now
+    }
+
     mutating func dropTurn() {
         if let id = turn?.turnId { retire(id) }
         turn = nil
@@ -173,7 +194,7 @@ public struct PanelState: Sendable, Equatable {
         coalescer.reset()
     }
 
-    /// Everything except the memory (`closedTurnId`, `closedTimerId`, `retiredTurnIds`).
+    /// Everything except the memory (`closedTurnId`, `closedTimerId`, `closedTimerUntil`, `retiredTurnIds`).
     mutating func resetForHide() {
         dropTurn()
         visible = false

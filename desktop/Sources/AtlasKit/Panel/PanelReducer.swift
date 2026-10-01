@@ -23,7 +23,7 @@ public enum PanelReducer {
         case .stopClicked: stopClicked(&state, now, &effects)
         case .hoverChanged(let inside):
             if state.visible { state.setHovering(inside, now: now) }
-        case .closePressed: onClose(&state, &effects)
+        case .closePressed: onClose(&state, now, &effects)
         case .deadline: onDeadline(&state, now, &effects)
         case .connectionLost: hide(&state, animated: true, &effects)
         case .displayRemoved: onDisplayRemoved(&state, now, &effects)
@@ -123,10 +123,10 @@ public enum PanelReducer {
     // MARK: Shell events
 
     /// D-04: Close hides now, and the turn and the ring it showed never come back.
-    private static func onClose(_ state: inout PanelState, _ effects: inout [PanelEffect]) {
+    private static func onClose(_ state: inout PanelState, _ now: Date, _ effects: inout [PanelEffect]) {
         guard state.visible else { return }
         if let id = state.turn?.turnId { state.closedTurnId = id }
-        if let id = state.ring?.timerId { state.closedTimerId = id }
+        if let id = state.ring?.timerId { state.rememberClosedRing(id, now: now) }
         hide(&state, animated: true, &effects)
     }
 
