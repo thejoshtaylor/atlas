@@ -6,6 +6,7 @@ real USB device, no network fetch)."""
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 from atlas_edge.config import DEFAULT_MUSIC_FIFO
@@ -13,6 +14,7 @@ from atlas_edge.config import DEFAULT_MUSIC_FIFO
 _EDGE_ROOT = Path(__file__).resolve().parents[1]
 _SERVICE_PATH = _EDGE_ROOT / "systemd" / "atlas-edge.service"
 _LIBRESPOT_PATH = _EDGE_ROOT / "systemd" / "atlas-librespot.service"
+_WATCHDOG_PATH = _EDGE_ROOT / "systemd" / "atlas-librespot-watchdog.service"
 _UDEV_PATH = _EDGE_ROOT / "udev" / "99-atlas-edge-xvf3800.rules"
 _FETCH_SCRIPT_PATH = _EDGE_ROOT / "scripts" / "fetch-vad-model.sh"
 
@@ -94,6 +96,53 @@ class TestLibrespotUnit:
             "WantedBy=multi-user.target",
         ):
             assert line in text
+
+
+class TestLibrespotWatchdogUnit:
+    def _text(self) -> str:
+        return _WATCHDOG_PATH.read_text()
+
+    def _script(self) -> str:
+        match = re.search(r"^ExecStart=/bin/sh -c '(.+)'$", self._text(), re.MULTILINE)
+        assert match is not None
+        return match.group(1)
+
+    def test_follows_only_new_librespot_journal_lines(self) -> None:
+        assert "journalctl -u atlas-librespot -f -n 0 -o cat" in self._script()
+
+    def test_a_fixed_string_match_restarts_librespot_inside_the_pipe(self) -> None:
+        parts = self._script().rsplit("|", 1)
+        assert len(parts) == 2
+        last_stage = parts[1]
+        match_at = last_stage.index('grep -q -F "Connection to server closed"')
+        restart_at = last_stage.index("systemctl restart atlas-librespot")
+        assert match_at < restart_at
+
+    def test_script_parses_as_posix_sh(self) -> None:
+        # -n only parses the script. It never runs it.
+        result = subprocess.run(["sh", "-n", "-c", self._script()], check=False)
+        assert result.returncode == 0
+
+    def test_runs_as_root_without_a_dynamic_user(self) -> None:
+        text = self._text()
+        assert re.search(r"^User=", text, re.MULTILINE) is None
+        assert re.search(r"^DynamicUser=", text, re.MULTILINE) is None
+
+    def test_keeps_watching_with_a_debounce(self) -> None:
+        text = self._text()
+        for line in (
+            "Restart=always",
+            "StartLimitIntervalSec=0",
+            "NoNewPrivileges=yes",
+            "WantedBy=multi-user.target",
+        ):
+            assert line in text
+        after = re.search(r"^After=(.+)$", text, re.MULTILINE)
+        assert after is not None
+        assert "atlas-librespot.service" in after.group(1)
+        restart_sec = re.search(r"^RestartSec=(\d+)$", text, re.MULTILINE)
+        assert restart_sec is not None
+        assert int(restart_sec.group(1)) >= 10
 
 
 class TestUdevRule:
