@@ -12,7 +12,7 @@ struct MenuContent: View {
         Divider()
         if model.menuState.kind == .unpaired || model.menuState.kind == .revoked {
             Button("Pair\u{2026}") {
-                // Task 2 opens the setup window here.
+                model.openSetup(focus: .pair)
             }
             Divider()
         }
