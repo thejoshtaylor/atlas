@@ -861,6 +861,53 @@ def test_active_is_enabled_or_wake_interrupts(enabled, wake, expected):
     assert _wake_monitor(wake=wake, enabled=enabled).active is expected
 
 
+# --- Phase 13: the reply's own wake word (D-02) ------------------------------
+
+
+def _reply_monitor(phrase: str = "hey atlas", margin_s: float = 0.5, echo_delay_s: float = 0.0) -> BargeInMonitor:
+    from atlas.sources.reply_timing import ReplyUtterance
+
+    monitor = BargeInMonitor(
+        floor=_FLOOR,
+        min_duration_s=_MIN_DURATION_S,
+        guard_window_s=_GUARD_S,
+        enabled=False,
+        wake_interrupts=True,
+        wake_phrase=phrase,
+        reply_margin_s=margin_s,
+        echo_delay_s=echo_delay_s,
+    )
+    monitor.playback.utterances.append(ReplyUtterance("I am Atlas, here to help", 10.0, 12.0))
+    return monitor
+
+
+def test_reply_wake_word_at_is_true_inside_a_window_and_false_outside():
+    monitor = _reply_monitor()
+    # "Atlas" starts at character 5 of 24, so its sound is near 10.4 to 11.0.
+    assert monitor.reply_wake_word_at(10.6) is True
+    assert monitor.reply_wake_word_at(13.0) is False
+    assert monitor.reply_wake_word_at(9.0) is False
+
+
+def test_reply_wake_word_at_counts_the_echo_delay_on_the_high_edge():
+    without = _reply_monitor()
+    with_delay = _reply_monitor(echo_delay_s=0.4)
+    assert without.reply_wake_word_at(11.6) is False
+    assert with_delay.reply_wake_word_at(11.6) is True
+
+
+def test_reply_wake_word_at_is_false_with_no_wake_phrase():
+    assert _reply_monitor(phrase="").reply_wake_word_at(10.6) is False
+
+
+def test_reply_wake_word_at_is_false_when_the_reply_has_no_wake_word():
+    from atlas.sources.reply_timing import ReplyUtterance
+
+    monitor = _reply_monitor()
+    monitor.playback.utterances[:] = [ReplyUtterance("the lights are on", 10.0, 12.0)]
+    assert monitor.reply_wake_word_at(10.6) is False
+
+
 # --- Phase 13: which sources and turns may ever get the wake path (D-04) ----
 
 

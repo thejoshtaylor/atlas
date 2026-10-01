@@ -107,7 +107,7 @@ from atlas.config import BargeInConfig, GateConfig, WakeConfig
 from atlas.db.repository import WakeEventRepository
 from atlas.providers.tts_xai import SinkFormat
 from atlas.sources.frame_fanout import TurnFrameSource
-from atlas.sources.reply_timing import ReplyCursor
+from atlas.sources.reply_timing import ReplyCursor, in_any_window, wake_word_windows
 from atlas.sources.turn_group import ParallelTurns, TurnGroup, TurnHooks
 from atlas.speaker.output_trace import EmittedAudioTrace
 from atlas.timers.ring_stop import RingStopWindow
@@ -126,6 +126,11 @@ logger = logging.getLogger("atlas.sources.runner")
 # noise source would otherwise add a task that never completes and is never
 # discarded.
 MAX_PENDING_WAKE_EVENT_WRITES = 64
+
+# The block reason for a playback wake hit that lines up with the reply's own
+# wake word (Phase 13 D-02). `wake_events.block_reason` is free text, so a new
+# reason needs no migration.
+REPLY_WAKE_WORD_BLOCK = "reply_wake_word"
 
 
 def resolve_wake_threshold(wake_config: WakeConfig) -> float:
@@ -255,6 +260,9 @@ class BargeInMonitor:
         wake_interrupts: bool = False,
         holds_for_playback: bool = False,
         on_interrupt: "Callable[[], None] | None" = None,
+        wake_phrase: str = "",
+        reply_margin_s: float = 1.0,
+        echo_delay_s: float = 0.0,
     ) -> None:
         self.floor = floor
         self.min_duration_s = min_duration_s
@@ -272,6 +280,11 @@ class BargeInMonitor:
         # `playback` is the queue-end cursor `_speak` feeds (D-02).
         self.wake_interrupts = wake_interrupts
         self.holds_for_playback = holds_for_playback
+        # D-02: where the reply's own wake word falls in time, so a hit that
+        # lines up with it is not taken for the operator.
+        self.wake_phrase = wake_phrase
+        self.reply_margin_s = reply_margin_s
+        self.echo_delay_s = echo_delay_s
         self.playback = ReplyCursor()
         self.interrupted = asyncio.Event()
         self.interrupt_kind: str | None = None
@@ -310,6 +323,21 @@ class BargeInMonitor:
             except Exception:
                 logger.warning("barge-in interrupt hook failed", exc_info=True)
         self.interrupted.set()
+
+    def reply_wake_word_at(self, now: float) -> bool:
+        """True when `now` falls inside the estimated play time of the wake
+        word in a reply already written to the speaker (D-02). A hit during
+        the write burst comes before its utterance is recorded, so it is not
+        suppressed. False with no wake phrase."""
+        return in_any_window(
+            now,
+            wake_word_windows(
+                self.playback.utterances,
+                wake_phrase=self.wake_phrase,
+                margin_s=self.reply_margin_s,
+                echo_delay_s=self.echo_delay_s,
+            ),
+        )
 
     def process_wake_hit(self, now: float) -> bool:
         """Latch an interrupt for a wake hit the gate allowed. Returns False
@@ -699,6 +727,7 @@ class SourceRunner:
         # configuration inside a write call, matching the gate's own
         # resolve-once-at-construction discipline (D-04).
         self._wake_engine_name = resolved_wake.engine
+        self._wake_phrase = resolved_wake.phrase
         self._gate = WakeGate(
             threshold=threshold,
             refractory_s=resolved_wake.refractory_s,
@@ -1018,6 +1047,9 @@ class SourceRunner:
             wake_interrupts=wake_interrupts,
             holds_for_playback=can_stop and (wake_interrupts or self._barge_in_config.enabled),
             on_interrupt=self._schedule_stop_playback if can_stop else None,
+            wake_phrase=self._wake_phrase,
+            reply_margin_s=self._barge_in_config.atlas_margin_ms / 1000.0,
+            echo_delay_s=self._calibration.delay_s if self._calibration is not None else 0.0,
         )
 
     def _schedule_stop_playback(self) -> None:
@@ -1203,6 +1235,16 @@ class SourceRunner:
                 self._name,
                 hit.score,
                 decision.reason,
+            )
+            return
+        if monitor.reply_wake_word_at(now):
+            # Scores and the reason only, never the reply text (D-02).
+            self._record_blocked_hit(hit.score, REPLY_WAKE_WORD_BLOCK, now)
+            logger.info(
+                "wake hit during playback suppressed: it lines up with the reply's own wake word "
+                "(source %r, score=%.3f)",
+                self._name,
+                hit.score,
             )
             return
         if monitor.process_wake_hit(now):

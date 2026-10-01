@@ -7,11 +7,19 @@ the moment the last byte written so far finishes playing. It also keeps one
 record per finished utterance, so a later plan can tell what the reply said
 and when.
 
+The assistant's own reply can say "Atlas". If residual echo of that word
+reaches the wake detector, the reply would interrupt itself. D-02: the
+server does not compare text. It computes a time window around each
+wake word in the reply (`wake_word_windows`), and a hit that falls inside a
+window is the reply's own echo (`in_any_window`). Character position stands
+in for time, so the windows are wide on purpose.
+
 Pure: no asyncio, no clock reads. The caller passes `now`.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -86,3 +94,40 @@ class ReplyCursor:
         else:
             return 0.0
         return max(0.0, min(now - start, end - start))
+
+
+def wake_word_windows(
+    utterances,
+    *,
+    wake_phrase: str,
+    margin_s: float,
+    echo_delay_s: float,
+) -> tuple[tuple[float, float], ...]:
+    """The time windows in which a wake hit is the reply's own echo.
+
+    The wake word is the last word of `wake_phrase` ("hey atlas" gives
+    "atlas"). Each whole-word, case-insensitive match in an utterance's text
+    gets one window. The word's start and end are estimated from its
+    character position, as a share of the utterance's play time. The window
+    adds `margin_s` on both sides, and `echo_delay_s` (the calibrated echo
+    delay) on the high side only. An empty phrase gives no windows.
+    """
+    words = [w.strip(".,!?;:\"'()[]") for w in wake_phrase.lower().split()]
+    words = [w for w in words if w]
+    if not words:
+        return ()
+    pattern = re.compile(rf"\b{re.escape(words[-1])}\b", re.IGNORECASE)
+    windows: list[tuple[float, float]] = []
+    for utterance in utterances:
+        length = max(1, len(utterance.text))
+        span = utterance.end - utterance.start
+        for match in pattern.finditer(utterance.text):
+            word_start = utterance.start + span * (match.start() / length)
+            word_end = utterance.start + span * (match.end() / length)
+            windows.append((word_start - margin_s, word_end + margin_s + echo_delay_s))
+    return tuple(windows)
+
+
+def in_any_window(t: float, windows) -> bool:
+    """True when `t` is inside any `(low, high)` window, edges included."""
+    return any(low <= t <= high for low, high in windows)

@@ -1812,6 +1812,13 @@ class BargeInConfig:
     wake_word: bool = False
     # Phase 13 D-13, D-14: the Pi fades a cut reply over this many milliseconds.
     fade_ms: int = 120
+    # Phase 13 D-02: how far around each wake word in the assistant's own
+    # reply a wake hit counts as that reply's echo and is ignored. Claude's
+    # discretion, so it is a field an operator can tune with no rebuild. The
+    # Pi sends up to 1100 ms of pre-roll in a burst at `vad.start`, so a
+    # server hit can lag the sound by about that much (RESEARCH 2b).
+    # Provisional until real playback hits are logged (D-03).
+    atlas_margin_ms: int = 1000
     sources: dict[str, dict] = field(default_factory=dict)
 
     @classmethod

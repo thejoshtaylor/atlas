@@ -63,7 +63,7 @@ class _ScriptedWakeDetector:
 
 
 def _edge_runner(
-    source: EdgeAudioSource, *, barge_in_config: BargeInConfig, detector=None
+    source: EdgeAudioSource, *, barge_in_config: BargeInConfig, detector=None, wake_event_repo=None
 ) -> SourceRunner:
     async def run_turn_fn(turn_source) -> None:
         return None
@@ -75,6 +75,7 @@ def _edge_runner(
         lambda chunk: chunk,
         run_turn_fn,
         barge_in_config=barge_in_config,
+        wake_event_repo=wake_event_repo,
     )
 
 
@@ -323,6 +324,77 @@ async def test_wake_hit_during_edge_reply_hold_sends_stop_and_ends_barged_in(edg
         serve_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await serve_task
+
+
+async def _speak_with_one_hit(edge_source, repo, *, reply_text: str, atlas_margin_ms: int):
+    """A burst reply of `reply_text` (1.0 s of audio) and a wake hit right
+    after the burst. Returns the socket and the finished timings."""
+    from atlas.timing import TurnTimings
+
+    socket = FakeEdgeSocket()
+    device = fake_edge_device(device_id=1)
+    serve_task = asyncio.create_task(edge_source.serve(socket, device))
+    detector = _ScriptedWakeDetector(hit_on_calls={1})
+    runner = _edge_runner(
+        edge_source,
+        barge_in_config=BargeInConfig(enabled=False, wake_word=True, atlas_margin_ms=atlas_margin_ms),
+        detector=detector,
+        wake_event_repo=repo,
+    )
+    monitor = runner._new_barge_in_monitor()
+    monitor.mark_transcript_done()
+    watch_task = asyncio.create_task(runner._watch_barge_in(monitor))
+    try:
+        await asyncio.sleep(0)
+        timings = TurnTimings()
+        timings.turn_outcome = "completed"
+        speak_task = asyncio.create_task(
+            _speak(
+                edge_source,
+                _BurstFakeTts([b"\x00\x00" * 1600] * 10),
+                timings,
+                reply_text,
+                kind="answer",
+                barge_in=monitor,
+                sink=edge_source.sink_format(),
+            )
+        )
+        await _wait_until(lambda: len(socket.sent_bytes) == 10)
+        socket.push_bytes(b"\x00\x00\x00\x00" * 256)
+        await asyncio.wait_for(speak_task, timeout=3.0)
+        await asyncio.sleep(0.05)
+        return socket, timings
+    finally:
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
+        serve_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serve_task
+
+
+async def test_a_hit_lined_up_with_atlas_in_the_reply_does_not_interrupt(edge_source, fake_wake_event_repository):
+    """D-02: the reply says "Atlas" at its start, and the hit lands right
+    after the burst, inside that word's window. The reply is not cut."""
+    repo = fake_wake_event_repository()
+    socket, timings = await _speak_with_one_hit(
+        edge_source, repo, reply_text="Atlas is here to help you", atlas_margin_ms=1000
+    )
+    assert timings.turn_outcome == "completed"
+    assert _stop_frames(socket) == []
+    assert [(e.allowed, e.block_reason) for e in repo.events] == [(False, "reply_wake_word")]
+
+
+async def test_a_hit_outside_every_atlas_window_still_interrupts(edge_source, fake_wake_event_repository):
+    """With no margin and "Atlas" as the last word, an early hit is far from
+    the word, so the reply is cut as before."""
+    repo = fake_wake_event_repository()
+    socket, timings = await _speak_with_one_hit(
+        edge_source, repo, reply_text="the answer is Atlas", atlas_margin_ms=0
+    )
+    assert timings.turn_outcome == "barged_in"
+    assert _stop_frames(socket) == [{"type": "stop", "fade_ms": 120}]
+    assert [(e.allowed, e.block_reason) for e in repo.events] == [(True, None)]
 
 
 async def test_edge_reply_with_no_wake_hit_holds_until_playback_end(edge_source):

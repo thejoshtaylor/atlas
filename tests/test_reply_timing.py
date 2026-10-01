@@ -82,3 +82,76 @@ def test_spoken_s_clamps_to_the_utterance_length():
     assert cursor.spoken_s(4.0) == 0.0
     assert cursor.spoken_s(5.25) == pytest.approx(0.25)
     assert cursor.spoken_s(99.0) == pytest.approx(1.0)
+
+
+# --- D-02: where the reply's own wake word falls in time --------------------
+
+
+from atlas.sources.reply_timing import ReplyUtterance, in_any_window, wake_word_windows  # noqa: E402
+
+
+def _windows(text, *, start=10.0, end=11.0, phrase="atlas", margin=0.5, echo=0.0):
+    return wake_word_windows(
+        [ReplyUtterance(text, start, end)], wake_phrase=phrase, margin_s=margin, echo_delay_s=echo
+    )
+
+
+def test_a_reply_with_no_wake_word_has_no_windows():
+    assert _windows("the lights are on") == ()
+
+
+def test_a_window_follows_the_words_character_position():
+    text = "hello, I am Atlas, here to help"
+    match_start = text.index("Atlas")
+    match_end = match_start + len("Atlas")
+    ((low, high),) = _windows(text)
+    assert low == pytest.approx(10.0 + match_start / len(text) - 0.5)
+    assert high == pytest.approx(10.0 + match_end / len(text) + 0.5)
+
+
+def test_the_echo_delay_widens_the_high_edge_only():
+    (plain,) = _windows("hello Atlas")
+    (delayed,) = _windows("hello Atlas", echo=0.25)
+    assert delayed[0] == pytest.approx(plain[0])
+    assert delayed[1] == pytest.approx(plain[1] + 0.25)
+
+
+@pytest.mark.parametrize("text", ["ATLAS is here", "atlas is here", "Hey, Atlas!"])
+def test_matching_ignores_case_and_punctuation(text):
+    assert len(_windows(text)) == 1
+
+
+@pytest.mark.parametrize("text", ["the atlases are heavy", "a fatlas appeared", "atlas2 is a model"])
+def test_matching_needs_a_whole_word(text):
+    assert _windows(text) == ()
+
+
+def test_two_words_make_two_windows_and_two_replies_make_windows_from_both():
+    assert len(_windows("Atlas here, Atlas there")) == 2
+    both = wake_word_windows(
+        [ReplyUtterance("I am Atlas", 1.0, 2.0), ReplyUtterance("Atlas again", 5.0, 6.0)],
+        wake_phrase="atlas",
+        margin_s=0.1,
+        echo_delay_s=0.0,
+    )
+    assert len(both) == 2
+    assert both[0][1] < 3.0 < 4.0 < both[1][0] + 1.0
+
+
+def test_a_two_word_phrase_matches_on_its_last_word_once():
+    assert len(_windows("hey Atlas, welcome", phrase="hey atlas")) == 1
+
+
+def test_an_empty_phrase_has_no_windows():
+    assert _windows("Atlas", phrase="") == ()
+    assert _windows("Atlas", phrase="  ") == ()
+
+
+def test_in_any_window_is_inclusive_at_both_edges():
+    windows = ((1.0, 2.0), (5.0, 6.0))
+    assert in_any_window(1.0, windows)
+    assert in_any_window(2.0, windows)
+    assert in_any_window(5.5, windows)
+    assert not in_any_window(2.5, windows)
+    assert not in_any_window(0.9, windows)
+    assert in_any_window(1.0, ()) is False
