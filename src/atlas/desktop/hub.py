@@ -36,6 +36,7 @@ from atlas.desktop.protocol import (
     DesktopPing,
     DesktopPong,
     DesktopProtocolError,
+    DesktopTimerStop,
     build_error,
     build_hello_ack,
     build_ping,
@@ -129,6 +130,7 @@ class DesktopHub:
         hello_timeout_s: float = HELLO_TIMEOUT_S,
         ping_timeout_s: float = TEST_TIMEOUT_S,
         idle_timeout_s: float = IDLE_TIMEOUT_S,
+        on_timer_stop: Callable[[int, int], None] | None = None,
     ) -> None:
         self._device_repo = device_repo
         self._clock = clock
@@ -137,6 +139,12 @@ class DesktopHub:
         self.idle_timeout_s = idle_timeout_s
         self._connections: dict[int, DesktopConnection] = {}
         self._tasks: dict[int, asyncio.Task[Any]] = {}
+        # Called with (device_id, timer_id) for a valid `timer.stop` frame
+        # (Phase 15, D-15). The relay behind it decides whether anything stops.
+        self._on_timer_stop = on_timer_stop
+        # Frames a Mac that connects later must still see, such as the ring
+        # that plays now (D-17). Keyed, so a new frame replaces the old one.
+        self._sticky: dict[str, tuple[str, str]] = {}
 
     async def serve(self, websocket: Any, device: DesktopDevice) -> None:
         """Run one Mac connection to its end. The caller has accepted."""
@@ -189,6 +197,11 @@ class DesktopHub:
         await self._supersede(device.id)
         connection = DesktopConnection(websocket, device.id, hello, datetime.now(timezone.utc))
         self._connections[device.id] = connection
+        # Queued now, in the same step as the registration, so a ring that
+        # starts or ends during the ack is neither missed nor sent twice. The
+        # sender starts after the ack, so the ack stays first on the wire (D-17).
+        for sticky_frame, sticky_type in self._sticky.values():
+            connection.outbox.put(sticky_frame, sticky_type)
         task = asyncio.current_task()
         if task is not None:
             self._tasks[device.id] = task
@@ -226,14 +239,26 @@ class DesktopHub:
             await self._mark_seen(device.id)
             logger.info("desktop %s disconnected", device.id)
 
-    def broadcast(self, frame: str, *, frame_type: str, coalesce_key: str | None = None) -> int:
+    def broadcast(
+        self,
+        frame: str,
+        *,
+        frame_type: str,
+        coalesce_key: str | None = None,
+        sticky_key: str | None = None,
+    ) -> int:
         """Put `frame` on the outbox of every connected Mac (Phase 15, D-12).
 
         A plain method on purpose: it only appends to a bounded queue and
         never awaits a socket, so a turn that calls it is never slowed by a
         Mac (D-13). Returns how many Macs it reached. The log names the
         device id and the frame type only, never the frame body.
+
+        With `sticky_key`, the frame is also kept and sent to every Mac that
+        connects until `clear_sticky(sticky_key)` (D-17).
         """
+        if sticky_key is not None:
+            self._sticky[sticky_key] = (frame, frame_type)
         reached = 0
         for connection in list(self._connections.values()):
             try:
@@ -245,6 +270,10 @@ class DesktopHub:
                 continue
             reached += 1
         return reached
+
+    def clear_sticky(self, key: str) -> None:
+        """Forget a sticky frame. A key that is not set is not an error."""
+        self._sticky.pop(key, None)
 
     async def _send_loop(self, connection: DesktopConnection) -> None:
         """Write this Mac's queued frames to its socket, one at a time. A
@@ -325,6 +354,9 @@ class DesktopHub:
                         # The edge T-10-25 rule: a pong nobody waits for is
                         # counted like any other bad frame.
                         invalid = not connection.resolve_pong(parsed.id)
+                    elif isinstance(parsed, DesktopTimerStop):
+                        # Idempotent, so a valid frame is never invalid.
+                        self._dispatch_timer_stop(connection.device_id, parsed.timer_id)
                     # Any other type, including one this server has never
                     # heard of, is ignored so an older server keeps working
                     # with a newer app.
@@ -333,6 +365,14 @@ class DesktopHub:
                 if invalid_count >= MAX_INVALID_MESSAGES:
                     await self._close(websocket, CLOSE_POLICY_VIOLATION, "too_many_invalid")
                     return
+
+    def _dispatch_timer_stop(self, device_id: int, timer_id: int) -> None:
+        if self._on_timer_stop is None:
+            return
+        try:
+            self._on_timer_stop(device_id, timer_id)
+        except Exception:
+            logger.warning("desktop %s: timer.stop handler failed", device_id, exc_info=True)
 
     async def _mark_seen(self, device_id: int) -> None:
         if self._device_repo is None:

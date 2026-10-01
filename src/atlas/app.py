@@ -126,6 +126,7 @@ from atlas.speaker.volume_tool import VolumeToolHost, set_current_turn_target
 from atlas.timing import TurnTimings
 from atlas.desktop.bridge import DesktopEventBridge
 from atlas.desktop.hub import DesktopHub
+from atlas.desktop.ring import DesktopRingRelay
 from atlas.transports.camera import CameraAudioSource
 from atlas.transports.edge import (
     CLOSE_NOT_CONFIGURED,
@@ -1331,7 +1332,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # built unconditionally, because a Mac connection does not depend on the
     # audio source.
     app.state.desktop_device_repo = repositories.get("desktop_device_repo")
-    app.state.desktop_hub = DesktopHub(device_repo=app.state.desktop_device_repo)
+    # Phase 15 (D-14, D-15): a ring reaches every Mac and a Stop click comes
+    # back through the relay. Both closures read `app.state` at call time,
+    # because the scheduler is built later and only with a timer repository.
+    app.state.desktop_hub = DesktopHub(
+        device_repo=app.state.desktop_device_repo,
+        on_timer_stop=lambda device_id, timer_id: app.state.desktop_ring_relay.on_timer_stop(
+            device_id, timer_id
+        ),
+    )
+
+    def _stop_ring_for(timer_id: int) -> bool:
+        scheduler = getattr(app.state, "timer_scheduler", None)
+        return False if scheduler is None else scheduler.stop_ring_for(timer_id)
+
+    app.state.desktop_ring_relay = DesktopRingRelay(
+        app.state.desktop_hub, stop_ring_for=_stop_ring_for
+    )
     # Quick task 260930-06x: same tolerant `.get(...)` for timers.
     timer_repo = repositories.get("timer_repo")
     app.state.timer_repo = timer_repo
@@ -2260,7 +2277,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     timer_scheduler: "TimerScheduler | None" = None
     if timer_repo is not None:
         timer_scheduler = TimerScheduler(
-            timer_repo, _timer_ring, zone=_resolved_timezone, on_ring=_timer_ring_led
+            timer_repo,
+            _timer_ring,
+            zone=_resolved_timezone,
+            on_ring=_timer_ring_led,
+            on_ring_event=app.state.desktop_ring_relay.on_ring_event,
         )
         timer_scheduler.start()
         _timers_view = lambda: timer_scheduler.snapshot  # noqa: E731 -- a one-line view, not a function
