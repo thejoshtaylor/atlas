@@ -232,7 +232,7 @@ Keep these facts in mind:
   server must build from that same repository.
 - The updater refreshes only the unit files that are already in
   `/etc/systemd/system`. Optional units stay off until you install them.
-  The `atlas-librespot` unit stays off until you install it in step 17.
+  The `atlas-librespot` and `atlas-librespot-watchdog` units stay off until you install them in step 17.
 - Build the server image with the `GIT_SHA` build argument set to the full
   commit. Without it, `/health` reports an empty commit and the updater
   does nothing:
@@ -428,16 +428,25 @@ it replies.
    LIBRESPOT_NAME=<name>
    ```
 
-3. Copy the updated edge unit and the new `librespot` unit into place.
-   Restart the edge service first, because it creates the FIFO directory:
+3. Copy the updated edge unit, the new `librespot` unit, and its watchdog
+   unit into place. Restart the edge service first, because it creates the
+   FIFO directory:
 
    ```bash
    sudo cp /opt/atlas-edge/edge/systemd/atlas-edge.service \
-           /opt/atlas-edge/edge/systemd/atlas-librespot.service /etc/systemd/system/
+           /opt/atlas-edge/edge/systemd/atlas-librespot.service \
+           /opt/atlas-edge/edge/systemd/atlas-librespot-watchdog.service /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl restart atlas-edge
    sudo systemctl enable --now atlas-librespot
+   sudo systemctl enable --now atlas-librespot-watchdog
    ```
+
+   The watchdog restarts `atlas-librespot` when its log shows "Connection
+   to server closed". librespot 0.8.0 does not connect again after this
+   error. If `atlas-librespot` already runs from an earlier install, copy
+   only `atlas-librespot-watchdog.service`. Then run
+   `sudo systemctl daemon-reload` and the last enable line.
 
 4. Sign in once. On a phone on the house network, open Spotify and pick
    the `Atlas` device (or your name from step 2) from the Connect list.
@@ -468,3 +477,4 @@ The array plays audio at 16 kHz, so the music has no content above 8 kHz.
 | `enforce` mode stops an enrolled member's turns | The threshold no longer fits this member's voice | Run `tune` again (step 9) with fresh labeled turns, or re-enroll the member (step 5) |
 | `enforce` mode lets everyone through | No member is enrolled for the model `speaker_id.model` selects | Enroll at least one member (step 5), or select the model you enrolled members under |
 | `atlas-librespot` restarts again and again, and its log shows "Avahi error: Setting up dns-sd failed" | The unit runs with `DynamicUser=yes`, and D-Bus cannot find that user | Use the unit from step 17, which runs as the `atlas-librespot` user. Create the user first (step 17, sub-step 1) |
+| The Spotify device disappears from the Connect list, and the `atlas-librespot` log shows "Connection to server closed" | Spotify closed the session, and librespot 0.8.0 does not connect again. The process stays up, so systemd does not restart it | Install `atlas-librespot-watchdog` (step 17, sub-step 3). It restarts `atlas-librespot` when this line appears. To recover now, run `sudo systemctl restart atlas-librespot` |
