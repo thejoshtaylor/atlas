@@ -142,17 +142,20 @@ def build_answer_request(
 
     The scope is the exact set of tools this turn dispatched, narrowed by the
     scope this turn itself ran under, so a chain never widens (D-10). When the
-    turn dispatched no tool and the model asked the operator a question
-    (`expects_reply`), the scope is `offered_tools` instead, the catalog the
-    turn offered. It is narrowed the same way. No window opens past
+    model asked the operator a question (`expects_reply`), the scope is
+    `offered_tools` instead, the catalog the turn offered, with no entity
+    limit, even when the turn dispatched tools: a question asked after a
+    state read must still let the answer act. It is narrowed the same way. No window opens past
     `MAX_CHAINED_FOLLOW_UPS` links or after a blank reply.
     """
     chain_depth = (incoming.chain_depth if incoming is not None else 0) + 1
     if chain_depth > MAX_CHAINED_FOLLOW_UPS or not reply_text.strip():
         return None
     scope_tools = frozenset(called_tools)
-    if not scope_tools and expects_reply:
+    scope_entities = called_entities
+    if expects_reply and offered_tools:
         scope_tools = frozenset(offered_tools)
+        scope_entities = None
     return FollowUpRequest(
         kind="answer",
         chain_depth=chain_depth,
@@ -161,7 +164,7 @@ def build_answer_request(
         prior_messages=tuple(prior_exchange) if prior_exchange else (),
         playback_ends_at=playback_ends_at,
         proposals_only=proposals_only,
-        answer_scope=AnswerScope(tool_names=scope_tools, entity_ids=called_entities).narrowed_by(answer_scope),
+        answer_scope=AnswerScope(tool_names=scope_tools, entity_ids=scope_entities).narrowed_by(answer_scope),
         answer_only_from=answer_only_from,
         expects_reply=expects_reply,
     )

@@ -150,9 +150,22 @@ async def test_a_plain_text_no_tool_answer_keeps_the_empty_scope():
     assert request.answer_scope == AnswerScope(tool_names=frozenset())
 
 
-async def test_a_turn_that_used_a_tool_keeps_the_dispatched_scope_whatever_the_flag_says():
-    """13-CONTEXT D-10, unchanged."""
+async def test_a_question_after_a_tool_call_opens_the_full_offered_catalog():
+    """A 2026-10-01 user decision amends 13-CONTEXT D-10: a question asked
+    after a state read must still let the answer act."""
     brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_WEATHER]), _json("which place?", True)])
+    edge = _Edge([_text("what is the weather"), _text("")], brain)
+
+    await edge.run()
+
+    request = edge.requests[0]
+    assert request is not None
+    assert request.answer_scope == AnswerScope(tool_names=_FULL, entity_ids=None)
+
+
+async def test_a_turn_that_used_a_tool_and_asked_nothing_keeps_the_dispatched_scope():
+    """13-CONTEXT D-10, unchanged without the flag."""
+    brain = RecordingFakeBrain(replies=[BrainReply(tool_calls=[_WEATHER]), _json("sunny.", False)])
     edge = _Edge([_text("what is the weather"), _text("")], brain)
 
     await edge.run()
@@ -235,8 +248,14 @@ def test_no_tool_and_a_question_uses_the_offered_catalog():
     assert _scope() == AnswerScope(tool_names=frozenset({"a", "b"}))
 
 
-def test_a_dispatched_tool_wins_over_the_offered_catalog():
-    assert _scope(called_tools=frozenset({"a"})) == AnswerScope(tool_names=frozenset({"a"}))
+def test_a_question_widens_a_dispatched_scope_to_the_offered_catalog():
+    assert _scope(called_tools=frozenset({"a"}), called_entities=frozenset({"light.example_lamp"})) == AnswerScope(
+        tool_names=frozenset({"a", "b"})
+    )
+
+
+def test_a_dispatched_tool_without_a_question_keeps_its_scope():
+    assert _scope(called_tools=frozenset({"a"}), expects_reply=False) == AnswerScope(tool_names=frozenset({"a"}))
 
 
 def test_no_question_keeps_the_empty_scope_even_with_an_offered_catalog():

@@ -1998,24 +1998,21 @@ async def run_turn(
                 reply_text=reply_text,
                 called_tools=dispatched.tool_names,
                 called_entities=dispatched.entity_ids,
-                # A user decision of 2026-10-01 amends 13-CONTEXT D-11 for
-                # this case only. The turn dispatched no tool and the model
-                # asked the operator a question. The answer may then reach
-                # every tool this turn offered, with no entity limit.
-                # `narrowed_by` makes sure a chain never gets a wider scope.
-                # A turn that dispatched tools keeps the D-10 scope, whatever
-                # the flag says. A source without `answer_windows` still
-                # opens no window.
+                # User decisions of 2026-10-01 amend 13-CONTEXT D-10 and D-11
+                # for this case only. When the model asked the operator a
+                # question, the answer may reach every tool this turn
+                # offered, with no entity limit, whether or not the turn
+                # dispatched tools (a state read before "turn on the what?"
+                # must not leave the answer able only to read). `narrowed_by`
+                # makes sure a chain never gets a wider scope. Without the
+                # flag, D-10 and D-11 hold. A source without `answer_windows`
+                # still opens no window.
                 expects_reply=winner.expects_reply,
-                # A turn that dispatched a tool never widens, even when WR-01
-                # dropped that tool from the scope: it offers nothing here.
                 offered_tools=frozenset(
                     name
                     for entry in turn_tools_schema
                     if isinstance(name := entry.get("function", {}).get("name"), str)
-                )
-                if not handoff_slot.called_tools
-                else frozenset(),
+                ),
                 answer_scope=answer_scope,
                 proposals_only=restrict_tools_to_proposals,
                 prior_exchange=prior_exchange,
