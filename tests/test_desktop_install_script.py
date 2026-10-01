@@ -39,7 +39,23 @@ case "$1" in
   set-key-partition-list)
     exit "${FAKE_PARTITION_EXIT:-0}"
     ;;
-  import | add-trusted-cert)
+  dump-keychain)
+    printf '%s\n' "$FAKE_KEYCHAIN_DUMP"
+    exit 0
+    ;;
+  add-trusted-cert)
+    # Record whether the private key file still exists at the trust step.
+    for last; do :; done
+    if [ -n "$FAKE_SECURITY_LOG" ]; then
+      if [ -e "$(dirname "$last")/key.pem" ]; then
+        echo "key-present-at-trust" >>"$FAKE_SECURITY_LOG"
+      else
+        echo "key-gone-at-trust" >>"$FAKE_SECURITY_LOG"
+      fi
+    fi
+    exit 0
+    ;;
+  import)
     exit 0
     ;;
 esac
@@ -274,7 +290,7 @@ _OPENSSL = Path("/usr/bin/openssl")
 
 
 def _create_local_identity(
-    fake_bin: Path, tmp_path: Path, *, partition_exit: int = 0
+    fake_bin: Path, tmp_path: Path, *, partition_exit: int = 0, keychain_dump: str = ""
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     log = tmp_path / "security.log"
     result = _run(
@@ -282,7 +298,11 @@ def _create_local_identity(
         fake_bin,
         tmp_path,
         identities=_listing(_LOCAL_LINE),
-        extra_env={"FAKE_SECURITY_LOG": str(log), "FAKE_PARTITION_EXIT": str(partition_exit)},
+        extra_env={
+            "FAKE_SECURITY_LOG": str(log),
+            "FAKE_PARTITION_EXIT": str(partition_exit),
+            "FAKE_KEYCHAIN_DUMP": keychain_dump,
+        },
     )
     calls = log.read_text().splitlines() if log.exists() else []
     return result, calls
@@ -298,12 +318,44 @@ def test_new_local_identity_gets_a_codesign_partition_list(
     assert len(partition) == 1
     assert "-S apple-tool:,apple:,codesign:" in partition[0]
     # Scoped to the one key, in the login keychain, with no password in argv.
-    assert '-l ATLAS Local Signing' in partition[0]
+    assert "-l Imported Private Key" in partition[0]
     assert "login.keychain-db" in partition[0]
     assert " -k " not in f" {partition[0]} "
     names = [c.split()[0] for c in calls]
     assert names.index("import") < names.index("add-trusted-cert")
     assert names.index("add-trusted-cert") < names.index("set-key-partition-list")
+
+
+@pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")
+def test_new_local_identity_puts_no_password_on_a_command_line(
+    fake_bin: Path, tmp_path: Path
+) -> None:
+    result, calls = _create_local_identity(fake_bin, tmp_path)
+    assert result.returncode == 0, result.stderr
+    imports = [c for c in calls if c.startswith("import")]
+    assert len(imports) == 2
+    for call in imports:
+        assert " -P " not in f" {call} "
+
+
+@pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")
+def test_private_key_file_is_gone_before_the_trust_step(fake_bin: Path, tmp_path: Path) -> None:
+    result, calls = _create_local_identity(fake_bin, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "key-gone-at-trust" in calls
+    assert "key-present-at-trust" not in calls
+
+
+@pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")
+def test_partition_list_is_skipped_when_another_key_has_the_import_label(
+    fake_bin: Path, tmp_path: Path
+) -> None:
+    result, calls = _create_local_identity(
+        fake_bin, tmp_path, keychain_dump='    0x00000001 <blob>="Imported Private Key"'
+    )
+    assert result.returncode == 0, result.stderr
+    assert not any(c.startswith("set-key-partition-list") for c in calls)
+    assert "codesign will ask" in result.stderr
 
 
 @pytest.mark.skipif(not _OPENSSL.exists(), reason="system openssl exists on macOS only")

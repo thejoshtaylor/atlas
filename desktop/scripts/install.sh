@@ -153,14 +153,23 @@ trust_local_certificate() {
   security add-trusted-cert -r trustRoot -p codeSign -k "$LOGIN_KEYCHAIN" "$1"
 }
 
+# The label that security import gives a private key it reads from a PEM file.
+# The label is the only handle that set-key-partition-list can use to find it.
+IMPORTED_KEY_LABEL="Imported Private Key"
+
 # Let codesign use the new private key without a prompt on each build. The
 # security tool asks for the login password itself, so this script never holds
-# it. The partition list names this one key only. A failure is not fatal: the
-# build still works, and codesign asks for access instead.
+# it. The partition list matches keys by label, so it runs only when the new
+# key is the only key with that label. A failure is not fatal: the build still
+# works, and codesign asks for access instead.
 allow_codesign_key() {
+  if [ "$1" -gt 0 ]; then
+    log "The login keychain already holds another key with the label \"$IMPORTED_KEY_LABEL\". codesign will ask for access during each build."
+    return 0
+  fi
   log "macOS will ask for your login password again. It lets codesign use the new key without a prompt on each build."
   if ! security set-key-partition-list -S apple-tool:,apple:,codesign: \
-    -s -l "$LOCAL_CERT_NAME" "$LOGIN_KEYCHAIN" >/dev/null; then
+    -s -l "$IMPORTED_KEY_LABEL" "$LOGIN_KEYCHAIN" >/dev/null; then
     log "Could not change the key access. codesign will ask for access during each build."
   fi
 }
@@ -176,8 +185,15 @@ warn_if_local_identity() {
   fi
 }
 
+# Count the keys in the login keychain that carry the import label. This lists
+# attributes only. It reads no key data and shows no prompt.
+count_imported_key_label() {
+  { security dump-keychain "$LOGIN_KEYCHAIN" 2>/dev/null || true; } |
+    grep -c "\"$IMPORTED_KEY_LABEL\"" || true
+}
+
 create_local_identity() {
-  local work pass imported=0
+  local work imported=0 stale_keys=0
   log "macOS will ask for your login password once. It lets this certificate sign code."
   work="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -198,20 +214,23 @@ basicConstraints = critical,CA:false
 keyUsage = critical,digitalSignature
 extendedKeyUsage = critical,codeSigning
 CNF
-    /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-      -config "$work/openssl.cnf" \
-      -keyout "$work/key.pem" -out "$work/cert.pem" 2>/dev/null
-    pass="$(/usr/bin/openssl rand -hex 16)"
-    ATLAS_P12_PASS="$pass" /usr/bin/openssl pkcs12 -export \
-      -inkey "$work/key.pem" -in "$work/cert.pem" -name "$LOCAL_CERT_NAME" \
-      -passout env:ATLAS_P12_PASS -out "$work/atlas.p12"
-    security import "$work/atlas.p12" -k "$LOGIN_KEYCHAIN" -P "$pass" \
+    # An unencrypted RSA key in PEM form. security import reads it with no
+    # password, so no password is ever put on a command line. The key file
+    # exists only until the import ends.
+    /usr/bin/openssl genrsa -out "$work/key.pem" 2048 2>/dev/null
+    /usr/bin/openssl req -x509 -new -days 3650 -key "$work/key.pem" \
+      -config "$work/openssl.cnf" -out "$work/cert.pem"
+    stale_keys="$(count_imported_key_label)"
+    security import "$work/key.pem" -k "$LOGIN_KEYCHAIN" -f openssl \
       -T /usr/bin/codesign >/dev/null
+    rm -f "$work/key.pem"
+    security import "$work/cert.pem" -k "$LOGIN_KEYCHAIN" >/dev/null
     imported=1
   fi
   trust_local_certificate "$work/cert.pem"
+  rm -rf "$work"
   if [ "$imported" -eq 1 ]; then
-    allow_codesign_key
+    allow_codesign_key "$stale_keys"
   fi
   if [ -z "$(identity_matching "$LOCAL_CERT_NAME")" ]; then
     log "The $LOCAL_CERT_NAME identity is still not valid after the trust step."
