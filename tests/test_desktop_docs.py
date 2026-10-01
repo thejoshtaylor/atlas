@@ -123,3 +123,45 @@ def test_guide_holds_no_identity_material() -> None:
             "pair",
             "github.com",
         }, f"not a placeholder host: {host}"
+
+
+def _section(text: str, heading: str) -> str:
+    """The body of the `## heading` section, up to the next `## ` heading."""
+    match = re.search(rf"^##\s+{re.escape(heading)}\s*$", text, re.MULTILINE)
+    assert match, f"missing section: {heading}"
+    rest = text[match.end() :]
+    following = re.search(r"^##\s", rest, re.MULTILINE)
+    return rest[: following.start()] if following else rest
+
+
+def test_troubleshooting_names_the_recovery_tools() -> None:
+    body = _section(_guide_text(), "Troubleshooting")
+    for name in ("tccutil", "--diagnose", "launch.jsonl", "install.sh --verify"):
+        assert name in body, f"Troubleshooting does not name {name}"
+
+
+def test_troubleshooting_covers_the_signing_and_local_network_failures() -> None:
+    body = _section(_guide_text(), "Troubleshooting")
+    for phrase in (
+        "Offline but the server is up",
+        "Checking",
+        "The certificate is lost",
+        "codesign wants to sign using key",
+        "internal certificate authority",
+        "never skips certificate checks",
+    ):
+        assert phrase in body, f"Troubleshooting does not cover: {phrase}"
+
+
+def test_rebuild_section_names_the_log_fields_and_the_verify_flag() -> None:
+    body = _section(_guide_text(), "Check that permissions survive a rebuild")
+    for name in ("ax_trusted", "keychain_pairing_status", "install.sh --verify", "three"):
+        assert name in body, f"the rebuild section does not name {name}"
+
+
+def test_log_fields_in_the_guide_exist_in_the_app() -> None:
+    source = (_REPO_ROOT / "desktop" / "Sources" / "AtlasDesktop" / "LaunchDiagnostics.swift").read_text(
+        encoding="utf-8"
+    )
+    for field in re.findall(r"`((?:ax_trusted|keychain_[a-z_]+|login_item_status))`", _guide_text()):
+        assert f'"{field}"' in source, f"the app does not write {field}"

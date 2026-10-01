@@ -235,6 +235,73 @@ The menu has these items: Finish Setup… while a required step is open, Pair…
 
 **The menu says Offline but the server is up.** The Local Network permission may be off. Open the setup window, find the Local Network row, and click Open Settings. Turn on ATLAS. The app connects again by itself. See [Local Network](#local-network).
 
+**The Local Network row stays on Checking….** The app shows a result only after a connection attempt ends. Open the server in a browser to make sure it is up. Wait for the next attempt. See [Local Network](#local-network).
+
+**Accessibility resets after a rebuild.** The signing identity changed. Run `desktop/scripts/install.sh --verify`. It exits 1 when the new build has a different identity from the installed app. Then pin the identity with `ATLAS_SIGN_IDENTITY`. See [Signing identity](#signing-identity). Grant Accessibility again after you pin it.
+
+**The Keychain asks for access after each rebuild.** The app uses the local certificate, which has no team id. This is the known cost of the fallback. Choose Always Allow. To remove the prompt, use an Apple Development certificate. See [Recommended: an Apple Development certificate](#recommended-an-apple-development-certificate).
+
+**Every build asks "codesign wants to sign using key".** The certificate came from an older version of the script. Delete "ATLAS Local Signing" in Keychain Access and run `desktop/scripts/install.sh` again. See [Fallback: the local certificate](#fallback-the-local-certificate).
+
+**The certificate is lost.** You deleted "ATLAS Local Signing", or you restored the Mac from a backup. The next install makes a new certificate. This is a new identity, so macOS resets the grants once. Grant Accessibility again and pair again.
+
+**The Accessibility grant is stuck.** Reset it, then grant it again:
+
+```bash
+tccutil reset Accessibility org.atlas-assistant.desktop
+```
+
+Open the setup window and click Open Settings on the Accessibility row.
+
+**"The server did not accept this token."** The server revoked the token, or the token has a typing error. Add a new Mac on the Macs page and pair again.
+
+**"This link is not secure."** The pair link starts with a plain scheme. The app pairs over wss only. Open the Macs page over https and copy a new link.
+
+**"This app and the server use different versions."** Update the repository and run `desktop/scripts/install.sh` again.
+
+**"Could not save the token to Keychain."** Unlock the login keychain and pair again.
+
+**The server uses a certificate from an internal certificate authority.** Trust that authority on the Mac. Add its certificate to Keychain Access and set it to Always Trust. The app never skips certificate checks and has no setting that does.
+
+### Collect facts for a bug report
+
+Run the app in diagnose mode. The command waits until the app exits:
+
+```bash
+open -n -W /Applications/ATLAS.app --args --diagnose
+```
+
+Then read the last line of the launch log:
+
+```bash
+tail -n 1 ~/Library/Logs/ATLAS/launch.jsonl
+```
+
+The line holds the Accessibility state (`ax_trusted`), the Keychain read status, the login item status, and the signing requirement. It never holds the token. It does hold the host that the Mac is paired with. Remove that value before you share the line.
+
+To test one server from this Mac, add `--host atlas.example.com`. The command accepts a bare host or `host:port`. Add `--write-probe` to store a test item in the Keychain, so a later rebuild can show whether access survived.
+
+## Check that permissions survive a rebuild
+
+Do this check once on a new Mac. It proves that rebuilds keep the Accessibility grant and the Keychain token.
+
+1. Pair the Mac and grant Accessibility.
+2. Run `desktop/scripts/install.sh`. The script opens the app when it ends.
+3. Read the last line of the launch log:
+
+   ```bash
+   tail -n 1 ~/Library/Logs/ATLAS/launch.jsonl
+   ```
+
+4. Check these two values: `ax_trusted` must be `true`. `keychain_pairing_status` must be `0`.
+5. Run `desktop/scripts/install.sh --verify`. It must exit 0.
+6. Repeat steps 2 to 5 two more times. That makes three rebuilds in a row.
+7. Open the Macs page. After each rebuild the Mac must show Online again within seconds.
+
+With an Apple Development or Developer ID identity, no Keychain or Accessibility dialog appears during the three rebuilds.
+
+With the local certificate, the Keychain asks once after each rebuild. Choose Always Allow. Read the log again after you answer. The status is then `0`. A status other than `0` before you answer is expected. The field `keychain_pairing_outcome` then shows `needs_interaction`.
+
 ## Uninstall
 
 1. Quit ATLAS from the menu bar.
