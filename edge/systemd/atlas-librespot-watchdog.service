@@ -1,0 +1,54 @@
+# This unit follows the atlas-librespot journal. When librespot logs
+# "Connection to server closed", it restarts atlas-librespot.
+#
+# Why: librespot 0.8.0 logs this line when Spotify closes the session. It
+# then never connects again. The process stays up, so Restart=always in
+# atlas-librespot.service never fires, and the device leaves the Spotify
+# Connect list. Upstream PRs #1692 and #1690 are not merged, and no newer
+# release exists. Remove this unit when a librespot release connects again
+# by itself.
+#
+# This unit runs as root. It reads the journal of another unit and it calls
+# systemctl. This is the same reason as atlas-edge-update.service.
+#
+# Install: copy to /etc/systemd/system/atlas-librespot-watchdog.service
+# after you install atlas-librespot. Then run
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now atlas-librespot-watchdog
+# See docs/runbooks/edge-microphone.md step 17.
+
+[Unit]
+Description=ATLAS librespot watchdog (restart atlas-librespot when its Spotify session closes)
+After=atlas-librespot.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# -n 0 skips old lines. The line that caused the last restart never causes a
+# second one.
+# grep exits on the first match, and the restart runs in the same pipe stage.
+# It never waits for journalctl to exit. After the restart, the shell exits
+# and Restart=always starts a fresh watch.
+# grep -F only compares the log text with a fixed phrase. The shell never
+# runs log text. librespot faces the LAN, so a forged line can at most cause
+# one restart for each RestartSec.
+ExecStart=/bin/sh -c 'journalctl -u atlas-librespot -f -n 0 -o cat | { grep -q -F "Connection to server closed" && systemctl restart atlas-librespot; }'
+Restart=always
+# This is the debounce. If the error flaps, librespot restarts at most once
+# every 10 s.
+# ponytail: the watch does not see lines that librespot logs during the
+# restart and the 10 s gap. If the session closes again in that gap,
+# librespot stays down until someone restarts it. To fix this, start the
+# next watch with --since at the restart time and filter on the new
+# librespot _PID.
+RestartSec=10
+
+# A light sandbox. It is safe for a root unit that only reads the journal
+# and calls systemctl over its socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
