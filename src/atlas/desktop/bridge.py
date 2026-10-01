@@ -11,6 +11,9 @@ its wake: the turn's own transcript opened with the wake phrase and `run_turn`
 emitted `wake.confirmed`. The bridge admits that turn id. Every other event
 of a turn that was not admitted is dropped. A detector hit that the server
 does not confirm (a television) therefore puts nothing on a Mac socket.
+The speaker check runs after this gate. A voice that says the wake phrase and
+that the speaker check then refuses is already admitted: its words reach every
+Mac before `turn.ended` closes the turn with `no_speech`.
 
 A follow-up turn has no wake phrase. It is admitted only when its
 `turn.started` says `follow_up`, it comes from the source of the turn that

@@ -11,9 +11,14 @@ literals and fails when one has no entry here, so a new outcome gets a
 decision. A value that still gets through (a literal built at run time) maps
 to `completed`, which shows no outcome line.
 
-`unknown_speaker`, `wake_unverified` and `follow_up_wrong_speaker` end turns
-that the bridge never admitted, so they do not reach a Mac. They are in the
-table so the walk stays closed.
+`unknown_speaker`, `wake_unverified` and `follow_up_wrong_speaker` map to
+`no_speech`. Those turns do reach a Mac. The bridge admits a turn when the
+transcript opens with the wake phrase, and that check runs before the speaker
+check. The Mac has then already shown the partials and the final transcript,
+and it shows "no_speech" only when the turn ends. So the Mac shows the words
+of a voice that ATLAS then refuses, and the outcome line does not say that
+ATLAS heard it and refused it. The wake phrase check narrows this. It does
+not stop it.
 """
 
 from __future__ import annotations

@@ -269,6 +269,8 @@ The panel hides about 4 seconds after the reply audio ends. If ATLAS asks a ques
 
 Every online Mac shows the transcript of every confirmed wake. This includes a Mac that other people use. This version has no switch for each Mac. Pair only Macs that you want to show these transcripts.
 
+The panel opens before ATLAS checks who is speaking. If a television or a voice that ATLAS does not know says the wake phrase, the panel shows what it said. ATLAS then refuses the request, and the panel closes with "Did not catch that". The panel shows this text even though ATLAS refused the request. A sentence that does not start with the wake phrase shows nothing.
+
 ### Timers and alarms
 
 When a timer or an alarm rings, the panel opens with a bell, the word Timer or Alarm, and the label. If the label is empty, the panel shows "Time is up" or "Alarm is ringing". A Mac that connects while a timer rings shows the ring at once.
