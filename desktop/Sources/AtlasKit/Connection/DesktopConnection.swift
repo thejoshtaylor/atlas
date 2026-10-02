@@ -35,6 +35,15 @@ public struct HelloInfo: Sendable, Equatable {
     }
 }
 
+/// What the panel reads from the connection, in the order it happened. The
+/// drop of the link is an item in the same stream as the frames, so a frame
+/// that was queued before the drop is read before it, and none follows it. Two
+/// separate streams (frames and snapshots) have no order between them.
+public enum InboundEvent: Sendable, Equatable {
+    case frame(ServerMessage)
+    case linkLost
+}
+
 /// Keeps the Mac connected to the server: dial, hello, heartbeat, retries.
 ///
 /// Every transport result, timer and system event becomes a `ConnectionEvent`
@@ -43,9 +52,9 @@ public struct HelloInfo: Sendable, Equatable {
 /// kinds, never the token and never a frame body.
 public actor DesktopConnection {
     public nonisolated let snapshots: AsyncStream<ConnectionSnapshot>
-    /// Frames from the server that the panel acts on. Ping, pong, hello.ack and
-    /// error stay inside this actor.
-    public nonisolated let inbound: AsyncStream<ServerMessage>
+    /// Frames from the server that the panel acts on, and the loss of the link.
+    /// Ping, pong, hello.ack and error stay inside this actor.
+    public nonisolated let inbound: AsyncStream<InboundEvent>
 
     private let transport: any WebSocketTransport
     private let clock: any ConnectionClock
@@ -54,7 +63,7 @@ public actor DesktopConnection {
     private let random: @Sendable () -> Double
     private let log = Logger(subsystem: AppIdentity.bundleIdentifier, category: "connection")
     private let continuation: AsyncStream<ConnectionSnapshot>.Continuation
-    private let inboundContinuation: AsyncStream<ServerMessage>.Continuation
+    private let inboundContinuation: AsyncStream<InboundEvent>.Continuation
 
     private var machine: ConnectionStateMachine
     private var credentials: PairingCredentials?
@@ -96,7 +105,7 @@ public actor DesktopConnection {
         self.continuation = continuation
         continuation.yield(initial)
         let (inboundStream, inboundContinuation) = AsyncStream.makeStream(
-            of: ServerMessage.self, bufferingPolicy: .bufferingNewest(256))
+            of: InboundEvent.self, bufferingPolicy: .bufferingNewest(256))
         self.inbound = inboundStream
         self.inboundContinuation = inboundContinuation
     }
@@ -187,6 +196,9 @@ public actor DesktopConnection {
         let snapshot = ConnectionSnapshot(
             status: machine.status, everConnected: everConnected, lastFailure: lastFailure)
         guard snapshot != lastPublished else { return }
+        if case .connected = lastPublished.status {
+            if case .connected = snapshot.status {} else { inboundContinuation.yield(.linkLost) }
+        }
         lastPublished = snapshot
         continuation.yield(snapshot)
     }
@@ -291,7 +303,7 @@ public actor DesktopConnection {
         case .wakeConfirmed, .turnState, .transcriptPartial, .transcriptFinal, .card, .turnEnded,
             .timerRinging, .timerStopped:
             // A panel frame. Its body is never logged: it holds spoken words.
-            inboundContinuation.yield(message)
+            inboundContinuation.yield(.frame(message))
         case .unknown:
             break
         }

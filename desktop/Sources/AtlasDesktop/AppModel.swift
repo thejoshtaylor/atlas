@@ -104,10 +104,19 @@ final class AppModel {
         panel.onSendTimerStop = { [weak self] timerId in self?.sendTimerStop(timerId) }
         let inbound = connection.inbound
         Task { [weak self] in
-            for await message in inbound {
-                guard let event = PanelEvent(message), let self else { continue }
-                self.ringTracker.apply(event)
-                self.panel.dispatch(event)
+            // One ordered stream: a dropped link is read after the frames queued
+            // before it, so a late frame never reopens the panel on a dead socket.
+            for await item in inbound {
+                guard let self else { continue }
+                switch item {
+                case .frame(let message):
+                    guard let event = PanelEvent(message) else { continue }
+                    self.ringTracker.apply(event)
+                    self.panel.dispatch(event)
+                case .linkLost:
+                    self.ringTracker.apply(.connectionLost)
+                    self.panel.dispatch(.connectionLost)
+                }
             }
         }
 
@@ -383,18 +392,10 @@ final class AppModel {
     // MARK: - Connection snapshots
 
     private func handle(_ next: ConnectionSnapshot) {
-        var wasConnected = false
-        if case .connected = snapshot.status { wasConnected = true }
         snapshot = next
-        // A dropped connection hides the panel at once (D-08).
-        if wasConnected {
-            var isConnected = false
-            if case .connected = next.status { isConnected = true }
-            if !isConnected {
-                ringTracker.apply(.connectionLost)
-                panel.dispatch(.connectionLost)
-            }
-        }
+        // A dropped connection hides the panel at once (D-08). That comes in the
+        // inbound stream (`InboundEvent.linkLost`), which keeps it in order with
+        // the frames. This stream is not ordered against that one.
         if next.everConnected { UserDefaults.standard.set(true, forKey: Self.localNetworkGrantedKey) }
         let wasPairing: Bool
         switch flow.state {

@@ -150,7 +150,7 @@ final class Rig: Sendable {
             String(data: try JSONSerialization.data(withJSONObject: message), encoding: .utf8))
 
         // A bounded wait: the stream must yield, or the task group's timeout wins.
-        let first = await withTaskGroup(of: ServerMessage?.self) { group in
+        let first = await withTaskGroup(of: InboundEvent?.self) { group in
             group.addTask {
                 var iterator = rig.connection.inbound.makeAsyncIterator()
                 return await iterator.next()
@@ -164,7 +164,40 @@ final class Rig: Sendable {
             group.cancelAll()
             return result
         }
-        #expect(first == .wakeConfirmed(WakeConfirmed(turnId: turnId)))
+        #expect(first == .frame(.wakeConfirmed(WakeConfirmed(turnId: turnId))))
+    }
+
+    // WR-03: the drop is a marker in the same stream as the frames, so a frame
+    // queued before the drop is read before it, and no frame follows it.
+    @Test func aDroppedLinkIsMarkedInTheInboundStreamAfterTheFramesQueuedBeforeIt() async throws {
+        let rig = Rig()
+        let channel = await rig.connect()
+        let url = desktopRoot().appending(path: "protocol/v1/messages/wake_confirmed.json")
+        let root = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        let message = try #require(root["message"] as? [String: Any])
+        let turnId = try #require(message["turn_id"] as? String)
+        let text = try #require(
+            String(data: try JSONSerialization.data(withJSONObject: message), encoding: .utf8))
+
+        let seen = await withTaskGroup(of: [InboundEvent].self) { group in
+            group.addTask {
+                var iterator = rig.connection.inbound.makeAsyncIterator()
+                var items: [InboundEvent] = []
+                while items.count < 2, let next = await iterator.next() { items.append(next) }
+                return items
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(2))
+                return []
+            }
+            channel.push(text)
+            channel.push(failure: .unreachable)
+            let result = await group.next() ?? []
+            group.cancelAll()
+            return result
+        }
+        #expect(seen == [.frame(.wakeConfirmed(WakeConfirmed(turnId: turnId))), .linkLost])
     }
 
     @Test func aMissingPongClosesTheSocketAndTheNextDialFollowsTheBackoff() async throws {

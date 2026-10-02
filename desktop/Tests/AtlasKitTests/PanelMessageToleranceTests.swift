@@ -128,7 +128,9 @@ import Testing
             group.addTask {
                 var iterator = rig.connection.inbound.makeAsyncIterator()
                 var seen: [ServerMessage] = []
-                while seen.count < 3, let next = await iterator.next() { seen.append(next) }
+                while seen.count < 3, let next = await iterator.next() {
+                    if case .frame(let message) = next { seen.append(message) }
+                }
                 return seen
             }
             group.addTask {
