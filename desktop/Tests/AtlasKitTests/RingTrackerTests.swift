@@ -58,6 +58,44 @@ import Testing
         #expect(tracker.timerId == 7)
     }
 
+    // WR-05: a lost `timer.stopped` ends at the same cap as the panel's ring view.
+    private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func aRingHasACapDeadlineAfterTheRingCap() {
+        var tracker = RingTracker()
+        tracker.apply(ringing(7), now: t0)
+        #expect(tracker.capAt == t0.addingTimeInterval(PanelTiming.ringCapS))
+    }
+
+    @Test func aRingThatNeverGetsItsStoppedFrameIsForgottenAtTheCap() {
+        var tracker = RingTracker()
+        tracker.apply(ringing(7), now: t0)
+        tracker.expire(now: t0.addingTimeInterval(PanelTiming.ringCapS - 1))
+        #expect(tracker.timerId == 7)
+        tracker.expire(now: t0.addingTimeInterval(PanelTiming.ringCapS))
+        #expect(tracker.timerId == nil)
+        #expect(tracker.capAt == nil)
+    }
+
+    @Test func theSameRingAgainDoesNotMoveTheCap() {
+        var tracker = RingTracker()
+        tracker.apply(ringing(7), now: t0)
+        tracker.apply(ringing(7), now: t0.addingTimeInterval(60))
+        #expect(tracker.capAt == t0.addingTimeInterval(PanelTiming.ringCapS))
+    }
+
+    @Test func aNewRingMovesTheCapAndAStopOrADropClearsIt() {
+        var tracker = RingTracker()
+        tracker.apply(ringing(7), now: t0)
+        tracker.apply(ringing(8), now: t0.addingTimeInterval(60))
+        #expect(tracker.capAt == t0.addingTimeInterval(60 + PanelTiming.ringCapS))
+        tracker.apply(.timerStopped(TimerStopped(timerId: 8)))
+        #expect(tracker.capAt == nil)
+        tracker.apply(ringing(9), now: t0)
+        tracker.apply(.connectionLost)
+        #expect(tracker.capAt == nil)
+    }
+
     @Test func noRingMeansNoStopAction() {
         #expect(RingTracker().stopAction(panelRing: nil) == nil)
     }

@@ -61,6 +61,8 @@ final class AppModel {
     @ObservationIgnored private var activity: NSObjectProtocol?
     /// Connection commands run one after another, in the order they were given.
     @ObservationIgnored private var connectionTail: Task<Void, Never>?
+    /// Ends the "Stop Ringing" item when a ring never gets its stopped frame.
+    @ObservationIgnored private var ringExpiryTask: Task<Void, Never>?
     /// A pair link can arrive before the saved pairing is read. It waits, so a
     /// Mac that is already paired never skips the Replace sheet (T-14-40).
     @ObservationIgnored private var credentialsLoaded = false
@@ -117,6 +119,7 @@ final class AppModel {
                     self.ringTracker.apply(.connectionLost)
                     self.panel.dispatch(.connectionLost)
                 }
+                self.scheduleRingExpiry()
             }
         }
 
@@ -280,6 +283,20 @@ final class AppModel {
     func sendTimerStop(_ timerId: Int) {
         let connection = connection
         Task { _ = await connection.send(.timerStop(TimerStop(timerId: timerId))) }
+    }
+
+    /// Wakes at the tracker's cap and drops a ring that never got its stopped
+    /// frame. Each frame replaces the wait, and no ring means no wait.
+    private func scheduleRingExpiry() {
+        ringExpiryTask?.cancel()
+        ringExpiryTask = nil
+        guard let capAt = ringTracker.capAt else { return }
+        ringExpiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, capAt.timeIntervalSinceNow)))
+            guard !Task.isCancelled else { return }
+            // The wall clock and the sleep can differ by a hair, so the cap itself is `now`.
+            self?.ringTracker.expire(now: max(Date(), capAt))
+        }
     }
 
     /// The "Stop Ringing" menu item, the keyboard path to Stop (UI-SPEC
