@@ -72,6 +72,7 @@ _COMPLETED = (
     "email_draft",
     "needs_clarification",
     "needs_confirmation",
+    "missing_target",
 )
 
 OUTCOME_TO_WIRE: dict[str, str] = {
