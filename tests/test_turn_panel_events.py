@@ -404,6 +404,41 @@ async def test_an_observer_fault_while_turn_ended_is_sent_changes_nothing(fake_t
         )
 
 
+async def test_a_wake_confirmed_that_cannot_be_sent_changes_nothing_about_the_turn(fake_tts) -> None:
+    class _FaultySource(_RecordingSource):
+        async def send_event(self, event: dict) -> None:
+            if event["type"] == "wake.confirmed":
+                raise OSError("the socket is closed")
+            await super().send_event(event)
+
+    source = _FaultySource()
+    timings = await _run(
+        source,
+        [[PartialTranscript(text="hey atlas"), FinalTranscript(text="hey atlas what time is it")]],
+        fake_tts,
+        wake_phrase="hey atlas",
+    )
+
+    assert timings.turn_outcome == "completed"
+    assert source.sent_audio, "the reply is still spoken"
+    assert "reply.text" in _types(source)
+
+
+async def test_a_reply_started_that_cannot_be_sent_still_speaks_the_reply(fake_tts) -> None:
+    class _FaultySource(_RecordingSource):
+        async def send_event(self, event: dict) -> None:
+            if event["type"] == "reply.started":
+                raise OSError("the socket is closed")
+            await super().send_event(event)
+
+    source = _FaultySource()
+    timings = await _run(source, [[FinalTranscript(text="what time is it")]], fake_tts)
+
+    assert timings.turn_outcome == "completed"
+    assert source.sent_audio, "the reply is still spoken"
+    assert "reply.text" in _types(source)
+
+
 async def test_a_reply_that_plays_for_a_second_reports_the_time_it_has_left(fake_tts) -> None:
     source = _SinkSource()
     await _run_with(

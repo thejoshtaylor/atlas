@@ -916,7 +916,7 @@ async def run_turn(
         # transcript confirms. One confirmation per turn, judged as each STT
         # event arrives. `source` is read at call time: it is rewrapped later.
         async def _emit_wake_confirmed() -> None:
-            await _emit_event(source, {"type": "wake.confirmed"})
+            await _emit_display_event(source, {"type": "wake.confirmed"})
 
         wake_confirm = (
             WakeConfirmation(wake_phrase, _emit_wake_confirmed)
@@ -3581,7 +3581,7 @@ async def _speak(
             if timings.answer_audio_at is None:
                 timings.answer_audio_at = written_at
         # Phase 15: the follower's own reply starts here, and its audio ends where the lead's does.
-        await _emit_event(source, reply_started_event(reply_text))
+        await _emit_display_event(source, reply_started_event(reply_text))
         _note_reply_playback_end(timings, speech.result, sink)
         await _emit_event(source, {"type": "reply.text", "text": reply_text})
     return speech.result
@@ -3693,7 +3693,7 @@ async def _speak_direct(
     if kind == "answer":
         # Phase 15 (PANEL-04): the panel's speaking state and the source of its text
         # card. Sent before the speech lock, so a dead speaker still shows the text.
-        await _emit_event(source, reply_started_event(event_text if event_text is not None else reply_text))
+        await _emit_display_event(source, reply_started_event(event_text if event_text is not None else reply_text))
 
     async def _one_delta() -> AsyncIterator[str]:
         yield reply_text
@@ -3845,6 +3845,21 @@ async def _emit_event(source: _AudioSource, event: dict[str, Any]) -> None:
     send_event = getattr(source, "send_event", None)
     if send_event is not None:
         await send_event(event)
+
+
+async def _emit_display_event(source: _AudioSource, event: dict[str, Any]) -> None:
+    """`_emit_event` for an event that only the Mac panel shows (Phase 15).
+
+    A display event never changes how a turn goes. A source whose socket is
+    closed raises from `send_event`, and that must not leave the transcript
+    drain without its cleanup or skip the spoken reply. The fault is logged
+    with the event type only. A cancellation is not an `Exception`, so it
+    still passes through.
+    """
+    try:
+        await _emit_event(source, event)
+    except Exception:
+        logger.debug("display event %s could not be sent", event.get("type"), exc_info=True)
 
 
 def _is_error(result: Any) -> bool:
