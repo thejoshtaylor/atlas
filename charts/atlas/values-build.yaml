@@ -46,6 +46,14 @@ config:
   bindHost: "0.0.0.0"
   cookieSecure: "false"
 
+# Parakeet (local) speech-to-text decodes with 8 threads (quick task
+# 261001-mp8). One requested CPU let the scheduler place the pod on a node
+# that cannot give those threads, so the request matches the decoder.
+resources:
+  requests:
+    cpu: "8"
+    memory: 3Gi
+
 persistence:
   data:
     size: 5Gi
