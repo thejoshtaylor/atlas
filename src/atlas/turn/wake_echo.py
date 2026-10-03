@@ -47,6 +47,10 @@ transcript opens with the wake phrase and returns the text after it.
 stream open: a provider that can hold a final asks `WakeHold` whether a final
 is only the wake phrase, and holds it when so. `WakeHold` (261001-ibf) also
 holds a final that looks like an unfinished command.
+
+`completes_wake_command` is true only for the wake phrase followed by a
+finished command. It decides if a one-breath wake segment can end the turn
+early on a provider that gives no word before it is finalized.
 """
 
 from __future__ import annotations
@@ -189,6 +193,25 @@ def is_wake_without_command(text: str, phrase: str, *, verify: bool) -> bool:
             return False
         command = text
     return not command or is_wake_only(command, phrase)
+
+
+def completes_wake_command(text: str, phrase: str, *, verify: bool) -> bool:
+    """True when `text` is the wake phrase and a finished command after it.
+
+    The early transcription of a one-breath wake segment uses this check.
+    Only a text that passes can end the turn before the operator says more.
+    With `verify` on, the text must open with the phrase. The command after
+    the phrase must not be empty, must not be only the wake phrase again,
+    and must not look unfinished ("turn off.").
+    """
+    if not text or not phrase or is_wake_without_command(text, phrase, verify=verify):
+        return False
+    command = strip_wake_phrase(text, phrase)
+    if command is None:
+        if verify:
+            return False
+        command = text
+    return not looks_unfinished(command)
 
 
 @dataclass

@@ -154,6 +154,10 @@ class ParakeetStt:
     whole-utterance provider must keep the controller's second-drain path.
     """
 
+    # The provider gives no word until it is finalized. The controller reads
+    # this flag: a Pi `vad.end` cannot wait for a word from this provider.
+    words_before_finalize = False
+
     def __init__(
         self,
         config: SttConfig,

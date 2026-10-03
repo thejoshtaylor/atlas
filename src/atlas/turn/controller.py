@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -111,6 +112,7 @@ from atlas.timing import TurnTimings
 from atlas.turn import brain_race
 from atlas.turn.brain_turn_log import BrainTurnLog, TurnBrainRecord
 from atlas.turn.early_finalize import wait_for_end_of_speech
+from atlas.turn.one_breath import EarlyTranscript
 from atlas.turn.follow_up import (
     HA_CALL_SERVICE_TOOL,
     MAX_CHAINED_FOLLOW_UPS,
@@ -162,7 +164,13 @@ from atlas.turn.answer_window import (
 )
 from atlas.turn.turn_context import TurnContext, follow_up_speaker_mismatch
 from atlas.turn.wake_confirm import WakeConfirmation
-from atlas.turn.wake_echo import WakeHold, is_wake_only, is_wake_without_command, strip_wake_phrase
+from atlas.turn.wake_echo import (
+    WakeHold,
+    completes_wake_command,
+    is_wake_only,
+    is_wake_without_command,
+    strip_wake_phrase,
+)
 
 logger = logging.getLogger("atlas.turn.controller")
 
@@ -948,6 +956,13 @@ async def run_turn(
             # byte-identical to before this plan.
             split_event=speaker_span.split_event if speaker_span is not None else None,
             on_text=wake_confirm.observe if wake_confirm is not None else None,
+            # Debug wake-command-needs-beep-wait: "Hey Atlas, <command>" in
+            # one breath on a provider with no word before the finalize.
+            early_final=(
+                functools.partial(completes_wake_command, phrase=wake_phrase, verify=verify_wake)
+                if incoming is None and wake_phrase and wake_hold is None and not _words_before_finalize(stt)
+                else None
+            ),
         )
         final_text = getattr(final, "text", "") if final is not None else ""
         # D-04: a speaker change ended this turn, so its transcript still holds
@@ -2496,6 +2511,12 @@ def _holds_wake_finals(stt: Any) -> bool:
         return False
 
 
+def _words_before_finalize(stt: Any) -> bool:
+    # Parakeet and faster-whisper decode once, after the finalize, so no word
+    # arrives before it. Test doubles and xAI keep the default.
+    return bool(getattr(stt, "words_before_finalize", True))
+
+
 async def _drain_to_final_transcript(
     source: _AudioSource,
     stt: _SttProvider,
@@ -2513,8 +2534,18 @@ async def _drain_to_final_transcript(
     wordless_segment_grace_s: float | None = None,
     unfinished_hold_s: float | None = None,
     on_text: "Callable[[str], Awaitable[None]] | None" = None,
+    early_final: "Callable[[str], bool] | None" = None,
 ) -> Any | None:
     """Forward every event but the last as a partial; return the last, if any.
+
+    `early_final` (debug wake-command-needs-beep-wait), when given with
+    `speech_signals` and a segment in progress at the start of this drain,
+    starts a `turn/one_breath.py::EarlyTranscript`. When that segment ends,
+    the frames read so far are transcribed once. If `early_final` accepts
+    the text and no new speech began, the drain ends with that text. Only a
+    provider that gives no word before it is finalized needs this: the
+    word-first rule below can never finalize the one-breath segment for it.
+    `None` (the default) changes nothing.
 
     `on_text` (Phase 15, D-05), when given, is awaited with the text of every
     STT event at the moment it arrives, before the partial forward: it sees
@@ -2632,7 +2663,12 @@ async def _drain_to_final_transcript(
     # where "both channels to the recorder, one to speech-to-text" holds
     # with no second reader of `source.frames()`'s own queue. A one-channel
     # format (every source before Phase 10) is unchanged by `stt_view`.
-    frames, fmt = stt_view(source.frames(), source.source_format())
+    raw_frames = source.frames()
+    early: EarlyTranscript | None = None
+    if early_final is not None and speech_signals is not None and speech_signals.in_speech:
+        early = EarlyTranscript(stt, source.source_format(), speech_signals, early_final)
+        raw_frames = early.tee(raw_frames)
+    frames, fmt = stt_view(raw_frames, source.source_format())
 
     finalize_event: "asyncio.Event | None" = None
     watch_task: "asyncio.Task[None] | None" = None
@@ -2779,6 +2815,7 @@ async def _drain_to_final_transcript(
 
         stream_kwargs["hold_final"] = _counting_hold
     stream = stt.stream(frames, fmt, **stream_kwargs)
+    early_task: "asyncio.Task[None] | None" = asyncio.create_task(early.watch()) if early is not None else None
 
     async def _stop_watch() -> None:
         # Cancelled and awaited on every return path below, so a watch
@@ -2786,6 +2823,10 @@ async def _drain_to_final_transcript(
         # `max_utterance_s` ended the turn first) never outlives this call.
         if unsubscribe_segments is not None:
             unsubscribe_segments()
+        if early_task is not None:
+            early_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await early_task
         if watch_task is not None:
             watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2853,7 +2894,25 @@ async def _drain_to_final_transcript(
                 timings.mark_speech_end(last_word_change_arrival)
                 return FinalTranscript(text="")
 
-        done, _pending_tasks = await asyncio.wait({next_event_task}, timeout=poll_interval_s)
+        if early is not None and early.text is not None and not finalize_requested:
+            # One breath: the wake segment already holds a finished command.
+            next_event_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await next_event_task
+            await stream.aclose()
+            await _stop_watch()
+            timings.mark_vad_end(early.end_at)
+            timings.mark_speech_end(last_word_change_arrival)
+            if on_text is not None:
+                await on_text(early.text)
+            return FinalTranscript(text=early.text)
+
+        waiting: "set[asyncio.Future[Any]]" = {next_event_task}
+        if early_task is not None and not early_task.done():
+            waiting.add(early_task)
+        done, _pending_tasks = await asyncio.wait(
+            waiting, timeout=poll_interval_s, return_when=asyncio.FIRST_COMPLETED
+        )
         if next_event_task not in done:
             continue
 

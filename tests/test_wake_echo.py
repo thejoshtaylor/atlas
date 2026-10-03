@@ -5,7 +5,13 @@ follows (260922-woc).
 
 import pytest
 
-from atlas.turn.wake_echo import WakeHold, is_wake_only, is_wake_without_command, strip_wake_phrase
+from atlas.turn.wake_echo import (
+    WakeHold,
+    completes_wake_command,
+    is_wake_only,
+    is_wake_without_command,
+    strip_wake_phrase,
+)
 
 _PHRASE = "hey atlas"
 
@@ -140,3 +146,32 @@ def test_wake_hold_heard_text_puts_the_held_phrase_back() -> None:
 
     assert hold.heard_text("turn on the lights") == "Hey Atlas. turn on the lights"
     assert hold.heard_text("Hey Atlas, turn on") == "Hey Atlas, turn on"
+
+
+# Debug wake-command-needs-beep-wait: the early transcription of a one-breath
+# wake segment ends the turn only on the phrase and a finished command. The
+# false samples are real Parakeet decodes of recorded wake segments ("Yeah.",
+# "Partless", "Hey Alice.") and the shapes the drain must keep waiting for.
+@pytest.mark.parametrize(
+    ("text", "verify", "expected"),
+    [
+        ("Hey Atlas, turn on the T V.", True, True),
+        ("Hey Atlas, what time is it?", True, True),
+        ("The Atlas, turn it off.", True, True),
+        ("Hey Atlas.", True, False),
+        ("Hey Atlas", True, False),
+        ("Hey Atlas, at last.", True, False),
+        ("Hey Atlas, turn off.", True, False),
+        ("Hey Atlas, turn on the", True, False),
+        ("Hey yeah, let's turn off the fan.", True, False),
+        ("Yeah.", True, False),
+        ("Partless", True, False),
+        ("Hey Alice.", True, False),
+        ("", True, False),
+        ("It is very nice in the spring.", True, False),
+        ("It is very nice in the spring.", False, True),
+        ("Turn off.", False, False),
+    ],
+)
+def test_completes_wake_command(text: str, verify: bool, expected: bool) -> None:
+    assert completes_wake_command(text, _PHRASE, verify=verify) is expected

@@ -166,6 +166,10 @@ class FasterWhisperStt:
     at once. `_decode_lock` lets one decode run at a time, so a second
     parallel decode waits its turn (Research Pitfall 11)."""
 
+    # The provider gives no word until it is finalized. The controller reads
+    # this flag: a Pi `vad.end` cannot wait for a word from this provider.
+    words_before_finalize = False
+
     def __init__(
         self,
         config: SttConfig,
