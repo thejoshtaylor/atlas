@@ -178,6 +178,9 @@ def make_stt_transcribe(
 
     `stt` is read on every call, because the provider can change at run time.
     It returns None while speech-to-text is unavailable.
+
+    Some providers, such as Parakeet, give no word until they are finalized.
+    The listen uses the wake turn's wordless grace, so a Pi vad.end still ends it.
     """
 
     async def transcribe(source: Any) -> str | None:
@@ -185,7 +188,11 @@ def make_stt_transcribe(
         if provider is None:
             raise RuntimeError("speech-to-text is not available for the ring-stop window")
         from atlas.timing import TurnTimings
-        from atlas.turn.controller import _DEFAULT_POLL_INTERVAL_S, _drain_to_final_transcript
+        from atlas.turn.controller import (
+            _DEFAULT_POLL_INTERVAL_S,
+            _WORDLESS_SEGMENT_GRACE_S,
+            _drain_to_final_transcript,
+        )
 
         final = await _drain_to_final_transcript(
             QuietSource(source),
@@ -196,6 +203,7 @@ def make_stt_transcribe(
             poll_interval_s=_DEFAULT_POLL_INTERVAL_S,
             onset_deadline=clock() + listen_s,
             speech_signals=getattr(source, "speech_signals", None),
+            wordless_segment_grace_s=_WORDLESS_SEGMENT_GRACE_S,
             finalize_if_already_ended=False,
         )
         return getattr(final, "text", None) if final is not None else None
