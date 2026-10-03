@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,6 +20,7 @@ from atlas.timers.core import announcement
 from atlas.timers.ring_stop import RingStopWindow, is_stop_command, make_stt_transcribe
 from atlas.timers.scheduler import TimerScheduler
 from atlas.transports.base import SourceFormat
+from atlas.transports.edge import SpeechSignals
 from tests.conftest import FakeStt, FakeWakeDetector, FinalTranscript
 from tests.timer_fakes import FakeTimerRepository
 
@@ -541,3 +543,50 @@ async def test_the_parallel_runner_opens_the_window_during_a_ring_and_starts_no_
     assert runner._ring_window_task is not None and runner._ring_window_task.done()
     assert runner.turn_group is not None
     assert runner.turn_group.fanout._subscriptions == []
+
+
+# --- a provider that gives no word until it is finalized (261003-9tq) ----------
+
+
+class _SignalTickSource(_TickSource):
+    """A tick source that carries the Pi's speech signals."""
+
+    def __init__(self, speech_signals: SpeechSignals) -> None:
+        self.speech_signals = speech_signals
+
+
+class _WordlessUntilFinalizedStt:
+    """Copies Parakeet: no partial, one final, and only after `finalize` is set."""
+
+    words_before_finalize = False
+
+    async def stream(self, frames, source_format, *, finalize=None):
+        assert finalize is not None
+        await finalize.wait()
+        yield FinalTranscript(text="stop")
+
+
+async def test_a_stt_with_no_words_before_finalize_hears_stop_on_vad_end():
+    """Parakeet gives no word until it is finalized.
+
+    A Pi vad.end must still end the ring-stop listen. If it does not, a spoken
+    stop never stops the ring.
+    """
+    signals = SpeechSignals(hangover_s=0.0)
+    stt = _WordlessUntilFinalizedStt()
+
+    async def publish_segment() -> None:
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.start", "seq": 1})
+        await asyncio.sleep(0.05)
+        signals.publish({"type": "vad.end", "seq": 1})
+
+    publisher = asyncio.ensure_future(publish_segment())
+    transcribe = make_stt_transcribe(lambda: stt, max_utterance_s=2.0, listen_s=1.5)
+    started = time.monotonic()
+    text = await asyncio.wait_for(transcribe(_SignalTickSource(signals)), BOUND_S)
+    elapsed = time.monotonic() - started
+    await publisher
+
+    assert text == "stop"
+    assert elapsed < 1.5
